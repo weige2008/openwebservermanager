@@ -91,7 +91,8 @@ func (s *Store) Bootstrap() ([]model.Server, []model.CredentialPublic, []model.C
 	for _, item := range s.state.Sessions {
 		sessions = append(sessions, item)
 	}
-	logs := append([]model.AuditLog(nil), s.state.AuditLogs...)
+	logs := make([]model.AuditLog, len(s.state.AuditLogs))
+	copy(logs, s.state.AuditLogs)
 	return servers, credentials, sessions, logs
 }
 

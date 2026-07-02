@@ -32,11 +32,6 @@ func main() {
 func run() error {
 	addr := env("SERVERMANAGER_ADDR", "127.0.0.1:8080")
 	dataDir := env("SERVERMANAGER_DATA_DIR", "data")
-	adminUser := env("SERVERMANAGER_ADMIN_USER", "admin")
-	adminPassword := env("SERVERMANAGER_ADMIN_PASSWORD", "admin123")
-	if adminUser == "admin" && adminPassword == "admin123" {
-		slog.Warn("using default admin credentials; set SERVERMANAGER_ADMIN_USER and SERVERMANAGER_ADMIN_PASSWORD")
-	}
 
 	if err := os.MkdirAll(dataDir, 0o700); err != nil {
 		return fmt.Errorf("create data dir: %w", err)
@@ -70,7 +65,7 @@ func run() error {
 
 	srv := &http.Server{
 		Addr:              addr,
-		Handler:           app.New(app.Config{Store: st, Guacd: guacd, StaticFS: staticFS, DataDir: dataDir, AdminUser: adminUser, AdminPassword: adminPassword}),
+		Handler:           app.New(app.Config{Store: st, Guacd: guacd, StaticFS: staticFS, DataDir: dataDir}),
 		ReadHeaderTimeout: 10 * time.Second,
 	}
 

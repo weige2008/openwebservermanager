@@ -5,7 +5,7 @@
 ## 当前能力
 
 - Go 后端单进程服务，内嵌 NewAPI 新版风格的静态管理界面。
-- 公开首页与登录页；服务器、凭据、会话、审计日志必须登录后查看。
+- 公开首页、首次设置页与登录页；服务器、凭据、会话、审计日志必须登录后查看。
 - SSH：浏览器 WebSocket 到服务端 SSH PTY，支持密码、私钥、私钥 passphrase。
 - RDP：浏览器 Guacamole tunnel 到 `guacd`，服务端注入 RDP 凭据、录屏目录、文件传输参数。
 - 数据：本地 JSON 文件存储，模型覆盖服务器、凭据、连接会话、审计日志。
@@ -19,16 +19,14 @@ go run ./cmd/servermanager
 
 默认监听 `http://127.0.0.1:8080`，数据目录为 `data/`。
 
-建议设置固定主密钥和管理员账号：
+建议设置固定主密钥：
 
 ```powershell
 $env:SERVERMANAGER_MASTER_KEY="change-this-to-a-long-random-secret"
-$env:SERVERMANAGER_ADMIN_USER="admin"
-$env:SERVERMANAGER_ADMIN_PASSWORD="change-this-password"
 go run ./cmd/servermanager
 ```
 
-如果未设置管理员环境变量，MVP 默认账号为 `admin / admin123`，生产环境必须修改。
+首次启动时数据库没有管理员账号，访问 `/login` 会进入首次设置页面。创建管理员后，密码只以 bcrypt 哈希形式写入服务端数据库，不会保存明文。
 
 ## RDP / guacd
 
@@ -46,6 +44,8 @@ RDP 依赖 Apache Guacamole 的 `guacd`。服务启动时会按以下顺序寻�
 
 ## API 摘要
 
+- `GET /api/auth/status` 判断是否已经完成管理员初始化。
+- `POST /api/auth/setup` 首次创建管理员并设置 HttpOnly Cookie。
 - `POST /api/auth/login` 登录并设置 HttpOnly Cookie。
 - `POST /api/auth/logout` 退出登录。
 - `GET /api/auth/me` 获取当前登录用户。

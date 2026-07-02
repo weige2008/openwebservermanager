@@ -2,6 +2,7 @@ const state = {
   initialized: false,
   route: routeFromLocation(),
   auth: null,
+  setupRequired: false,
   view: localStorage.getItem("servermanager:view") || "overview",
   theme: localStorage.getItem("servermanager:theme") || "light",
   servers: [],
@@ -85,6 +86,7 @@ async function api(path, options = {}) {
   if (res.status === 401 && !path.startsWith("/api/auth/")) {
     clearPrivateState();
     state.auth = null;
+    if (data.setup_required) state.setupRequired = true;
     navigate("/login");
     throw new Error(data.error || "请先登录");
   }
@@ -95,9 +97,15 @@ async function api(path, options = {}) {
 
 async function init() {
   try {
-    const me = await api("/api/auth/me");
-    state.auth = me.user;
-    await refresh({ silent: true });
+    const status = await api("/api/auth/status");
+    state.setupRequired = !status.configured;
+    if (!state.setupRequired) {
+      const me = await api("/api/auth/me");
+      state.auth = me.user;
+      await refresh({ silent: true });
+    } else {
+      clearPrivateState();
+    }
   } catch (_) {
     clearPrivateState();
   } finally {
@@ -162,7 +170,9 @@ function render() {
   if (!state.auth) {
     app.innerHTML =
       state.route === "login" || state.route === "app"
-        ? signInPage()
+        ? state.setupRequired
+          ? setupPage()
+          : signInPage()
         : landingPage(false);
     return;
   }
@@ -183,6 +193,7 @@ function brand(size = "") {
 }
 
 function publicHeader(authenticated) {
+  const authLabel = state.setupRequired ? "初始化" : "登录";
   return html`<header class="public-header">
     <nav class="public-nav">
       <button class="brand-button" onclick="navigate('/')">${brand()}</button>
@@ -196,7 +207,7 @@ function publicHeader(authenticated) {
         ${
           authenticated
             ? `<button class="primary" onclick="navigate('/app')">进入控制台</button>`
-            : `<button class="primary" onclick="navigate('/login')">登录</button>`
+            : `<button class="primary" onclick="navigate('/login')">${authLabel}</button>`
         }
       </div>
     </nav>
@@ -204,6 +215,7 @@ function publicHeader(authenticated) {
 }
 
 function landingPage(authenticated) {
+  const entryText = state.setupRequired ? "初始化管理员" : "登录控制台";
   return html`<div class="public-page">
     ${publicHeader(authenticated)}
     <main>
@@ -219,7 +231,7 @@ function landingPage(authenticated) {
             ${
               authenticated
                 ? `<button class="primary hero-button" onclick="navigate('/app')">进入控制台 <span>→</span></button>`
-                : `<button class="primary hero-button" onclick="navigate('/login')">登录控制台 <span>→</span></button>`
+                : `<button class="primary hero-button" onclick="navigate('/login')">${entryText} <span>→</span></button>`
             }
             <button class="outline hero-button" onclick="document.querySelector('#features').scrollIntoView({ behavior: 'smooth' })">查看能力</button>
           </div>
@@ -313,9 +325,68 @@ function signInPage() {
         </label>
         <button class="primary wide" type="submit">登录控制台</button>
       </form>
-      <div class="auth-footnote">默认账号可通过 SERVERMANAGER_ADMIN_USER / SERVERMANAGER_ADMIN_PASSWORD 修改。</div>
+      <div class="auth-footnote">管理员密码保存在服务端数据库中，浏览器只保存 HttpOnly 会话 Cookie。</div>
     </main>
   </div>${toastView()}`;
+}
+
+function setupPage() {
+  return html`<div class="auth-page">
+    <button class="auth-brand" onclick="navigate('/')">${brand()}</button>
+    <main class="auth-card">
+      <div class="auth-heading">
+        <span class="section-label">First Run</span>
+        <h1>首次设置管理员</h1>
+        <p>当前数据库还没有管理员账号。创建后才能查看服务器、凭据、会话与审计数据。</p>
+      </div>
+      <form class="auth-form" onsubmit="setupAdmin(event)">
+        <label>
+          <span>用户名</span>
+          <input name="username" autocomplete="username" placeholder="admin" value="admin" required />
+        </label>
+        <label>
+          <span>新密码</span>
+          <input name="password" type="password" autocomplete="new-password" placeholder="至少 8 位" minlength="8" required />
+        </label>
+        <label>
+          <span>确认密码</span>
+          <input name="confirm_password" type="password" autocomplete="new-password" placeholder="再次输入新密码" minlength="8" required />
+        </label>
+        <button class="primary wide" type="submit">创建管理员并进入控制台</button>
+      </form>
+      <div class="auth-footnote">密码只会以 bcrypt 哈希形式写入服务端数据库，不会以明文保存。</div>
+    </main>
+  </div>${toastView()}`;
+}
+
+async function setupAdmin(event) {
+  event.preventDefault();
+  const button = event.submitter;
+  button.disabled = true;
+  const data = Object.fromEntries(new FormData(event.target).entries());
+  if (data.password !== data.confirm_password) {
+    toast("两次输入的密码不一致");
+    button.disabled = false;
+    return;
+  }
+  try {
+    const res = await api("/api/auth/setup", {
+      method: "POST",
+      body: JSON.stringify({
+        username: data.username,
+        password: data.password,
+      }),
+    });
+    state.setupRequired = false;
+    state.auth = res.user;
+    await refresh({ silent: true });
+    navigate("/app");
+    toast("管理员已创建");
+  } catch (err) {
+    toast(err.message);
+  } finally {
+    button.disabled = false;
+  }
 }
 
 async function login(event) {
@@ -328,6 +399,7 @@ async function login(event) {
       method: "POST",
       body: JSON.stringify(data),
     });
+    state.setupRequired = false;
     state.auth = res.user;
     await refresh({ silent: true });
     navigate("/app");

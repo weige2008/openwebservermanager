@@ -13,6 +13,8 @@ import (
 
 	"servermanager/internal/model"
 	"servermanager/internal/security"
+
+	"golang.org/x/crypto/bcrypt"
 )
 
 type Store struct {
@@ -27,6 +29,7 @@ type state struct {
 	Credentials map[string]model.Credential        `json:"credentials"`
 	Sessions    map[string]model.ConnectionSession `json:"sessions"`
 	AuditLogs   []model.AuditLog                   `json:"audit_logs"`
+	Admin       *AdminAuth                         `json:"admin,omitempty"`
 }
 
 type CredentialSecret struct {
@@ -34,6 +37,24 @@ type CredentialSecret struct {
 	PrivateKey string
 	Passphrase string
 }
+
+type AdminAuth struct {
+	UserID       string    `json:"user_id"`
+	Username     string    `json:"username"`
+	PasswordHash string    `json:"password_hash"`
+	CreatedAt    time.Time `json:"created_at"`
+	UpdatedAt    time.Time `json:"updated_at"`
+}
+
+type AdminPublic struct {
+	UserID    string    `json:"id"`
+	Username  string    `json:"username"`
+	Role      string    `json:"role"`
+	CreatedAt time.Time `json:"created_at"`
+	UpdatedAt time.Time `json:"updated_at"`
+}
+
+var ErrAdminAlreadyConfigured = errors.New("admin already configured")
 
 func Open(path string, cipher *security.Cipher) (*Store, error) {
 	st := &Store{
@@ -58,6 +79,65 @@ func Open(path string, cipher *security.Cipher) (*Store, error) {
 	}
 	st.ensureMaps()
 	return st, nil
+}
+
+func (s *Store) AdminConfigured() bool {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return s.state.Admin != nil && s.state.Admin.PasswordHash != ""
+}
+
+func (s *Store) SetupAdmin(username, password string) (AdminPublic, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	if s.state.Admin != nil && s.state.Admin.PasswordHash != "" {
+		return AdminPublic{}, ErrAdminAlreadyConfigured
+	}
+	hash, err := bcrypt.GenerateFromPassword([]byte(password), bcrypt.DefaultCost)
+	if err != nil {
+		return AdminPublic{}, err
+	}
+
+	now := time.Now().UTC()
+	admin := AdminAuth{
+		UserID:       newID("user"),
+		Username:     username,
+		PasswordHash: string(hash),
+		CreatedAt:    now,
+		UpdatedAt:    now,
+	}
+	s.state.Admin = &admin
+	if err := s.saveLocked(); err != nil {
+		return AdminPublic{}, err
+	}
+	return admin.Public(), nil
+}
+
+func (s *Store) VerifyAdmin(username, password string) (AdminPublic, bool, error) {
+	s.mu.RLock()
+	admin := s.state.Admin
+	s.mu.RUnlock()
+	if admin == nil || admin.PasswordHash == "" {
+		return AdminPublic{}, false, nil
+	}
+	if username != admin.Username {
+		return AdminPublic{}, false, nil
+	}
+	if err := bcrypt.CompareHashAndPassword([]byte(admin.PasswordHash), []byte(password)); err != nil {
+		return AdminPublic{}, false, nil
+	}
+	return admin.Public(), true, nil
+}
+
+func (a AdminAuth) Public() AdminPublic {
+	return AdminPublic{
+		UserID:    a.UserID,
+		Username:  a.Username,
+		Role:      "admin",
+		CreatedAt: a.CreatedAt,
+		UpdatedAt: a.UpdatedAt,
+	}
 }
 
 func (s *Store) ensureMaps() {

@@ -22,12 +22,10 @@ import (
 )
 
 type Config struct {
-	Store         *store.Store
-	Guacd         *guac.Manager
-	StaticFS      fs.FS
-	DataDir       string
-	AdminUser     string
-	AdminPassword string
+	Store    *store.Store
+	Guacd    *guac.Manager
+	StaticFS fs.FS
+	DataDir  string
 }
 
 type Server struct {
@@ -46,7 +44,7 @@ func New(cfg Config) http.Handler {
 		cfg:      cfg,
 		static:   http.FileServer(http.FS(sub)),
 		staticFS: sub,
-		auth:     newAuthManager(cfg.AdminUser, cfg.AdminPassword),
+		auth:     newAuthManager(),
 	}
 }
 
@@ -70,6 +68,12 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) serveAPI(w http.ResponseWriter, r *http.Request) {
 	switch {
+	case r.Method == http.MethodGet && r.URL.Path == "/api/auth/status":
+		s.handleAuthStatus(w, r)
+		return
+	case r.Method == http.MethodPost && r.URL.Path == "/api/auth/setup":
+		s.handleSetup(w, r)
+		return
 	case r.Method == http.MethodPost && r.URL.Path == "/api/auth/login":
 		s.handleLogin(w, r)
 		return

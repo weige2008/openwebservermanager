@@ -2,25 +2,23 @@ package app
 
 import (
 	"crypto/rand"
-	"crypto/subtle"
 	"encoding/hex"
+	"errors"
 	"net/http"
 	"strings"
 	"sync"
 	"time"
+
+	"servermanager/internal/store"
 )
 
 const (
 	authCookieName = "servermanager_session"
 	authSessionTTL = 24 * time.Hour
-	defaultAdmin   = "admin"
-	defaultPass    = "admin123"
 )
 
 type authManager struct {
 	mu       sync.RWMutex
-	user     string
-	password string
 	sessions map[string]authSession
 }
 
@@ -31,41 +29,33 @@ type authSession struct {
 	ExpiresAt time.Time `json:"expires_at"`
 }
 
+type authStatus struct {
+	Configured bool `json:"configured"`
+}
+
+type setupRequest struct {
+	Username string `json:"username"`
+	Password string `json:"password"`
+}
+
 type loginRequest struct {
 	Username string `json:"username"`
 	Password string `json:"password"`
 }
 
-func newAuthManager(user, password string) *authManager {
-	user = strings.TrimSpace(user)
-	if user == "" {
-		user = defaultAdmin
-	}
-	if password == "" {
-		password = defaultPass
-	}
-	return &authManager{
-		user:     user,
-		password: password,
-		sessions: map[string]authSession{},
-	}
+func newAuthManager() *authManager {
+	return &authManager{sessions: map[string]authSession{}}
 }
 
-func (m *authManager) authenticate(username, password string) bool {
-	userOK := subtle.ConstantTimeCompare([]byte(username), []byte(m.user)) == 1
-	passOK := subtle.ConstantTimeCompare([]byte(password), []byte(m.password)) == 1
-	return userOK && passOK
-}
-
-func (m *authManager) create(username string) (string, authSession, error) {
+func (m *authManager) create(admin store.AdminPublic) (string, authSession, error) {
 	token, err := randomToken()
 	if err != nil {
 		return "", authSession{}, err
 	}
 	session := authSession{
-		UserID:    "local-admin",
-		Username:  username,
-		Role:      "admin",
+		UserID:    admin.UserID,
+		Username:  admin.Username,
+		Role:      admin.Role,
 		ExpiresAt: time.Now().Add(authSessionTTL).UTC(),
 	}
 	m.mu.Lock()
@@ -102,6 +92,13 @@ func (m *authManager) session(r *http.Request) (string, authSession, bool) {
 }
 
 func (s *Server) requireAuth(w http.ResponseWriter, r *http.Request) bool {
+	if !s.cfg.Store.AdminConfigured() {
+		writeJSON(w, http.StatusUnauthorized, map[string]any{
+			"error":          "admin setup required",
+			"setup_required": true,
+		})
+		return false
+	}
 	_, _, ok := s.auth.session(r)
 	if ok {
 		return true
@@ -113,9 +110,47 @@ func (s *Server) requireAuth(w http.ResponseWriter, r *http.Request) bool {
 func (s *Server) currentUserID(r *http.Request) string {
 	_, session, ok := s.auth.session(r)
 	if !ok || session.UserID == "" {
-		return "local-admin"
+		return "anonymous"
 	}
 	return session.UserID
+}
+
+func (s *Server) handleAuthStatus(w http.ResponseWriter, _ *http.Request) {
+	writeJSON(w, http.StatusOK, authStatus{Configured: s.cfg.Store.AdminConfigured()})
+}
+
+func (s *Server) handleSetup(w http.ResponseWriter, r *http.Request) {
+	var req setupRequest
+	if !decodeJSON(w, r, &req) {
+		return
+	}
+	username := strings.TrimSpace(req.Username)
+	if username == "" {
+		username = "admin"
+	}
+	if len(req.Password) < 8 {
+		writeError(w, http.StatusBadRequest, "password must be at least 8 characters")
+		return
+	}
+
+	admin, err := s.cfg.Store.SetupAdmin(username, req.Password)
+	if err != nil {
+		if errors.Is(err, store.ErrAdminAlreadyConfigured) {
+			writeError(w, http.StatusConflict, "admin already configured")
+			return
+		}
+		writeError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+
+	token, session, err := s.auth.create(admin)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	http.SetCookie(w, s.authCookie(r, token, int(authSessionTTL.Seconds())))
+	_ = s.audit(r, "auth.setup", session.UserID, "", "admin initialized")
+	writeJSON(w, http.StatusCreated, map[string]any{"user": session})
 }
 
 func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
@@ -123,12 +158,24 @@ func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
 	if !decodeJSON(w, r, &req) {
 		return
 	}
-	if !s.auth.authenticate(req.Username, req.Password) {
+	if !s.cfg.Store.AdminConfigured() {
+		writeJSON(w, http.StatusConflict, map[string]any{
+			"error":          "admin setup required",
+			"setup_required": true,
+		})
+		return
+	}
+	admin, ok, err := s.cfg.Store.VerifyAdmin(strings.TrimSpace(req.Username), req.Password)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	if !ok {
 		writeError(w, http.StatusUnauthorized, "invalid username or password")
 		return
 	}
 
-	token, session, err := s.auth.create(req.Username)
+	token, session, err := s.auth.create(admin)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, err.Error())
 		return

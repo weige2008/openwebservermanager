@@ -22,16 +22,19 @@ import (
 )
 
 type Config struct {
-	Store    *store.Store
-	Guacd    *guac.Manager
-	StaticFS fs.FS
-	DataDir  string
+	Store         *store.Store
+	Guacd         *guac.Manager
+	StaticFS      fs.FS
+	DataDir       string
+	AdminUser     string
+	AdminPassword string
 }
 
 type Server struct {
 	cfg      Config
 	static   http.Handler
 	staticFS fs.FS
+	auth     *authManager
 }
 
 func New(cfg Config) http.Handler {
@@ -43,6 +46,7 @@ func New(cfg Config) http.Handler {
 		cfg:      cfg,
 		static:   http.FileServer(http.FS(sub)),
 		staticFS: sub,
+		auth:     newAuthManager(cfg.AdminUser, cfg.AdminPassword),
 	}
 }
 
@@ -51,7 +55,7 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		s.serveAPI(w, r)
 		return
 	}
-	if r.URL.Path == "/" {
+	if r.Method == http.MethodGet && shouldServeIndex(r.URL.Path) {
 		index, err := fs.ReadFile(s.staticFS, "index.html")
 		if err != nil {
 			writeError(w, http.StatusInternalServerError, err.Error())
@@ -65,6 +69,22 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) serveAPI(w http.ResponseWriter, r *http.Request) {
+	switch {
+	case r.Method == http.MethodPost && r.URL.Path == "/api/auth/login":
+		s.handleLogin(w, r)
+		return
+	case r.Method == http.MethodPost && r.URL.Path == "/api/auth/logout":
+		s.handleLogout(w, r)
+		return
+	case r.Method == http.MethodGet && r.URL.Path == "/api/auth/me":
+		s.handleMe(w, r)
+		return
+	}
+
+	if !s.requireAuth(w, r) {
+		return
+	}
+
 	switch {
 	case r.Method == http.MethodGet && r.URL.Path == "/api/bootstrap":
 		s.handleBootstrap(w, r)
@@ -188,7 +208,7 @@ func (s *Server) handleCreateSSH(w http.ResponseWriter, r *http.Request) {
 		Protocol:     model.ProtocolSSH,
 		ServerID:     server.ID,
 		CredentialID: credential.ID,
-		UserID:       "local-admin",
+		UserID:       s.currentUserID(r),
 		ClientIP:     clientIP(r),
 		Width:        req.Cols,
 		Height:       req.Rows,
@@ -247,7 +267,7 @@ func (s *Server) handleCreateRDP(w http.ResponseWriter, r *http.Request) {
 		Protocol:     model.ProtocolRDP,
 		ServerID:     server.ID,
 		CredentialID: credential.ID,
-		UserID:       "local-admin",
+		UserID:       s.currentUserID(r),
 		ClientIP:     clientIP(r),
 		Width:        req.Width,
 		Height:       req.Height,
@@ -384,13 +404,21 @@ func (s *Server) connectionParts(w http.ResponseWriter, sessionID string, protoc
 
 func (s *Server) audit(r *http.Request, action, targetID string, protocol model.Protocol, detail string) error {
 	return s.cfg.Store.Audit(model.AuditLog{
-		UserID:   "local-admin",
+		UserID:   s.currentUserID(r),
 		Action:   action,
 		TargetID: targetID,
 		Protocol: protocol,
 		Detail:   detail,
 		ClientIP: clientIP(r),
 	})
+}
+
+func shouldServeIndex(path string) bool {
+	if path == "/" {
+		return true
+	}
+	base := filepath.Base(path)
+	return !strings.Contains(base, ".")
 }
 
 func ensureChildPath(root, child string) error {
@@ -450,4 +478,3 @@ func pathSegment(value string, index int) string {
 	}
 	return parts[index]
 }
-

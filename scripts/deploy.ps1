@@ -31,6 +31,10 @@ mkdir -p "`$REMOTE_ROOT/src"
 tar -xf "`$ARCHIVE" -C "`$REMOTE_ROOT/src"
 
 cd "`$REMOTE_ROOT/src"
+if [ -f frontend/package.json ]; then
+  npm --prefix frontend ci
+  npm --prefix frontend run build
+fi
 go mod tidy
 go build -o "`$REMOTE_ROOT/bin/servermanager" ./cmd/servermanager
 

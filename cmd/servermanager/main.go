@@ -19,7 +19,7 @@ import (
 	"servermanager/internal/store"
 )
 
-//go:embed static/* static/vendor/*
+//go:embed static
 var staticFS embed.FS
 
 func main() {

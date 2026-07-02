@@ -3,3 +3,5 @@ data/
 *.log
 /dist/
 /bin/
+frontend/node_modules/
+frontend/tsconfig.tsbuildinfo

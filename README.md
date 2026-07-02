@@ -4,7 +4,7 @@
 
 ## 当前能力
 
-- Go 后端单进程服务，内嵌 NewAPI 新版风格的静态管理界面。
+- Go 后端单进程服务，内嵌 React + TypeScript + Tailwind 的 NewAPI 新版风格管理界面。
 - 公开首页、首次设置页与登录页；服务器、凭据、会话、审计日志必须登录后查看。
 - SSH：浏览器 WebSocket 到服务端 SSH PTY，支持密码、私钥、私钥 passphrase。
 - RDP：浏览器 Guacamole tunnel 到 `guacd`，服务端注入 RDP 凭据、录屏目录、文件传输参数。
@@ -66,4 +66,13 @@ RDP 依赖 Apache Guacamole 的 `guacd`。服务启动时会按以下顺序寻�
 .\scripts\deploy.ps1
 ```
 
-默认部署到 `/opt/servermanager` 并监听 `0.0.0.0:8080`。
+默认部署到 `/opt/servermanager` 并监听 `0.0.0.0:8080`。部署脚本会先在服务器执行 `npm --prefix frontend ci && npm --prefix frontend run build`，再执行 Go 构建。
+
+## 前端开发
+
+```powershell
+npm --prefix frontend install
+npm --prefix frontend run dev
+```
+
+生产构建输出到 `cmd/servermanager/static/`，由 Go `embed` 打进最终二进制。

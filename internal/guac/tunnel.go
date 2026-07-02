@@ -1,0 +1,229 @@
+package guac
+
+import (
+	"bufio"
+	"context"
+	"fmt"
+	"io"
+	"log/slog"
+	"net"
+	"os"
+	"path/filepath"
+	"strconv"
+	"sync"
+	"time"
+
+	"servermanager/internal/model"
+	"servermanager/internal/store"
+	"servermanager/internal/ws"
+)
+
+type Tunnel struct {
+	Manager *Manager
+	Store   *store.Store
+	Logger  *slog.Logger
+	DataDir string
+}
+
+type RDPConfig struct {
+	Session    model.ConnectionSession
+	Server     model.Server
+	Credential model.Credential
+	Secret     store.CredentialSecret
+	Width      int
+	Height     int
+	DPI        int
+}
+
+func (t Tunnel) Run(ctx context.Context, browser *ws.Conn, cfg RDPConfig) {
+	defer browser.Close()
+
+	if cfg.Width <= 0 {
+		cfg.Width = 1440
+	}
+	if cfg.Height <= 0 {
+		cfg.Height = 900
+	}
+	if cfg.DPI <= 0 {
+		cfg.DPI = 96
+	}
+
+	guacd, err := t.Manager.Dial(ctx)
+	if err != nil {
+		t.fail(cfg.Session.ID, fmt.Errorf("connect guacd: %w", err))
+		return
+	}
+	defer guacd.Close()
+
+	reader := bufio.NewReader(guacd)
+	if err := t.handshake(guacd, reader, cfg); err != nil {
+		t.fail(cfg.Session.ID, err)
+		return
+	}
+
+	_, _ = t.Store.UpdateSession(cfg.Session.ID, func(item *model.ConnectionSession) {
+		item.Status = model.SessionActive
+		item.Width = cfg.Width
+		item.Height = cfg.Height
+	})
+
+	var once sync.Once
+	closeSession := func(reason string) {
+		once.Do(func() {
+			now := time.Now().UTC()
+			recordingSize := directorySize(cfg.Session.RecordingPath)
+			_, _ = t.Store.UpdateSession(cfg.Session.ID, func(item *model.ConnectionSession) {
+				item.Status = model.SessionClosed
+				item.EndedAt = &now
+				item.RecordingSize = recordingSize
+				if reason != "" {
+					item.Error = reason
+				}
+			})
+		})
+	}
+
+	go func() {
+		for {
+			_, raw, err := ReadInstruction(reader)
+			if err != nil {
+				if err != io.EOF {
+					closeSession(err.Error())
+				} else {
+					closeSession("")
+				}
+				return
+			}
+			if err := browser.SendText(raw); err != nil {
+				closeSession(err.Error())
+				return
+			}
+		}
+	}()
+
+	for {
+		op, payload, err := browser.ReadFrame()
+		if err != nil {
+			closeSession("")
+			return
+		}
+		switch op {
+		case 1, 2:
+			if _, err := guacd.Write(payload); err != nil {
+				closeSession(err.Error())
+				return
+			}
+			_, _ = t.Store.UpdateSession(cfg.Session.ID, func(item *model.ConnectionSession) {})
+		case 8:
+			closeSession("")
+			return
+		case 9:
+			_ = browser.SendText(Encode("nop"))
+		}
+	}
+}
+
+func (t Tunnel) handshake(conn net.Conn, reader *bufio.Reader, cfg RDPConfig) error {
+	if _, err := conn.Write(Encode("select", "rdp")); err != nil {
+		return fmt.Errorf("send select: %w", err)
+	}
+
+	argsInstruction, raw, err := ReadInstruction(reader)
+	if err != nil {
+		return fmt.Errorf("read args: %w", err)
+	}
+	if argsInstruction.Opcode != "args" {
+		return fmt.Errorf("expected guacd args, got %s (%s)", argsInstruction.Opcode, string(raw))
+	}
+
+	if _, err := conn.Write(Encode("size", strconv.Itoa(cfg.Width), strconv.Itoa(cfg.Height), strconv.Itoa(cfg.DPI))); err != nil {
+		return fmt.Errorf("send size: %w", err)
+	}
+	if _, err := conn.Write(Encode("audio", "audio/L16", "rate=44100", "channels=2")); err != nil {
+		return fmt.Errorf("send audio: %w", err)
+	}
+	if _, err := conn.Write(Encode("video")); err != nil {
+		return fmt.Errorf("send video: %w", err)
+	}
+	if _, err := conn.Write(Encode("image", "image/png", "image/jpeg")); err != nil {
+		return fmt.Errorf("send image: %w", err)
+	}
+	if _, err := conn.Write(Encode("timezone", "UTC")); err != nil {
+		return fmt.Errorf("send timezone: %w", err)
+	}
+
+	values := make([]string, 0, len(argsInstruction.Args))
+	for _, name := range argsInstruction.Args {
+		values = append(values, t.argValue(name, cfg))
+	}
+	if _, err := conn.Write(Encode("connect", values...)); err != nil {
+		return fmt.Errorf("send connect: %w", err)
+	}
+	return nil
+}
+
+func (t Tunnel) argValue(name string, cfg RDPConfig) string {
+	recordingPath := cfg.Session.RecordingPath
+	drivePath := filepath.Join(t.DataDir, "drives", cfg.Session.ID)
+	_ = os.MkdirAll(recordingPath, 0o700)
+	_ = os.MkdirAll(drivePath, 0o700)
+
+	values := map[string]string{
+		"hostname":                 cfg.Server.Host,
+		"port":                     strconv.Itoa(cfg.Server.RDPPort),
+		"username":                 cfg.Credential.Username,
+		"password":                 cfg.Secret.Password,
+		"domain":                   cfg.Credential.Domain,
+		"security":                 "any",
+		"ignore-cert":              "true",
+		"enable-wallpaper":         "true",
+		"enable-theming":           "true",
+		"resize-method":            "display-update",
+		"enable-drive":             "true",
+		"drive-name":               "ServerManager",
+		"drive-path":               drivePath,
+		"create-drive-path":        "true",
+		"enable-recording":         "true",
+		"recording-path":           recordingPath,
+		"create-recording-path":    "true",
+		"recording-name":           cfg.Session.ID,
+		"recording-exclude-output": "false",
+		"recording-exclude-mouse":  "false",
+		"recording-include-keys":   "false",
+		"console":                  "false",
+		"width":                    strconv.Itoa(cfg.Width),
+		"height":                   strconv.Itoa(cfg.Height),
+		"dpi":                      strconv.Itoa(cfg.DPI),
+	}
+	return values[name]
+}
+
+func (t Tunnel) fail(sessionID string, err error) {
+	if t.Logger != nil {
+		t.Logger.Warn("rdp session failed", "session", sessionID, "error", err)
+	}
+	now := time.Now().UTC()
+	_, _ = t.Store.UpdateSession(sessionID, func(item *model.ConnectionSession) {
+		item.Status = model.SessionFailed
+		item.Error = err.Error()
+		item.EndedAt = &now
+	})
+}
+
+func directorySize(path string) int64 {
+	if path == "" {
+		return 0
+	}
+	var total int64
+	_ = filepath.WalkDir(path, func(_ string, d os.DirEntry, err error) error {
+		if err != nil || d.IsDir() {
+			return nil
+		}
+		info, err := d.Info()
+		if err == nil {
+			total += info.Size()
+		}
+		return nil
+	})
+	return total
+}

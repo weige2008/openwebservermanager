@@ -1208,6 +1208,10 @@ td strong {
     grid-template-columns: 1fr;
   }
 
+  .main {
+    grid-template-rows: auto minmax(0, 1fr);
+  }
+
   .sidebar {
     position: relative;
     height: auto;
@@ -1239,6 +1243,17 @@ td strong {
 
   .header-actions {
     width: 100%;
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .header-actions button {
+    width: 100%;
+    min-width: 0;
+  }
+
+  .profile-chip {
+    max-width: none;
   }
 
   .content {

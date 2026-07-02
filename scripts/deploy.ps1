@@ -31,7 +31,7 @@ mkdir -p "`$REMOTE_ROOT/src"
 tar -xf "`$ARCHIVE" -C "`$REMOTE_ROOT/src"
 
 cd "`$REMOTE_ROOT/src"
-go mod download
+go mod tidy
 go build -o "`$REMOTE_ROOT/bin/servermanager" ./cmd/servermanager
 
 sudo tee /etc/systemd/system/servermanager.service >/dev/null <<UNIT

@@ -29,8 +29,9 @@ type Config struct {
 }
 
 type Server struct {
-	cfg    Config
-	static http.Handler
+	cfg      Config
+	static   http.Handler
+	staticFS fs.FS
 }
 
 func New(cfg Config) http.Handler {
@@ -39,8 +40,9 @@ func New(cfg Config) http.Handler {
 		panic(err)
 	}
 	return &Server{
-		cfg:    cfg,
-		static: http.FileServer(http.FS(sub)),
+		cfg:      cfg,
+		static:   http.FileServer(http.FS(sub)),
+		staticFS: sub,
 	}
 }
 
@@ -50,7 +52,14 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if r.URL.Path == "/" {
-		r.URL.Path = "/index.html"
+		index, err := fs.ReadFile(s.staticFS, "index.html")
+		if err != nil {
+			writeError(w, http.StatusInternalServerError, err.Error())
+			return
+		}
+		w.Header().Set("Content-Type", "text/html; charset=utf-8")
+		_, _ = w.Write(index)
+		return
 	}
 	s.static.ServeHTTP(w, r)
 }

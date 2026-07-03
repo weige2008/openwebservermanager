@@ -210,7 +210,7 @@ func (s *Server) handleCreateCredential(w http.ResponseWriter, r *http.Request) 
 		}
 	}
 	credential, err := s.cfg.Store.CreateCredential(model.Credential{
-		ServerID:  req.ServerID,
+		ServerID: req.ServerID,
 		Name:     req.Name,
 		Type:     req.Type,
 		Username: req.Username,

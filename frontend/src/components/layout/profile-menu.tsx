@@ -5,8 +5,6 @@ import type { ReactNode } from 'react'
 import { useApp } from '@/app/app-provider'
 import { cn } from '@/lib/utils'
 
-import { Button } from '../ui/button'
-
 export function ProfileMenu({ onLogout }: { onLogout: () => Promise<void> }) {
   const app = useApp()
   const username = app.auth?.username || 'admin'
@@ -15,10 +13,8 @@ export function ProfileMenu({ onLogout }: { onLogout: () => Promise<void> }) {
   return (
     <BaseMenu.Root modal={false}>
       <BaseMenu.Trigger
-        className={cn(
-          'inline-flex size-6 items-center justify-center rounded-full p-0 text-sm font-medium outline-none transition-colors hover:bg-muted focus-visible:ring-3 focus-visible:ring-ring/50'
-        )}
-        aria-label='用户菜单'
+        className='inline-flex size-6 items-center justify-center rounded-full p-0 text-sm font-medium outline-none transition-colors hover:bg-muted focus-visible:ring-3 focus-visible:ring-ring/50'
+        aria-label={app.t('userMenu')}
       >
         <span className='grid size-6 place-items-center rounded-full bg-primary text-[11px] font-semibold text-primary-foreground'>{initials}</span>
       </BaseMenu.Trigger>
@@ -35,16 +31,16 @@ export function ProfileMenu({ onLogout }: { onLogout: () => Promise<void> }) {
             <BaseMenu.Separator className='-mx-1 my-1 h-px bg-border' />
             <MenuItem onClick={() => void app.refresh()}>
               <RefreshCw className='size-4' />
-              刷新数据
+              {app.t('refreshData')}
             </MenuItem>
             <MenuItem disabled>
               <UserCircle className='size-4' />
-              个人资料
+              {app.t('profile')}
             </MenuItem>
             <BaseMenu.Separator className='-mx-1 my-1 h-px bg-border' />
             <MenuItem destructive onClick={() => void onLogout()}>
               <LogOut className='size-4' />
-              退出登录
+              {app.t('logout')}
             </MenuItem>
           </BaseMenu.Popup>
         </BaseMenu.Positioner>

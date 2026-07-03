@@ -3,7 +3,8 @@ import { createContext, useCallback, useContext, useEffect, useMemo, useState, t
 import { toast } from 'sonner'
 
 import { ApiError, apiRequest } from '@/lib/api'
-import type { AuthUser, BootstrapData, ModalState, PublicConfig, ResolvedTheme, Theme, WorkspaceState } from '@/types'
+import { translate } from '@/lib/i18n'
+import type { AuthUser, BootstrapData, Locale, ModalState, PublicConfig, ResolvedTheme, Theme, ThemeAppearance, WorkspaceState } from '@/types'
 
 interface AppContextValue {
   auth: AuthUser | null
@@ -16,7 +17,13 @@ interface AppContextValue {
   workspace: WorkspaceState
   theme: Theme
   resolvedTheme: ResolvedTheme
+  locale: Locale
+  appearance: ThemeAppearance
   setTheme: (theme: Theme) => void
+  setLocale: (locale: Locale) => void
+  setAppearance: (appearance: Partial<ThemeAppearance>) => void
+  resetAppearance: () => void
+  t: (key: string, fallback?: string) => string
   setModal: (modal: ModalState) => void
   setWorkspace: (workspace: WorkspaceState) => void
   setAuthenticatedUser: (user: AuthUser) => void
@@ -43,6 +50,15 @@ const defaultPublicConfig: PublicConfig = {
   ],
 }
 
+const defaultAppearance: ThemeAppearance = {
+  preset: 'default',
+  font: 'default',
+  radius: 'default',
+  scale: 'default',
+  contentLayout: 'full',
+  sidebarStyle: 'default',
+}
+
 const AppContext = createContext<AppContextValue | null>(null)
 
 function readStoredTheme(): Theme {
@@ -54,10 +70,45 @@ function readSystemTheme(): ResolvedTheme {
   return window.matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light'
 }
 
+function readStoredLocale(): Locale {
+  const stored = localStorage.getItem('servermanager:locale')
+  return stored === 'en-US' || stored === 'zh-CN' ? stored : 'zh-CN'
+}
+
+function readStoredAppearance(): ThemeAppearance {
+  const stored = localStorage.getItem('servermanager:appearance')
+  if (!stored) return defaultAppearance
+  try {
+    const parsed = JSON.parse(stored) as Partial<ThemeAppearance>
+    return {
+      preset: parsed.preset || defaultAppearance.preset,
+      font: parsed.font || defaultAppearance.font,
+      radius: parsed.radius || defaultAppearance.radius,
+      scale: parsed.scale || defaultAppearance.scale,
+      contentLayout: parsed.contentLayout || defaultAppearance.contentLayout,
+      sidebarStyle: parsed.sidebarStyle || defaultAppearance.sidebarStyle,
+    }
+  } catch {
+    return defaultAppearance
+  }
+}
+
+function applyBodyAttribute(name: string, value: string, fallback: string) {
+  const body = document.body
+  if (!body) return
+  if (value === fallback) {
+    body.removeAttribute(name)
+    return
+  }
+  body.setAttribute(name, value)
+}
+
 export function AppProvider({ children }: { children: ReactNode }) {
   const queryClient = useQueryClient()
   const [theme, setThemeState] = useState<Theme>(readStoredTheme)
   const [systemTheme, setSystemTheme] = useState<ResolvedTheme>(readSystemTheme)
+  const [locale, setLocaleState] = useState<Locale>(readStoredLocale)
+  const [appearance, setAppearanceState] = useState<ThemeAppearance>(readStoredAppearance)
   const [modal, setModal] = useState<ModalState>(null)
   const [workspace, setWorkspace] = useState<WorkspaceState>(null)
   const resolvedTheme = theme === 'system' ? systemTheme : theme
@@ -96,6 +147,20 @@ export function AppProvider({ children }: { children: ReactNode }) {
     setThemeState(next)
   }, [])
 
+  const setLocale = useCallback((next: Locale) => {
+    setLocaleState(next)
+  }, [])
+
+  const setAppearance = useCallback((next: Partial<ThemeAppearance>) => {
+    setAppearanceState((current) => ({ ...current, ...next }))
+  }, [])
+
+  const resetAppearance = useCallback(() => {
+    setAppearanceState(defaultAppearance)
+  }, [])
+
+  const t = useCallback((key: string, fallback?: string) => translate(locale, key, fallback), [locale])
+
   useEffect(() => {
     const query = window.matchMedia('(prefers-color-scheme: dark)')
     const updateSystemTheme = () => setSystemTheme(query.matches ? 'dark' : 'light')
@@ -107,6 +172,21 @@ export function AppProvider({ children }: { children: ReactNode }) {
   useEffect(() => {
     localStorage.setItem('servermanager:theme', theme)
   }, [theme])
+
+  useEffect(() => {
+    localStorage.setItem('servermanager:locale', locale)
+    document.documentElement.lang = locale === 'zh-CN' ? 'zh-CN' : 'en'
+  }, [locale])
+
+  useEffect(() => {
+    localStorage.setItem('servermanager:appearance', JSON.stringify(appearance))
+    applyBodyAttribute('data-theme-preset', appearance.preset, defaultAppearance.preset)
+    applyBodyAttribute('data-theme-font', appearance.font === 'default' ? 'sans' : appearance.font, 'sans')
+    applyBodyAttribute('data-theme-radius', appearance.radius, defaultAppearance.radius)
+    applyBodyAttribute('data-theme-scale', appearance.scale, defaultAppearance.scale)
+    applyBodyAttribute('data-theme-content-layout', appearance.contentLayout, defaultAppearance.contentLayout)
+    applyBodyAttribute('data-theme-sidebar-style', appearance.sidebarStyle, defaultAppearance.sidebarStyle)
+  }, [appearance])
 
   useEffect(() => {
     const root = document.documentElement
@@ -199,7 +279,13 @@ export function AppProvider({ children }: { children: ReactNode }) {
       workspace,
       theme,
       resolvedTheme,
+      locale,
+      appearance,
       setTheme,
+      setLocale,
+      setAppearance,
+      resetAppearance,
+      t,
       setModal,
       setWorkspace,
       setAuthenticatedUser,
@@ -218,11 +304,17 @@ export function AppProvider({ children }: { children: ReactNode }) {
       logout,
       modal,
       publicConfig,
+      appearance,
       refresh,
       resolvedTheme,
+      locale,
+      resetAppearance,
       setAuthenticatedUser,
+      setAppearance,
+      setLocale,
       setTheme,
       showToast,
+      t,
       theme,
       workspace,
     ]

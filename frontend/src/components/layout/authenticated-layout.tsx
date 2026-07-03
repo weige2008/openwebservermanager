@@ -16,8 +16,8 @@ export function AuthenticatedLayout({ children }: { children: ReactNode }) {
       <AppHeader sidebarOpen={sidebarOpen} onToggleSidebar={() => setSidebarOpen((open) => !open)} />
       <div className='flex min-h-0 w-full flex-1'>
         <AppSidebar collapsed={!sidebarOpen} />
-        <main className='@container/content h-[calc(100svh-var(--app-header-height))] min-h-0 min-w-0 flex-1 overflow-hidden'>
-          <div className='grid h-full content-start gap-4 overflow-auto p-3 sm:p-4 md:p-5'>{children}</div>
+        <main className='@container/content h-[calc(100svh-var(--app-header-height))] min-h-0 min-w-0 flex-1 overflow-auto p-3 sm:p-4 md:p-5'>
+          <div className='app-content-shell grid min-h-full content-start gap-4'>{children}</div>
         </main>
       </div>
     </div>

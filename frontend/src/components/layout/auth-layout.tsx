@@ -2,6 +2,7 @@ import { Link } from '@tanstack/react-router'
 import type { ReactNode } from 'react'
 
 import { SystemBrand } from './system-brand'
+import { LanguageSwitcher } from './language-switcher'
 import { ThemeSwitch } from './theme-switch'
 
 export function AuthLayout({ children }: { children: ReactNode }) {
@@ -10,7 +11,8 @@ export function AuthLayout({ children }: { children: ReactNode }) {
       <Link to='/' className='absolute top-4 left-4 z-10 transition-opacity hover:opacity-80 sm:top-8 sm:left-8'>
         <SystemBrand variant='auth' />
       </Link>
-      <div className='absolute top-4 right-4 z-10 sm:top-8 sm:right-8'>
+      <div className='absolute top-4 right-4 z-10 flex items-center gap-1 sm:top-8 sm:right-8'>
+        <LanguageSwitcher className='size-9' />
         <ThemeSwitch className='size-9' />
       </div>
       <div className='container mx-auto flex items-center px-4 pt-16 sm:pt-0'>

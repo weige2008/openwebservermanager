@@ -7,11 +7,13 @@ import { cn } from '@/lib/utils'
 
 import { Button } from '../ui/button'
 import { buttonVariants } from '../ui/button'
+import { LanguageSwitcher } from './language-switcher'
+import { NotificationButton } from './notification-button'
 import { SystemBrand } from './system-brand'
 import { ThemeSwitch } from './theme-switch'
 
 export function PublicHeader({ authenticated }: { authenticated: boolean }) {
-  const { publicConfig, setupRequired } = useApp()
+  const { publicConfig, setupRequired, t } = useApp()
   const [scrolled, setScrolled] = useState(false)
   const [mobileOpen, setMobileOpen] = useState(false)
 
@@ -29,7 +31,7 @@ export function PublicHeader({ authenticated }: { authenticated: boolean }) {
     }
   }, [mobileOpen])
 
-  const entryLabel = authenticated ? '进入控制台' : setupRequired ? '初始化' : '登录'
+  const entryLabel = authenticated ? t('enterConsole') : setupRequired ? t('initialize') : t('signIn')
   const entryTo = authenticated ? '/app' : '/login'
   const publicLinks = publicConfig.nav_links
 
@@ -61,30 +63,24 @@ export function PublicHeader({ authenticated }: { authenticated: boolean }) {
                   rel={link.external ? 'noreferrer' : undefined}
                   className='rounded-lg px-3 py-1.5 text-[13px] font-medium text-muted-foreground transition-colors duration-200 hover:text-foreground'
                 >
-                  {link.title}
+                  {t(link.title)}
                 </a>
               ))}
               <div className='mx-2 h-4 w-px bg-border/40' />
+              <LanguageSwitcher className='size-9' />
               <ThemeSwitch className='size-9' />
+              <NotificationButton className='size-9' />
               <div className='mx-1 h-4 w-px bg-border/40' />
-              <Link
-                to={entryTo}
-                className={cn(buttonVariants({ variant: 'primary', size: 'sm' }), 'h-8 rounded-lg px-3.5 text-xs font-medium')}
-              >
+              <Link to={entryTo} className={cn(buttonVariants({ variant: 'primary', size: 'sm' }), 'h-8 rounded-lg px-3.5 text-xs font-medium')}>
                 {entryLabel}
               </Link>
             </div>
 
-            <div className='flex items-center gap-2 sm:hidden'>
+            <div className='flex items-center gap-1 sm:hidden'>
+              <LanguageSwitcher className='size-9' />
               <ThemeSwitch className='size-9' />
-              <Button
-                type='button'
-                variant='ghost'
-                size='icon'
-                className='size-9'
-                onClick={() => setMobileOpen((open) => !open)}
-                aria-label='切换导航菜单'
-              >
+              <NotificationButton className='size-9' />
+              <Button type='button' variant='ghost' size='icon' className='size-9' onClick={() => setMobileOpen((open) => !open)} aria-label={t('toggleNavigation')}>
                 {mobileOpen ? <X className='size-4' /> : <Menu className='size-4' />}
               </Button>
             </div>
@@ -113,7 +109,7 @@ export function PublicHeader({ authenticated }: { authenticated: boolean }) {
                 )}
                 style={{ transitionDelay: mobileOpen ? `${100 + index * 50}ms` : '0ms' }}
               >
-                {link.title}
+                {t(link.title)}
               </a>
             ))}
           </nav>
@@ -127,7 +123,7 @@ export function PublicHeader({ authenticated }: { authenticated: boolean }) {
             )}
             style={{ transitionDelay: mobileOpen ? '250ms' : '0ms' }}
           >
-            {authenticated ? '进入控制台' : setupRequired ? '初始化管理员' : '登录控制台'}
+            {authenticated ? t('enterConsole') : setupRequired ? t('initializeAdmin') : t('signInConsole')}
           </Link>
         </div>
       </div>

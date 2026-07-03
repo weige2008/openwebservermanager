@@ -3,6 +3,13 @@ export type ConsoleView = 'overview' | 'servers' | 'credentials' | 'sessions' | 
 export type Protocol = 'ssh' | 'rdp'
 export type Theme = 'light' | 'dark' | 'system'
 export type ResolvedTheme = 'light' | 'dark'
+export type Locale = 'zh-CN' | 'en-US'
+export type ThemePreset = 'default' | 'underground' | 'rose-garden' | 'lake-view' | 'sunset-glow' | 'forest-whisper'
+export type ThemeFont = 'default' | 'sans' | 'serif'
+export type ThemeRadius = 'default' | 'none' | 'sm' | 'md' | 'lg' | 'xl'
+export type ThemeScale = 'default' | 'sm' | 'lg' | 'xl'
+export type ThemeContentLayout = 'full' | 'centered'
+export type ThemeSidebarStyle = 'default' | 'inset' | 'floating'
 export type ServerOS = 'linux' | 'windows'
 export type CredentialType = 'ssh_password' | 'ssh_key' | 'rdp_password'
 export type SessionStatus = 'pending' | 'active' | 'closed' | 'failed' | string
@@ -83,6 +90,15 @@ export interface PublicNavLink {
 export interface PublicConfig {
   site_name: string
   nav_links: PublicNavLink[]
+}
+
+export interface ThemeAppearance {
+  preset: ThemePreset
+  font: ThemeFont
+  radius: ThemeRadius
+  scale: ThemeScale
+  contentLayout: ThemeContentLayout
+  sidebarStyle: ThemeSidebarStyle
 }
 
 export type ModalState =

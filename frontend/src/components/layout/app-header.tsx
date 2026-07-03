@@ -1,33 +1,35 @@
-import { Link, useNavigate, useRouterState } from '@tanstack/react-router'
 import { Dialog as BaseDialog } from '@base-ui/react/dialog'
+import { Link, useNavigate, useRouterState } from '@tanstack/react-router'
 import { KeyRound, LogOut, Menu, Plus, RefreshCw, UserCircle, X } from 'lucide-react'
 import { useState } from 'react'
 
 import { useApp } from '@/app/app-provider'
 import { cn } from '@/lib/utils'
 
+import { Badge } from '../ui/badge'
 import { Button } from '../ui/button'
 import { buttonVariants } from '../ui/button'
-import { Badge } from '../ui/badge'
+import { AppearanceDrawer } from './appearance-drawer'
 import { CommandSearch } from './command-search'
 import { consoleNavItems } from './app-sidebar'
+import { LanguageSwitcher } from './language-switcher'
+import { NotificationButton } from './notification-button'
 import { ProfileMenu } from './profile-menu'
 import { SystemBrand } from './system-brand'
-import { ThemeSwitch } from './theme-switch'
 
-const pageTitles: Record<string, string> = {
-  '/app': '总览',
-  '/app/servers': '服务器',
-  '/app/credentials': '凭据',
-  '/app/sessions': '连接会话',
-  '/app/audit': '审计日志',
+const pageTitleKeys: Record<string, string> = {
+  '/app': 'overview',
+  '/app/servers': 'servers',
+  '/app/credentials': 'credentials',
+  '/app/sessions': 'sessions',
+  '/app/audit': 'audit',
 }
 
 export function AppHeader({ sidebarOpen, onToggleSidebar }: { sidebarOpen: boolean; onToggleSidebar: () => void }) {
   const app = useApp()
   const navigate = useNavigate()
   const pathname = useRouterState({ select: (state) => state.location.pathname })
-  const title = pageTitles[pathname] || '控制台'
+  const title = app.t(pageTitleKeys[pathname] || 'dashboard')
   const [mobileOpen, setMobileOpen] = useState(false)
 
   const handleSidebarButton = () => {
@@ -48,36 +50,44 @@ export function AppHeader({ sidebarOpen, onToggleSidebar }: { sidebarOpen: boole
     <>
       <header className='sticky top-0 z-40 h-[var(--app-header-height)] w-full shrink-0 bg-transparent'>
         <div className='flex h-full items-center gap-1.5 px-2 sm:gap-2 sm:px-3'>
-        <Button size='icon' variant='ghost' title={sidebarOpen ? '收起侧栏' : '展开侧栏'} onClick={handleSidebarButton}>
-          <Menu className='size-4' />
-        </Button>
-        <div className='min-w-0'>
-          <SystemBrand clickable />
-        </div>
-        <div className='hidden min-w-0 border-l border-border pl-3 md:block'>
-          <div className='text-xs text-muted-foreground'>ServerManager / {title}</div>
-        </div>
-        <div className='ms-auto flex min-w-0 items-center gap-1 sm:gap-2'>
-          <div className='hidden lg:flex'>
-            <Link to='/app/servers' className={buttonVariants({ variant: 'ghost', size: 'sm' })}>服务器</Link>
-            <Link to='/app/sessions' className={buttonVariants({ variant: 'ghost', size: 'sm' })}>会话</Link>
+          <Button size='icon' variant='ghost' title={sidebarOpen ? app.t('closeSidebar') : app.t('openSidebar')} onClick={handleSidebarButton}>
+            <Menu className='size-4' />
+          </Button>
+          <div className='min-w-0'>
+            <SystemBrand clickable />
           </div>
-          <CommandSearch />
-          <Button className='hidden sm:inline-flex' size='sm' variant='outline' onClick={() => void app.refresh()}>
-            <RefreshCw className='size-4' />
-            <span>刷新</span>
-          </Button>
-          <Button className='hidden sm:inline-flex' size='sm' variant='outline' onClick={() => app.setModal({ type: 'credential' })}>
-            <KeyRound className='size-4' />
-            <span>凭据</span>
-          </Button>
-          <Button className='hidden sm:inline-flex' size='sm' variant='primary' onClick={() => app.setModal({ type: 'server' })}>
-            <Plus className='size-4' />
-            <span>服务器</span>
-          </Button>
-          <ThemeSwitch size='icon-sm' className='rounded-md' />
-          <ProfileMenu onLogout={logout} />
-        </div>
+          <div className='hidden min-w-0 border-l border-border pl-3 md:block'>
+            <div className='text-xs text-muted-foreground'>ServerManager / {title}</div>
+          </div>
+          <div className='ms-auto flex min-w-0 items-center gap-1 sm:gap-2'>
+            <div className='hidden lg:flex'>
+              <Link to='/app/servers' className={buttonVariants({ variant: 'ghost', size: 'sm' })}>
+                {app.t('servers')}
+              </Link>
+              <Link to='/app/sessions' className={buttonVariants({ variant: 'ghost', size: 'sm' })}>
+                {app.t('sessions')}
+              </Link>
+            </div>
+            <CommandSearch />
+            <div className='hidden xl:flex items-center gap-2'>
+              <Button size='sm' variant='outline' onClick={() => void app.refresh()}>
+                <RefreshCw className='size-4' />
+                <span>{app.t('refresh')}</span>
+              </Button>
+              <Button size='sm' variant='outline' onClick={() => app.setModal({ type: 'credential' })}>
+                <KeyRound className='size-4' />
+                <span>{app.t('credentials')}</span>
+              </Button>
+              <Button size='sm' variant='primary' onClick={() => app.setModal({ type: 'server' })}>
+                <Plus className='size-4' />
+                <span>{app.t('servers')}</span>
+              </Button>
+            </div>
+            <NotificationButton size='icon-sm' className='rounded-md' />
+            <LanguageSwitcher size='icon-sm' className='rounded-md' />
+            <AppearanceDrawer className='size-7 rounded-md' />
+            <ProfileMenu onLogout={logout} />
+          </div>
         </div>
       </header>
       <MobileNavDrawer open={mobileOpen} onOpenChange={setMobileOpen} onLogout={logout} />
@@ -106,10 +116,12 @@ function MobileNavDrawer({
         <BaseDialog.Popup className='fixed inset-y-0 left-0 z-50 flex w-[min(17rem,calc(100vw-2rem))] flex-col border-r border-sidebar-border bg-sidebar text-sidebar-foreground shadow-2xl outline-none md:hidden'>
           <div className='flex h-[var(--app-header-height)] items-center justify-between border-b border-sidebar-border px-4'>
             <SystemBrand clickable />
-            <BaseDialog.Close render={<Button size='icon-sm' variant='ghost' aria-label='关闭菜单'><X className='size-4' /></Button>} />
+            <BaseDialog.Close render={<Button size='icon-sm' variant='ghost' aria-label={app.t('closeMenu')} />}>
+              <X className='size-4' />
+            </BaseDialog.Close>
           </div>
           <div className='flex-1 overflow-auto py-3'>
-            <div className='px-3 pb-2 text-xs font-medium text-muted-foreground'>应用</div>
+            <div className='px-3 pb-2 text-xs font-medium text-muted-foreground'>{app.t('app')}</div>
             <nav className='grid gap-1 px-2'>
               {consoleNavItems.map((item) => {
                 const Icon = item.icon
@@ -127,7 +139,7 @@ function MobileNavDrawer({
                     <span className='grid size-7 place-items-center rounded-md bg-background/70'>
                       <Icon className='size-4' />
                     </span>
-                    {item.label}
+                    {app.t(item.label)}
                   </Link>
                 )
               })}
@@ -135,31 +147,49 @@ function MobileNavDrawer({
             <div className='mt-4 grid gap-2 px-3'>
               <Button variant='outline' className='justify-start' onClick={() => void app.refresh().then(close)}>
                 <RefreshCw className='size-4' />
-                刷新数据
+                {app.t('refreshData')}
               </Button>
-              <Button variant='outline' className='justify-start' onClick={() => { app.setModal({ type: 'credential' }); close() }}>
+              <Button
+                variant='outline'
+                className='justify-start'
+                onClick={() => {
+                  app.setModal({ type: 'credential' })
+                  close()
+                }}
+              >
                 <KeyRound className='size-4' />
-                新增凭据
+                {app.t('addCredential')}
               </Button>
-              <Button variant='primary' className='justify-start' onClick={() => { app.setModal({ type: 'server' }); close() }}>
+              <Button
+                variant='primary'
+                className='justify-start'
+                onClick={() => {
+                  app.setModal({ type: 'server' })
+                  close()
+                }}
+              >
                 <Plus className='size-4' />
-                新增服务器
+                {app.t('addServer')}
               </Button>
             </div>
           </div>
           <div className='m-3 grid gap-3 rounded-lg border border-sidebar-border bg-card/70 p-3 text-xs'>
             <div className='flex items-center justify-between gap-2'>
               <span className='text-muted-foreground'>Gateway</span>
-              <Badge tone={app.data.guacd?.address ? 'success' : 'warning'}>{app.data.guacd?.address ? 'ready' : 'offline'}</Badge>
+              <Badge tone={app.data.guacd?.address ? 'success' : 'warning'}>{app.data.guacd?.address ? app.t('gatewayReady') : app.t('gatewayOffline')}</Badge>
             </div>
-            <div className='truncate text-muted-foreground'>{app.data.guacd?.address || 'guacd 未连接'}</div>
-            <div className='flex items-center gap-2'>
-              <ThemeSwitch size='icon-sm' variant='outline' />
-              <Button variant='outline' className='min-w-0 flex-1 justify-start' onClick={() => void onLogout()}>
-                <UserCircle className='size-4' />
-                <span className='truncate'>{app.auth?.username || 'admin'}</span>
-                <LogOut className='size-4 ms-auto' />
+            <div className='truncate text-muted-foreground'>{app.data.guacd?.address || app.t('guacdOffline')}</div>
+            <div className='grid grid-cols-4 gap-2'>
+              <NotificationButton size='icon-sm' variant='outline' />
+              <LanguageSwitcher size='icon-sm' variant='outline' />
+              <AppearanceDrawer className='size-7 rounded-md border border-border bg-background' />
+              <Button variant='outline' className='min-w-0 justify-start col-span-1 px-2' onClick={() => void onLogout()} title={app.t('logout')}>
+                <LogOut className='size-4' />
               </Button>
+            </div>
+            <div className='flex items-center gap-2 rounded-lg border border-border bg-background px-2 py-1.5'>
+              <UserCircle className='size-4 text-muted-foreground' />
+              <span className='truncate'>{app.auth?.username || 'admin'}</span>
             </div>
           </div>
         </BaseDialog.Popup>

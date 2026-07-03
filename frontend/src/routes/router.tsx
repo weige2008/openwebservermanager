@@ -15,7 +15,6 @@ import { SystemBrand } from '@/components/layout/system-brand'
 import { AuthenticatedLayout } from '@/components/layout/authenticated-layout'
 import { AuthPage } from '@/features/auth/auth-page'
 import { AuditPage } from '@/features/console/audit-page'
-import { CredentialsPage } from '@/features/console/credentials-page'
 import { OverviewPage } from '@/features/console/overview-page'
 import { ServersPage } from '@/features/console/servers-page'
 import { SessionsPage } from '@/features/console/sessions-page'
@@ -99,7 +98,7 @@ const serversRoute = createRoute({
 const credentialsRoute = createRoute({
   getParentRoute: () => rootRoute,
   path: '/app/credentials',
-  component: () => <ConsoleGate><CredentialsPage /></ConsoleGate>,
+  component: () => <Navigate to='/app/servers' replace />,
 })
 
 const sessionsRoute = createRoute({

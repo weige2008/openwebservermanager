@@ -43,7 +43,7 @@ export function statusLabel(value: SessionStatus): string {
 
 export function routeToView(pathname: string) {
   if (pathname.endsWith('/servers')) return 'servers'
-  if (pathname.endsWith('/credentials')) return 'credentials'
+  if (pathname.endsWith('/credentials')) return 'servers'
   if (pathname.endsWith('/sessions')) return 'sessions'
   if (pathname.endsWith('/audit')) return 'audit'
   return 'overview'

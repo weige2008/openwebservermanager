@@ -1,5 +1,5 @@
 import { Link, useRouterState } from '@tanstack/react-router'
-import { FileClock, Home, KeyRound, MonitorUp, Server, Settings } from 'lucide-react'
+import { FileClock, Home, MonitorUp, Server, Settings } from 'lucide-react'
 
 import { useApp } from '@/app/app-provider'
 import { cn } from '@/lib/utils'
@@ -9,7 +9,6 @@ import { Badge } from '../ui/badge'
 export const consoleNavItems = [
   { to: '/app', label: 'overview', icon: Home },
   { to: '/app/servers', label: 'servers', icon: Server },
-  { to: '/app/credentials', label: 'credentials', icon: KeyRound },
   { to: '/app/sessions', label: 'sessions', icon: MonitorUp },
   { to: '/app/audit', label: 'audit', icon: FileClock },
 ] as const
@@ -38,7 +37,7 @@ export function AppSidebar({ collapsed = false }: { collapsed?: boolean }) {
             {consoleNavItems.map((item) => {
               const Icon = item.icon
               const active = item.to === '/app' ? pathname === '/app' : pathname.startsWith(item.to)
-              const label = t(item.label)
+              const label = item.to === '/app/servers' ? `${t('servers')} / ${t('credentials')}` : t(item.label)
               return (
                 <Link
                   key={item.to}

@@ -1,5 +1,5 @@
 import { useNavigate } from '@tanstack/react-router'
-import { Activity, FileClock, KeyRound, MonitorUp, Plus, SearchIcon, Server } from 'lucide-react'
+import { Activity, FileClock, MonitorUp, Plus, SearchIcon, Server } from 'lucide-react'
 import { useEffect, useMemo, useState } from 'react'
 import { useTranslation } from 'react-i18next'
 
@@ -44,8 +44,7 @@ export function CommandSearch() {
   const commands = useMemo<CommandItem[]>(
     () => [
       { id: 'overview', label: t('overview'), description: t('commandSearch.overviewDescription'), icon: Activity, run: () => navigate({ to: '/app' }) },
-      { id: 'servers', label: t('servers'), description: t('commandSearch.serversDescription'), icon: Server, run: () => navigate({ to: '/app/servers' }) },
-      { id: 'credentials', label: t('credentials'), description: t('commandSearch.credentialsDescription'), icon: KeyRound, run: () => navigate({ to: '/app/credentials' }) },
+      { id: 'servers', label: `${t('servers')} / ${t('credentials')}`, description: t('commandSearch.serversDescription'), icon: Server, run: () => navigate({ to: '/app/servers' }) },
       { id: 'sessions', label: t('sessions'), description: t('commandSearch.sessionsDescription'), icon: MonitorUp, run: () => navigate({ to: '/app/sessions' }) },
       { id: 'audit', label: t('audit'), description: t('commandSearch.auditDescription'), icon: FileClock, run: () => navigate({ to: '/app/audit' }) },
       { id: 'new-server', label: t('addServer'), description: t('commandSearch.newServerDescription'), icon: Plus, run: () => app.setModal({ type: 'server' }) },

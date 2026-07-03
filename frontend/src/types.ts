@@ -1,5 +1,5 @@
 export type AppRoute = 'home' | 'login' | 'console'
-export type ConsoleView = 'overview' | 'servers' | 'credentials' | 'sessions' | 'audit'
+export type ConsoleView = 'overview' | 'servers' | 'sessions' | 'audit'
 export type Protocol = 'ssh' | 'rdp'
 export type Theme = 'light' | 'dark' | 'system'
 export type ResolvedTheme = 'light' | 'dark'

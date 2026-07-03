@@ -20,7 +20,7 @@ import { SystemBrand } from './system-brand'
 const pageTitleKeys: Record<string, string> = {
   '/app': 'overview',
   '/app/servers': 'servers',
-  '/app/credentials': 'credentials',
+  '/app/credentials': 'servers',
   '/app/sessions': 'sessions',
   '/app/audit': 'audit',
 }
@@ -29,7 +29,9 @@ export function AppHeader({ sidebarOpen, onToggleSidebar }: { sidebarOpen: boole
   const app = useApp()
   const navigate = useNavigate()
   const pathname = useRouterState({ select: (state) => state.location.pathname })
-  const title = app.t(pageTitleKeys[pathname] || 'dashboard')
+  const title = pathname === '/app/servers' || pathname === '/app/credentials'
+    ? `${app.t('servers')} / ${app.t('credentials')}`
+    : app.t(pageTitleKeys[pathname] || 'dashboard')
   const [mobileOpen, setMobileOpen] = useState(false)
 
   const handleSidebarButton = () => {
@@ -62,7 +64,7 @@ export function AppHeader({ sidebarOpen, onToggleSidebar }: { sidebarOpen: boole
           <div className='ms-auto flex min-w-0 items-center gap-1 sm:gap-2'>
             <div className='hidden lg:flex'>
               <Link to='/app/servers' className={buttonVariants({ variant: 'ghost', size: 'sm' })}>
-                {app.t('servers')}
+                {app.t('servers')} / {app.t('credentials')}
               </Link>
               <Link to='/app/sessions' className={buttonVariants({ variant: 'ghost', size: 'sm' })}>
                 {app.t('sessions')}
@@ -126,6 +128,7 @@ function MobileNavDrawer({
               {consoleNavItems.map((item) => {
                 const Icon = item.icon
                 const active = item.to === '/app' ? pathname === '/app' : pathname.startsWith(item.to)
+                const label = item.to === '/app/servers' ? `${app.t('servers')} / ${app.t('credentials')}` : app.t(item.label)
                 return (
                   <Link
                     key={item.to}
@@ -139,7 +142,7 @@ function MobileNavDrawer({
                     <span className='grid size-7 place-items-center rounded-md bg-background/70'>
                       <Icon className='size-4' />
                     </span>
-                    {app.t(item.label)}
+                    {label}
                   </Link>
                 )
               })}

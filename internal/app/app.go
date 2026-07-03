@@ -26,6 +26,18 @@ type Config struct {
 	Guacd    *guac.Manager
 	StaticFS fs.FS
 	DataDir  string
+	Public   PublicConfig
+}
+
+type PublicConfig struct {
+	SiteName string          `json:"site_name"`
+	NavLinks []PublicNavLink `json:"nav_links"`
+}
+
+type PublicNavLink struct {
+	Title    string `json:"title"`
+	Href     string `json:"href"`
+	External bool   `json:"external,omitempty"`
 }
 
 type Server struct {
@@ -71,6 +83,9 @@ func (s *Server) serveAPI(w http.ResponseWriter, r *http.Request) {
 	case r.Method == http.MethodGet && r.URL.Path == "/api/auth/status":
 		s.handleAuthStatus(w, r)
 		return
+	case r.Method == http.MethodGet && r.URL.Path == "/api/public/config":
+		s.handlePublicConfig(w, r)
+		return
 	case r.Method == http.MethodPost && r.URL.Path == "/api/auth/setup":
 		s.handleSetup(w, r)
 		return
@@ -111,6 +126,21 @@ func (s *Server) serveAPI(w http.ResponseWriter, r *http.Request) {
 	default:
 		writeError(w, http.StatusNotFound, "endpoint not found")
 	}
+}
+
+func (s *Server) handlePublicConfig(w http.ResponseWriter, _ *http.Request) {
+	cfg := s.cfg.Public
+	if cfg.SiteName == "" {
+		cfg.SiteName = "ServerManager"
+	}
+	if len(cfg.NavLinks) == 0 {
+		cfg.NavLinks = []PublicNavLink{
+			{Title: "能力", Href: "#features"},
+			{Title: "安全", Href: "#security"},
+			{Title: "流程", Href: "#workflow"},
+		}
+	}
+	writeJSON(w, http.StatusOK, cfg)
 }
 
 func (s *Server) handleBootstrap(w http.ResponseWriter, _ *http.Request) {

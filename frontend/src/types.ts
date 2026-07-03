@@ -1,7 +1,8 @@
 export type AppRoute = 'home' | 'login' | 'console'
 export type ConsoleView = 'overview' | 'servers' | 'credentials' | 'sessions' | 'audit'
 export type Protocol = 'ssh' | 'rdp'
-export type Theme = 'light' | 'dark'
+export type Theme = 'light' | 'dark' | 'system'
+export type ResolvedTheme = 'light' | 'dark'
 export type ServerOS = 'linux' | 'windows'
 export type CredentialType = 'ssh_password' | 'ssh_key' | 'rdp_password'
 export type SessionStatus = 'pending' | 'active' | 'closed' | 'failed' | string
@@ -71,6 +72,17 @@ export interface BootstrapData {
   sessions: ConnectionSession[]
   audit_logs: AuditLog[]
   guacd?: { address: string }
+}
+
+export interface PublicNavLink {
+  title: string
+  href: string
+  external?: boolean
+}
+
+export interface PublicConfig {
+  site_name: string
+  nav_links: PublicNavLink[]
 }
 
 export type ModalState =

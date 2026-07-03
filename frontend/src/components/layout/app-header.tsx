@@ -1,6 +1,6 @@
 import { Link, useNavigate, useRouterState } from '@tanstack/react-router'
 import { Dialog as BaseDialog } from '@base-ui/react/dialog'
-import { KeyRound, LogOut, Menu, Moon, Plus, RefreshCw, Sun, UserCircle, X } from 'lucide-react'
+import { KeyRound, LogOut, Menu, Plus, RefreshCw, UserCircle, X } from 'lucide-react'
 import { useState } from 'react'
 
 import { useApp } from '@/app/app-provider'
@@ -13,6 +13,7 @@ import { CommandSearch } from './command-search'
 import { consoleNavItems } from './app-sidebar'
 import { ProfileMenu } from './profile-menu'
 import { SystemBrand } from './system-brand'
+import { ThemeSwitch } from './theme-switch'
 
 const pageTitles: Record<string, string> = {
   '/app': '总览',
@@ -74,9 +75,7 @@ export function AppHeader({ sidebarOpen, onToggleSidebar }: { sidebarOpen: boole
             <Plus className='size-4' />
             <span>服务器</span>
           </Button>
-          <Button size='icon-sm' variant='outline' title='切换主题' onClick={() => app.setTheme(app.theme === 'dark' ? 'light' : 'dark')}>
-            {app.theme === 'dark' ? <Sun className='size-4' /> : <Moon className='size-4' />}
-          </Button>
+          <ThemeSwitch size='icon-sm' className='rounded-md' />
           <ProfileMenu onLogout={logout} />
         </div>
         </div>
@@ -155,9 +154,7 @@ function MobileNavDrawer({
             </div>
             <div className='truncate text-muted-foreground'>{app.data.guacd?.address || 'guacd 未连接'}</div>
             <div className='flex items-center gap-2'>
-              <Button size='icon-sm' variant='outline' title='切换主题' onClick={() => app.setTheme(app.theme === 'dark' ? 'light' : 'dark')}>
-                {app.theme === 'dark' ? <Sun className='size-4' /> : <Moon className='size-4' />}
-              </Button>
+              <ThemeSwitch size='icon-sm' variant='outline' />
               <Button variant='outline' className='min-w-0 flex-1 justify-start' onClick={() => void onLogout()}>
                 <UserCircle className='size-4' />
                 <span className='truncate'>{app.auth?.username || 'admin'}</span>

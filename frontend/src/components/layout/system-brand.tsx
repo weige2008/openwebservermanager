@@ -1,5 +1,6 @@
 import { Link } from '@tanstack/react-router'
 
+import { useApp } from '@/app/app-provider'
 import { cn } from '@/lib/utils'
 
 export function SystemBrand({
@@ -11,6 +12,9 @@ export function SystemBrand({
   clickable?: boolean
   variant?: 'inline' | 'auth'
 }) {
+  const { publicConfig } = useApp()
+  const siteName = publicConfig.site_name || 'ServerManager'
+
   const content = (
     <span
       className={cn(
@@ -23,7 +27,7 @@ export function SystemBrand({
       <span className={cn('grid place-items-center overflow-hidden rounded-md bg-primary text-primary-foreground shadow-sm', variant === 'auth' ? 'size-8 rounded-full' : 'size-5')}>
         <span className={cn('rounded-sm bg-primary-foreground/90', variant === 'auth' ? 'size-3.5' : 'size-2.5')} />
       </span>
-      <span className={cn('max-w-[12rem] truncate', variant === 'auth' ? 'font-medium' : 'font-medium')}>ServerManager</span>
+      <span className={cn('max-w-[12rem] truncate', variant === 'auth' ? 'font-medium' : 'font-medium')}>{siteName}</span>
     </span>
   )
 

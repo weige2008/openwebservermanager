@@ -65,7 +65,7 @@ func run() error {
 
 	srv := &http.Server{
 		Addr:              addr,
-		Handler:           app.New(app.Config{Store: st, Guacd: guacd, StaticFS: staticFS, DataDir: dataDir}),
+		Handler:           app.New(app.Config{Store: st, Guacd: guacd, StaticFS: staticFS, DataDir: dataDir, Public: publicConfig()}),
 		ReadHeaderTimeout: 10 * time.Second,
 	}
 
@@ -97,4 +97,15 @@ func env(name, fallback string) string {
 		return value
 	}
 	return fallback
+}
+
+func publicConfig() app.PublicConfig {
+	return app.PublicConfig{
+		SiteName: env("SERVERMANAGER_SITE_NAME", "ServerManager"),
+		NavLinks: []app.PublicNavLink{
+			{Title: "能力", Href: "#features"},
+			{Title: "安全", Href: "#security"},
+			{Title: "流程", Href: "#workflow"},
+		},
+	}
 }

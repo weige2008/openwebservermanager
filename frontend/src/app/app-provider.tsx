@@ -3,17 +3,19 @@ import { createContext, useCallback, useContext, useEffect, useMemo, useState, t
 import { toast } from 'sonner'
 
 import { ApiError, apiRequest } from '@/lib/api'
-import type { AuthUser, BootstrapData, ModalState, Theme, WorkspaceState } from '@/types'
+import type { AuthUser, BootstrapData, ModalState, PublicConfig, ResolvedTheme, Theme, WorkspaceState } from '@/types'
 
 interface AppContextValue {
   auth: AuthUser | null
   booted: boolean
   configured: boolean
   setupRequired: boolean
+  publicConfig: PublicConfig
   data: BootstrapData
   modal: ModalState
   workspace: WorkspaceState
   theme: Theme
+  resolvedTheme: ResolvedTheme
   setTheme: (theme: Theme) => void
   setModal: (modal: ModalState) => void
   setWorkspace: (workspace: WorkspaceState) => void
@@ -31,17 +33,43 @@ const emptyBootstrap: BootstrapData = {
   audit_logs: [],
 }
 
+const defaultPublicConfig: PublicConfig = {
+  site_name: 'ServerManager',
+  nav_links: [
+    { title: '能力', href: '#features' },
+    { title: '安全', href: '#security' },
+    { title: '流程', href: '#workflow' },
+  ],
+}
+
 const AppContext = createContext<AppContextValue | null>(null)
+
+function readStoredTheme(): Theme {
+  const stored = localStorage.getItem('servermanager:theme')
+  return stored === 'light' || stored === 'dark' || stored === 'system' ? stored : 'system'
+}
+
+function readSystemTheme(): ResolvedTheme {
+  return window.matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light'
+}
 
 export function AppProvider({ children }: { children: ReactNode }) {
   const queryClient = useQueryClient()
-  const [theme, setThemeState] = useState<Theme>(() => (localStorage.getItem('servermanager:theme') as Theme) || 'light')
+  const [theme, setThemeState] = useState<Theme>(readStoredTheme)
+  const [systemTheme, setSystemTheme] = useState<ResolvedTheme>(readSystemTheme)
   const [modal, setModal] = useState<ModalState>(null)
   const [workspace, setWorkspace] = useState<WorkspaceState>(null)
+  const resolvedTheme = theme === 'system' ? systemTheme : theme
 
   const authStatus = useQuery({
     queryKey: ['auth-status'],
     queryFn: () => apiRequest<{ configured: boolean }>('/api/auth/status'),
+    retry: false,
+  })
+
+  const publicConfigQuery = useQuery({
+    queryKey: ['public-config'],
+    queryFn: () => apiRequest<PublicConfig>('/api/public/config'),
     retry: false,
   })
 
@@ -68,9 +96,31 @@ export function AppProvider({ children }: { children: ReactNode }) {
   }, [])
 
   useEffect(() => {
-    document.documentElement.classList.toggle('dark', theme === 'dark')
+    const query = window.matchMedia('(prefers-color-scheme: dark)')
+    const updateSystemTheme = () => setSystemTheme(query.matches ? 'dark' : 'light')
+    updateSystemTheme()
+    query.addEventListener('change', updateSystemTheme)
+    return () => query.removeEventListener('change', updateSystemTheme)
+  }, [])
+
+  useEffect(() => {
     localStorage.setItem('servermanager:theme', theme)
   }, [theme])
+
+  useEffect(() => {
+    const root = document.documentElement
+    root.classList.toggle('dark', resolvedTheme === 'dark')
+    root.style.colorScheme = resolvedTheme
+
+    const themeColor = resolvedTheme === 'dark' ? '#1f1f1f' : '#ffffff'
+    let metaThemeColor = document.querySelector<HTMLMetaElement>("meta[name='theme-color']")
+    if (!metaThemeColor) {
+      metaThemeColor = document.createElement('meta')
+      metaThemeColor.name = 'theme-color'
+      document.head.appendChild(metaThemeColor)
+    }
+    metaThemeColor.content = themeColor
+  }, [resolvedTheme])
 
   const showToast = useCallback((message: string) => toast(message), [])
 
@@ -127,6 +177,13 @@ export function AppProvider({ children }: { children: ReactNode }) {
       }
     : emptyBootstrap
 
+  const publicConfig = publicConfigQuery.data
+    ? {
+        site_name: publicConfigQuery.data.site_name || defaultPublicConfig.site_name,
+        nav_links: publicConfigQuery.data.nav_links?.length ? publicConfigQuery.data.nav_links : defaultPublicConfig.nav_links,
+      }
+    : defaultPublicConfig
+
   const booted = authStatus.isFetched && (!configured || meQuery.isFetched || meQuery.isError)
 
   const value = useMemo<AppContextValue>(
@@ -135,10 +192,12 @@ export function AppProvider({ children }: { children: ReactNode }) {
       booted,
       configured,
       setupRequired: authStatus.isFetched ? !configured : false,
+      publicConfig,
       data,
       modal,
       workspace,
       theme,
+      resolvedTheme,
       setTheme,
       setModal,
       setWorkspace,
@@ -157,7 +216,9 @@ export function AppProvider({ children }: { children: ReactNode }) {
       handleApiError,
       logout,
       modal,
+      publicConfig,
       refresh,
+      resolvedTheme,
       setAuthenticatedUser,
       setTheme,
       showToast,

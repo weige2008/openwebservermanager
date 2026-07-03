@@ -36,9 +36,10 @@ const emptyBootstrap: BootstrapData = {
 const defaultPublicConfig: PublicConfig = {
   site_name: 'ServerManager',
   nav_links: [
-    { title: '能力', href: '#features' },
+    { title: '产品', href: '#product' },
+    { title: '连接', href: '#connections' },
     { title: '安全', href: '#security' },
-    { title: '流程', href: '#workflow' },
+    { title: '部署', href: '#deploy' },
   ],
 }
 

@@ -103,9 +103,10 @@ func publicConfig() app.PublicConfig {
 	return app.PublicConfig{
 		SiteName: env("SERVERMANAGER_SITE_NAME", "ServerManager"),
 		NavLinks: []app.PublicNavLink{
-			{Title: "能力", Href: "#features"},
+			{Title: "产品", Href: "#product"},
+			{Title: "连接", Href: "#connections"},
 			{Title: "安全", Href: "#security"},
-			{Title: "流程", Href: "#workflow"},
+			{Title: "部署", Href: "#deploy"},
 		},
 	}
 }

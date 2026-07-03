@@ -135,9 +135,10 @@ func (s *Server) handlePublicConfig(w http.ResponseWriter, _ *http.Request) {
 	}
 	if len(cfg.NavLinks) == 0 {
 		cfg.NavLinks = []PublicNavLink{
-			{Title: "能力", Href: "#features"},
+			{Title: "产品", Href: "#product"},
+			{Title: "连接", Href: "#connections"},
 			{Title: "安全", Href: "#security"},
-			{Title: "流程", Href: "#workflow"},
+			{Title: "部署", Href: "#deploy"},
 		}
 	}
 	writeJSON(w, http.StatusOK, cfg)

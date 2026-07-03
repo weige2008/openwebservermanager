@@ -88,7 +88,7 @@ export function AuthPage() {
             <Input name='confirm_password' type='password' autoComplete='new-password' placeholder='再次输入新密码' minLength={8} required />
           </Field>
         ) : null}
-        <Button variant='primary' className='w-full' disabled={submitting}>
+        <Button type='submit' variant='primary' className='w-full' disabled={submitting}>
           {submitting ? <Loader2 className='size-4 animate-spin' /> : null}
           {app.setupRequired ? '创建管理员并进入控制台' : '登录控制台'}
         </Button>

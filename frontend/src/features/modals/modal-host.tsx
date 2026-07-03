@@ -62,7 +62,7 @@ function ServerDialog() {
         <Field label='描述' className='md:col-span-2'><Textarea name='description' placeholder='用途、环境、负责人等' /></Field>
         <div className='flex justify-end gap-2 md:col-span-2'>
           <Button type='button' variant='outline' onClick={() => app.setModal(null)}>取消</Button>
-          <Button variant='primary' disabled={submitting}>保存服务器</Button>
+          <Button type='submit' variant='primary' disabled={submitting}>保存服务器</Button>
         </div>
       </form>
     </DialogShell>
@@ -118,7 +118,7 @@ function CredentialDialog() {
         <Field label='私钥' className='md:col-span-2'><Textarea name='private_key' placeholder='-----BEGIN OPENSSH PRIVATE KEY-----' /></Field>
         <div className='flex justify-end gap-2 md:col-span-2'>
           <Button type='button' variant='outline' onClick={() => app.setModal(null)}>取消</Button>
-          <Button variant='primary' disabled={submitting}>保存凭据</Button>
+          <Button type='submit' variant='primary' disabled={submitting}>保存凭据</Button>
         </div>
       </form>
     </DialogShell>
@@ -185,7 +185,7 @@ function ConnectDialog({ protocol, serverId }: { protocol: Protocol; serverId: s
           </div>
           <div className='flex justify-end gap-2'>
             <Button type='button' variant='outline' onClick={() => app.setModal(null)}>取消</Button>
-            <Button variant='primary' disabled={submitting}>开始连接</Button>
+            <Button type='submit' variant='primary' disabled={submitting}>开始连接</Button>
           </div>
         </form>
       ) : (

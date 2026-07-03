@@ -90,29 +90,39 @@ export function PublicHeader({ authenticated }: { authenticated: boolean }) {
 
       <div
         className={cn(
-          'fixed inset-0 z-40 bg-background/98 backdrop-blur-2xl transition-all duration-500 ease-[cubic-bezier(0.16,1,0.3,1)] sm:pointer-events-none sm:hidden',
+          'fixed inset-0 z-[60] bg-background/98 backdrop-blur-2xl transition-all duration-500 ease-[cubic-bezier(0.16,1,0.3,1)] sm:pointer-events-none sm:hidden',
           mobileOpen ? 'pointer-events-auto opacity-100' : 'pointer-events-none opacity-0'
         )}
+        aria-hidden={!mobileOpen}
       >
-        <div className='flex h-full flex-col justify-between px-8 pt-20 pb-10'>
-          <nav className='flex flex-col gap-1'>
-            {publicLinks.map((link, index) => (
-              <a
-                key={link.href}
-                href={link.href}
-                target={link.external ? '_blank' : undefined}
-                rel={link.external ? 'noreferrer' : undefined}
-                onClick={() => setMobileOpen(false)}
-                className={cn(
-                  'py-3 text-base font-medium tracking-tight text-muted-foreground transition-all duration-500 ease-[cubic-bezier(0.16,1,0.3,1)] hover:text-foreground',
-                  mobileOpen ? 'translate-y-0 opacity-100' : 'translate-y-4 opacity-0'
-                )}
-                style={{ transitionDelay: mobileOpen ? `${100 + index * 50}ms` : '0ms' }}
-              >
-                {t(link.title)}
-              </a>
-            ))}
-          </nav>
+        <div className='flex h-full flex-col justify-between px-8 pt-6 pb-10'>
+          <div>
+            <div className='flex h-10 items-center justify-between'>
+              <SystemBrand clickable />
+              <Button type='button' variant='ghost' size='icon' className='size-9' onClick={() => setMobileOpen(false)} aria-label={t('closeMenu')}>
+                <X className='size-4' />
+              </Button>
+            </div>
+
+            <nav className='mt-10 flex flex-col gap-1'>
+              {publicLinks.map((link, index) => (
+                <a
+                  key={link.href}
+                  href={link.href}
+                  target={link.external ? '_blank' : undefined}
+                  rel={link.external ? 'noreferrer' : undefined}
+                  onClick={() => setMobileOpen(false)}
+                  className={cn(
+                    'py-3 text-base font-medium tracking-tight text-muted-foreground transition-all duration-500 ease-[cubic-bezier(0.16,1,0.3,1)] hover:text-foreground',
+                    mobileOpen ? 'translate-y-0 opacity-100' : 'translate-y-4 opacity-0'
+                  )}
+                  style={{ transitionDelay: mobileOpen ? `${100 + index * 50}ms` : '0ms' }}
+                >
+                  {t(link.title)}
+                </a>
+              ))}
+            </nav>
+          </div>
 
           <Link
             to={entryTo}

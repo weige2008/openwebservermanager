@@ -214,7 +214,7 @@ function HeroSection(props: { copy: HomeCopy; entryTo: string; entryText: string
               type='button'
               variant='outline'
               className='border-border/50 hover:border-border hover:bg-muted/50 h-11 rounded-lg px-5 text-sm font-medium'
-              onClick={() => document.querySelector('#features')?.scrollIntoView({ behavior: 'smooth' })}
+              onClick={() => document.querySelector('#product')?.scrollIntoView({ behavior: 'smooth' })}
             >
               {copy.viewProduct}
             </Button>
@@ -532,7 +532,7 @@ function FeatureBento({ copy }: { copy: HomeCopy }) {
   }))
 
   return (
-    <section id='features' className='relative z-10 px-6 py-24 md:py-32'>
+    <section id='product' className='relative z-10 px-6 py-24 md:py-32'>
       <div className='mx-auto max-w-6xl'>
         <div className='landing-animate-fade-up mb-16 max-w-lg opacity-0'>
           <p className='text-muted-foreground mb-3 text-xs font-medium tracking-widest uppercase'>Core Features</p>
@@ -792,7 +792,7 @@ function CtaSection(props: { authenticated: boolean; copy: HomeCopy; entryTo: st
               type='button'
               variant='outline'
               className='border-border/50 hover:border-border hover:bg-muted/50 h-10 rounded-lg px-4'
-              onClick={() => document.querySelector('#features')?.scrollIntoView({ behavior: 'smooth' })}
+              onClick={() => document.querySelector('#product')?.scrollIntoView({ behavior: 'smooth' })}
             >
               {copy.viewProduct}
             </Button>
@@ -931,7 +931,7 @@ function PublicFooter({ siteName, entryTo, entryText, copy }: { siteName: string
         <FooterColumn
           title={copy.footerProduct}
           links={[
-            [copy.footerLinks[0], '#features'],
+            [copy.footerLinks[0], '#product'],
             [copy.footerLinks[1], '#connections'],
             [copy.footerLinks[2], '#security'],
             [copy.footerLinks[3], '#deploy'],

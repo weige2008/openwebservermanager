@@ -5,12 +5,19 @@
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <title>ServerManager</title>
     <script>
-      window.module = { exports: {} };
-      window.exports = window.module.exports;
+      window.__guacamoleModule = { exports: {} };
+      window.module = window.__guacamoleModule;
+      window.exports = window.__guacamoleModule.exports;
     </script>
     <script src="/vendor/guacamole-common.min.js"></script>
     <script>
-      window.Guacamole = window.module.exports || window.Guacamole;
+      const guacamoleExport = window.__guacamoleModule && window.__guacamoleModule.exports;
+      if (guacamoleExport && Object.keys(guacamoleExport).length > 0) {
+        window.Guacamole = guacamoleExport;
+      } else if (typeof Guacamole !== 'undefined') {
+        window.Guacamole = Guacamole;
+      }
+      delete window.__guacamoleModule;
       delete window.module;
       delete window.exports;
     </script>

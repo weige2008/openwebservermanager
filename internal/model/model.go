@@ -48,6 +48,7 @@ type Server struct {
 
 type Credential struct {
 	ID                string         `json:"id"`
+	ServerID          string         `json:"server_id,omitempty"`
 	Name              string         `json:"name"`
 	Type              CredentialType `json:"type"`
 	Username          string         `json:"username"`
@@ -61,6 +62,7 @@ type Credential struct {
 
 type CredentialPublic struct {
 	ID        string         `json:"id"`
+	ServerID  string         `json:"server_id,omitempty"`
 	Name      string         `json:"name"`
 	Type      CredentialType `json:"type"`
 	Username  string         `json:"username"`
@@ -72,6 +74,7 @@ type CredentialPublic struct {
 func (c Credential) Public() CredentialPublic {
 	return CredentialPublic{
 		ID:        c.ID,
+		ServerID:  c.ServerID,
 		Name:      c.Name,
 		Type:      c.Type,
 		Username:  c.Username,

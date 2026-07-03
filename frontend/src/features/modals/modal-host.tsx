@@ -8,8 +8,8 @@ import { DialogShell } from '@/components/ui/dialog'
 import { EmptyState } from '@/components/ui/empty-state'
 import { Field, Input, Select, Textarea } from '@/components/ui/field'
 import { apiRequest } from '@/lib/api'
-import { formatDate, serverSupportsProtocol } from '@/lib/utils'
-import type { ConnectionSession, Credential, Locale, ManagedServer, Protocol, Theme, ThemeContentLayout, ThemeSidebarStyle } from '@/types'
+import { credentialsForServer, formatDate, serverSupportsProtocol } from '@/lib/utils'
+import type { ConnectionSession, Credential, CredentialType, Locale, ManagedServer, Protocol, ServerOS, Theme, ThemeContentLayout, ThemeSidebarStyle } from '@/types'
 
 export function ModalHost() {
   const app = useApp()
@@ -120,27 +120,56 @@ function ServerDialog() {
   const app = useApp()
   const { t } = useTranslation()
   const [submitting, setSubmitting] = useState(false)
+  const [os, setOS] = useState<ServerOS>('linux')
+  const [credentialType, setCredentialType] = useState<CredentialType>('ssh_password')
 
   const onSubmit = async (event: FormEvent<HTMLFormElement>) => {
     event.preventDefault()
     setSubmitting(true)
     const form = new FormData(event.currentTarget)
     try {
-      await apiRequest<ManagedServer>('/api/servers', {
+      const credentialName = String(form.get('credential_name') || '').trim()
+      const username = String(form.get('username') || '').trim()
+      const domain = String(form.get('domain') || '').trim()
+      const password = String(form.get('password') || '')
+      const privateKey = String(form.get('private_key') || '').trim()
+      const passphrase = String(form.get('passphrase') || '')
+      const hasCredential = Boolean(credentialName || username || domain || password || privateKey || passphrase)
+
+      if (hasCredential && !username) throw new Error(t('modals.credentialUsernameRequired'))
+      if (hasCredential && credentialType === 'ssh_key' && !privateKey) throw new Error(t('modals.privateKeyRequired'))
+      if (hasCredential && credentialType !== 'ssh_key' && !password) throw new Error(t('modals.passwordRequired'))
+
+      const server = await apiRequest<ManagedServer>('/api/servers', {
         method: 'POST',
         body: JSON.stringify({
           name: String(form.get('name') || ''),
           host: String(form.get('host') || ''),
-          os: String(form.get('os') || 'linux'),
+          os,
           group: String(form.get('group') || ''),
           ssh_port: Number(form.get('ssh_port') || 22),
           rdp_port: Number(form.get('rdp_port') || 3389),
           description: String(form.get('description') || ''),
         }),
       })
+      if (hasCredential) {
+        await apiRequest<Credential>('/api/credentials', {
+          method: 'POST',
+          body: JSON.stringify({
+            server_id: server.id,
+            name: credentialName || `${server.name} ${credentialType === 'rdp_password' ? 'RDP' : 'SSH'}`,
+            type: credentialType,
+            username,
+            domain,
+            password,
+            private_key: privateKey,
+            passphrase,
+          }),
+        })
+      }
       app.setModal(null)
       await app.refresh(true)
-      app.showToast(t('modals.serverAdded'))
+      app.showToast(hasCredential ? t('modals.serverAndCredentialAdded') : t('modals.serverAdded'))
     } catch (error) {
       app.handleApiError(error)
     } finally {
@@ -148,16 +177,64 @@ function ServerDialog() {
     }
   }
 
+  const onOSChange = (nextOS: ServerOS) => {
+    setOS(nextOS)
+    setCredentialType(nextOS === 'windows' ? 'rdp_password' : 'ssh_password')
+  }
+
   return (
     <DialogShell open onOpenChange={(open) => !open && app.setModal(null)} title={t('modals.addServerTitle')} description={t('modals.addServerDescription')}>
       <form className='grid grid-cols-1 gap-3 md:grid-cols-2' onSubmit={onSubmit}>
         <Field label={t('name')}><Input name='name' placeholder={t('modals.serverNamePlaceholder')} required /></Field>
         <Field label={t('modals.host')}><Input name='host' placeholder={t('modals.hostPlaceholder')} required /></Field>
-        <Field label={t('os')}><Select name='os' defaultValue='linux'><option value='linux'>Linux</option><option value='windows'>Windows</option></Select></Field>
+        <Field label={t('os')}>
+          <Select name='os' value={os} onChange={(event) => onOSChange(event.currentTarget.value as ServerOS)}>
+            <option value='linux'>Linux</option>
+            <option value='windows'>Windows</option>
+          </Select>
+        </Field>
         <Field label={t('group')}><Input name='group' placeholder='default' /></Field>
-        <Field label={t('modals.sshPort')}><Input name='ssh_port' type='number' defaultValue={22} /></Field>
-        <Field label={t('modals.rdpPort')}><Input name='rdp_port' type='number' defaultValue={3389} /></Field>
+        {os === 'linux' ? (
+          <Field label={t('modals.sshPort')}><Input name='ssh_port' type='number' defaultValue={22} /></Field>
+        ) : (
+          <Field label={t('modals.rdpPort')}><Input name='rdp_port' type='number' defaultValue={3389} /></Field>
+        )}
         <Field label={t('modals.description')} className='md:col-span-2'><Textarea name='description' placeholder={t('modals.descriptionPlaceholder')} /></Field>
+
+        <div className='grid gap-3 rounded-xl border border-border bg-muted/25 p-3 md:col-span-2'>
+          <div className='flex flex-wrap items-center justify-between gap-2'>
+            <div>
+              <div className='text-sm font-medium'>{t('modals.defaultCredential')}</div>
+              <p className='mt-0.5 text-xs text-muted-foreground'>{t('modals.defaultCredentialDescription')}</p>
+            </div>
+            <Badge tone={os === 'windows' ? 'info' : 'neutral'}>{os === 'windows' ? 'RDP' : 'SSH'}</Badge>
+          </div>
+          <div className='grid grid-cols-1 gap-3 md:grid-cols-2'>
+            <Field label={t('name')}><Input name='credential_name' placeholder={t('modals.credentialNamePlaceholder')} /></Field>
+            <Field label={t('type')}>
+              <Select value={credentialType} onChange={(event) => setCredentialType(event.currentTarget.value as CredentialType)}>
+                {os === 'windows' ? (
+                  <option value='rdp_password'>{t('credentialTypes.rdp_password')}</option>
+                ) : (
+                  <>
+                    <option value='ssh_password'>{t('credentialTypes.ssh_password')}</option>
+                    <option value='ssh_key'>{t('credentialTypes.ssh_key')}</option>
+                  </>
+                )}
+              </Select>
+            </Field>
+            <Field label={t('username')}><Input name='username' placeholder='root / ubuntu / Administrator' /></Field>
+            <Field label={t('domainWorkgroup')}><Input name='domain' placeholder={t('optional')} /></Field>
+            {credentialType === 'ssh_key' ? (
+              <>
+                <Field label={t('modals.privateKeyPassphrase')}><Input name='passphrase' type='password' placeholder={t('optional')} /></Field>
+                <Field label={t('modals.privateKey')} className='md:col-span-2'><Textarea name='private_key' placeholder={t('modals.privateKeyPlaceholder')} /></Field>
+              </>
+            ) : (
+              <Field label={t('modals.password')}><Input name='password' type='password' placeholder={t('optional')} /></Field>
+            )}
+          </div>
+        </div>
         <div className='flex justify-end gap-2 md:col-span-2'>
           <Button type='button' variant='outline' onClick={() => app.setModal(null)}>{t('cancel')}</Button>
           <Button type='submit' variant='primary' disabled={submitting}>{t('modals.saveServer')}</Button>
@@ -171,21 +248,30 @@ function CredentialDialog() {
   const app = useApp()
   const { t } = useTranslation()
   const [submitting, setSubmitting] = useState(false)
+  const modal = app.modal?.type === 'credential' ? app.modal : null
+  const server = modal?.serverId ? app.data.servers.find((item) => item.id === modal.serverId) : undefined
+  const [credentialType, setCredentialType] = useState<CredentialType>(server?.os === 'windows' ? 'rdp_password' : 'ssh_password')
 
   const onSubmit = async (event: FormEvent<HTMLFormElement>) => {
     event.preventDefault()
     setSubmitting(true)
     const form = new FormData(event.currentTarget)
     try {
+      const password = String(form.get('password') || '')
+      const privateKey = String(form.get('private_key') || '').trim()
+      if (credentialType === 'ssh_key' && !privateKey) throw new Error(t('modals.privateKeyRequired'))
+      if (credentialType !== 'ssh_key' && !password) throw new Error(t('modals.passwordRequired'))
+
       await apiRequest<Credential>('/api/credentials', {
         method: 'POST',
         body: JSON.stringify({
+          server_id: server?.id || '',
           name: String(form.get('name') || ''),
-          type: String(form.get('type') || ''),
+          type: credentialType,
           username: String(form.get('username') || ''),
           domain: String(form.get('domain') || ''),
-          password: String(form.get('password') || ''),
-          private_key: String(form.get('private_key') || ''),
+          password,
+          private_key: privateKey,
           passphrase: String(form.get('passphrase') || ''),
         }),
       })
@@ -199,22 +285,47 @@ function CredentialDialog() {
     }
   }
 
+  const title = server ? t('modals.addServerCredentialTitle', { name: server.name }) : t('modals.addCredentialTitle')
+  const description = server ? t('modals.addServerCredentialDescription') : t('modals.addCredentialDescription')
+
   return (
-    <DialogShell open onOpenChange={(open) => !open && app.setModal(null)} title={t('modals.addCredentialTitle')} description={t('modals.addCredentialDescription')}>
+    <DialogShell open onOpenChange={(open) => !open && app.setModal(null)} title={title} description={description}>
       <form className='grid grid-cols-1 gap-3 md:grid-cols-2' onSubmit={onSubmit}>
+        {server ? (
+          <div className='flex flex-wrap gap-2 rounded-xl border border-border bg-muted/30 p-3 md:col-span-2'>
+            <Badge>{server.name}</Badge>
+            <Badge>{server.host}</Badge>
+            <Badge tone={server.os === 'windows' ? 'info' : 'neutral'}>{server.os === 'windows' ? 'RDP' : 'SSH'}</Badge>
+          </div>
+        ) : null}
         <Field label={t('name')}><Input name='name' placeholder={t('modals.credentialNamePlaceholder')} required /></Field>
         <Field label={t('type')}>
-          <Select name='type' defaultValue='ssh_password'>
-            <option value='ssh_password'>{t('credentialTypes.ssh_password')}</option>
-            <option value='ssh_key'>{t('credentialTypes.ssh_key')}</option>
-            <option value='rdp_password'>{t('credentialTypes.rdp_password')}</option>
+          <Select value={credentialType} onChange={(event) => setCredentialType(event.currentTarget.value as CredentialType)}>
+            {server?.os === 'windows' ? (
+              <option value='rdp_password'>{t('credentialTypes.rdp_password')}</option>
+            ) : server?.os === 'linux' ? (
+              <>
+                <option value='ssh_password'>{t('credentialTypes.ssh_password')}</option>
+                <option value='ssh_key'>{t('credentialTypes.ssh_key')}</option>
+              </>
+            ) : (
+              <>
+                <option value='ssh_password'>{t('credentialTypes.ssh_password')}</option>
+                <option value='ssh_key'>{t('credentialTypes.ssh_key')}</option>
+                <option value='rdp_password'>{t('credentialTypes.rdp_password')}</option>
+              </>
+            )}
           </Select>
         </Field>
         <Field label={t('username')}><Input name='username' placeholder='root / ubuntu / Administrator' required /></Field>
         <Field label={t('domainWorkgroup')}><Input name='domain' placeholder={t('optional')} /></Field>
         <Field label={t('modals.password')}><Input name='password' type='password' placeholder={t('optional')} /></Field>
-        <Field label={t('modals.privateKeyPassphrase')}><Input name='passphrase' type='password' placeholder={t('optional')} /></Field>
-        <Field label={t('modals.privateKey')} className='md:col-span-2'><Textarea name='private_key' placeholder={t('modals.privateKeyPlaceholder')} /></Field>
+        {credentialType === 'ssh_key' ? (
+          <>
+            <Field label={t('modals.privateKeyPassphrase')}><Input name='passphrase' type='password' placeholder={t('optional')} /></Field>
+            <Field label={t('modals.privateKey')} className='md:col-span-2'><Textarea name='private_key' placeholder={t('modals.privateKeyPlaceholder')} /></Field>
+          </>
+        ) : null}
         <div className='flex justify-end gap-2 md:col-span-2'>
           <Button type='button' variant='outline' onClick={() => app.setModal(null)}>{t('cancel')}</Button>
           <Button type='submit' variant='primary' disabled={submitting}>{t('modals.saveCredential')}</Button>
@@ -229,7 +340,7 @@ function ConnectDialog({ protocol, serverId }: { protocol: Protocol; serverId: s
   const { t } = useTranslation()
   const [submitting, setSubmitting] = useState(false)
   const server = app.data.servers.find((item) => item.id === serverId)
-  const credentials = app.data.credentials.filter((credential) =>
+  const credentials = credentialsForServer(app.data.credentials, server).filter((credential) =>
     protocol === 'ssh'
       ? credential.type === 'ssh_password' || credential.type === 'ssh_key'
       : credential.type === 'rdp_password'
@@ -287,7 +398,11 @@ function ConnectDialog({ protocol, serverId }: { protocol: Protocol; serverId: s
         <form className='grid gap-4' onSubmit={onSubmit}>
           <Field label={t('modals.credential')}>
             <Select name='credential_id'>
-              {credentials.map((credential) => <option key={credential.id} value={credential.id}>{credential.name} ({credential.username})</option>)}
+              {credentials.map((credential) => (
+                <option key={credential.id} value={credential.id}>
+                  {credential.name} ({credential.username}){credential.server_id ? '' : ` - ${t('modals.sharedCredential')}`}
+                </option>
+              ))}
             </Select>
           </Field>
           <div className='flex flex-wrap gap-2'>
@@ -313,7 +428,7 @@ function ConnectDialog({ protocol, serverId }: { protocol: Protocol; serverId: s
         <div className='grid gap-4'>
           <EmptyState title={t('modals.noCredentialTitle', { protocol: protocol.toUpperCase() })} body={t('modals.noCredentialBody')} />
           <div className='flex justify-end'>
-            <Button variant='primary' onClick={() => app.setModal({ type: 'credential' })}>{t('addCredential')}</Button>
+            <Button variant='primary' onClick={() => app.setModal({ type: 'credential', serverId })}>{t('addCredential')}</Button>
           </div>
         </div>
       )}

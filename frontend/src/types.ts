@@ -46,6 +46,7 @@ export interface ManagedServer {
 
 export interface Credential {
   id: string
+  server_id?: string
   name: string
   type: CredentialType
   username: string
@@ -113,7 +114,7 @@ export interface ThemeAppearance {
 
 export type ModalState =
   | { type: 'server' }
-  | { type: 'credential' }
+  | { type: 'credential'; serverId?: string }
   | { type: 'profile' }
   | { type: 'settings' }
   | { type: 'connect'; protocol: Protocol; serverId: string }

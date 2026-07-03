@@ -5,16 +5,23 @@
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <title>ServerManager</title>
     <script>
-      window.module = { exports: {} };
-      window.exports = window.module.exports;
+      window.__guacamoleModule = { exports: {} };
+      window.module = window.__guacamoleModule;
+      window.exports = window.__guacamoleModule.exports;
     </script>
     <script src="/vendor/guacamole-common.min.js"></script>
     <script>
-      window.Guacamole = window.module.exports || window.Guacamole;
+      const guacamoleExport = window.__guacamoleModule && window.__guacamoleModule.exports;
+      if (guacamoleExport && Object.keys(guacamoleExport).length > 0) {
+        window.Guacamole = guacamoleExport;
+      } else if (typeof Guacamole !== 'undefined') {
+        window.Guacamole = Guacamole;
+      }
+      delete window.__guacamoleModule;
       delete window.module;
       delete window.exports;
     </script>
-  <script defer src="/assets/lib-react.645214ca06.js"></script><script defer src="/assets/399.84e10ff0b8.js"></script><script defer src="/assets/index.ded15e995b.js"></script><link href="/assets/index.ef0db09bd4.css" rel="stylesheet"></head>
+  <script defer src="/assets/lib-react.645214ca06.js"></script><script defer src="/assets/399.84e10ff0b8.js"></script><script defer src="/assets/index.5389dce98e.js"></script><link href="/assets/index.61b6232708.css" rel="stylesheet"></head>
   <body>
     <div id="root"></div>
   </body>

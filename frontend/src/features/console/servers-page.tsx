@@ -1,5 +1,5 @@
 import type { ColumnDef } from '@tanstack/react-table'
-import { Plus } from 'lucide-react'
+import { KeyRound, Plus } from 'lucide-react'
 import { useMemo } from 'react'
 import { useTranslation } from 'react-i18next'
 
@@ -8,20 +8,12 @@ import { DataTable } from '@/components/data-table/data-table'
 import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card'
-import { credentialLabel, formatDate, osLabel, serverProtocol } from '@/lib/utils'
+import { credentialLabel, credentialsForServer, formatDate, osLabel, serverProtocol } from '@/lib/utils'
 import type { Credential, ManagedServer, Protocol } from '@/types'
 
 export function ServersPage() {
   const app = useApp()
   const { t } = useTranslation()
-  const sshCredentials = useMemo(
-    () => app.data.credentials.filter((credential) => credential.type === 'ssh_password' || credential.type === 'ssh_key'),
-    [app.data.credentials]
-  )
-  const rdpCredentials = useMemo(
-    () => app.data.credentials.filter((credential) => credential.type === 'rdp_password'),
-    [app.data.credentials]
-  )
   const serverColumns = useMemo<ColumnDef<ManagedServer>[]>(
     () => [
       {
@@ -38,93 +30,95 @@ export function ServersPage() {
       { header: t('ports'), cell: ({ row }) => row.original.os === 'windows' ? `RDP ${row.original.rdp_port || 3389}` : `SSH ${row.original.ssh_port || 22}` },
       {
         header: t('credentials'),
-        cell: ({ row }) => (
-          <div className='flex flex-wrap gap-1.5'>
-            {row.original.os === 'windows' ? (
-              <Badge tone={rdpCredentials.length ? 'success' : 'warning'}>RDP {rdpCredentials.length}</Badge>
-            ) : (
-              <Badge tone={sshCredentials.length ? 'success' : 'warning'}>SSH {sshCredentials.length}</Badge>
-            )}
-          </div>
-        ),
+        cell: ({ row }) => <ServerCredentials server={row.original} credentials={app.data.credentials} />,
       },
       { header: t('group'), accessorFn: (row) => row.group || '-' },
+      { header: t('createdAt'), cell: ({ row }) => formatDate(row.original.created_at) },
       {
         id: 'actions',
         header: '',
-        cell: ({ row }) => (
-          <div className='flex justify-end gap-2'>
-            <ConnectButton protocol={serverProtocol(row.original)} server={row.original} />
-          </div>
-        ),
+        cell: ({ row }) => <ServerActions server={row.original} />,
       },
     ],
-    [app, rdpCredentials.length, sshCredentials.length, t]
-  )
-  const credentialColumns = useMemo<ColumnDef<Credential>[]>(
-    () => [
-      { header: t('name'), cell: ({ row }) => <strong>{row.original.name}</strong> },
-      { header: t('type'), cell: ({ row }) => <Badge>{credentialLabel(row.original.type)}</Badge> },
-      { header: t('username'), accessorFn: (row) => row.username },
-      { header: t('domainWorkgroup'), accessorFn: (row) => row.domain || '-' },
-      { header: t('createdAt'), cell: ({ row }) => formatDate(row.original.created_at) },
-    ],
-    [t]
+    [app.data.credentials, t]
   )
 
   return (
-    <div className='grid gap-4'>
-      <Card>
-        <CardHeader className='gap-3 max-sm:grid-cols-1'>
-          <div>
-            <CardTitle>{t('servers')} / {t('credentials')}</CardTitle>
-            <CardDescription>{t('serversPage.description')}</CardDescription>
-          </div>
-          <div className='flex flex-wrap justify-end gap-2 max-sm:justify-start'>
-            <Button variant='outline' onClick={() => app.setModal({ type: 'credential' })}>
-              <Plus className='size-4' />
-              {t('addCredential')}
-            </Button>
-            <Button variant='primary' onClick={() => app.setModal({ type: 'server' })}>
-              <Plus className='size-4' />
-              {t('addServer')}
-            </Button>
-          </div>
-        </CardHeader>
-        <CardContent>
-          <DataTable
-            columns={serverColumns}
-            data={app.data.servers}
-            emptyTitle={t('serversPage.emptyTitle')}
-            emptyBody={t('serversPage.emptyBody')}
-            searchPlaceholder={t('serversPage.searchPlaceholder')}
-            getSearchText={(server) => [server.name, server.host, server.os, server.group, server.description].filter(Boolean).join(' ')}
-          />
-        </CardContent>
-      </Card>
-
-      <Card>
-        <CardHeader className='gap-3 max-sm:grid-cols-1'>
-          <div>
-            <CardTitle>{t('credentialsPage.title')}</CardTitle>
-            <CardDescription>{t('credentialsPage.description')}</CardDescription>
-          </div>
-          <Button variant='outline' onClick={() => app.setModal({ type: 'credential' })}>
+    <Card>
+      <CardHeader className='gap-3 max-sm:grid-cols-1'>
+        <div>
+          <CardTitle>{t('serversPage.title')}</CardTitle>
+          <CardDescription>{t('serversPage.description')}</CardDescription>
+        </div>
+        <div className='flex flex-wrap justify-end gap-2 max-sm:justify-start'>
+          <Button variant='primary' onClick={() => app.setModal({ type: 'server' })}>
             <Plus className='size-4' />
-            {t('addCredential')}
+            {t('addServer')}
           </Button>
-        </CardHeader>
-        <CardContent>
-          <DataTable
-            columns={credentialColumns}
-            data={app.data.credentials}
-            emptyTitle={t('credentialsPage.emptyTitle')}
-            emptyBody={t('credentialsPage.emptyBody')}
-            searchPlaceholder={t('credentialsPage.searchPlaceholder')}
-            getSearchText={(credential) => [credential.name, credential.type, credential.username, credential.domain].filter(Boolean).join(' ')}
-          />
-        </CardContent>
-      </Card>
+        </div>
+      </CardHeader>
+      <CardContent>
+        <DataTable
+          columns={serverColumns}
+          data={app.data.servers}
+          emptyTitle={t('serversPage.emptyTitle')}
+          emptyBody={t('serversPage.emptyBody')}
+          searchPlaceholder={t('serversPage.searchPlaceholder')}
+          getSearchText={(server) => {
+            const credentials = credentialsForServer(app.data.credentials, server)
+            return [
+              server.name,
+              server.host,
+              server.os,
+              server.group,
+              server.description,
+              ...credentials.flatMap((credential) => [credential.name, credential.username, credential.type, credential.domain]),
+            ].filter(Boolean).join(' ')
+          }}
+        />
+      </CardContent>
+    </Card>
+  )
+}
+
+function ServerCredentials({ server, credentials }: { server: ManagedServer; credentials: Credential[] }) {
+  const { t } = useTranslation()
+  const items = credentialsForServer(credentials, server)
+
+  if (!items.length) {
+    return <span className='text-xs text-muted-foreground'>{t('serversPage.noCredentials')}</span>
+  }
+
+  return (
+    <div className='flex max-w-72 flex-wrap gap-1.5'>
+      {items.slice(0, 3).map((credential) => (
+        <Badge key={credential.id} tone={credential.server_id ? 'success' : 'neutral'} className='max-w-full'>
+          <span className='truncate'>{credential.name}</span>
+          <span className='text-muted-foreground'>({credentialLabel(credential.type)})</span>
+        </Badge>
+      ))}
+      {items.length > 3 ? <Badge tone='info'>+{items.length - 3}</Badge> : null}
+    </div>
+  )
+}
+
+function ServerActions({ server }: { server: ManagedServer }) {
+  const app = useApp()
+  const { t } = useTranslation()
+  const protocol = serverProtocol(server)
+
+  return (
+    <div className='flex justify-end gap-1.5'>
+      <Button
+        size='sm'
+        variant='outline'
+        title={t('serversPage.addCredentialForServer')}
+        onClick={() => app.setModal({ type: 'credential', serverId: server.id })}
+      >
+        <KeyRound className='size-3.5' />
+        <span className='hidden xl:inline'>{t('addCredential')}</span>
+      </Button>
+      <ConnectButton protocol={protocol} server={server} />
     </div>
   )
 }

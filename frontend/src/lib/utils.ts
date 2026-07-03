@@ -3,7 +3,7 @@ import { twMerge } from 'tailwind-merge'
 
 import i18n from '@/i18n/config'
 import { normalizeInterfaceLanguage } from '@/i18n/languages'
-import type { CredentialType, ManagedServer, Protocol, ServerOS, SessionStatus } from '@/types'
+import type { Credential, CredentialType, ManagedServer, Protocol, ServerOS, SessionStatus } from '@/types'
 
 export function cn(...inputs: ClassValue[]) {
   return twMerge(clsx(inputs))
@@ -37,6 +37,10 @@ export function credentialLabel(value: CredentialType): string {
   return i18n.t(`credentialTypes.${value}`, { defaultValue: value })
 }
 
+export function credentialProtocol(value: CredentialType): Protocol {
+  return value === 'rdp_password' ? 'rdp' : 'ssh'
+}
+
 export function statusLabel(value: SessionStatus): string {
   return i18n.t(`statusLabels.${value}`, { defaultValue: value })
 }
@@ -48,6 +52,19 @@ export function serverProtocol(server: ManagedServer): Protocol {
 export function serverSupportsProtocol(server: ManagedServer | undefined, protocol: Protocol): boolean {
   if (!server) return false
   return serverProtocol(server) === protocol
+}
+
+export function credentialSupportsServer(credential: Credential, server: ManagedServer | undefined): boolean {
+  if (!server) return false
+  if (credential.server_id && credential.server_id !== server.id) return false
+  return credentialProtocol(credential.type) === serverProtocol(server)
+}
+
+export function credentialsForServer(credentials: Credential[], server: ManagedServer | undefined): Credential[] {
+  if (!server) return []
+  return credentials
+    .filter((credential) => credentialSupportsServer(credential, server))
+    .sort((left, right) => Number(Boolean(right.server_id)) - Number(Boolean(left.server_id)) || left.name.localeCompare(right.name))
 }
 
 export function routeToView(pathname: string) {

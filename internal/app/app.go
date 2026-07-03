@@ -180,6 +180,7 @@ func (s *Server) handleCreateServer(w http.ResponseWriter, r *http.Request) {
 
 type credentialRequest struct {
 	Name       string               `json:"name"`
+	ServerID   string               `json:"server_id"`
 	Type       model.CredentialType `json:"type"`
 	Username   string               `json:"username"`
 	Domain     string               `json:"domain"`
@@ -197,7 +198,19 @@ func (s *Server) handleCreateCredential(w http.ResponseWriter, r *http.Request) 
 		writeError(w, http.StatusBadRequest, "name, username and type are required")
 		return
 	}
+	if req.ServerID != "" {
+		server, ok := s.cfg.Store.GetServer(req.ServerID)
+		if !ok {
+			writeError(w, http.StatusNotFound, "server not found")
+			return
+		}
+		if err := validateCredentialForServer(req.Type, server); err != nil {
+			writeError(w, http.StatusBadRequest, err.Error())
+			return
+		}
+	}
 	credential, err := s.cfg.Store.CreateCredential(model.Credential{
+		ServerID:  req.ServerID,
 		Name:     req.Name,
 		Type:     req.Type,
 		Username: req.Username,
@@ -236,6 +249,10 @@ func (s *Server) handleCreateSSH(w http.ResponseWriter, r *http.Request) {
 	}
 	if credential.Type != model.CredentialSSHPassword && credential.Type != model.CredentialSSHKey {
 		writeError(w, http.StatusBadRequest, "credential is not ssh compatible")
+		return
+	}
+	if credential.ServerID != "" && credential.ServerID != server.ID {
+		writeError(w, http.StatusBadRequest, "credential is bound to another server")
 		return
 	}
 	if server.OS != model.ServerOSLinux {
@@ -299,6 +316,10 @@ func (s *Server) handleCreateRDP(w http.ResponseWriter, r *http.Request) {
 	}
 	if credential.Type != model.CredentialRDPPassword {
 		writeError(w, http.StatusBadRequest, "credential is not rdp compatible")
+		return
+	}
+	if credential.ServerID != "" && credential.ServerID != server.ID {
+		writeError(w, http.StatusBadRequest, "credential is bound to another server")
 		return
 	}
 	if server.OS != model.ServerOSWindows {
@@ -457,6 +478,22 @@ func (s *Server) audit(r *http.Request, action, targetID string, protocol model.
 		Detail:   detail,
 		ClientIP: clientIP(r),
 	})
+}
+
+func validateCredentialForServer(credentialType model.CredentialType, server model.Server) error {
+	if server.OS == model.ServerOSWindows {
+		if credentialType == model.CredentialRDPPassword {
+			return nil
+		}
+		return errors.New("windows servers only support rdp credentials")
+	}
+	if server.OS == model.ServerOSLinux {
+		if credentialType == model.CredentialSSHPassword || credentialType == model.CredentialSSHKey {
+			return nil
+		}
+		return errors.New("linux servers only support ssh credentials")
+	}
+	return errors.New("unsupported server os")
 }
 
 func shouldServeIndex(path string) bool {

@@ -18,7 +18,7 @@ export function OverviewPage() {
 
   return (
     <>
-      <section className='rounded-xl border border-border bg-[radial-gradient(circle_at_80%_0%,color-mix(in_oklch,var(--info)_12%,transparent),transparent_34%),var(--card)] p-5 shadow-sm'>
+      <section className='rounded-xl border border-border bg-card p-5 shadow-sm'>
         <div className='flex flex-wrap items-center justify-between gap-4'>
           <div>
             <div className='text-xs font-medium tracking-[0.12em] text-muted-foreground uppercase'>{t('overviewPage.eyebrow')}</div>

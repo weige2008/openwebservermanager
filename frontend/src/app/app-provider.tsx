@@ -143,7 +143,7 @@ export function AppProvider({ children }: { children: ReactNode }) {
     document.body.setAttribute('data-theme-font', resolveThemeFont(appearance))
     applyBodyAttribute('data-theme-radius', appearance.radius, defaultAppearance.radius)
     applyBodyAttribute('data-theme-scale', appearance.scale, defaultAppearance.scale)
-    applyBodyAttribute('data-theme-content-layout', appearance.contentLayout, defaultAppearance.contentLayout)
+    document.body.setAttribute('data-theme-content-layout', appearance.contentLayout)
     applyBodyAttribute('data-theme-sidebar-style', appearance.sidebarStyle, defaultAppearance.sidebarStyle)
   }, [appearance])
 
@@ -152,15 +152,15 @@ export function AppProvider({ children }: { children: ReactNode }) {
     root.classList.toggle('dark', resolvedTheme === 'dark')
     root.style.colorScheme = resolvedTheme
 
-    const themeColor = resolvedTheme === 'dark' ? '#1f1f1f' : '#ffffff'
     let metaThemeColor = document.querySelector<HTMLMetaElement>("meta[name='theme-color']")
     if (!metaThemeColor) {
       metaThemeColor = document.createElement('meta')
       metaThemeColor.name = 'theme-color'
       document.head.appendChild(metaThemeColor)
     }
+    const themeColor = getComputedStyle(document.body).backgroundColor
     metaThemeColor.content = themeColor
-  }, [resolvedTheme])
+  }, [resolvedTheme, appearance.preset])
 
   const showToast = useCallback((message: string) => toast(message), [])
 

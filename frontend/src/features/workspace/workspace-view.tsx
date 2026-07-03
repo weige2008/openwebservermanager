@@ -52,11 +52,11 @@ export function WorkspaceView() {
   }
 
   return (
-    <div className='grid min-h-svh grid-rows-[52px_minmax(0,1fr)] bg-[#050506] text-zinc-100'>
-      <div className='flex min-w-0 items-center justify-between gap-3 border-b border-white/10 bg-[#0d0d10] px-3 max-md:h-auto max-md:flex-col max-md:items-start max-md:py-3'>
+    <div className='grid min-h-svh grid-rows-[52px_minmax(0,1fr)] bg-background text-foreground'>
+      <div className='flex min-w-0 items-center justify-between gap-3 border-b border-border bg-background/95 px-3 backdrop-blur-xl max-md:h-auto max-md:flex-col max-md:items-start max-md:py-3'>
         <div className='flex min-w-0 items-center gap-2'>
           <strong>{workspace.session.protocol.toUpperCase()}</strong>
-          <span className='truncate text-zinc-400'>{server?.name || workspace.session.server_id}</span>
+          <span className='truncate text-muted-foreground'>{server?.name || workspace.session.server_id}</span>
           <Badge tone={status === 'connected' ? 'success' : 'neutral'}>{statusLabel(status)}</Badge>
           {workspace.session.protocol === 'rdp' ? <Badge tone='danger'>{t('workspace.recordingOn')}</Badge> : null}
         </div>
@@ -102,12 +102,16 @@ function SSHWorkspace({
 
   useEffect(() => {
     if (!containerRef.current) return
+    const styles = getComputedStyle(document.body)
+    const isDark = document.documentElement.classList.contains('dark')
+    const background = styles.getPropertyValue(isDark ? '--background' : '--foreground').trim()
+    const foreground = styles.getPropertyValue(isDark ? '--foreground' : '--background').trim()
     const term = new Terminal({
       cursorBlink: true,
       convertEol: true,
       fontFamily: 'Cascadia Mono, JetBrains Mono, Consolas, monospace',
       fontSize: 13,
-      theme: { background: '#030305', foreground: '#d4d4d8' },
+      theme: { background, foreground },
     })
     const fit = new FitAddon()
     term.loadAddon(fit)
@@ -155,7 +159,7 @@ function SSHWorkspace({
     }
   }, [messages.connected, messages.connecting, messages.disconnected, session.id, setStatus])
 
-  return <div ref={containerRef} className='h-[calc(100vh-52px)] bg-[#030305] p-3 max-md:h-[calc(100vh-120px)]' />
+  return <div ref={containerRef} className='h-[calc(100vh-52px)] bg-background p-3 max-md:h-[calc(100vh-120px)]' />
 }
 
 function RDPWorkspace({
@@ -184,7 +188,7 @@ function RDPWorkspace({
     if (!container) return
     if (!Guacamole) {
       const message = document.createElement('div')
-      message.style.cssText = 'margin:20px;padding:16px;border:1px solid rgba(255,255,255,.12);border-radius:14px;background:#111113'
+      message.style.cssText = 'margin:20px;padding:16px;border:1px solid var(--border);border-radius:var(--radius);background:var(--card);color:var(--card-foreground)'
       message.textContent = messages.missingGuacamole
       container.replaceChildren(message)
       return
@@ -253,5 +257,5 @@ function RDPWorkspace({
     }
   }, [messages, session.id, setStatus, showToast])
 
-  return <div ref={containerRef} className='h-[calc(100vh-52px)] overflow-hidden bg-[#020204] max-md:h-[calc(100vh-120px)]' />
+  return <div ref={containerRef} className='h-[calc(100vh-52px)] overflow-hidden bg-background max-md:h-[calc(100vh-120px)]' />
 }

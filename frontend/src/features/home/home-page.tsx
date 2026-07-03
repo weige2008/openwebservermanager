@@ -84,8 +84,8 @@ export function HomePage() {
       <PublicHeader authenticated={authenticated} />
       <main>
         <section className='relative isolate overflow-hidden border-b border-border bg-background pt-24 pb-10 md:pt-28 lg:min-h-[min(760px,82svh)]'>
-          <div aria-hidden='true' className='absolute inset-0 bg-[linear-gradient(180deg,color-mix(in_oklch,var(--muted)_42%,transparent)_0%,transparent_42%)]' />
-          <div className='absolute inset-x-0 bottom-0 h-32 bg-gradient-to-t from-background to-transparent' aria-hidden='true' />
+          <div aria-hidden='true' className='absolute inset-0 bg-muted/30' />
+          <div className='absolute inset-x-0 bottom-0 h-32 bg-background' aria-hidden='true' />
           <div className='relative z-10 mx-auto grid w-[min(72rem,calc(100%-2rem))] items-center gap-8 lg:grid-cols-[minmax(0,0.82fr)_minmax(390px,0.9fr)] lg:gap-10'>
             <div className='max-w-2xl lg:max-w-[35rem]'>
               <div className='landing-animate inline-flex max-w-full items-center gap-2 rounded-full border border-border bg-background/75 px-3 py-1.5 text-[11px] font-medium text-muted-foreground shadow-sm backdrop-blur-xl'>
@@ -187,7 +187,7 @@ function HeroOperationsPreview({ copy }: { copy: HomeCopy }) {
           <div className='min-w-0 border-r border-border bg-muted/35 p-3 sm:p-4'>
             <div className='mb-4 h-7 rounded-lg bg-background/80' />
             {copy.preview.servers.map((item, index) => (
-              <div key={item} className={cn('mb-2 rounded-lg border p-2 text-[11px] sm:p-3 sm:text-xs', index === 1 ? 'border-info/40 bg-info/10 text-foreground' : 'border-border bg-card/75 text-muted-foreground')}>
+              <div key={item} className={cn('mb-2 rounded-lg border p-2 text-[11px] sm:p-3 sm:text-xs', index === 1 ? 'border-primary/20 bg-muted text-foreground shadow-sm' : 'border-border bg-card/75 text-muted-foreground')}>
                 <div className='mb-2 flex min-w-0 items-center gap-2'>
                   <span className={cn('size-2 shrink-0 rounded-full', index === 2 ? 'bg-warning' : 'bg-success')} />
                   <span className='truncate font-medium'>{item}</span>
@@ -198,13 +198,13 @@ function HeroOperationsPreview({ copy }: { copy: HomeCopy }) {
           </div>
           <div className='grid min-w-0 content-start gap-3 p-3 sm:p-4'>
             <div className='grid gap-3 xl:grid-cols-[1fr_0.72fr]'>
-              <div className='rounded-xl bg-[#050507] p-3 font-mono text-[11px] leading-6 text-zinc-300 shadow-[inset_0_0_0_1px_rgb(255_255_255_/_0.08)] sm:p-4'>
+              <div className='rounded-xl border border-border bg-foreground p-3 font-mono text-[11px] leading-6 text-background shadow-sm dark:bg-background dark:text-foreground sm:p-4'>
                 <div>$ ssh ubuntu@10.18.12.24</div>
                 <div>{copy.preview.terminalWelcome}</div>
                 <div>$ systemctl status app</div>
-                <div className='text-emerald-300'>{copy.preview.terminalStatus}</div>
+                <div className='text-success'>{copy.preview.terminalStatus}</div>
               </div>
-              <div className='rounded-xl border border-border bg-[linear-gradient(180deg,color-mix(in_oklch,var(--info)_18%,var(--card)),var(--card))] p-3'>
+              <div className='rounded-xl border border-border bg-card p-3'>
                 <div className='mb-3 flex items-center justify-between gap-2 text-[11px] text-muted-foreground'>
                   <span>{copy.preview.rdpDesktop}</span>
                   <span>1920 x 1080</span>
@@ -349,7 +349,7 @@ function PublicFooter({ siteName, entryTo, entryText, copy }: { siteName: string
         </div>
       </div>
       <div className='mx-auto flex w-[min(72rem,calc(100%-2rem))] flex-col gap-2 border-t border-border py-5 text-xs text-muted-foreground sm:flex-row sm:items-center sm:justify-between'>
-        <span>© 2026 {siteName}. Self-hosted server operations console.</span>
+        <span>&copy; 2026 {siteName}. Self-hosted server operations console.</span>
         <span>{copy.footerBuilt}</span>
       </div>
     </footer>

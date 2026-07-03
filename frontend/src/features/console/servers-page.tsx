@@ -53,7 +53,14 @@ export function ServersPage() {
           添加服务器
         </Button>
       </CardHeader>
-      <DataTable columns={columns} data={app.data.servers} emptyTitle='还没有服务器' emptyBody='添加服务器后，SSH/RDP 入口会出现在列表右侧。' />
+      <DataTable
+        columns={columns}
+        data={app.data.servers}
+        emptyTitle='还没有服务器'
+        emptyBody='添加服务器后，SSH/RDP 入口会出现在列表右侧。'
+        searchPlaceholder='过滤服务器...'
+        getSearchText={(server) => [server.name, server.host, server.os, server.group, server.description].filter(Boolean).join(' ')}
+      />
     </Card>
   )
 }

@@ -29,7 +29,14 @@ export function AuditPage() {
           <CardDescription>连接、断开、凭据创建、录屏访问都会记录。</CardDescription>
         </div>
       </CardHeader>
-      <DataTable columns={columns} data={[...data.audit_logs].reverse()} emptyTitle='暂无审计日志' emptyBody='登录与连接操作会逐步写入这里。' />
+      <DataTable
+        columns={columns}
+        data={[...data.audit_logs].reverse()}
+        emptyTitle='暂无审计日志'
+        emptyBody='登录与连接操作会逐步写入这里。'
+        searchPlaceholder='过滤审计日志...'
+        getSearchText={(log) => [log.action, log.target_id, log.protocol, log.client_ip, log.detail, log.user_id].filter(Boolean).join(' ')}
+      />
     </Card>
   )
 }

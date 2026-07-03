@@ -9,7 +9,9 @@ import { cn } from '@/lib/utils'
 import { Button } from '../ui/button'
 import { buttonVariants } from '../ui/button'
 import { Badge } from '../ui/badge'
+import { CommandSearch } from './command-search'
 import { consoleNavItems } from './app-sidebar'
+import { ProfileMenu } from './profile-menu'
 import { SystemBrand } from './system-brand'
 
 const pageTitles: Record<string, string> = {
@@ -59,6 +61,7 @@ export function AppHeader({ sidebarOpen, onToggleSidebar }: { sidebarOpen: boole
             <Link to='/app/servers' className={buttonVariants({ variant: 'ghost', size: 'sm' })}>服务器</Link>
             <Link to='/app/sessions' className={buttonVariants({ variant: 'ghost', size: 'sm' })}>会话</Link>
           </div>
+          <CommandSearch />
           <Button className='hidden sm:inline-flex' size='sm' variant='outline' onClick={() => void app.refresh()}>
             <RefreshCw className='size-4' />
             <span>刷新</span>
@@ -74,11 +77,7 @@ export function AppHeader({ sidebarOpen, onToggleSidebar }: { sidebarOpen: boole
           <Button size='icon-sm' variant='outline' title='切换主题' onClick={() => app.setTheme(app.theme === 'dark' ? 'light' : 'dark')}>
             {app.theme === 'dark' ? <Sun className='size-4' /> : <Moon className='size-4' />}
           </Button>
-          <Button className='hidden sm:inline-flex' size='sm' variant='outline' onClick={() => void logout()}>
-            <UserCircle className='size-4' />
-            <span>{app.auth?.username || 'admin'}</span>
-            <LogOut className='size-4' />
-          </Button>
+          <ProfileMenu onLogout={logout} />
         </div>
         </div>
       </header>

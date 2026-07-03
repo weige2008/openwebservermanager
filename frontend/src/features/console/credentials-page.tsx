@@ -35,7 +35,14 @@ export function CredentialsPage() {
           添加凭据
         </Button>
       </CardHeader>
-      <DataTable columns={columns} data={app.data.credentials} emptyTitle='还没有凭据' emptyBody='添加 SSH 或 RDP 凭据后才能发起连接。' />
+      <DataTable
+        columns={columns}
+        data={app.data.credentials}
+        emptyTitle='还没有凭据'
+        emptyBody='添加 SSH 或 RDP 凭据后才能发起连接。'
+        searchPlaceholder='过滤凭据...'
+        getSearchText={(credential) => [credential.name, credential.type, credential.username, credential.domain].filter(Boolean).join(' ')}
+      />
     </Card>
   )
 }

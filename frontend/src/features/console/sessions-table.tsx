@@ -70,6 +70,8 @@ export function SessionsTable({ sessions }: { sessions: ConnectionSession[] }) {
       data={sessions}
       emptyTitle='暂无连接会话'
       emptyBody='从服务器列表发起 SSH 或 RDP 后会出现在这里。'
+      searchPlaceholder='过滤会话...'
+      getSearchText={(session) => [session.id, session.protocol, session.status, session.client_ip, serverName(session.server_id)].filter(Boolean).join(' ')}
     />
   )
 }

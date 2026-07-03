@@ -5,11 +5,15 @@ import {
   type ColumnDef,
   type Row,
 } from '@tanstack/react-table'
+import { SearchIcon, X } from 'lucide-react'
 import type { ReactNode } from 'react'
+import { useMemo, useState } from 'react'
 
 import { cn } from '@/lib/utils'
 
+import { Button } from '../ui/button'
 import { EmptyState } from '../ui/empty-state'
+import { Input } from '../ui/field'
 
 export function DataTable<TData>({
   columns,
@@ -17,15 +21,26 @@ export function DataTable<TData>({
   emptyTitle,
   emptyBody,
   className,
+  searchPlaceholder,
+  getSearchText,
 }: {
   columns: ColumnDef<TData>[]
   data: TData[]
   emptyTitle: string
   emptyBody: string
   className?: string
+  searchPlaceholder?: string
+  getSearchText?: (row: TData) => string
 }) {
+  const [query, setQuery] = useState('')
+  const normalizedQuery = query.trim().toLowerCase()
+  const filteredData = useMemo(() => {
+    if (!normalizedQuery || !getSearchText) return data
+    return data.filter((row) => getSearchText(row).toLowerCase().includes(normalizedQuery))
+  }, [data, getSearchText, normalizedQuery])
+
   const table = useReactTable({
-    data,
+    data: filteredData,
     columns,
     getCoreRowModel: getCoreRowModel(),
   })
@@ -39,7 +54,35 @@ export function DataTable<TData>({
   }
 
   return (
-    <div className={cn('min-w-0', className)}>
+    <div className={cn('grid min-w-0 gap-2.5 sm:gap-3', className)}>
+      {getSearchText ? (
+        <div className='flex flex-wrap items-center gap-2 sm:gap-3'>
+          <div className='relative w-full sm:w-[240px]'>
+            <SearchIcon className='pointer-events-none absolute top-1/2 left-2.5 size-4 -translate-y-1/2 text-muted-foreground' />
+            <Input
+              value={query}
+              onChange={(event) => setQuery(event.target.value)}
+              placeholder={searchPlaceholder || '过滤...'}
+              className='pl-8'
+            />
+          </div>
+          {query ? (
+            <Button variant='ghost' size='sm' className='text-muted-foreground' onClick={() => setQuery('')}>
+              重置
+              <X className='size-3.5' />
+            </Button>
+          ) : null}
+          <div className='ms-auto text-xs text-muted-foreground'>
+            {filteredData.length} / {data.length}
+          </div>
+        </div>
+      ) : null}
+      {!filteredData.length ? (
+        <div data-slot='table-empty' className='rounded-xl ring-1 ring-foreground/10'>
+          <EmptyState title='没有匹配结果' body='调整过滤条件后再试。' />
+        </div>
+      ) : (
+      <>
       <div className='grid gap-3 sm:hidden'>
         {table.getRowModel().rows.map((row) => (
           <MobileRowCard key={row.id} row={row} />
@@ -71,6 +114,8 @@ export function DataTable<TData>({
         </tbody>
       </table>
       </div>
+      </>
+      )}
     </div>
   )
 }

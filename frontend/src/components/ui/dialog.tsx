@@ -22,23 +22,24 @@ export function DialogShell({
   compact?: boolean
 }) {
   return (
-    <BaseDialog.Root open={open} onOpenChange={onOpenChange}>
+    <BaseDialog.Root data-slot='dialog' open={open} onOpenChange={onOpenChange}>
       <BaseDialog.Portal>
-        <BaseDialog.Backdrop className='fixed inset-0 z-50 bg-black/50' />
+        <BaseDialog.Backdrop data-slot='dialog-overlay' className='fixed inset-0 isolate z-50 bg-black/10 duration-100 supports-backdrop-filter:backdrop-blur-xs' />
         <BaseDialog.Popup
+          data-slot='dialog-content'
           className={cn(
-            'fixed top-1/2 left-1/2 z-50 grid max-h-[calc(100vh-2rem)] w-[calc(100vw-2rem)] -translate-x-1/2 -translate-y-1/2 grid-rows-[auto_minmax(0,1fr)] overflow-hidden rounded-xl border border-border bg-card shadow-2xl outline-none',
+            'fixed top-1/2 left-1/2 z-50 grid max-h-[calc(100vh-2rem)] w-[calc(100vw-2rem)] -translate-x-1/2 -translate-y-1/2 grid-rows-[auto_minmax(0,1fr)] gap-4 overflow-hidden rounded-xl bg-popover p-4 text-sm text-popover-foreground ring-1 ring-foreground/10 shadow-md outline-none',
             compact ? 'max-w-xl' : 'max-w-3xl'
           )}
         >
-          <header className='flex items-start justify-between gap-4 border-b border-border p-4'>
-            <div>
-              <BaseDialog.Title className='text-lg font-semibold tracking-tight'>{title}</BaseDialog.Title>
-              {description ? <BaseDialog.Description className='mt-1 text-sm text-muted-foreground'>{description}</BaseDialog.Description> : null}
+          <header data-slot='dialog-header' className='flex items-start justify-between gap-4'>
+            <div className='grid gap-2'>
+              <BaseDialog.Title data-slot='dialog-title' className='text-base leading-none font-medium'>{title}</BaseDialog.Title>
+              {description ? <BaseDialog.Description data-slot='dialog-description' className='text-sm text-muted-foreground'>{description}</BaseDialog.Description> : null}
             </div>
-            <BaseDialog.Close render={<Button size='icon' variant='ghost' aria-label='关闭'><X className='size-4' /></Button>} />
+            <BaseDialog.Close render={<Button size='icon-sm' variant='ghost' aria-label='关闭'><X className='size-4' /></Button>} />
           </header>
-          <div className='overflow-auto p-4'>{children}</div>
+          <div className='-mx-1 min-h-0 overflow-x-hidden overflow-y-auto overscroll-contain px-1 py-1'>{children}</div>
         </BaseDialog.Popup>
       </BaseDialog.Portal>
     </BaseDialog.Root>

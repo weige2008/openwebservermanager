@@ -7,13 +7,14 @@ type Tone = 'neutral' | 'success' | 'warning' | 'danger' | 'info'
 export function Badge({ children, tone = 'neutral', className }: { children: ReactNode; tone?: Tone; className?: string }) {
   return (
     <span
+      data-slot='badge'
       className={cn(
-        'inline-flex h-6 items-center rounded-md border px-2 text-xs font-medium',
-        tone === 'neutral' && 'border-border bg-muted text-foreground',
-        tone === 'success' && 'border-success/35 bg-success/12 text-foreground',
-        tone === 'warning' && 'border-warning/35 bg-warning/15 text-foreground',
-        tone === 'danger' && 'border-destructive/35 bg-destructive/12 text-foreground',
-        tone === 'info' && 'border-info/35 bg-info/12 text-foreground',
+        'inline-flex h-5 w-fit shrink-0 items-center justify-center gap-1 overflow-hidden rounded-full border border-transparent px-2 py-0.5 text-xs font-medium whitespace-nowrap transition-all focus-visible:border-ring focus-visible:ring-3 focus-visible:ring-ring/50',
+        tone === 'neutral' && 'border-border bg-secondary text-secondary-foreground',
+        tone === 'success' && 'bg-success/12 text-foreground ring-1 ring-success/25',
+        tone === 'warning' && 'bg-warning/15 text-foreground ring-1 ring-warning/25',
+        tone === 'danger' && 'bg-destructive/10 text-destructive ring-1 ring-destructive/20',
+        tone === 'info' && 'bg-info/12 text-foreground ring-1 ring-info/25',
         className
       )}
     >

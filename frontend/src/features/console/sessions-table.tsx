@@ -51,12 +51,12 @@ export function SessionsTable({ sessions }: { sessions: ConnectionSession[] }) {
         cell: ({ row }) => (
           <div className='flex justify-end gap-2'>
             {row.original.recording_path ? (
-              <Button size='sm' onClick={() => { window.location.href = `/api/connections/${row.original.id}/recording.zip` }}>
+              <Button size='sm' variant='outline' onClick={() => { window.location.href = `/api/connections/${row.original.id}/recording.zip` }}>
                 <Download className='size-3.5' />
                 下载录屏
               </Button>
             ) : null}
-            <Button size='sm' onClick={() => void closeSession(row.original.id)}>关闭</Button>
+            <Button size='sm' variant='outline' onClick={() => void closeSession(row.original.id)}>关闭</Button>
           </div>
         ),
       },

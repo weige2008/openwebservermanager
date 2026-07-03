@@ -20,12 +20,20 @@ const pageTitles: Record<string, string> = {
   '/app/audit': '审计日志',
 }
 
-export function AppHeader() {
+export function AppHeader({ sidebarOpen, onToggleSidebar }: { sidebarOpen: boolean; onToggleSidebar: () => void }) {
   const app = useApp()
   const navigate = useNavigate()
   const pathname = useRouterState({ select: (state) => state.location.pathname })
   const title = pageTitles[pathname] || '控制台'
   const [mobileOpen, setMobileOpen] = useState(false)
+
+  const handleSidebarButton = () => {
+    if (window.matchMedia('(min-width: 768px)').matches) {
+      onToggleSidebar()
+      return
+    }
+    setMobileOpen(true)
+  }
 
   const logout = async () => {
     await app.logout()
@@ -35,42 +43,43 @@ export function AppHeader() {
 
   return (
     <>
-      <header className='sticky top-0 z-30 flex h-[var(--app-header-height)] items-center gap-2 border-b border-border bg-background/85 px-3 backdrop-blur-xl'>
-        <Button size='icon' variant='ghost' className='md:hidden' title='菜单' onClick={() => setMobileOpen(true)}>
+      <header className='sticky top-0 z-40 h-[var(--app-header-height)] w-full shrink-0 bg-transparent'>
+        <div className='flex h-full items-center gap-1.5 px-2 sm:gap-2 sm:px-3'>
+        <Button size='icon' variant='ghost' title={sidebarOpen ? '收起侧栏' : '展开侧栏'} onClick={handleSidebarButton}>
           <Menu className='size-4' />
         </Button>
-        <div className='min-w-0 md:hidden'>
+        <div className='min-w-0'>
           <SystemBrand clickable />
         </div>
-        <div className='hidden min-w-0 md:block'>
+        <div className='hidden min-w-0 border-l border-border pl-3 md:block'>
           <div className='text-xs text-muted-foreground'>ServerManager / {title}</div>
-          <h1 className='text-sm font-semibold tracking-tight'>{title}</h1>
         </div>
         <div className='ms-auto flex min-w-0 items-center gap-1 sm:gap-2'>
           <div className='hidden lg:flex'>
-            <Link to='/app/servers' className={buttonVariants({ variant: 'ghost' })}>服务器</Link>
-            <Link to='/app/sessions' className={buttonVariants({ variant: 'ghost' })}>会话</Link>
+            <Link to='/app/servers' className={buttonVariants({ variant: 'ghost', size: 'sm' })}>服务器</Link>
+            <Link to='/app/sessions' className={buttonVariants({ variant: 'ghost', size: 'sm' })}>会话</Link>
           </div>
-          <Button className='hidden sm:inline-flex' variant='outline' onClick={() => void app.refresh()}>
+          <Button className='hidden sm:inline-flex' size='sm' variant='outline' onClick={() => void app.refresh()}>
             <RefreshCw className='size-4' />
             <span>刷新</span>
           </Button>
-          <Button className='hidden sm:inline-flex' variant='outline' onClick={() => app.setModal({ type: 'credential' })}>
+          <Button className='hidden sm:inline-flex' size='sm' variant='outline' onClick={() => app.setModal({ type: 'credential' })}>
             <KeyRound className='size-4' />
             <span>凭据</span>
           </Button>
-          <Button className='hidden sm:inline-flex' variant='primary' onClick={() => app.setModal({ type: 'server' })}>
+          <Button className='hidden sm:inline-flex' size='sm' variant='primary' onClick={() => app.setModal({ type: 'server' })}>
             <Plus className='size-4' />
             <span>服务器</span>
           </Button>
-          <Button size='icon' variant='outline' title='切换主题' onClick={() => app.setTheme(app.theme === 'dark' ? 'light' : 'dark')}>
+          <Button size='icon-sm' variant='outline' title='切换主题' onClick={() => app.setTheme(app.theme === 'dark' ? 'light' : 'dark')}>
             {app.theme === 'dark' ? <Sun className='size-4' /> : <Moon className='size-4' />}
           </Button>
-          <Button className='hidden sm:inline-flex' variant='outline' onClick={() => void logout()}>
+          <Button className='hidden sm:inline-flex' size='sm' variant='outline' onClick={() => void logout()}>
             <UserCircle className='size-4' />
             <span>{app.auth?.username || 'admin'}</span>
             <LogOut className='size-4' />
           </Button>
+        </div>
         </div>
       </header>
       <MobileNavDrawer open={mobileOpen} onOpenChange={setMobileOpen} onLogout={logout} />
@@ -96,10 +105,10 @@ function MobileNavDrawer({
     <BaseDialog.Root open={open} onOpenChange={onOpenChange}>
       <BaseDialog.Portal>
         <BaseDialog.Backdrop className='fixed inset-0 z-50 bg-black/45 md:hidden' />
-        <BaseDialog.Popup className='fixed inset-y-0 left-0 z-50 flex w-[min(22rem,calc(100vw-2rem))] flex-col border-r border-sidebar-border bg-sidebar text-sidebar-foreground shadow-2xl outline-none md:hidden'>
+        <BaseDialog.Popup className='fixed inset-y-0 left-0 z-50 flex w-[min(17rem,calc(100vw-2rem))] flex-col border-r border-sidebar-border bg-sidebar text-sidebar-foreground shadow-2xl outline-none md:hidden'>
           <div className='flex h-[var(--app-header-height)] items-center justify-between border-b border-sidebar-border px-4'>
             <SystemBrand clickable />
-            <BaseDialog.Close render={<Button size='icon' variant='ghost' aria-label='关闭菜单'><X className='size-4' /></Button>} />
+            <BaseDialog.Close render={<Button size='icon-sm' variant='ghost' aria-label='关闭菜单'><X className='size-4' /></Button>} />
           </div>
           <div className='flex-1 overflow-auto py-3'>
             <div className='px-3 pb-2 text-xs font-medium text-muted-foreground'>应用</div>
@@ -147,7 +156,7 @@ function MobileNavDrawer({
             </div>
             <div className='truncate text-muted-foreground'>{app.data.guacd?.address || 'guacd 未连接'}</div>
             <div className='flex items-center gap-2'>
-              <Button size='icon' variant='outline' title='切换主题' onClick={() => app.setTheme(app.theme === 'dark' ? 'light' : 'dark')}>
+              <Button size='icon-sm' variant='outline' title='切换主题' onClick={() => app.setTheme(app.theme === 'dark' ? 'light' : 'dark')}>
                 {app.theme === 'dark' ? <Sun className='size-4' /> : <Moon className='size-4' />}
               </Button>
               <Button variant='outline' className='min-w-0 flex-1 justify-start' onClick={() => void onLogout()}>

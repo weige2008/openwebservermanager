@@ -39,7 +39,7 @@ export function PublicHeader({ authenticated }: { authenticated: boolean }) {
           <a className='rounded-md px-3 py-1.5 text-[13px] font-medium text-muted-foreground hover:text-foreground' href='#workflow'>流程</a>
         </div>
         <div className='flex items-center gap-2'>
-          <Button size='icon' variant='outline' title='切换主题' onClick={() => setTheme(theme === 'dark' ? 'light' : 'dark')}>
+          <Button size='icon-sm' variant='outline' title='切换主题' onClick={() => setTheme(theme === 'dark' ? 'light' : 'dark')}>
             {theme === 'dark' ? <Sun className='size-4' /> : <Moon className='size-4' />}
           </Button>
           <Link to={authenticated ? '/app' : '/login'} className={buttonVariants({ variant: 'primary' })}>{entryLabel}</Link>

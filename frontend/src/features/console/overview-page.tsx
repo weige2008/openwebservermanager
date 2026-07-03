@@ -66,7 +66,7 @@ export function OverviewPage() {
                   </span>
                   <span className='flex gap-2'>
                     <Button size='sm' variant='primary' onClick={() => app.setModal({ type: 'connect', protocol: 'ssh', serverId: server.id })}>SSH</Button>
-                    <Button size='sm' onClick={() => app.setModal({ type: 'connect', protocol: 'rdp', serverId: server.id })}>RDP</Button>
+                    <Button size='sm' variant='outline' onClick={() => app.setModal({ type: 'connect', protocol: 'rdp', serverId: server.id })}>RDP</Button>
                   </span>
                 </div>
               ))}

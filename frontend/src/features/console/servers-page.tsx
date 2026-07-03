@@ -33,7 +33,7 @@ export function ServersPage() {
         cell: ({ row }) => (
           <div className='flex justify-end gap-2'>
             <Button size='sm' variant='primary' onClick={() => app.setModal({ type: 'connect', protocol: 'ssh', serverId: row.original.id })}>SSH</Button>
-            <Button size='sm' onClick={() => app.setModal({ type: 'connect', protocol: 'rdp', serverId: row.original.id })}>RDP</Button>
+            <Button size='sm' variant='outline' onClick={() => app.setModal({ type: 'connect', protocol: 'rdp', serverId: row.original.id })}>RDP</Button>
           </div>
         ),
       },

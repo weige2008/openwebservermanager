@@ -1,6 +1,7 @@
 import { Dialog as BaseDialog } from '@base-ui/react/dialog'
 import { X } from 'lucide-react'
 import type { ReactNode } from 'react'
+import { useTranslation } from 'react-i18next'
 
 import { cn } from '@/lib/utils'
 
@@ -21,6 +22,8 @@ export function DialogShell({
   children: ReactNode
   compact?: boolean
 }) {
+  const { t } = useTranslation()
+
   return (
     <BaseDialog.Root data-slot='dialog' open={open} onOpenChange={onOpenChange}>
       <BaseDialog.Portal>
@@ -37,7 +40,7 @@ export function DialogShell({
               <BaseDialog.Title data-slot='dialog-title' className='text-base leading-none font-medium'>{title}</BaseDialog.Title>
               {description ? <BaseDialog.Description data-slot='dialog-description' className='text-sm text-muted-foreground'>{description}</BaseDialog.Description> : null}
             </div>
-            <BaseDialog.Close render={<Button size='icon-sm' variant='ghost' aria-label='关闭'><X className='size-4' /></Button>} />
+            <BaseDialog.Close render={<Button size='icon-sm' variant='ghost' aria-label={t('close')}><X className='size-4' /></Button>} />
           </header>
           <div className='-mx-1 min-h-0 overflow-x-hidden overflow-y-auto overscroll-contain px-1 py-1'>{children}</div>
         </BaseDialog.Popup>

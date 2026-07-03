@@ -8,6 +8,7 @@ import {
 import { SearchIcon, X } from 'lucide-react'
 import type { ReactNode } from 'react'
 import { useMemo, useState } from 'react'
+import { useTranslation } from 'react-i18next'
 
 import { cn } from '@/lib/utils'
 
@@ -32,6 +33,7 @@ export function DataTable<TData>({
   searchPlaceholder?: string
   getSearchText?: (row: TData) => string
 }) {
+  const { t } = useTranslation()
   const [query, setQuery] = useState('')
   const normalizedQuery = query.trim().toLowerCase()
   const filteredData = useMemo(() => {
@@ -62,13 +64,13 @@ export function DataTable<TData>({
             <Input
               value={query}
               onChange={(event) => setQuery(event.target.value)}
-              placeholder={searchPlaceholder || '过滤...'}
+              placeholder={searchPlaceholder || t('filter')}
               className='pl-8'
             />
           </div>
           {query ? (
             <Button variant='ghost' size='sm' className='text-muted-foreground' onClick={() => setQuery('')}>
-              重置
+              {t('resetFilter')}
               <X className='size-3.5' />
             </Button>
           ) : null}
@@ -79,7 +81,7 @@ export function DataTable<TData>({
       ) : null}
       {!filteredData.length ? (
         <div data-slot='table-empty' className='rounded-xl ring-1 ring-foreground/10'>
-          <EmptyState title='没有匹配结果' body='调整过滤条件后再试。' />
+          <EmptyState title={t('noMatches')} body={t('noMatchesBody')} />
         </div>
       ) : (
       <>

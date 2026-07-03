@@ -1,14 +1,14 @@
 import { useState, type FormEvent } from 'react'
+import { useTranslation } from 'react-i18next'
 
 import { useApp } from '@/app/app-provider'
-import { apiRequest } from '@/lib/api'
-import type { ConnectionSession, Credential, ManagedServer, Protocol } from '@/types'
-
 import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
 import { DialogShell } from '@/components/ui/dialog'
 import { EmptyState } from '@/components/ui/empty-state'
 import { Field, Input, Select, Textarea } from '@/components/ui/field'
+import { apiRequest } from '@/lib/api'
+import type { ConnectionSession, Credential, ManagedServer, Protocol } from '@/types'
 
 export function ModalHost() {
   const app = useApp()
@@ -21,6 +21,7 @@ export function ModalHost() {
 
 function ServerDialog() {
   const app = useApp()
+  const { t } = useTranslation()
   const [submitting, setSubmitting] = useState(false)
 
   const onSubmit = async (event: FormEvent<HTMLFormElement>) => {
@@ -42,7 +43,7 @@ function ServerDialog() {
       })
       app.setModal(null)
       await app.refresh(true)
-      app.showToast('服务器已添加')
+      app.showToast(t('modals.serverAdded'))
     } catch (error) {
       app.handleApiError(error)
     } finally {
@@ -51,18 +52,18 @@ function ServerDialog() {
   }
 
   return (
-    <DialogShell open onOpenChange={(open) => !open && app.setModal(null)} title='添加服务器' description='保存主机基础信息后即可绑定凭据发起连接。'>
+    <DialogShell open onOpenChange={(open) => !open && app.setModal(null)} title={t('modals.addServerTitle')} description={t('modals.addServerDescription')}>
       <form className='grid grid-cols-1 gap-3 md:grid-cols-2' onSubmit={onSubmit}>
-        <Field label='名称'><Input name='name' placeholder='生产网关' required /></Field>
-        <Field label='主机地址'><Input name='host' placeholder='10.0.0.12 / example.com' required /></Field>
-        <Field label='系统'><Select name='os' defaultValue='linux'><option value='linux'>Linux</option><option value='windows'>Windows</option></Select></Field>
-        <Field label='分组'><Input name='group' placeholder='default' /></Field>
-        <Field label='SSH 端口'><Input name='ssh_port' type='number' defaultValue={22} /></Field>
-        <Field label='RDP 端口'><Input name='rdp_port' type='number' defaultValue={3389} /></Field>
-        <Field label='描述' className='md:col-span-2'><Textarea name='description' placeholder='用途、环境、负责人等' /></Field>
+        <Field label={t('name')}><Input name='name' placeholder={t('modals.serverNamePlaceholder')} required /></Field>
+        <Field label={t('modals.host')}><Input name='host' placeholder={t('modals.hostPlaceholder')} required /></Field>
+        <Field label={t('os')}><Select name='os' defaultValue='linux'><option value='linux'>Linux</option><option value='windows'>Windows</option></Select></Field>
+        <Field label={t('group')}><Input name='group' placeholder='default' /></Field>
+        <Field label={t('modals.sshPort')}><Input name='ssh_port' type='number' defaultValue={22} /></Field>
+        <Field label={t('modals.rdpPort')}><Input name='rdp_port' type='number' defaultValue={3389} /></Field>
+        <Field label={t('modals.description')} className='md:col-span-2'><Textarea name='description' placeholder={t('modals.descriptionPlaceholder')} /></Field>
         <div className='flex justify-end gap-2 md:col-span-2'>
-          <Button type='button' variant='outline' onClick={() => app.setModal(null)}>取消</Button>
-          <Button type='submit' variant='primary' disabled={submitting}>保存服务器</Button>
+          <Button type='button' variant='outline' onClick={() => app.setModal(null)}>{t('cancel')}</Button>
+          <Button type='submit' variant='primary' disabled={submitting}>{t('modals.saveServer')}</Button>
         </div>
       </form>
     </DialogShell>
@@ -71,6 +72,7 @@ function ServerDialog() {
 
 function CredentialDialog() {
   const app = useApp()
+  const { t } = useTranslation()
   const [submitting, setSubmitting] = useState(false)
 
   const onSubmit = async (event: FormEvent<HTMLFormElement>) => {
@@ -92,7 +94,7 @@ function CredentialDialog() {
       })
       app.setModal(null)
       await app.refresh(true)
-      app.showToast('凭据已添加')
+      app.showToast(t('modals.credentialAdded'))
     } catch (error) {
       app.handleApiError(error)
     } finally {
@@ -101,24 +103,24 @@ function CredentialDialog() {
   }
 
   return (
-    <DialogShell open onOpenChange={(open) => !open && app.setModal(null)} title='添加凭据' description='明文只在提交时发送一次，服务端加密落盘。'>
+    <DialogShell open onOpenChange={(open) => !open && app.setModal(null)} title={t('modals.addCredentialTitle')} description={t('modals.addCredentialDescription')}>
       <form className='grid grid-cols-1 gap-3 md:grid-cols-2' onSubmit={onSubmit}>
-        <Field label='名称'><Input name='name' placeholder='root-key / windows-admin' required /></Field>
-        <Field label='类型'>
+        <Field label={t('name')}><Input name='name' placeholder={t('modals.credentialNamePlaceholder')} required /></Field>
+        <Field label={t('type')}>
           <Select name='type' defaultValue='ssh_password'>
-            <option value='ssh_password'>SSH 密码</option>
-            <option value='ssh_key'>SSH 私钥</option>
-            <option value='rdp_password'>RDP 密码</option>
+            <option value='ssh_password'>{t('credentialTypes.ssh_password')}</option>
+            <option value='ssh_key'>{t('credentialTypes.ssh_key')}</option>
+            <option value='rdp_password'>{t('credentialTypes.rdp_password')}</option>
           </Select>
         </Field>
-        <Field label='用户名'><Input name='username' placeholder='root / ubuntu / Administrator' required /></Field>
-        <Field label='域 / 工作组'><Input name='domain' placeholder='可选' /></Field>
-        <Field label='密码'><Input name='password' type='password' placeholder='可选' /></Field>
-        <Field label='私钥 passphrase'><Input name='passphrase' type='password' placeholder='可选' /></Field>
-        <Field label='私钥' className='md:col-span-2'><Textarea name='private_key' placeholder='-----BEGIN OPENSSH PRIVATE KEY-----' /></Field>
+        <Field label={t('username')}><Input name='username' placeholder='root / ubuntu / Administrator' required /></Field>
+        <Field label={t('domainWorkgroup')}><Input name='domain' placeholder={t('optional')} /></Field>
+        <Field label={t('modals.password')}><Input name='password' type='password' placeholder={t('optional')} /></Field>
+        <Field label={t('modals.privateKeyPassphrase')}><Input name='passphrase' type='password' placeholder={t('optional')} /></Field>
+        <Field label={t('modals.privateKey')} className='md:col-span-2'><Textarea name='private_key' placeholder={t('modals.privateKeyPlaceholder')} /></Field>
         <div className='flex justify-end gap-2 md:col-span-2'>
-          <Button type='button' variant='outline' onClick={() => app.setModal(null)}>取消</Button>
-          <Button type='submit' variant='primary' disabled={submitting}>保存凭据</Button>
+          <Button type='button' variant='outline' onClick={() => app.setModal(null)}>{t('cancel')}</Button>
+          <Button type='submit' variant='primary' disabled={submitting}>{t('modals.saveCredential')}</Button>
         </div>
       </form>
     </DialogShell>
@@ -127,6 +129,7 @@ function CredentialDialog() {
 
 function ConnectDialog({ protocol, serverId }: { protocol: Protocol; serverId: string }) {
   const app = useApp()
+  const { t } = useTranslation()
   const [submitting, setSubmitting] = useState(false)
   const server = app.data.servers.find((item) => item.id === serverId)
   const credentials = app.data.credentials.filter((credential) =>
@@ -169,11 +172,14 @@ function ConnectDialog({ protocol, serverId }: { protocol: Protocol; serverId: s
     }
   }
 
+  const title = t('modals.connectTitle', { name: server?.name || t('modals.connectFallbackServer') })
+  const description = t('modals.connectDescription', { protocol: protocol.toUpperCase() })
+
   return (
-    <DialogShell compact open onOpenChange={(open) => !open && app.setModal(null)} title={`连接到 ${server?.name || '服务器'}`} description={`${protocol.toUpperCase()} 会话将以全屏工作区打开。`}>
+    <DialogShell compact open onOpenChange={(open) => !open && app.setModal(null)} title={title} description={description}>
       {credentials.length ? (
         <form className='grid gap-4' onSubmit={onSubmit}>
-          <Field label='凭据'>
+          <Field label={t('modals.credential')}>
             <Select name='credential_id'>
               {credentials.map((credential) => <option key={credential.id} value={credential.id}>{credential.name} ({credential.username})</option>)}
             </Select>
@@ -181,18 +187,18 @@ function ConnectDialog({ protocol, serverId }: { protocol: Protocol; serverId: s
           <div className='flex flex-wrap gap-2'>
             <Badge>{server?.host || '-'}</Badge>
             <Badge>{protocol === 'ssh' ? `SSH ${server?.ssh_port || 22}` : `RDP ${server?.rdp_port || 3389}`}</Badge>
-            <Badge>{protocol === 'rdp' ? '启用录屏目录' : 'PTY 终端'}</Badge>
+            <Badge>{protocol === 'rdp' ? t('modals.recordingEnabled') : t('modals.ptyTerminal')}</Badge>
           </div>
           <div className='flex justify-end gap-2'>
-            <Button type='button' variant='outline' onClick={() => app.setModal(null)}>取消</Button>
-            <Button type='submit' variant='primary' disabled={submitting}>开始连接</Button>
+            <Button type='button' variant='outline' onClick={() => app.setModal(null)}>{t('cancel')}</Button>
+            <Button type='submit' variant='primary' disabled={submitting}>{t('modals.startConnection')}</Button>
           </div>
         </form>
       ) : (
         <div className='grid gap-4'>
-          <EmptyState title={`没有可用的 ${protocol.toUpperCase()} 凭据`} body='请先创建对应类型的凭据，再发起连接。' />
+          <EmptyState title={t('modals.noCredentialTitle', { protocol: protocol.toUpperCase() })} body={t('modals.noCredentialBody')} />
           <div className='flex justify-end'>
-            <Button variant='primary' onClick={() => app.setModal({ type: 'credential' })}>添加凭据</Button>
+            <Button variant='primary' onClick={() => app.setModal({ type: 'credential' })}>{t('addCredential')}</Button>
           </div>
         </div>
       )}

@@ -175,7 +175,7 @@ function MobileNavDrawer({
           </div>
           <div className='m-3 grid gap-3 rounded-lg border border-sidebar-border bg-card/70 p-3 text-xs'>
             <div className='flex items-center justify-between gap-2'>
-              <span className='text-muted-foreground'>Gateway</span>
+              <span className='text-muted-foreground'>{app.t('gateway')}</span>
               <Badge tone={app.data.guacd?.address ? 'success' : 'warning'}>{app.data.guacd?.address ? app.t('gatewayReady') : app.t('gatewayOffline')}</Badge>
             </div>
             <div className='truncate text-muted-foreground'>{app.data.guacd?.address || app.t('guacdOffline')}</div>

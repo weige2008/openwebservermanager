@@ -1,9 +1,11 @@
 import { Menu as BaseMenu } from '@base-ui/react/menu'
 import { Check, Monitor, Moon, Sun } from 'lucide-react'
+import { useEffect, useState } from 'react'
+import { useTranslation } from 'react-i18next'
 
-import { useApp } from '@/app/app-provider'
-import type { Theme } from '@/types'
 import { cn } from '@/lib/utils'
+import { usePreferencesStore } from '@/stores/preferences-store'
+import type { Theme } from '@/types'
 
 import { buttonVariants, type ButtonProps } from '../ui/button'
 
@@ -12,6 +14,10 @@ const themeOptions: Array<{ value: Theme; labelKey: string; icon: typeof Sun }> 
   { value: 'light', labelKey: 'light', icon: Sun },
   { value: 'dark', labelKey: 'dark', icon: Moon },
 ]
+
+function readSystemTheme() {
+  return window.matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light'
+}
 
 export function ThemeSwitch({
   className,
@@ -22,7 +28,18 @@ export function ThemeSwitch({
   size?: ButtonProps['size']
   variant?: ButtonProps['variant']
 }) {
-  const { theme, resolvedTheme, setTheme, t } = useApp()
+  const { t } = useTranslation()
+  const theme = usePreferencesStore((state) => state.theme)
+  const setTheme = usePreferencesStore((state) => state.setTheme)
+  const [systemTheme, setSystemTheme] = useState(readSystemTheme)
+  const resolvedTheme = theme === 'system' ? systemTheme : theme
+
+  useEffect(() => {
+    const media = window.matchMedia('(prefers-color-scheme: dark)')
+    const onChange = () => setSystemTheme(media.matches ? 'dark' : 'light')
+    media.addEventListener('change', onChange)
+    return () => media.removeEventListener('change', onChange)
+  }, [])
 
   return (
     <BaseMenu.Root modal={false}>
@@ -52,7 +69,7 @@ export function ThemeSwitch({
             })}
             <BaseMenu.Separator className='-mx-1 my-1 h-px bg-border' />
             <div className='px-2 py-1 text-xs text-muted-foreground'>
-              {t('current')}：{resolvedTheme === 'dark' ? t('dark') : t('light')}
+              {t('current')}: {resolvedTheme === 'dark' ? t('dark') : t('light')}
             </div>
           </BaseMenu.Popup>
         </BaseMenu.Positioner>

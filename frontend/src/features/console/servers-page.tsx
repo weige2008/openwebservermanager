@@ -1,6 +1,7 @@
 import type { ColumnDef } from '@tanstack/react-table'
 import { Plus } from 'lucide-react'
 import { useMemo } from 'react'
+import { useTranslation } from 'react-i18next'
 
 import { useApp } from '@/app/app-provider'
 import { DataTable } from '@/components/data-table/data-table'
@@ -12,21 +13,22 @@ import type { ManagedServer } from '@/types'
 
 export function ServersPage() {
   const app = useApp()
+  const { t } = useTranslation()
   const columns = useMemo<ColumnDef<ManagedServer>[]>(
     () => [
       {
-        header: '名称',
+        header: t('name'),
         cell: ({ row }) => (
           <div>
             <strong>{row.original.name}</strong>
-            <div className='text-xs text-muted-foreground'>{row.original.description || '无描述'}</div>
+            <div className='text-xs text-muted-foreground'>{row.original.description || t('serversPage.noDescription')}</div>
           </div>
         ),
       },
-      { header: '地址', cell: ({ row }) => <span className='font-mono text-xs'>{row.original.host}</span> },
-      { header: '系统', cell: ({ row }) => <Badge tone={row.original.os === 'windows' ? 'info' : 'neutral'}>{osLabel(row.original.os)}</Badge> },
-      { header: '端口', cell: ({ row }) => `SSH ${row.original.ssh_port || 22} / RDP ${row.original.rdp_port || 3389}` },
-      { header: '分组', accessorFn: (row) => row.group || '-' },
+      { header: t('address'), cell: ({ row }) => <span className='font-mono text-xs'>{row.original.host}</span> },
+      { header: t('os'), cell: ({ row }) => <Badge tone={row.original.os === 'windows' ? 'info' : 'neutral'}>{osLabel(row.original.os)}</Badge> },
+      { header: t('ports'), cell: ({ row }) => `SSH ${row.original.ssh_port || 22} / RDP ${row.original.rdp_port || 3389}` },
+      { header: t('group'), accessorFn: (row) => row.group || '-' },
       {
         id: 'actions',
         header: '',
@@ -38,27 +40,27 @@ export function ServersPage() {
         ),
       },
     ],
-    [app]
+    [app, t]
   )
 
   return (
     <Card>
       <CardHeader>
         <div>
-          <CardTitle>服务器资产</CardTitle>
-          <CardDescription>登录后可见，连接动作会写入审计日志。</CardDescription>
+          <CardTitle>{t('serversPage.title')}</CardTitle>
+          <CardDescription>{t('serversPage.description')}</CardDescription>
         </div>
         <Button variant='primary' onClick={() => app.setModal({ type: 'server' })}>
           <Plus className='size-4' />
-          添加服务器
+          {t('addServer')}
         </Button>
       </CardHeader>
       <DataTable
         columns={columns}
         data={app.data.servers}
-        emptyTitle='还没有服务器'
-        emptyBody='添加服务器后，SSH/RDP 入口会出现在列表右侧。'
-        searchPlaceholder='过滤服务器...'
+        emptyTitle={t('serversPage.emptyTitle')}
+        emptyBody={t('serversPage.emptyBody')}
+        searchPlaceholder={t('serversPage.searchPlaceholder')}
         getSearchText={(server) => [server.name, server.host, server.os, server.group, server.description].filter(Boolean).join(' ')}
       />
     </Card>

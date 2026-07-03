@@ -1,9 +1,11 @@
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { createContext, useCallback, useContext, useEffect, useMemo, useState, type ReactNode } from 'react'
+import { useTranslation } from 'react-i18next'
 import { toast } from 'sonner'
 
+import { normalizeInterfaceLanguage } from '@/i18n/languages'
 import { ApiError, apiRequest } from '@/lib/api'
-import { translate } from '@/lib/i18n'
+import { defaultAppearance, usePreferencesStore } from '@/stores/preferences-store'
 import type { AuthUser, BootstrapData, Locale, ModalState, PublicConfig, ResolvedTheme, Theme, ThemeAppearance, WorkspaceState } from '@/types'
 
 interface AppContextValue {
@@ -43,54 +45,17 @@ const emptyBootstrap: BootstrapData = {
 const defaultPublicConfig: PublicConfig = {
   site_name: 'ServerManager',
   nav_links: [
-    { title: '产品', href: '#product' },
-    { title: '连接', href: '#connections' },
-    { title: '安全', href: '#security' },
-    { title: '部署', href: '#deploy' },
+    { title: 'product', href: '#product' },
+    { title: 'connections', href: '#connections' },
+    { title: 'security', href: '#security' },
+    { title: 'deploy', href: '#deploy' },
   ],
-}
-
-const defaultAppearance: ThemeAppearance = {
-  preset: 'default',
-  font: 'default',
-  radius: 'default',
-  scale: 'default',
-  contentLayout: 'full',
-  sidebarStyle: 'default',
 }
 
 const AppContext = createContext<AppContextValue | null>(null)
 
-function readStoredTheme(): Theme {
-  const stored = localStorage.getItem('servermanager:theme')
-  return stored === 'light' || stored === 'dark' || stored === 'system' ? stored : 'system'
-}
-
 function readSystemTheme(): ResolvedTheme {
   return window.matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light'
-}
-
-function readStoredLocale(): Locale {
-  const stored = localStorage.getItem('servermanager:locale')
-  return stored === 'en-US' || stored === 'zh-CN' ? stored : 'zh-CN'
-}
-
-function readStoredAppearance(): ThemeAppearance {
-  const stored = localStorage.getItem('servermanager:appearance')
-  if (!stored) return defaultAppearance
-  try {
-    const parsed = JSON.parse(stored) as Partial<ThemeAppearance>
-    return {
-      preset: parsed.preset || defaultAppearance.preset,
-      font: parsed.font || defaultAppearance.font,
-      radius: parsed.radius || defaultAppearance.radius,
-      scale: parsed.scale || defaultAppearance.scale,
-      contentLayout: parsed.contentLayout || defaultAppearance.contentLayout,
-      sidebarStyle: parsed.sidebarStyle || defaultAppearance.sidebarStyle,
-    }
-  } catch {
-    return defaultAppearance
-  }
 }
 
 function applyBodyAttribute(name: string, value: string, fallback: string) {
@@ -105,13 +70,17 @@ function applyBodyAttribute(name: string, value: string, fallback: string) {
 
 export function AppProvider({ children }: { children: ReactNode }) {
   const queryClient = useQueryClient()
-  const [theme, setThemeState] = useState<Theme>(readStoredTheme)
+  const { i18n, t: translate } = useTranslation()
+  const theme = usePreferencesStore((state) => state.theme)
+  const appearance = usePreferencesStore((state) => state.appearance)
+  const setTheme = usePreferencesStore((state) => state.setTheme)
+  const setAppearance = usePreferencesStore((state) => state.setAppearance)
+  const resetAppearance = usePreferencesStore((state) => state.resetAppearance)
   const [systemTheme, setSystemTheme] = useState<ResolvedTheme>(readSystemTheme)
-  const [locale, setLocaleState] = useState<Locale>(readStoredLocale)
-  const [appearance, setAppearanceState] = useState<ThemeAppearance>(readStoredAppearance)
   const [modal, setModal] = useState<ModalState>(null)
   const [workspace, setWorkspace] = useState<WorkspaceState>(null)
   const resolvedTheme = theme === 'system' ? systemTheme : theme
+  const locale = normalizeInterfaceLanguage(i18n.language)
 
   const authStatus = useQuery({
     queryKey: ['auth-status'],
@@ -143,23 +112,14 @@ export function AppProvider({ children }: { children: ReactNode }) {
     retry: false,
   })
 
-  const setTheme = useCallback((next: Theme) => {
-    setThemeState(next)
-  }, [])
+  const setLocale = useCallback(
+    (next: Locale) => {
+      void i18n.changeLanguage(next)
+    },
+    [i18n]
+  )
 
-  const setLocale = useCallback((next: Locale) => {
-    setLocaleState(next)
-  }, [])
-
-  const setAppearance = useCallback((next: Partial<ThemeAppearance>) => {
-    setAppearanceState((current) => ({ ...current, ...next }))
-  }, [])
-
-  const resetAppearance = useCallback(() => {
-    setAppearanceState(defaultAppearance)
-  }, [])
-
-  const t = useCallback((key: string, fallback?: string) => translate(locale, key, fallback), [locale])
+  const t = useCallback((key: string, fallback?: string) => translate(key, { defaultValue: fallback ?? key }), [translate])
 
   useEffect(() => {
     const query = window.matchMedia('(prefers-color-scheme: dark)')
@@ -170,16 +130,10 @@ export function AppProvider({ children }: { children: ReactNode }) {
   }, [])
 
   useEffect(() => {
-    localStorage.setItem('servermanager:theme', theme)
-  }, [theme])
-
-  useEffect(() => {
-    localStorage.setItem('servermanager:locale', locale)
-    document.documentElement.lang = locale === 'zh-CN' ? 'zh-CN' : 'en'
+    document.documentElement.lang = locale
   }, [locale])
 
   useEffect(() => {
-    localStorage.setItem('servermanager:appearance', JSON.stringify(appearance))
     applyBodyAttribute('data-theme-preset', appearance.preset, defaultAppearance.preset)
     applyBodyAttribute('data-theme-font', appearance.font === 'default' ? 'sans' : appearance.font, 'sans')
     applyBodyAttribute('data-theme-radius', appearance.radius, defaultAppearance.radius)
@@ -213,9 +167,9 @@ export function AppProvider({ children }: { children: ReactNode }) {
         queryClient.removeQueries({ queryKey: ['bootstrap'] })
         setWorkspace(null)
       }
-      toast.error(error instanceof Error ? error.message : '操作失败')
+      toast.error(error instanceof Error ? error.message : t('operationFailed'))
     },
-    [queryClient]
+    [queryClient, t]
   )
 
   const setAuthenticatedUser = useCallback(
@@ -229,9 +183,9 @@ export function AppProvider({ children }: { children: ReactNode }) {
   const refresh = useCallback(
     async (silent = false) => {
       await queryClient.invalidateQueries({ queryKey: ['bootstrap'] })
-      if (!silent) toast.success('数据已刷新')
+      if (!silent) toast.success(t('dataRefreshed'))
     },
-    [queryClient]
+    [queryClient, t]
   )
 
   const logoutMutation = useMutation({
@@ -297,20 +251,20 @@ export function AppProvider({ children }: { children: ReactNode }) {
     [
       auth,
       authStatus.isFetched,
+      appearance,
       booted,
       configured,
       data,
       handleApiError,
+      locale,
       logout,
       modal,
       publicConfig,
-      appearance,
       refresh,
-      resolvedTheme,
-      locale,
       resetAppearance,
-      setAuthenticatedUser,
+      resolvedTheme,
       setAppearance,
+      setAuthenticatedUser,
       setLocale,
       setTheme,
       showToast,

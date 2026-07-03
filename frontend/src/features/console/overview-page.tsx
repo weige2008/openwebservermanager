@@ -1,5 +1,6 @@
 import { Link } from '@tanstack/react-router'
 import { Activity, Database, KeyRound, Server } from 'lucide-react'
+import { useTranslation } from 'react-i18next'
 
 import { useApp } from '@/app/app-provider'
 import { Badge } from '@/components/ui/badge'
@@ -11,6 +12,7 @@ import { SessionsTable } from './sessions-table'
 
 export function OverviewPage() {
   const app = useApp()
+  const { t } = useTranslation()
   const active = app.data.sessions.filter((item) => item.status === 'active').length
   const recordings = app.data.sessions.filter((item) => item.recording_path).length
 
@@ -19,42 +21,40 @@ export function OverviewPage() {
       <section className='rounded-xl border border-border bg-[radial-gradient(circle_at_80%_0%,color-mix(in_oklch,var(--info)_12%,transparent),transparent_34%),var(--card)] p-5 shadow-sm'>
         <div className='flex flex-wrap items-center justify-between gap-4'>
           <div>
-            <div className='text-xs font-medium tracking-[0.12em] text-muted-foreground uppercase'>Connection Workspace</div>
-            <h2 className='mt-2 text-2xl font-semibold tracking-tight'>从服务器资产直接进入 SSH 或 RDP</h2>
-            <p className='mt-1 max-w-2xl text-sm text-muted-foreground'>
-              第一阶段专注在线连接：登记服务器和凭据后，在服务器列表里打开全屏终端或桌面工作区。
-            </p>
+            <div className='text-xs font-medium tracking-[0.12em] text-muted-foreground uppercase'>{t('overviewPage.eyebrow')}</div>
+            <h2 className='mt-2 text-2xl font-semibold tracking-tight'>{t('overviewPage.title')}</h2>
+            <p className='mt-1 max-w-2xl text-sm text-muted-foreground'>{t('overviewPage.description')}</p>
           </div>
           <div className='flex flex-wrap gap-2'>
-            <Link to='/app/credentials' className={buttonVariants({ variant: 'outline' })}>管理凭据</Link>
-            <Link to='/app/servers' className={buttonVariants({ variant: 'primary' })}>打开服务器列表</Link>
+            <Link to='/app/credentials' className={buttonVariants({ variant: 'outline' })}>{t('overviewPage.manageCredentials')}</Link>
+            <Link to='/app/servers' className={buttonVariants({ variant: 'primary' })}>{t('overviewPage.openServers')}</Link>
           </div>
         </div>
       </section>
 
       <section className='grid grid-cols-1 gap-3 md:grid-cols-2 xl:grid-cols-4'>
-        <StatCard icon={Server} title='服务器' value={app.data.servers.length} desc='已登记 Linux / Windows 主机' />
-        <StatCard icon={KeyRound} title='凭据' value={app.data.credentials.length} desc='SSH 密码、私钥与 RDP 账号' />
-        <StatCard icon={Activity} title='活跃会话' value={active} desc='当前仍在运行的连接' />
-        <StatCard icon={Database} title='录屏索引' value={recordings} desc='RDP 原始录屏目录' />
+        <StatCard icon={Server} title={t('overviewPage.serverCount')} value={app.data.servers.length} desc={t('overviewPage.serverCountDesc')} />
+        <StatCard icon={KeyRound} title={t('overviewPage.credentialCount')} value={app.data.credentials.length} desc={t('overviewPage.credentialCountDesc')} />
+        <StatCard icon={Activity} title={t('overviewPage.activeSessions')} value={active} desc={t('overviewPage.activeSessionsDesc')} />
+        <StatCard icon={Database} title={t('overviewPage.recordingIndexes')} value={recordings} desc={t('overviewPage.recordingIndexesDesc')} />
       </section>
 
       <section className='grid grid-cols-1 gap-4 xl:grid-cols-[minmax(0,1.35fr)_minmax(320px,0.8fr)]'>
         <Card>
           <CardHeader>
             <div>
-              <CardTitle>最近会话</CardTitle>
+              <CardTitle>{t('overviewPage.recentSessions')}</CardTitle>
             </div>
-            <Link to='/app/sessions' className={buttonVariants({ variant: 'ghost' })}>查看全部</Link>
+            <Link to='/app/sessions' className={buttonVariants({ variant: 'ghost' })}>{t('overviewPage.viewAll')}</Link>
           </CardHeader>
           <SessionsTable sessions={app.data.sessions.slice(-6).reverse()} />
         </Card>
         <Card>
           <CardHeader>
             <div>
-              <CardTitle>快速服务器</CardTitle>
+              <CardTitle>{t('overviewPage.quickServers')}</CardTitle>
             </div>
-            <Link to='/app/servers' className={buttonVariants({ variant: 'ghost' })}>管理</Link>
+            <Link to='/app/servers' className={buttonVariants({ variant: 'ghost' })}>{t('overviewPage.manage')}</Link>
           </CardHeader>
           {app.data.servers.length ? (
             <div className='grid'>
@@ -72,7 +72,7 @@ export function OverviewPage() {
               ))}
             </div>
           ) : (
-            <div className='p-4 text-sm text-muted-foreground'>添加第一台服务器后，可以在这里快速发起连接。</div>
+            <div className='p-4 text-sm text-muted-foreground'>{t('overviewPage.noQuickServers')}</div>
           )}
         </Card>
       </section>

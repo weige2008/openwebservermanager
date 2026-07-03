@@ -1,11 +1,25 @@
-import { Dialog as BaseDialog } from '@base-ui/react/dialog'
-import { CheckCircle2, Palette, RotateCcw, X } from 'lucide-react'
-import { useState } from 'react'
+import { CheckCircle2, Palette, RotateCcw } from 'lucide-react'
 import type { ReactNode } from 'react'
+import { useTranslation } from 'react-i18next'
 
-import { useApp } from '@/app/app-provider'
-import type { Theme, ThemeContentLayout, ThemeFont, ThemePreset, ThemeRadius, ThemeScale, ThemeSidebarStyle } from '@/types'
+import {
+  sideDrawerContentClassName,
+  sideDrawerFooterClassName,
+  sideDrawerFormClassName,
+  sideDrawerHeaderClassName,
+} from '@/components/drawer-layout'
+import {
+  Sheet,
+  SheetContent,
+  SheetDescription,
+  SheetFooter,
+  SheetHeader,
+  SheetTitle,
+  SheetTrigger,
+} from '@/components/ui/sheet'
 import { cn } from '@/lib/utils'
+import { usePreferencesStore } from '@/stores/preferences-store'
+import type { Theme, ThemeContentLayout, ThemeFont, ThemePreset, ThemeRadius, ThemeScale, ThemeSidebarStyle } from '@/types'
 
 import { Button } from '../ui/button'
 
@@ -58,119 +72,113 @@ const sidebarStyleOptions: Array<{ value: ThemeSidebarStyle; labelKey: string }>
 ]
 
 export function AppearanceDrawer({ className }: { className?: string }) {
-  const app = useApp()
-  const [open, setOpen] = useState(false)
+  const { t } = useTranslation()
+  const theme = usePreferencesStore((state) => state.theme)
+  const appearance = usePreferencesStore((state) => state.appearance)
+  const setTheme = usePreferencesStore((state) => state.setTheme)
+  const setAppearance = usePreferencesStore((state) => state.setAppearance)
+  const resetAppearance = usePreferencesStore((state) => state.resetAppearance)
 
   return (
-    <BaseDialog.Root open={open} onOpenChange={setOpen}>
-      <BaseDialog.Trigger render={<Button size='icon' variant='ghost' className={className} aria-label={app.t('openThemeSettings')} title={app.t('openThemeSettings')} />}>
+    <Sheet>
+      <SheetTrigger render={<Button size='icon' variant='ghost' className={className} aria-label={t('openThemeSettings')} title={t('openThemeSettings')} />}>
         <Palette className='size-[1.05rem]' />
-      </BaseDialog.Trigger>
-      <BaseDialog.Portal>
-        <BaseDialog.Backdrop className='fixed inset-0 z-50 bg-black/20 backdrop-blur-sm' />
-        <BaseDialog.Popup className='fixed inset-y-0 right-0 z-50 grid w-[min(25rem,calc(100vw-1rem))] grid-rows-[auto_minmax(0,1fr)_auto] border-l border-border bg-popover text-popover-foreground shadow-2xl outline-none'>
-          <header className='flex items-start justify-between gap-4 border-b border-border p-4'>
-            <div>
-              <BaseDialog.Title className='text-base font-semibold'>{app.t('themeSettings')}</BaseDialog.Title>
-              <BaseDialog.Description className='mt-1 text-sm leading-6 text-muted-foreground'>{app.t('appearanceDescription')}</BaseDialog.Description>
+      </SheetTrigger>
+      <SheetContent className={sideDrawerContentClassName('sm:max-w-md')}>
+        <SheetHeader className={sideDrawerHeaderClassName()}>
+          <SheetTitle>{t('themeSettings')}</SheetTitle>
+          <SheetDescription>{t('appearanceDescription')}</SheetDescription>
+        </SheetHeader>
+
+        <div className={sideDrawerFormClassName()}>
+          <OptionSection title={t('theme')}>
+            <div className='grid grid-cols-3 gap-2'>
+              {themeModes.map((mode) => (
+                <ChoiceButton key={mode.value} selected={theme === mode.value} onClick={() => setTheme(mode.value)}>
+                  {t(mode.labelKey)}
+                </ChoiceButton>
+              ))}
             </div>
-            <BaseDialog.Close render={<Button size='icon-sm' variant='ghost' aria-label={app.t('closeMenu')} />}>
-              <X className='size-4' />
-            </BaseDialog.Close>
-          </header>
+          </OptionSection>
 
-          <div className='min-h-0 overflow-y-auto p-4'>
-            <div className='grid gap-6'>
-              <OptionSection title={app.t('theme')}>
-                <div className='grid grid-cols-3 gap-2'>
-                  {themeModes.map((mode) => (
-                    <ChoiceButton key={mode.value} selected={app.theme === mode.value} onClick={() => app.setTheme(mode.value)}>
-                      {app.t(mode.labelKey)}
-                    </ChoiceButton>
-                  ))}
-                </div>
-              </OptionSection>
-
-              <OptionSection title={app.t('colorPreset')}>
-                <div className='grid grid-cols-3 gap-3'>
-                  {presets.map((preset) => (
-                    <button
-                      key={preset.value}
-                      type='button'
-                      className={cn('group grid gap-1.5 text-left text-xs outline-none', app.appearance.preset === preset.value && 'text-foreground')}
-                      onClick={() => app.setAppearance({ preset: preset.value })}
-                    >
-                      <span className={cn('relative h-12 rounded-lg ring-1 ring-border transition group-hover:ring-primary/60', app.appearance.preset === preset.value && 'ring-primary shadow-sm')}>
-                        <span className='absolute inset-0 rounded-lg' style={{ background: `linear-gradient(135deg, ${preset.swatches[0]}, ${preset.swatches[1]})` }} />
-                        {app.appearance.preset === preset.value ? <CheckCircle2 className='absolute -top-2 -right-2 z-10 size-5 fill-primary text-primary-foreground' /> : null}
-                      </span>
-                      <span className='truncate text-center text-muted-foreground'>{preset.label}</span>
-                    </button>
-                  ))}
-                </div>
-              </OptionSection>
-
-              <OptionSection title={app.t('font')}>
-                <div className='grid grid-cols-3 gap-2'>
-                  {fontOptions.map((option) => (
-                    <ChoiceButton key={option.value} selected={app.appearance.font === option.value} onClick={() => app.setAppearance({ font: option.value })}>
-                      {app.t(option.labelKey)}
-                    </ChoiceButton>
-                  ))}
-                </div>
-              </OptionSection>
-
-              <OptionSection title={app.t('borderRadius')}>
-                <div className='grid grid-cols-6 gap-2'>
-                  {radiusOptions.map((option) => (
-                    <ChoiceButton key={option.value} selected={app.appearance.radius === option.value} onClick={() => app.setAppearance({ radius: option.value })}>
-                      {option.label}
-                    </ChoiceButton>
-                  ))}
-                </div>
-              </OptionSection>
-
-              <OptionSection title={app.t('density')}>
-                <div className='grid grid-cols-4 gap-2'>
-                  {scaleOptions.map((option) => (
-                    <ChoiceButton key={option.value} selected={app.appearance.scale === option.value} onClick={() => app.setAppearance({ scale: option.value })}>
-                      {app.t(option.labelKey)}
-                    </ChoiceButton>
-                  ))}
-                </div>
-              </OptionSection>
-
-              <OptionSection title={app.t('contentWidth')}>
-                <div className='grid grid-cols-2 gap-2'>
-                  {contentLayoutOptions.map((option) => (
-                    <ChoiceButton key={option.value} selected={app.appearance.contentLayout === option.value} onClick={() => app.setAppearance({ contentLayout: option.value })}>
-                      {app.t(option.labelKey)}
-                    </ChoiceButton>
-                  ))}
-                </div>
-              </OptionSection>
-
-              <OptionSection title={app.t('sidebarStyle')}>
-                <div className='grid grid-cols-3 gap-2'>
-                  {sidebarStyleOptions.map((option) => (
-                    <ChoiceButton key={option.value} selected={app.appearance.sidebarStyle === option.value} onClick={() => app.setAppearance({ sidebarStyle: option.value })}>
-                      {app.t(option.labelKey)}
-                    </ChoiceButton>
-                  ))}
-                </div>
-              </OptionSection>
+          <OptionSection title={t('colorPreset')}>
+            <div className='grid grid-cols-3 gap-3'>
+              {presets.map((preset) => (
+                <button
+                  key={preset.value}
+                  type='button'
+                  className={cn('group grid gap-1.5 text-left text-xs outline-none', appearance.preset === preset.value && 'text-foreground')}
+                  onClick={() => setAppearance({ preset: preset.value })}
+                >
+                  <span className={cn('relative h-12 rounded-lg ring-1 ring-border transition group-hover:ring-primary/60', appearance.preset === preset.value && 'ring-primary shadow-sm')}>
+                    <span className='absolute inset-0 rounded-lg' style={{ background: `linear-gradient(135deg, ${preset.swatches[0]}, ${preset.swatches[1]})` }} />
+                    {appearance.preset === preset.value ? <CheckCircle2 className='absolute -top-2 -right-2 z-10 size-5 fill-primary text-primary-foreground' /> : null}
+                  </span>
+                  <span className='truncate text-center text-muted-foreground'>{preset.label}</span>
+                </button>
+              ))}
             </div>
-          </div>
+          </OptionSection>
 
-          <footer className='border-t border-border p-4'>
-            <Button variant='destructive' className='w-full' onClick={app.resetAppearance}>
-              <RotateCcw className='size-4' />
-              {app.t('reset')}
-            </Button>
-          </footer>
-        </BaseDialog.Popup>
-      </BaseDialog.Portal>
-    </BaseDialog.Root>
+          <OptionSection title={t('font')}>
+            <div className='grid grid-cols-3 gap-2'>
+              {fontOptions.map((option) => (
+                <ChoiceButton key={option.value} selected={appearance.font === option.value} onClick={() => setAppearance({ font: option.value })}>
+                  {t(option.labelKey)}
+                </ChoiceButton>
+              ))}
+            </div>
+          </OptionSection>
+
+          <OptionSection title={t('borderRadius')}>
+            <div className='grid grid-cols-6 gap-2'>
+              {radiusOptions.map((option) => (
+                <ChoiceButton key={option.value} selected={appearance.radius === option.value} onClick={() => setAppearance({ radius: option.value })}>
+                  {option.label}
+                </ChoiceButton>
+              ))}
+            </div>
+          </OptionSection>
+
+          <OptionSection title={t('density')}>
+            <div className='grid grid-cols-4 gap-2'>
+              {scaleOptions.map((option) => (
+                <ChoiceButton key={option.value} selected={appearance.scale === option.value} onClick={() => setAppearance({ scale: option.value })}>
+                  {t(option.labelKey)}
+                </ChoiceButton>
+              ))}
+            </div>
+          </OptionSection>
+
+          <OptionSection title={t('contentWidth')}>
+            <div className='grid grid-cols-2 gap-2'>
+              {contentLayoutOptions.map((option) => (
+                <ChoiceButton key={option.value} selected={appearance.contentLayout === option.value} onClick={() => setAppearance({ contentLayout: option.value })}>
+                  {t(option.labelKey)}
+                </ChoiceButton>
+              ))}
+            </div>
+          </OptionSection>
+
+          <OptionSection title={t('sidebarStyle')}>
+            <div className='grid grid-cols-3 gap-2'>
+              {sidebarStyleOptions.map((option) => (
+                <ChoiceButton key={option.value} selected={appearance.sidebarStyle === option.value} onClick={() => setAppearance({ sidebarStyle: option.value })}>
+                  {t(option.labelKey)}
+                </ChoiceButton>
+              ))}
+            </div>
+          </OptionSection>
+        </div>
+
+        <SheetFooter className={sideDrawerFooterClassName()}>
+          <Button variant='destructive' className='w-full' onClick={resetAppearance}>
+            <RotateCcw className='size-4' />
+            {t('reset')}
+          </Button>
+        </SheetFooter>
+      </SheetContent>
+    </Sheet>
   )
 }
 

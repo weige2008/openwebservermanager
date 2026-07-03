@@ -1,9 +1,11 @@
 import { Menu as BaseMenu } from '@base-ui/react/menu'
-import { Bell, Megaphone, RadioTower } from 'lucide-react'
+import { Bell, RadioTower } from 'lucide-react'
 import { useMemo, useState } from 'react'
+import { useTranslation } from 'react-i18next'
 
 import { useApp } from '@/app/app-provider'
 import { cn } from '@/lib/utils'
+import { useNotificationStore } from '@/stores/notification-store'
 
 import { Badge } from '../ui/badge'
 import { buttonVariants, type ButtonProps } from '../ui/button'
@@ -17,41 +19,38 @@ export function NotificationButton({
   size?: ButtonProps['size']
   variant?: ButtonProps['variant']
 }) {
-  const { data, t } = useApp()
+  const { data } = useApp()
+  const { t } = useTranslation()
   const [activeTab, setActiveTab] = useState<'notice' | 'timeline'>('notice')
-  const [read, setRead] = useState(() => localStorage.getItem('servermanager:notifications-read') === '1')
+  const readKeys = useNotificationStore((state) => state.readKeys)
+  const markRead = useNotificationStore((state) => state.markRead)
 
   const notifications = useMemo(() => {
     const gatewayReady = Boolean(data.guacd?.address)
-    const date = t('today')
     return [
       {
-        id: 'gateway',
+        id: `gateway:${gatewayReady ? 'online' : 'offline'}`,
         type: gatewayReady ? 'success' : 'warning',
         title: gatewayReady ? t('rdpGatewayOnline') : t('rdpGatewayOffline'),
-        body: gatewayReady
-          ? data.guacd?.address || ''
-          : t('rdpGatewayOfflineBody'),
-        time: date,
+        body: gatewayReady ? data.guacd?.address || '' : t('rdpGatewayOfflineBody'),
+        time: t('today'),
       },
       {
         id: 'audit',
         type: 'info',
         title: t('sessionAuditEnabled'),
         body: t('sessionAuditEnabledBody'),
-        time: date,
+        time: t('today'),
       },
     ]
   }, [data.guacd?.address, t])
 
-  const unreadCount = read ? 0 : notifications.length
-  const markRead = () => {
-    setRead(true)
-    localStorage.setItem('servermanager:notifications-read', '1')
-  }
+  const noticeKey = 'notice:connection-workspace'
+  const notificationKeys = useMemo(() => [noticeKey, ...notifications.map((item) => `timeline:${item.id}`)], [notifications])
+  const unreadCount = notificationKeys.filter((key) => !readKeys.includes(key)).length
 
   return (
-    <BaseMenu.Root modal={false} onOpenChange={(open) => open && markRead()}>
+    <BaseMenu.Root modal={false} onOpenChange={(open) => open && markRead(notificationKeys)}>
       <BaseMenu.Trigger className={cn(buttonVariants({ variant, size }), 'relative p-0', className)} aria-label={t('notifications')} title={t('notifications')}>
         <Bell className='size-[1.05rem]' />
         {unreadCount > 0 ? (
@@ -82,9 +81,7 @@ export function NotificationButton({
                   <Bell className='mt-0.5 size-4 text-muted-foreground' />
                   <div>
                     <div className='font-medium'>{t('connectionWorkspaceLive')}</div>
-                    <p className='mt-1 text-xs leading-5 text-muted-foreground'>
-                      {t('connectionWorkspaceLiveBody')}
-                    </p>
+                    <p className='mt-1 text-xs leading-5 text-muted-foreground'>{t('connectionWorkspaceLiveBody')}</p>
                   </div>
                 </div>
               </div>

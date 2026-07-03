@@ -1,6 +1,7 @@
 import { useNavigate } from '@tanstack/react-router'
 import { Activity, FileClock, KeyRound, MonitorUp, Plus, SearchIcon, Server } from 'lucide-react'
 import { useEffect, useMemo, useState } from 'react'
+import { useTranslation } from 'react-i18next'
 
 import { useApp } from '@/app/app-provider'
 import { DialogShell } from '@/components/ui/dialog'
@@ -19,6 +20,7 @@ type CommandItem = {
 
 export function CommandSearch() {
   const app = useApp()
+  const { t } = useTranslation()
   const navigate = useNavigate()
   const [open, setOpen] = useState(false)
   const [query, setQuery] = useState('')
@@ -41,22 +43,22 @@ export function CommandSearch() {
 
   const commands = useMemo<CommandItem[]>(
     () => [
-      { id: 'overview', label: '总览', description: '查看连接工作区概览', icon: Activity, run: () => navigate({ to: '/app' }) },
-      { id: 'servers', label: '服务器', description: '查看服务器资产列表', icon: Server, run: () => navigate({ to: '/app/servers' }) },
-      { id: 'credentials', label: '凭据', description: '管理 SSH / RDP 凭据', icon: KeyRound, run: () => navigate({ to: '/app/credentials' }) },
-      { id: 'sessions', label: '连接会话', description: '查看 SSH / RDP 会话', icon: MonitorUp, run: () => navigate({ to: '/app/sessions' }) },
-      { id: 'audit', label: '审计日志', description: '查看登录、连接和录屏访问记录', icon: FileClock, run: () => navigate({ to: '/app/audit' }) },
-      { id: 'new-server', label: '新增服务器', description: '登记 Linux 或 Windows 服务器', icon: Plus, run: () => app.setModal({ type: 'server' }) },
-      { id: 'new-credential', label: '新增凭据', description: '保存 SSH 密码、私钥或 RDP 账号', icon: Plus, run: () => app.setModal({ type: 'credential' }) },
+      { id: 'overview', label: t('overview'), description: t('commandSearch.overviewDescription'), icon: Activity, run: () => navigate({ to: '/app' }) },
+      { id: 'servers', label: t('servers'), description: t('commandSearch.serversDescription'), icon: Server, run: () => navigate({ to: '/app/servers' }) },
+      { id: 'credentials', label: t('credentials'), description: t('commandSearch.credentialsDescription'), icon: KeyRound, run: () => navigate({ to: '/app/credentials' }) },
+      { id: 'sessions', label: t('sessions'), description: t('commandSearch.sessionsDescription'), icon: MonitorUp, run: () => navigate({ to: '/app/sessions' }) },
+      { id: 'audit', label: t('audit'), description: t('commandSearch.auditDescription'), icon: FileClock, run: () => navigate({ to: '/app/audit' }) },
+      { id: 'new-server', label: t('addServer'), description: t('commandSearch.newServerDescription'), icon: Plus, run: () => app.setModal({ type: 'server' }) },
+      { id: 'new-credential', label: t('addCredential'), description: t('commandSearch.newCredentialDescription'), icon: Plus, run: () => app.setModal({ type: 'credential' }) },
       ...app.data.servers.map((server) => ({
         id: `server:${server.id}`,
         label: server.name,
-        description: `${server.host} · ${server.os}`,
+        description: `${server.host} / ${server.os}`,
         icon: Server,
         run: () => app.setModal({ type: 'connect', protocol: server.os === 'windows' ? 'rdp' : 'ssh', serverId: server.id }),
       })),
     ],
-    [app, navigate]
+    [app, navigate, t]
   )
 
   const normalizedQuery = query.trim().toLowerCase()
@@ -75,26 +77,24 @@ export function CommandSearch() {
         variant='outline'
         className='group inline-flex h-8 min-w-0 flex-1 justify-start rounded-md bg-muted/25 text-sm font-normal text-muted-foreground shadow-none sm:w-44 sm:flex-none lg:w-60 xl:w-72'
         onClick={() => setOpen(true)}
-        aria-label='搜索'
+        aria-label={t('search')}
       >
         <SearchIcon className='size-4' />
-        <span className='truncate'>搜索服务器、凭据、会话</span>
+        <span className='truncate'>{t('commandSearch.placeholder')}</span>
         <kbd className='ms-auto hidden h-5 items-center gap-1 rounded border bg-muted px-1.5 font-mono text-[10px] font-medium group-hover:bg-accent lg:flex'>
           Ctrl K
         </kbd>
       </Button>
-      <DialogShell compact open={open} onOpenChange={setOpen} title='搜索' description='快速跳转、创建资源或打开服务器连接。'>
+      <DialogShell compact open={open} onOpenChange={setOpen} title={t('commandSearch.title')} description={t('commandSearch.description')}>
         <div className='grid gap-3'>
-          <Input autoFocus value={query} onChange={(event) => setQuery(event.target.value)} placeholder='输入服务器、页面或操作名称' />
+          <Input autoFocus value={query} onChange={(event) => setQuery(event.target.value)} placeholder={t('commandSearch.inputPlaceholder')} />
           <div className='grid max-h-[50vh] gap-1 overflow-auto'>
             {visibleCommands.map((item) => {
               const Icon = item.icon
               return (
                 <button
                   key={item.id}
-                  className={cn(
-                    'flex min-w-0 items-center gap-3 rounded-lg px-2 py-2 text-left text-sm outline-none transition-colors hover:bg-muted focus-visible:bg-muted'
-                  )}
+                  className={cn('flex min-w-0 items-center gap-3 rounded-lg px-2 py-2 text-left text-sm outline-none transition-colors hover:bg-muted focus-visible:bg-muted')}
                   onClick={() => void runCommand(item)}
                 >
                   <span className='grid size-8 shrink-0 place-items-center rounded-md bg-muted text-foreground'>
@@ -108,7 +108,7 @@ export function CommandSearch() {
               )
             })}
             {!visibleCommands.length ? (
-              <div className='rounded-lg border border-dashed border-border p-6 text-center text-sm text-muted-foreground'>没有匹配结果</div>
+              <div className='rounded-lg border border-dashed border-border p-6 text-center text-sm text-muted-foreground'>{t('commandSearch.noResults')}</div>
             ) : null}
           </div>
         </div>

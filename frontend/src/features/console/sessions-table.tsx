@@ -1,6 +1,7 @@
 import type { ColumnDef } from '@tanstack/react-table'
 import { Download } from 'lucide-react'
 import { useMemo } from 'react'
+import { useTranslation } from 'react-i18next'
 
 import { useApp } from '@/app/app-provider'
 import { DataTable } from '@/components/data-table/data-table'
@@ -12,6 +13,7 @@ import type { ConnectionSession } from '@/types'
 
 export function SessionsTable({ sessions }: { sessions: ConnectionSession[] }) {
   const app = useApp()
+  const { t } = useTranslation()
   const serverName = (id: string) => app.data.servers.find((server) => server.id === id)?.name || id
 
   const closeSession = async (id: string) => {
@@ -22,11 +24,11 @@ export function SessionsTable({ sessions }: { sessions: ConnectionSession[] }) {
   const columns = useMemo<ColumnDef<ConnectionSession>[]>(
     () => [
       {
-        header: '协议',
+        header: t('protocol'),
         cell: ({ row }) => <Badge tone={row.original.protocol === 'rdp' ? 'info' : 'neutral'}>{row.original.protocol.toUpperCase()}</Badge>,
       },
       {
-        header: '服务器',
+        header: t('server'),
         cell: ({ row }) => (
           <div>
             <strong>{serverName(row.original.server_id)}</strong>
@@ -35,16 +37,16 @@ export function SessionsTable({ sessions }: { sessions: ConnectionSession[] }) {
         ),
       },
       {
-        header: '状态',
+        header: t('status'),
         cell: ({ row }) => (
           <Badge tone={row.original.status === 'active' ? 'success' : row.original.status === 'pending' ? 'warning' : row.original.status === 'failed' ? 'danger' : 'neutral'}>
             {statusLabel(row.original.status)}
           </Badge>
         ),
       },
-      { header: '来源', accessorFn: (row) => row.client_ip || '-' },
-      { header: '开始时间', cell: ({ row }) => formatDate(row.original.started_at) },
-      { header: '录屏', cell: ({ row }) => (row.original.recording_path ? `${row.original.recording_size || 0} bytes` : '-') },
+      { header: t('source'), accessorFn: (row) => row.client_ip || '-' },
+      { header: t('startedAt'), cell: ({ row }) => formatDate(row.original.started_at) },
+      { header: t('recording'), cell: ({ row }) => (row.original.recording_path ? `${row.original.recording_size || 0} bytes` : '-') },
       {
         id: 'actions',
         header: '',
@@ -53,24 +55,24 @@ export function SessionsTable({ sessions }: { sessions: ConnectionSession[] }) {
             {row.original.recording_path ? (
               <Button size='sm' variant='outline' onClick={() => { window.location.href = `/api/connections/${row.original.id}/recording.zip` }}>
                 <Download className='size-3.5' />
-                下载录屏
+                {t('downloadRecording')}
               </Button>
             ) : null}
-            <Button size='sm' variant='outline' onClick={() => void closeSession(row.original.id)}>关闭</Button>
+            <Button size='sm' variant='outline' onClick={() => void closeSession(row.original.id)}>{t('close')}</Button>
           </div>
         ),
       },
     ],
-    [app.data.servers]
+    [app.data.servers, t]
   )
 
   return (
     <DataTable
       columns={columns}
       data={sessions}
-      emptyTitle='暂无连接会话'
-      emptyBody='从服务器列表发起 SSH 或 RDP 后会出现在这里。'
-      searchPlaceholder='过滤会话...'
+      emptyTitle={t('sessionsPage.emptyTitle')}
+      emptyBody={t('sessionsPage.emptyBody')}
+      searchPlaceholder={t('sessionsPage.searchPlaceholder')}
       getSearchText={(session) => [session.id, session.protocol, session.status, session.client_ip, serverName(session.server_id)].filter(Boolean).join(' ')}
     />
   )

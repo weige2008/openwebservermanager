@@ -8,6 +8,7 @@ import {
 import { Loader2 } from 'lucide-react'
 import { Toaster } from 'sonner'
 import type { ReactNode } from 'react'
+import { useTranslation } from 'react-i18next'
 
 import { useApp } from '@/app/app-provider'
 import { SystemBrand } from '@/components/layout/system-brand'
@@ -34,13 +35,15 @@ function RootLayout() {
 }
 
 function LoadingScreen() {
+  const { t } = useTranslation()
+
   return (
     <div className='grid min-h-svh place-items-center bg-background text-foreground'>
       <div className='grid gap-4 text-center'>
         <SystemBrand className='justify-center' />
         <div className='inline-flex items-center gap-2 rounded-lg border border-border bg-card px-4 py-3 text-sm text-muted-foreground'>
           <Loader2 className='size-4 animate-spin' />
-          正在加载控制台...
+          {t('loadingConsole')}
         </div>
       </div>
     </div>

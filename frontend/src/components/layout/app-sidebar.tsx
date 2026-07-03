@@ -60,7 +60,7 @@ export function AppSidebar({ collapsed = false }: { collapsed?: boolean }) {
       </div>
       <div className={cn('m-2 grid gap-2 rounded-lg bg-card/70 p-2 text-xs ring-1 ring-sidebar-border', collapsed && 'place-items-center p-1')}>
         <div className='flex items-center justify-between gap-2'>
-          <span className={cn('text-muted-foreground', collapsed && 'sr-only')}>Gateway</span>
+          <span className={cn('text-muted-foreground', collapsed && 'sr-only')}>{t('gateway')}</span>
           <Badge tone={data.guacd?.address ? 'success' : 'warning'}>{data.guacd?.address ? t('gatewayReady') : t('gatewayOffline')}</Badge>
         </div>
         <div className={cn('flex items-center gap-2 text-muted-foreground', collapsed && 'sr-only')}>

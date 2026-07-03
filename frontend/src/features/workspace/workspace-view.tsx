@@ -1,20 +1,40 @@
 import { FitAddon } from '@xterm/addon-fit'
 import { Terminal } from '@xterm/xterm'
 import { Clipboard, Power, Upload } from 'lucide-react'
-import { useEffect, useRef, useState } from 'react'
+import { useEffect, useMemo, useRef, useState } from 'react'
+import { useTranslation } from 'react-i18next'
 
 import { useApp } from '@/app/app-provider'
-import { apiRequest } from '@/lib/api'
-import { base64ToText, textToBase64 } from '@/lib/codec'
-import type { ConnectionSession } from '@/types'
-
 import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
+import { apiRequest } from '@/lib/api'
+import { base64ToText, textToBase64 } from '@/lib/codec'
+import { statusLabel } from '@/lib/utils'
+import type { ConnectionSession } from '@/types'
 
 export function WorkspaceView() {
   const app = useApp()
+  const { t } = useTranslation()
   const workspace = app.workspace
   const [status, setStatus] = useState(workspace?.status || 'connecting')
+  const sshMessages = useMemo(
+    () => ({
+      connecting: t('workspace.connecting'),
+      connected: t('workspace.connected'),
+      disconnected: t('workspace.disconnected'),
+    }),
+    [t]
+  )
+  const rdpMessages = useMemo(
+    () => ({
+      missingGuacamole: t('workspace.missingGuacamole'),
+      rdpFailed: t('workspace.rdpFailed'),
+      clipboardPrompt: t('workspace.clipboardPrompt'),
+      clipboardSent: t('workspace.clipboardSent'),
+      fileSent: t('workspace.fileSent'),
+    }),
+    [t]
+  )
 
   if (!workspace) return null
 
@@ -37,30 +57,47 @@ export function WorkspaceView() {
         <div className='flex min-w-0 items-center gap-2'>
           <strong>{workspace.session.protocol.toUpperCase()}</strong>
           <span className='truncate text-zinc-400'>{server?.name || workspace.session.server_id}</span>
-          <Badge tone={status === 'connected' ? 'success' : 'neutral'}>{status}</Badge>
-          {workspace.session.protocol === 'rdp' ? <Badge tone='danger'>录屏中</Badge> : null}
+          <Badge tone={status === 'connected' ? 'success' : 'neutral'}>{statusLabel(status)}</Badge>
+          {workspace.session.protocol === 'rdp' ? <Badge tone='danger'>{t('workspace.recordingOn')}</Badge> : null}
         </div>
         <div className='flex flex-wrap gap-2'>
           {workspace.type === 'rdp' ? (
             <>
-              <Button variant='outline' onClick={() => window.dispatchEvent(new Event('servermanager:rdp-clipboard'))}><Clipboard className='size-4' />剪贴板</Button>
-              <Button variant='outline' onClick={() => window.dispatchEvent(new Event('servermanager:rdp-upload'))}><Upload className='size-4' />上传文件</Button>
+              <Button variant='outline' onClick={() => window.dispatchEvent(new Event('servermanager:rdp-clipboard'))}><Clipboard className='size-4' />{t('workspace.clipboard')}</Button>
+              <Button variant='outline' onClick={() => window.dispatchEvent(new Event('servermanager:rdp-upload'))}><Upload className='size-4' />{t('workspace.uploadFile')}</Button>
             </>
           ) : null}
-          <Button variant='outline' onClick={() => void leave()}>返回控制台</Button>
-          <Button variant='destructive' onClick={() => void close()}><Power className='size-4' />断开</Button>
+          <Button variant='outline' onClick={() => void leave()}>{t('workspace.returnConsole')}</Button>
+          <Button variant='destructive' onClick={() => void close()}><Power className='size-4' />{t('workspace.disconnect')}</Button>
         </div>
       </div>
       {workspace.type === 'ssh' ? (
-        <SSHWorkspace session={workspace.session} setStatus={setStatus} />
+        <SSHWorkspace
+          session={workspace.session}
+          setStatus={setStatus}
+          messages={sshMessages}
+        />
       ) : (
-        <RDPWorkspace session={workspace.session} setStatus={setStatus} showToast={app.showToast} />
+        <RDPWorkspace
+          session={workspace.session}
+          setStatus={setStatus}
+          showToast={app.showToast}
+          messages={rdpMessages}
+        />
       )}
     </div>
   )
 }
 
-function SSHWorkspace({ session, setStatus }: { session: ConnectionSession; setStatus: (status: string) => void }) {
+function SSHWorkspace({
+  session,
+  setStatus,
+  messages,
+}: {
+  session: ConnectionSession
+  setStatus: (status: string) => void
+  messages: { connecting: string; connected: string; disconnected: string }
+}) {
   const containerRef = useRef<HTMLDivElement | null>(null)
 
   useEffect(() => {
@@ -77,7 +114,7 @@ function SSHWorkspace({ session, setStatus }: { session: ConnectionSession; setS
     term.open(containerRef.current)
     fit.fit()
     term.focus()
-    term.write('Connecting...\r\n')
+    term.write(`${messages.connecting}\r\n`)
 
     const proto = window.location.protocol === 'https:' ? 'wss' : 'ws'
     const socket = new WebSocket(`${proto}://${window.location.host}/api/connections/ssh/${session.id}/ws?cols=${term.cols}&rows=${term.rows}&term=xterm-256color`)
@@ -101,14 +138,14 @@ function SSHWorkspace({ session, setStatus }: { session: ConnectionSession; setS
       const msg = JSON.parse(event.data)
       if (msg.type === 'ready') {
         setStatus('connected')
-        term.write('Connected.\r\n')
+        term.write(`${messages.connected}\r\n`)
       }
       if (msg.type === 'stdout' || msg.type === 'stderr') term.write(base64ToText(msg.data).replaceAll('\n', '\r\n'))
       if (msg.type === 'error') term.write(`\r\n[error] ${msg.data}\r\n`)
     }
     socket.onclose = () => {
       setStatus('disconnected')
-      term.write('\r\n[disconnected]\r\n')
+      term.write(`\r\n[${messages.disconnected}]\r\n`)
     }
 
     return () => {
@@ -116,12 +153,28 @@ function SSHWorkspace({ session, setStatus }: { session: ConnectionSession; setS
       socket.close()
       term.dispose()
     }
-  }, [session.id, setStatus])
+  }, [messages.connected, messages.connecting, messages.disconnected, session.id, setStatus])
 
   return <div ref={containerRef} className='h-[calc(100vh-52px)] bg-[#030305] p-3 max-md:h-[calc(100vh-120px)]' />
 }
 
-function RDPWorkspace({ session, setStatus, showToast }: { session: ConnectionSession; setStatus: (status: string) => void; showToast: (message: string) => void }) {
+function RDPWorkspace({
+  session,
+  setStatus,
+  showToast,
+  messages,
+}: {
+  session: ConnectionSession
+  setStatus: (status: string) => void
+  showToast: (message: string) => void
+  messages: {
+    missingGuacamole: string
+    rdpFailed: string
+    clipboardPrompt: string
+    clipboardSent: string
+    fileSent: string
+  }
+}) {
   const containerRef = useRef<HTMLDivElement | null>(null)
   const clientRef = useRef<any>(null)
 
@@ -130,7 +183,10 @@ function RDPWorkspace({ session, setStatus, showToast }: { session: ConnectionSe
     const Guacamole = window.Guacamole
     if (!container) return
     if (!Guacamole) {
-      container.innerHTML = '<div style="margin:20px;padding:16px;border:1px solid rgba(255,255,255,.12);border-radius:14px;background:#111113">缺少 /vendor/guacamole-common.min.js，请放置 guacamole-common-js 后重新连接。</div>'
+      const message = document.createElement('div')
+      message.style.cssText = 'margin:20px;padding:16px;border:1px solid rgba(255,255,255,.12);border-radius:14px;background:#111113'
+      message.textContent = messages.missingGuacamole
+      container.replaceChildren(message)
       return
     }
 
@@ -152,16 +208,16 @@ function RDPWorkspace({ session, setStatus, showToast }: { session: ConnectionSe
       if (stateCode === 3) setStatus('connected')
       if (stateCode === 5) setStatus('disconnected')
     }
-    client.onerror = (err: { message?: string }) => showToast(err.message || 'RDP 连接失败')
+    client.onerror = (err: { message?: string }) => showToast(err.message || messages.rdpFailed)
 
     const onClipboard = () => {
-      const text = window.prompt('发送到远程剪贴板')
+      const text = window.prompt(messages.clipboardPrompt)
       if (text == null) return
       const stream = client.createClipboardStream('text/plain')
       const writer = new Guacamole.StringWriter(stream)
       writer.sendText(text)
       writer.sendEnd()
-      showToast('剪贴板已发送')
+      showToast(messages.clipboardSent)
     }
     const onUpload = () => {
       const input = document.createElement('input')
@@ -171,7 +227,7 @@ function RDPWorkspace({ session, setStatus, showToast }: { session: ConnectionSe
         if (!file) return
         const stream = client.createFileStream(file.type || 'application/octet-stream', file.name)
         const writer = new Guacamole.BlobWriter(stream)
-        writer.oncomplete = () => showToast('文件已发送')
+        writer.oncomplete = () => showToast(messages.fileSent)
         writer.sendBlob(file)
         writer.sendEnd()
       }
@@ -195,7 +251,7 @@ function RDPWorkspace({ session, setStatus, showToast }: { session: ConnectionSe
       clientRef.current = null
       container.innerHTML = ''
     }
-  }, [session.id, setStatus, showToast])
+  }, [messages, session.id, setStatus, showToast])
 
   return <div ref={containerRef} className='h-[calc(100vh-52px)] overflow-hidden bg-[#020204] max-md:h-[calc(100vh-120px)]' />
 }

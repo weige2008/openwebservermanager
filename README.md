@@ -18,7 +18,7 @@
 go run ./cmd/servermanager
 ```
 
-默认监听 `http://127.0.0.1:8080`，数据目录为 `data/`。建议设置固定主密钥：
+默认监听 `http://127.0.0.1:23876`，数据目录为 `data/`。建议设置固定主密钥：
 
 ```powershell
 $env:SERVERMANAGER_MASTER_KEY="change-this-to-a-long-random-secret"
@@ -65,7 +65,7 @@ RDP 依赖 Apache Guacamole 的 `guacd`。服务启动时会按以下顺序寻�
 .\scripts\deploy.ps1
 ```
 
-默认部署到 `/opt/servermanager` 并监听 `0.0.0.0:8080`。部署脚本会先在服务器执行 `npm --prefix frontend ci && npm --prefix frontend run build`，再执行 Go 构建。
+默认部署到 `/opt/servermanager` 并监听 `0.0.0.0:23876`。部署脚本会先在服务器执行 `npm --prefix frontend ci && npm --prefix frontend run build`，再执行 Go 构建。
 
 ## 前端开发
 

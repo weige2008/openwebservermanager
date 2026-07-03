@@ -28,7 +28,7 @@ export default defineConfig(({ envMode }) => {
     server: {
       host: '127.0.0.1',
       proxy: {
-        '/api': { target: 'http://127.0.0.1:8080', changeOrigin: true, ws: true },
+        '/api': { target: 'http://127.0.0.1:23876', changeOrigin: true, ws: true },
       },
     },
     output: {

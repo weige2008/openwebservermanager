@@ -30,7 +30,7 @@ func main() {
 }
 
 func run() error {
-	addr := env("SERVERMANAGER_ADDR", "127.0.0.1:8080")
+	addr := env("SERVERMANAGER_ADDR", "127.0.0.1:23876")
 	dataDir := env("SERVERMANAGER_DATA_DIR", "data")
 
 	if err := os.MkdirAll(dataDir, 0o700); err != nil {

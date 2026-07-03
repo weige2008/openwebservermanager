@@ -3,7 +3,7 @@ param(
   [string]$UserName = "ubuntu",
   [string]$KeyPath = "$env:USERPROFILE\.ssh\servermanager_deploy_rsa",
   [string]$RemoteRoot = "/opt/servermanager",
-  [int]$Port = 8080
+  [int]$Port = 23876
 )
 
 $ErrorActionPreference = "Stop"

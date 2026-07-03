@@ -160,6 +160,7 @@ function ConnectDialog({ protocol, serverId }: { protocol: Protocol; serverId: s
             width: Math.max(1024, window.innerWidth),
             height: Math.max(680, window.innerHeight - 52),
             dpi: 96,
+            recording_enabled: form.get('recording_enabled') === 'on',
           }),
         })
         app.setModal(null)
@@ -187,8 +188,17 @@ function ConnectDialog({ protocol, serverId }: { protocol: Protocol; serverId: s
           <div className='flex flex-wrap gap-2'>
             <Badge>{server?.host || '-'}</Badge>
             <Badge>{protocol === 'ssh' ? `SSH ${server?.ssh_port || 22}` : `RDP ${server?.rdp_port || 3389}`}</Badge>
-            <Badge>{protocol === 'rdp' ? t('modals.recordingEnabled') : t('modals.ptyTerminal')}</Badge>
+            <Badge>{protocol === 'rdp' ? t('modals.recordingDisabled') : t('modals.ptyTerminal')}</Badge>
           </div>
+          {protocol === 'rdp' ? (
+            <label className='flex items-start gap-2 rounded-lg border border-border bg-muted/30 p-3 text-sm'>
+              <input name='recording_enabled' type='checkbox' className='mt-1 size-4 accent-current' />
+              <span className='grid gap-0.5'>
+                <span className='font-medium'>{t('modals.recordingOption')}</span>
+                <span className='text-xs text-muted-foreground'>{t('modals.recordingDisabled')}</span>
+              </span>
+            </label>
+          ) : null}
           <div className='flex justify-end gap-2'>
             <Button type='button' variant='outline' onClick={() => app.setModal(null)}>{t('cancel')}</Button>
             <Button type='submit' variant='primary' disabled={submitting}>{t('modals.startConnection')}</Button>

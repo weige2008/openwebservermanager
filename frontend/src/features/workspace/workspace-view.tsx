@@ -58,7 +58,7 @@ export function WorkspaceView() {
           <strong>{workspace.session.protocol.toUpperCase()}</strong>
           <span className='truncate text-muted-foreground'>{server?.name || workspace.session.server_id}</span>
           <Badge tone={status === 'connected' ? 'success' : 'neutral'}>{statusLabel(status)}</Badge>
-          {workspace.session.protocol === 'rdp' ? <Badge tone='danger'>{t('workspace.recordingOn')}</Badge> : null}
+          {workspace.session.recording_path ? <Badge tone='danger'>{t('workspace.recordingOn')}</Badge> : null}
         </div>
         <div className='flex flex-wrap gap-2'>
           {workspace.type === 'rdp' ? (
@@ -212,7 +212,10 @@ function RDPWorkspace({
       if (stateCode === 3) setStatus('connected')
       if (stateCode === 5) setStatus('disconnected')
     }
-    client.onerror = (err: { message?: string }) => showToast(err.message || messages.rdpFailed)
+    client.onerror = (err: { message?: string }) => {
+      setStatus('disconnected')
+      showToast(err.message || messages.rdpFailed)
+    }
 
     const onClipboard = () => {
       const text = window.prompt(messages.clipboardPrompt)

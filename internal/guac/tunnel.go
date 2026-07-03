@@ -71,11 +71,12 @@ func (t Tunnel) Run(ctx context.Context, browser *ws.Conn, cfg RDPConfig) {
 	closeSession := func(reason string) {
 		once.Do(func() {
 			now := time.Now().UTC()
-			recordingSize := directorySize(cfg.Session.RecordingPath)
 			_, _ = t.Store.UpdateSession(cfg.Session.ID, func(item *model.ConnectionSession) {
 				item.Status = model.SessionClosed
 				item.EndedAt = &now
-				item.RecordingSize = recordingSize
+				if cfg.Session.RecordingPath != "" {
+					item.RecordingSize = directorySize(cfg.Session.RecordingPath)
+				}
 				if reason != "" {
 					item.Error = reason
 				}
@@ -165,8 +166,13 @@ func (t Tunnel) handshake(conn net.Conn, reader *bufio.Reader, cfg RDPConfig) er
 func (t Tunnel) argValue(name string, cfg RDPConfig) string {
 	recordingPath := cfg.Session.RecordingPath
 	drivePath := filepath.Join(t.DataDir, "drives", cfg.Session.ID)
-	_ = os.MkdirAll(recordingPath, 0o700)
-	_ = os.MkdirAll(drivePath, 0o700)
+	recordingEnabled := recordingPath != ""
+	// guacd often runs as a different OS user than ServerManager.
+	// Session-scoped transfer/recording directories must be writable by that process.
+	if recordingEnabled {
+		_ = ensureGuacdWritableDir(recordingPath)
+	}
+	_ = ensureGuacdWritableDir(drivePath)
 
 	values := map[string]string{
 		"hostname":                 cfg.Server.Host,
@@ -183,9 +189,9 @@ func (t Tunnel) argValue(name string, cfg RDPConfig) string {
 		"drive-name":               "ServerManager",
 		"drive-path":               drivePath,
 		"create-drive-path":        "true",
-		"enable-recording":         "true",
+		"enable-recording":         boolString(recordingEnabled),
 		"recording-path":           recordingPath,
-		"create-recording-path":    "true",
+		"create-recording-path":    boolString(recordingEnabled),
 		"recording-name":           cfg.Session.ID,
 		"recording-exclude-output": "false",
 		"recording-exclude-mouse":  "false",
@@ -196,6 +202,23 @@ func (t Tunnel) argValue(name string, cfg RDPConfig) string {
 		"dpi":                      strconv.Itoa(cfg.DPI),
 	}
 	return values[name]
+}
+
+func ensureGuacdWritableDir(path string) error {
+	if path == "" {
+		return nil
+	}
+	if err := os.MkdirAll(path, 0o777); err != nil {
+		return err
+	}
+	return os.Chmod(path, 0o777)
+}
+
+func boolString(value bool) string {
+	if value {
+		return "true"
+	}
+	return "false"
 }
 
 func (t Tunnel) fail(sessionID string, err error) {

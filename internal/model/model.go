@@ -119,9 +119,10 @@ type SSHCreateRequest struct {
 }
 
 type RDPCreateRequest struct {
-	ServerID     string `json:"server_id"`
-	CredentialID string `json:"credential_id"`
-	Width        int    `json:"width"`
-	Height       int    `json:"height"`
-	DPI          int    `json:"dpi"`
+	ServerID         string `json:"server_id"`
+	CredentialID     string `json:"credential_id"`
+	Width            int    `json:"width"`
+	Height           int    `json:"height"`
+	DPI              int    `json:"dpi"`
+	RecordingEnabled bool   `json:"recording_enabled"`
 }

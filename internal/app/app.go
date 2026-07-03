@@ -311,15 +311,18 @@ func (s *Server) handleCreateRDP(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
-	recordingPath := filepath.Join(s.cfg.DataDir, "recordings", session.ID)
-	_, _ = s.cfg.Store.UpdateSession(session.ID, func(item *model.ConnectionSession) {
-		item.RecordingPath = recordingPath
-	})
-	if err := os.MkdirAll(recordingPath, 0o700); err != nil {
-		writeError(w, http.StatusInternalServerError, err.Error())
-		return
+	if req.RecordingEnabled {
+		recordingPath := filepath.Join(s.cfg.DataDir, "recordings", session.ID)
+		_, _ = s.cfg.Store.UpdateSession(session.ID, func(item *model.ConnectionSession) {
+			item.RecordingPath = recordingPath
+		})
+		if err := os.MkdirAll(recordingPath, 0o777); err != nil {
+			writeError(w, http.StatusInternalServerError, err.Error())
+			return
+		}
+		_ = os.Chmod(recordingPath, 0o777)
+		session.RecordingPath = recordingPath
 	}
-	session.RecordingPath = recordingPath
 	_ = s.audit(r, "connection.rdp.create", session.ID, model.ProtocolRDP, "created rdp session")
 	writeJSON(w, http.StatusCreated, session)
 }

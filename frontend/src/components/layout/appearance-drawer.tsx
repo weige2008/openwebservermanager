@@ -24,12 +24,16 @@ import type { Theme, ThemeContentLayout, ThemeFont, ThemePreset, ThemeRadius, Th
 import { Button } from '../ui/button'
 
 const presets: Array<{ value: ThemePreset; label: string; swatches: string[] }> = [
-  { value: 'default', label: 'Default', swatches: ['oklch(1 0 0)', 'oklch(0.13 0 0)'] },
+  { value: 'default', label: 'Default', swatches: ['oklch(0.13 0 0)', 'oklch(0.95 0 0)'] },
+  { value: 'anthropic', label: 'Anthropic', swatches: ['oklch(0.984 0.005 95)', 'oklch(0.685 0.142 38)'] },
+  { value: 'simple-large', label: 'Simple Large-font', swatches: ['oklch(0.15 0 0)', 'oklch(0.99 0 0)'] },
   { value: 'underground', label: 'Underground', swatches: ['oklch(0.5315 0.0694 156.19)', 'oklch(0.5748 0.0862 336.52)'] },
-  { value: 'rose-garden', label: 'Rose', swatches: ['oklch(0.5827 0.2418 12.23)', 'oklch(0.8131 0.1129 5.67)'] },
-  { value: 'lake-view', label: 'Lake', swatches: ['oklch(0.765 0.177 163.22)', 'oklch(0.551 0.0899 200.52)'] },
-  { value: 'sunset-glow', label: 'Sunset', swatches: ['oklch(0.5591 0.1882 25.33)', 'oklch(0.7938 0.1248 42.42)'] },
-  { value: 'forest-whisper', label: 'Forest', swatches: ['oklch(0.5276 0.1072 182.22)', 'oklch(0.5236 0.0505 250.18)'] },
+  { value: 'rose-garden', label: 'Rose Garden', swatches: ['oklch(0.5827 0.2418 12.23)', 'oklch(0.8131 0.1129 5.67)'] },
+  { value: 'lake-view', label: 'Lake View', swatches: ['oklch(0.765 0.177 163.22)', 'oklch(0.551 0.0899 200.52)'] },
+  { value: 'sunset-glow', label: 'Sunset Glow', swatches: ['oklch(0.5591 0.1882 25.33)', 'oklch(0.7938 0.1248 42.42)'] },
+  { value: 'forest-whisper', label: 'Forest Whisper', swatches: ['oklch(0.5276 0.1072 182.22)', 'oklch(0.5236 0.0505 250.18)'] },
+  { value: 'ocean-breeze', label: 'Ocean Breeze', swatches: ['oklch(0.5461 0.2152 262.88)', 'oklch(0.5854 0.2041 277.12)'] },
+  { value: 'lavender-dream', label: 'Lavender Dream', swatches: ['oklch(0.5709 0.1808 306.89)', 'oklch(0.811 0.0589 201.14)'] },
 ]
 
 const themeModes: Array<{ value: Theme; labelKey: string }> = [

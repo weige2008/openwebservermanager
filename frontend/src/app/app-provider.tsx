@@ -68,6 +68,11 @@ function applyBodyAttribute(name: string, value: string, fallback: string) {
   body.setAttribute(name, value)
 }
 
+function resolveThemeFont(appearance: ThemeAppearance) {
+  if (appearance.font !== 'default') return appearance.font
+  return appearance.preset === 'anthropic' ? 'serif' : 'sans'
+}
+
 export function AppProvider({ children }: { children: ReactNode }) {
   const queryClient = useQueryClient()
   const { i18n, t: translate } = useTranslation()
@@ -135,7 +140,7 @@ export function AppProvider({ children }: { children: ReactNode }) {
 
   useEffect(() => {
     applyBodyAttribute('data-theme-preset', appearance.preset, defaultAppearance.preset)
-    applyBodyAttribute('data-theme-font', appearance.font === 'default' ? 'sans' : appearance.font, 'sans')
+    document.body.setAttribute('data-theme-font', resolveThemeFont(appearance))
     applyBodyAttribute('data-theme-radius', appearance.radius, defaultAppearance.radius)
     applyBodyAttribute('data-theme-scale', appearance.scale, defaultAppearance.scale)
     applyBodyAttribute('data-theme-content-layout', appearance.contentLayout, defaultAppearance.contentLayout)

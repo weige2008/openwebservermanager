@@ -1,4 +1,5 @@
 import '@fontsource-variable/public-sans'
+import '@fontsource-variable/lora'
 import '@xterm/xterm/css/xterm.css'
 import './i18n/config'
 import { QueryClientProvider } from '@tanstack/react-query'

@@ -4,11 +4,12 @@
 
 ## 当前能力
 
-- Go 后端单进程服务，内嵌 React + TypeScript + Tailwind 的 NewAPI 新版风格管理界面。
-- 公开首页、首次设置页与登录页；服务器、凭据、会话、审计日志必须登录后查看。
-- SSH：浏览器 WebSocket 到服务端 SSH PTY，支持密码、私钥、私钥 passphrase。
-- RDP：浏览器 Guacamole tunnel 到 `guacd`，服务端注入 RDP 凭据、录屏目录、文件传输参数。
-- 数据：本地 JSON 文件存储，模型覆盖服务器、凭据、连接会话、审计日志。
+- Go 后端单进程服务，内嵌新版前端静态资源。
+- 前端使用 NewAPI 当前同类技术栈：Rsbuild、React 19、TypeScript、Tailwind CSS v4、TanStack Router、TanStack Query、TanStack Table、Base UI。
+- 公开首页、首次设置页与登录页；服务器、凭据、会话和审计数据需要登录后查看。
+- SSH：浏览器 WebSocket 到服务端 SSH PTY，支持密码、私钥和私钥 passphrase。
+- RDP：浏览器 Guacamole tunnel 到 `guacd`，服务端注入 RDP 凭据、录屏目录和文件传输参数。
+- 数据：本地 JSON 文件存储，模型覆盖服务器、凭据、连接会话和审计日志。
 - 安全：凭据字段 AES-GCM 加密保存，API 响应不返回明文凭据。
 
 ## 启动
@@ -17,16 +18,14 @@
 go run ./cmd/servermanager
 ```
 
-默认监听 `http://127.0.0.1:8080`，数据目录为 `data/`。
-
-建议设置固定主密钥：
+默认监听 `http://127.0.0.1:8080`，数据目录为 `data/`。建议设置固定主密钥：
 
 ```powershell
 $env:SERVERMANAGER_MASTER_KEY="change-this-to-a-long-random-secret"
 go run ./cmd/servermanager
 ```
 
-首次启动时数据库没有管理员账号，访问 `/login` 会进入首次设置页面。创建管理员后，密码只以 bcrypt 哈希形式写入服务端数据库，不会保存明文。
+首次启动时数据库没有管理员账号，访问 `/login` 会进入首次设置页面。创建管理员后，密码只以 bcrypt 哈希形式写入服务端数据库，不保存明文。
 
 ## RDP / guacd
 

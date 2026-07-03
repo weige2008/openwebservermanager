@@ -6,7 +6,7 @@ import { useTranslation } from 'react-i18next'
 import { useApp } from '@/app/app-provider'
 import { DialogShell } from '@/components/ui/dialog'
 import { Input } from '@/components/ui/field'
-import { cn } from '@/lib/utils'
+import { cn, serverProtocol } from '@/lib/utils'
 
 import { Button } from '../ui/button'
 
@@ -54,7 +54,7 @@ export function CommandSearch() {
         label: server.name,
         description: `${server.host} / ${server.os}`,
         icon: Server,
-        run: () => app.setModal({ type: 'connect', protocol: server.os === 'windows' ? 'rdp' : 'ssh', serverId: server.id }),
+        run: () => app.setModal({ type: 'connect', protocol: serverProtocol(server), serverId: server.id }),
       })),
     ],
     [app, navigate, t]

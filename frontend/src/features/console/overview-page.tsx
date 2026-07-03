@@ -7,6 +7,7 @@ import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
 import { buttonVariants } from '@/components/ui/button'
 import { Card, CardHeader, CardTitle } from '@/components/ui/card'
+import { serverProtocol } from '@/lib/utils'
 
 import { SessionsTable } from './sessions-table'
 
@@ -112,8 +113,14 @@ export function OverviewPage() {
                     <em className='block truncate text-xs not-italic text-muted-foreground'>{server.host}</em>
                   </span>
                   <span className='flex gap-2'>
-                    <Button size='sm' variant='primary' onClick={() => app.setModal({ type: 'connect', protocol: 'ssh', serverId: server.id })}>SSH</Button>
-                    <Button size='sm' variant='outline' onClick={() => app.setModal({ type: 'connect', protocol: 'rdp', serverId: server.id })}>RDP</Button>
+                    {(() => {
+                      const protocol = serverProtocol(server)
+                      return (
+                        <Button size='sm' variant={protocol === 'rdp' ? 'outline' : 'primary'} onClick={() => app.setModal({ type: 'connect', protocol, serverId: server.id })}>
+                          {protocol.toUpperCase()}
+                        </Button>
+                      )
+                    })()}
                   </span>
                 </div>
               ))}

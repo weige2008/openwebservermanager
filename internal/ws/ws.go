@@ -43,7 +43,11 @@ func Upgrade(w http.ResponseWriter, r *http.Request) (*Conn, error) {
 	response := "HTTP/1.1 101 Switching Protocols\r\n" +
 		"Upgrade: websocket\r\n" +
 		"Connection: Upgrade\r\n" +
-		"Sec-WebSocket-Accept: " + websocketAccept(key) + "\r\n\r\n"
+		"Sec-WebSocket-Accept: " + websocketAccept(key) + "\r\n"
+	if protocol := acceptedSubprotocol(r.Header.Get("Sec-WebSocket-Protocol")); protocol != "" {
+		response += "Sec-WebSocket-Protocol: " + protocol + "\r\n"
+	}
+	response += "\r\n"
 	if _, err := rw.WriteString(response); err != nil {
 		_ = netConn.Close()
 		return nil, err
@@ -58,6 +62,16 @@ func Upgrade(w http.ResponseWriter, r *http.Request) (*Conn, error) {
 func websocketAccept(key string) string {
 	sum := sha1.Sum([]byte(key + websocketGUID))
 	return base64.StdEncoding.EncodeToString(sum[:])
+}
+
+func acceptedSubprotocol(header string) string {
+	for _, protocol := range strings.Split(header, ",") {
+		protocol = strings.TrimSpace(protocol)
+		if protocol == "guacamole" {
+			return protocol
+		}
+	}
+	return ""
 }
 
 func (c *Conn) Close() error {

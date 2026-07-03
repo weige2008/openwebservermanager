@@ -8,8 +8,8 @@ import { DataTable } from '@/components/data-table/data-table'
 import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card'
-import { credentialLabel, formatDate, osLabel } from '@/lib/utils'
-import type { Credential, ManagedServer } from '@/types'
+import { credentialLabel, formatDate, osLabel, serverProtocol } from '@/lib/utils'
+import type { Credential, ManagedServer, Protocol } from '@/types'
 
 export function ServersPage() {
   const app = useApp()
@@ -35,13 +35,16 @@ export function ServersPage() {
       },
       { header: t('address'), cell: ({ row }) => <span className='font-mono text-xs'>{row.original.host}</span> },
       { header: t('os'), cell: ({ row }) => <Badge tone={row.original.os === 'windows' ? 'info' : 'neutral'}>{osLabel(row.original.os)}</Badge> },
-      { header: t('ports'), cell: ({ row }) => `SSH ${row.original.ssh_port || 22} / RDP ${row.original.rdp_port || 3389}` },
+      { header: t('ports'), cell: ({ row }) => row.original.os === 'windows' ? `RDP ${row.original.rdp_port || 3389}` : `SSH ${row.original.ssh_port || 22}` },
       {
         header: t('credentials'),
-        cell: () => (
+        cell: ({ row }) => (
           <div className='flex flex-wrap gap-1.5'>
-            <Badge tone={sshCredentials.length ? 'success' : 'warning'}>SSH {sshCredentials.length}</Badge>
-            <Badge tone={rdpCredentials.length ? 'success' : 'warning'}>RDP {rdpCredentials.length}</Badge>
+            {row.original.os === 'windows' ? (
+              <Badge tone={rdpCredentials.length ? 'success' : 'warning'}>RDP {rdpCredentials.length}</Badge>
+            ) : (
+              <Badge tone={sshCredentials.length ? 'success' : 'warning'}>SSH {sshCredentials.length}</Badge>
+            )}
           </div>
         ),
       },
@@ -51,8 +54,7 @@ export function ServersPage() {
         header: '',
         cell: ({ row }) => (
           <div className='flex justify-end gap-2'>
-            <Button size='sm' variant='primary' onClick={() => app.setModal({ type: 'connect', protocol: 'ssh', serverId: row.original.id })}>SSH</Button>
-            <Button size='sm' variant='outline' onClick={() => app.setModal({ type: 'connect', protocol: 'rdp', serverId: row.original.id })}>RDP</Button>
+            <ConnectButton protocol={serverProtocol(row.original)} server={row.original} />
           </div>
         ),
       },
@@ -124,5 +126,19 @@ export function ServersPage() {
         </CardContent>
       </Card>
     </div>
+  )
+}
+
+function ConnectButton({ protocol, server }: { protocol: Protocol; server: ManagedServer }) {
+  const app = useApp()
+
+  return (
+    <Button
+      size='sm'
+      variant={protocol === 'rdp' ? 'outline' : 'primary'}
+      onClick={() => app.setModal({ type: 'connect', protocol, serverId: server.id })}
+    >
+      {protocol.toUpperCase()}
+    </Button>
   )
 }

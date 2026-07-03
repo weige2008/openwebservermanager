@@ -2,6 +2,7 @@ package guac
 
 import (
 	"bufio"
+	"bytes"
 	"context"
 	"fmt"
 	"io"
@@ -110,6 +111,14 @@ func (t Tunnel) Run(ctx context.Context, browser *ws.Conn, cfg RDPConfig) {
 		}
 		switch op {
 		case 1, 2:
+			payload, err := filterBrowserInstructions(payload)
+			if err != nil {
+				closeSession(err.Error())
+				return
+			}
+			if len(payload) == 0 {
+				continue
+			}
 			if _, err := guacd.Write(payload); err != nil {
 				closeSession(err.Error())
 				return
@@ -122,6 +131,28 @@ func (t Tunnel) Run(ctx context.Context, browser *ws.Conn, cfg RDPConfig) {
 			_ = browser.SendText(Encode("nop"))
 		}
 	}
+}
+
+func filterBrowserInstructions(payload []byte) ([]byte, error) {
+	reader := bufio.NewReader(bytes.NewReader(payload))
+	var out bytes.Buffer
+	for {
+		instruction, raw, err := ReadInstruction(reader)
+		if err != nil {
+			if err == io.EOF {
+				break
+			}
+			return nil, err
+		}
+		// Guacamole WebSocketTunnel uses the empty opcode for tunnel keepalive
+		// messages. guacd only understands protocol instructions, so these stay
+		// inside the browser-to-Go tunnel and are not forwarded upstream.
+		if instruction.Opcode == "" {
+			continue
+		}
+		out.Write(raw)
+	}
+	return out.Bytes(), nil
 }
 
 func (t Tunnel) handshake(conn net.Conn, reader *bufio.Reader, cfg RDPConfig) error {

@@ -238,6 +238,10 @@ func (s *Server) handleCreateSSH(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "credential is not ssh compatible")
 		return
 	}
+	if server.OS != model.ServerOSLinux {
+		writeError(w, http.StatusBadRequest, "ssh is only supported for linux servers")
+		return
+	}
 
 	session, err := s.cfg.Store.CreateSession(model.ConnectionSession{
 		Protocol:     model.ProtocolSSH,
@@ -295,6 +299,10 @@ func (s *Server) handleCreateRDP(w http.ResponseWriter, r *http.Request) {
 	}
 	if credential.Type != model.CredentialRDPPassword {
 		writeError(w, http.StatusBadRequest, "credential is not rdp compatible")
+		return
+	}
+	if server.OS != model.ServerOSWindows {
+		writeError(w, http.StatusBadRequest, "rdp is only supported for windows servers")
 		return
 	}
 

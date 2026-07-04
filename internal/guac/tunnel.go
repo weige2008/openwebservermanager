@@ -61,6 +61,10 @@ func (t Tunnel) Run(ctx context.Context, browser *ws.Conn, cfg RDPConfig) {
 		t.fail(cfg.Session.ID, err)
 		return
 	}
+	if err := browser.SendText(Encode("", cfg.Session.ID)); err != nil {
+		t.fail(cfg.Session.ID, fmt.Errorf("open browser tunnel: %w", err))
+		return
+	}
 
 	_, _ = t.Store.UpdateSession(cfg.Session.ID, func(item *model.ConnectionSession) {
 		item.Status = model.SessionActive

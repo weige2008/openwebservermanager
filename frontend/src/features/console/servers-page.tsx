@@ -100,7 +100,7 @@ function ServerCredentials({ server, credentials }: { server: ManagedServer; cre
             <span className='truncate'>{credential.name}</span>
           </Badge>
           <span className='min-w-0 truncate text-xs text-muted-foreground'>
-            {credential.username} · {credentialLabel(credential.type)}
+            {credential.username} / {credentialLabel(credential.type)}
           </span>
         </div>
       ))}

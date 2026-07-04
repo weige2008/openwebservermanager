@@ -49,6 +49,7 @@ func (t Tunnel) Run(ctx context.Context, browser *ws.Conn, cfg RDPConfig) {
 	if cfg.DPI <= 0 {
 		cfg.DPI = 96
 	}
+	trace := t.newTrace(cfg.Session.ID)
 
 	guacd, err := t.Manager.Dial(ctx)
 	if err != nil {
@@ -92,7 +93,7 @@ func (t Tunnel) Run(ctx context.Context, browser *ws.Conn, cfg RDPConfig) {
 
 	go func() {
 		for {
-			_, raw, err := ReadInstruction(reader)
+			instruction, raw, err := ReadInstruction(reader)
 			if err != nil {
 				if err != io.EOF {
 					closeSession(err.Error())
@@ -101,6 +102,7 @@ func (t Tunnel) Run(ctx context.Context, browser *ws.Conn, cfg RDPConfig) {
 				}
 				return
 			}
+			trace("guacd", instruction, len(raw))
 			if err := browser.SendText(raw); err != nil {
 				closeSession(err.Error())
 				return
@@ -116,7 +118,9 @@ func (t Tunnel) Run(ctx context.Context, browser *ws.Conn, cfg RDPConfig) {
 		}
 		switch op {
 		case 1, 2:
-			payload, err := filterBrowserInstructions(payload)
+			payload, err := filterBrowserInstructions(payload, func(instruction Instruction, raw []byte) {
+				trace("browser", instruction, len(raw))
+			})
 			if err != nil {
 				closeSession(err.Error())
 				return
@@ -138,7 +142,7 @@ func (t Tunnel) Run(ctx context.Context, browser *ws.Conn, cfg RDPConfig) {
 	}
 }
 
-func filterBrowserInstructions(payload []byte) ([]byte, error) {
+func filterBrowserInstructions(payload []byte, trace func(Instruction, []byte)) ([]byte, error) {
 	reader := bufio.NewReader(bytes.NewReader(payload))
 	var out bytes.Buffer
 	for {
@@ -149,6 +153,9 @@ func filterBrowserInstructions(payload []byte) ([]byte, error) {
 			}
 			return nil, err
 		}
+		if trace != nil {
+			trace(instruction, raw)
+		}
 		// Guacamole WebSocketTunnel uses the empty opcode for tunnel keepalive
 		// messages. guacd only understands protocol instructions, so these stay
 		// inside the browser-to-Go tunnel and are not forwarded upstream.
@@ -158,6 +165,34 @@ func filterBrowserInstructions(payload []byte) ([]byte, error) {
 		out.Write(raw)
 	}
 	return out.Bytes(), nil
+}
+
+func (t Tunnel) newTrace(sessionID string) func(string, Instruction, int) {
+	if os.Getenv("SERVERMANAGER_GUAC_TRACE") != "1" || t.Logger == nil {
+		return func(string, Instruction, int) {}
+	}
+	var mu sync.Mutex
+	counts := map[string]int{}
+	t.Logger.Info("guacamole trace enabled", "session", sessionID)
+	return func(direction string, instruction Instruction, rawLen int) {
+		key := direction + ":" + instruction.Opcode
+		mu.Lock()
+		counts[key]++
+		count := counts[key]
+		mu.Unlock()
+		if count > 20 {
+			return
+		}
+		t.Logger.Info(
+			"guacamole instruction",
+			"session", sessionID,
+			"direction", direction,
+			"opcode", instruction.Opcode,
+			"count", count,
+			"args", len(instruction.Args),
+			"bytes", rawLen,
+		)
+	}
 }
 
 func (t Tunnel) handshake(conn net.Conn, reader *bufio.Reader, cfg RDPConfig) error {

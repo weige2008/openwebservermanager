@@ -38,26 +38,24 @@ export function PublicHeader({ authenticated }: { authenticated: boolean }) {
 
   return (
     <>
-      <header className='fixed inset-x-0 top-0 isolate z-[100] pointer-events-auto'>
+      <header className='pointer-events-none fixed inset-x-0 top-0 z-50'>
         <div
           className={cn(
-            'mx-auto transition-all duration-700 ease-[cubic-bezier(0.16,1,0.3,1)]',
-            scrolled ? 'max-w-5xl px-3 pt-3' : 'max-w-7xl px-4 pt-3 md:px-6'
+            'pointer-events-auto mx-auto transition-all duration-700 ease-[cubic-bezier(0.16,1,0.3,1)]',
+            scrolled ? 'max-w-[52rem] px-3 pt-3' : 'max-w-7xl px-4 pt-0 md:px-6'
           )}
         >
           <nav
             className={cn(
-              'relative z-[101] flex min-w-0 items-center justify-between overflow-hidden rounded-2xl border border-border/45 bg-background/82 shadow-[0_10px_32px_-18px_rgb(15_23_42_/_0.45)] backdrop-blur-2xl transition-all duration-700 ease-[cubic-bezier(0.16,1,0.3,1)] dark:bg-background/72',
+              'flex items-center justify-between transition-all duration-700 ease-[cubic-bezier(0.16,1,0.3,1)]',
               scrolled
-                ? 'h-12 pr-1.5 pl-4'
-                : 'h-14 px-3 md:h-16 md:px-4'
+                ? 'h-12 rounded-2xl bg-background/60 pr-1.5 pl-4 shadow-[0_2px_16px_-6px_rgb(0_0_0_/_0.08),0_0_0_0.5px_rgb(0_0_0_/_0.02)] ring-[0.5px] ring-border/50 backdrop-blur-2xl dark:shadow-[0_2px_16px_-6px_rgb(0_0_0_/_0.4)]'
+                : 'h-16 px-2'
             )}
           >
-            <div className='min-w-0 flex-1 pr-2'>
-              <SystemBrand clickable className='w-full max-w-full' />
-            </div>
+            <SystemBrand clickable />
 
-            <div className='hidden shrink-0 items-center gap-0.5 lg:flex'>
+            <div className='hidden items-center gap-0.5 sm:flex'>
               {publicLinks.map((link) => (
                 <a
                   key={link.href}
@@ -79,7 +77,7 @@ export function PublicHeader({ authenticated }: { authenticated: boolean }) {
               </Link>
             </div>
 
-            <div className='flex shrink-0 items-center gap-1 lg:hidden'>
+            <div className='flex items-center gap-1 sm:hidden'>
               <LanguageSwitcher className='size-9' />
               <ThemeSwitch className='size-9' />
               <NotificationButton className='size-9' />
@@ -93,7 +91,7 @@ export function PublicHeader({ authenticated }: { authenticated: boolean }) {
 
       <div
         className={cn(
-          'fixed inset-0 z-[110] bg-background/98 backdrop-blur-2xl transition-all duration-500 ease-[cubic-bezier(0.16,1,0.3,1)] lg:pointer-events-none lg:hidden',
+          'fixed inset-0 z-[60] bg-background/98 backdrop-blur-2xl transition-all duration-500 ease-[cubic-bezier(0.16,1,0.3,1)] sm:pointer-events-none sm:hidden',
           mobileOpen ? 'pointer-events-auto opacity-100' : 'pointer-events-none opacity-0'
         )}
         aria-hidden={!mobileOpen}

@@ -99,8 +99,8 @@ The default script deploys to `/opt/openwebservermanager`, builds the frontend a
 The project version starts at `1.0.0` in `VERSION`. Increment patch, minor, or major versions for each update, then push a matching semantic version tag to trigger the GitHub Actions release workflow:
 
 ```powershell
-git tag v1.0.5
-git push origin v1.0.5
+git tag v1.0.6
+git push origin v1.0.6
 ```
 
 The workflow builds:

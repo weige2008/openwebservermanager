@@ -3,6 +3,7 @@ import { Menu, X } from 'lucide-react'
 import { useEffect, useState } from 'react'
 
 import { useApp } from '@/app/app-provider'
+import { resolvePublicHref } from '@/lib/public-navigation'
 import { cn } from '@/lib/utils'
 
 import { Button } from '../ui/button'
@@ -58,7 +59,7 @@ export function PublicHeader({ authenticated }: { authenticated: boolean }) {
               {publicLinks.map((link) => (
                 <a
                   key={link.href}
-                  href={link.href}
+                  href={link.external ? link.href : resolvePublicHref(link.href)}
                   target={link.external ? '_blank' : undefined}
                   rel={link.external ? 'noreferrer' : undefined}
                   className='rounded-lg px-3 py-1.5 text-[13px] font-medium text-muted-foreground transition-colors duration-200 hover:text-foreground'
@@ -108,7 +109,7 @@ export function PublicHeader({ authenticated }: { authenticated: boolean }) {
               {publicLinks.map((link, index) => (
                 <a
                   key={link.href}
-                  href={link.href}
+                  href={link.external ? link.href : resolvePublicHref(link.href)}
                   target={link.external ? '_blank' : undefined}
                   rel={link.external ? 'noreferrer' : undefined}
                   onClick={() => setMobileOpen(false)}

@@ -99,8 +99,8 @@ The default script deploys to `/opt/servermanager`, builds the frontend and back
 The project version starts at `1.0.0` in `VERSION`. Increment patch, minor, or major versions for each update, then push a matching semantic version tag to trigger the GitHub Actions release workflow:
 
 ```powershell
-git tag v1.0.2
-git push origin v1.0.2
+git tag v1.0.3
+git push origin v1.0.3
 ```
 
 The workflow builds:

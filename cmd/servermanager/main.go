@@ -117,10 +117,10 @@ func publicConfig() app.PublicConfig {
 		GitHubURL: env("SERVERMANAGER_GITHUB_URL", "https://github.com/weige2008/servermanager"),
 		Copyright: env("SERVERMANAGER_COPYRIGHT", "Copyright (c) 2026 weige2008. All rights reserved."),
 		NavLinks: []app.PublicNavLink{
-			{Title: "product", Href: "#product"},
-			{Title: "connections", Href: "#connections"},
-			{Title: "security", Href: "#security"},
-			{Title: "deploy", Href: "#deploy"},
+			{Title: "product", Href: "/#product"},
+			{Title: "connections", Href: "/#connections"},
+			{Title: "security", Href: "/#security"},
+			{Title: "deploy", Href: "/#deploy"},
 			{Title: "about", Href: "/about"},
 		},
 	}

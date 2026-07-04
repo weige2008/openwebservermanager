@@ -3,6 +3,8 @@ import { Link } from '@tanstack/react-router'
 import { useApp } from '@/app/app-provider'
 import { cn } from '@/lib/utils'
 
+import { BrandLogo } from './brand-logo'
+
 export function SystemBrand({
   className,
   clickable = false,
@@ -24,10 +26,8 @@ export function SystemBrand({
         className
       )}
     >
-      <span className={cn('grid place-items-center overflow-hidden rounded-md bg-primary text-primary-foreground shadow-sm', variant === 'auth' ? 'size-8 rounded-full' : 'size-5')}>
-        <span className={cn('rounded-sm bg-primary-foreground/90', variant === 'auth' ? 'size-3.5' : 'size-2.5')} />
-      </span>
-      <span className={cn('max-w-[12rem] truncate', variant === 'auth' ? 'font-medium' : 'font-medium')}>{siteName}</span>
+      <BrandLogo className={variant === 'auth' ? 'size-9' : 'size-6'} title={siteName} />
+      <span className='max-w-[12rem] truncate'>{siteName}</span>
     </span>
   )
 

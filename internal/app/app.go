@@ -156,10 +156,10 @@ func (s *Server) handlePublicConfig(w http.ResponseWriter, _ *http.Request) {
 	}
 	if len(cfg.NavLinks) == 0 {
 		cfg.NavLinks = []PublicNavLink{
-			{Title: "product", Href: "#product"},
-			{Title: "connections", Href: "#connections"},
-			{Title: "security", Href: "#security"},
-			{Title: "deploy", Href: "#deploy"},
+			{Title: "product", Href: "/#product"},
+			{Title: "connections", Href: "/#connections"},
+			{Title: "security", Href: "/#security"},
+			{Title: "deploy", Href: "/#deploy"},
 			{Title: "about", Href: "/about"},
 		}
 	}

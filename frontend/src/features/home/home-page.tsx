@@ -23,8 +23,10 @@ import { useCallback, useEffect, useRef, useState, type ReactNode } from 'react'
 import { useTranslation } from 'react-i18next'
 
 import { useApp } from '@/app/app-provider'
+import { BrandLogo } from '@/components/layout/brand-logo'
 import { PublicHeader } from '@/components/layout/public-header'
 import { Button, buttonVariants } from '@/components/ui/button'
+import { resolvePublicHref } from '@/lib/public-navigation'
 import { cn } from '@/lib/utils'
 
 type Pair = [string, string]
@@ -939,9 +941,7 @@ function PublicFooter({
       <div className='mx-auto grid w-[min(72rem,calc(100%-2rem))] gap-8 py-10 md:grid-cols-[1.2fr_0.8fr_0.8fr]'>
         <div>
           <div className='inline-flex items-center gap-2 text-sm font-semibold'>
-            <span className='grid size-6 place-items-center rounded-md bg-gradient-to-br from-blue-500 via-violet-500 to-purple-500 text-white'>
-              <span className='size-3 rounded-sm bg-white/90' />
-            </span>
+            <BrandLogo className='size-7' title={siteName} />
             {siteName}
           </div>
           <p className='mt-3 max-w-sm text-sm leading-6 text-muted-foreground'>{copy.footerBody}</p>
@@ -983,7 +983,7 @@ function FooterColumn({ title, links }: { title: string; links: Array<[string | 
       <h3 className='text-xs font-semibold tracking-[0.12em] text-muted-foreground uppercase'>{title}</h3>
       <div className='mt-4 grid gap-2'>
         {links.map(([label, href]) => (
-          <a key={href} href={href} className='text-sm text-muted-foreground transition-colors hover:text-foreground'>
+          <a key={href} href={resolvePublicHref(href)} className='text-sm text-muted-foreground transition-colors hover:text-foreground'>
             {label}
           </a>
         ))}

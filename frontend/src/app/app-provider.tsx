@@ -48,10 +48,10 @@ const defaultPublicConfig: PublicConfig = {
   github_url: 'https://github.com/weige2008/servermanager',
   copyright: 'Copyright (c) 2026 weige2008. All rights reserved.',
   nav_links: [
-    { title: 'product', href: '#product' },
-    { title: 'connections', href: '#connections' },
-    { title: 'security', href: '#security' },
-    { title: 'deploy', href: '#deploy' },
+    { title: 'product', href: '/#product' },
+    { title: 'connections', href: '/#connections' },
+    { title: 'security', href: '/#security' },
+    { title: 'deploy', href: '/#deploy' },
     { title: 'about', href: '/about' },
   ],
 }

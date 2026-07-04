@@ -1,5 +1,5 @@
 import type { ColumnDef } from '@tanstack/react-table'
-import { KeyRound, Plus } from 'lucide-react'
+import { KeyRound, Plus, ServerCog } from 'lucide-react'
 import { useMemo } from 'react'
 import { useTranslation } from 'react-i18next'
 
@@ -29,7 +29,7 @@ export function ServersPage() {
       { header: t('os'), cell: ({ row }) => <Badge tone={row.original.os === 'windows' ? 'info' : 'neutral'}>{osLabel(row.original.os)}</Badge> },
       { header: t('ports'), cell: ({ row }) => row.original.os === 'windows' ? `RDP ${row.original.rdp_port || 3389}` : `SSH ${row.original.ssh_port || 22}` },
       {
-        header: t('credentials'),
+        header: t('connectionAccounts'),
         cell: ({ row }) => <ServerCredentials server={row.original} credentials={app.data.credentials} />,
       },
       { header: t('group'), accessorFn: (row) => row.group || '-' },
@@ -47,13 +47,16 @@ export function ServersPage() {
     <Card>
       <CardHeader className='gap-3 max-sm:grid-cols-1'>
         <div>
-          <CardTitle>{t('serversPage.title')}</CardTitle>
+          <CardTitle className='flex items-center gap-2'>
+            <ServerCog className='size-5 text-primary' />
+            {t('serversPage.title')}
+          </CardTitle>
           <CardDescription>{t('serversPage.description')}</CardDescription>
         </div>
         <div className='flex flex-wrap justify-end gap-2 max-sm:justify-start'>
           <Button variant='primary' onClick={() => app.setModal({ type: 'server' })}>
             <Plus className='size-4' />
-            {t('addServer')}
+            {t('addAsset')}
           </Button>
         </div>
       </CardHeader>
@@ -90,12 +93,16 @@ function ServerCredentials({ server, credentials }: { server: ManagedServer; cre
   }
 
   return (
-    <div className='flex max-w-72 flex-wrap gap-1.5'>
+    <div className='grid max-w-80 gap-1.5'>
       {items.slice(0, 3).map((credential) => (
-        <Badge key={credential.id} tone={credential.server_id ? 'success' : 'neutral'} className='max-w-full'>
-          <span className='truncate'>{credential.name}</span>
-          <span className='text-muted-foreground'>({credentialLabel(credential.type)})</span>
-        </Badge>
+        <div key={credential.id} className='flex min-w-0 items-center gap-1.5'>
+          <Badge tone={credential.server_id ? 'success' : 'neutral'} className='max-w-full'>
+            <span className='truncate'>{credential.name}</span>
+          </Badge>
+          <span className='min-w-0 truncate text-xs text-muted-foreground'>
+            {credential.username} · {credentialLabel(credential.type)}
+          </span>
+        </div>
       ))}
       {items.length > 3 ? <Badge tone='info'>+{items.length - 3}</Badge> : null}
     </div>

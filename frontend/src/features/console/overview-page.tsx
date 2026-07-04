@@ -57,7 +57,7 @@ export function OverviewPage() {
                 <p className='mt-1 max-w-2xl text-sm text-muted-foreground'>{t('overviewPage.description')}</p>
               </div>
               <div className='flex flex-wrap gap-2'>
-                <Link to='/app/servers' className={buttonVariants({ variant: 'outline' })}>{t('overviewPage.manageCredentials')}</Link>
+                <Link to='/app/servers' className={buttonVariants({ variant: 'outline' })}>{t('overviewPage.manageAssets')}</Link>
                 <Link to='/app/servers' className={buttonVariants({ variant: 'primary' })}>{t('overviewPage.openServers')}</Link>
               </div>
             </div>
@@ -100,7 +100,7 @@ export function OverviewPage() {
         <Card>
           <CardHeader>
             <div>
-              <CardTitle>{t('overviewPage.quickServers')}</CardTitle>
+              <CardTitle>{t('overviewPage.quickAssets')}</CardTitle>
             </div>
             <Link to='/app/servers' className={buttonVariants({ variant: 'ghost' })}>{t('overviewPage.manage')}</Link>
           </CardHeader>

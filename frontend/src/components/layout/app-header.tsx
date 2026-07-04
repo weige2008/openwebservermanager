@@ -1,6 +1,6 @@
 import { Dialog as BaseDialog } from '@base-ui/react/dialog'
 import { Link, useNavigate, useRouterState } from '@tanstack/react-router'
-import { KeyRound, LogOut, Menu, Plus, RefreshCw, UserCircle, X } from 'lucide-react'
+import { LogOut, Menu, Plus, RefreshCw, UserCircle, X } from 'lucide-react'
 import { useState } from 'react'
 
 import { useApp } from '@/app/app-provider'
@@ -19,8 +19,8 @@ import { SystemBrand } from './system-brand'
 
 const pageTitleKeys: Record<string, string> = {
   '/app': 'overview',
-  '/app/servers': 'servers',
-  '/app/credentials': 'servers',
+  '/app/servers': 'assets',
+  '/app/credentials': 'assets',
   '/app/sessions': 'sessions',
   '/app/audit': 'audit',
 }
@@ -29,9 +29,7 @@ export function AppHeader({ sidebarOpen, onToggleSidebar }: { sidebarOpen: boole
   const app = useApp()
   const navigate = useNavigate()
   const pathname = useRouterState({ select: (state) => state.location.pathname })
-  const title = pathname === '/app/servers' || pathname === '/app/credentials'
-    ? `${app.t('servers')} / ${app.t('credentials')}`
-    : app.t(pageTitleKeys[pathname] || 'dashboard')
+  const title = app.t(pageTitleKeys[pathname] || 'dashboard')
   const [mobileOpen, setMobileOpen] = useState(false)
 
   const handleSidebarButton = () => {
@@ -64,7 +62,7 @@ export function AppHeader({ sidebarOpen, onToggleSidebar }: { sidebarOpen: boole
           <div className='ms-auto flex min-w-0 items-center gap-1 sm:gap-2'>
             <div className='hidden lg:flex'>
               <Link to='/app/servers' className={buttonVariants({ variant: 'ghost', size: 'sm' })}>
-                {app.t('servers')} / {app.t('credentials')}
+                {app.t('assets')}
               </Link>
               <Link to='/app/sessions' className={buttonVariants({ variant: 'ghost', size: 'sm' })}>
                 {app.t('sessions')}
@@ -76,13 +74,9 @@ export function AppHeader({ sidebarOpen, onToggleSidebar }: { sidebarOpen: boole
                 <RefreshCw className='size-4' />
                 <span>{app.t('refresh')}</span>
               </Button>
-              <Button size='sm' variant='outline' onClick={() => app.setModal({ type: 'credential' })}>
-                <KeyRound className='size-4' />
-                <span>{app.t('credentials')}</span>
-              </Button>
               <Button size='sm' variant='primary' onClick={() => app.setModal({ type: 'server' })}>
                 <Plus className='size-4' />
-                <span>{app.t('servers')}</span>
+                <span>{app.t('addAsset')}</span>
               </Button>
             </div>
             <NotificationButton size='icon-sm' className='rounded-md' />
@@ -128,7 +122,7 @@ function MobileNavDrawer({
               {consoleNavItems.map((item) => {
                 const Icon = item.icon
                 const active = item.to === '/app' ? pathname === '/app' : pathname.startsWith(item.to)
-                const label = item.to === '/app/servers' ? `${app.t('servers')} / ${app.t('credentials')}` : app.t(item.label)
+                const label = item.to === '/app/servers' ? app.t('assets') : app.t(item.label)
                 return (
                   <Link
                     key={item.to}
@@ -153,17 +147,6 @@ function MobileNavDrawer({
                 {app.t('refreshData')}
               </Button>
               <Button
-                variant='outline'
-                className='justify-start'
-                onClick={() => {
-                  app.setModal({ type: 'credential' })
-                  close()
-                }}
-              >
-                <KeyRound className='size-4' />
-                {app.t('addCredential')}
-              </Button>
-              <Button
                 variant='primary'
                 className='justify-start'
                 onClick={() => {
@@ -172,7 +155,7 @@ function MobileNavDrawer({
                 }}
               >
                 <Plus className='size-4' />
-                {app.t('addServer')}
+                {app.t('addAsset')}
               </Button>
             </div>
           </div>

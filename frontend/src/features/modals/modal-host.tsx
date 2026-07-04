@@ -249,7 +249,7 @@ function CredentialDialog() {
   const { t } = useTranslation()
   const [submitting, setSubmitting] = useState(false)
   const modal = app.modal?.type === 'credential' ? app.modal : null
-  const server = modal?.serverId ? app.data.servers.find((item) => item.id === modal.serverId) : undefined
+  const server = modal ? app.data.servers.find((item) => item.id === modal.serverId) : undefined
   const [credentialType, setCredentialType] = useState<CredentialType>(server?.os === 'windows' ? 'rdp_password' : 'ssh_password')
 
   const onSubmit = async (event: FormEvent<HTMLFormElement>) => {
@@ -257,6 +257,7 @@ function CredentialDialog() {
     setSubmitting(true)
     const form = new FormData(event.currentTarget)
     try {
+      if (!server) throw new Error(t('modals.selectAssetForCredentialTitle'))
       const password = String(form.get('password') || '')
       const privateKey = String(form.get('private_key') || '').trim()
       if (credentialType === 'ssh_key' && !privateKey) throw new Error(t('modals.privateKeyRequired'))
@@ -265,7 +266,7 @@ function CredentialDialog() {
       await apiRequest<Credential>('/api/credentials', {
         method: 'POST',
         body: JSON.stringify({
-          server_id: server?.id || '',
+          server_id: server.id,
           name: String(form.get('name') || ''),
           type: credentialType,
           username: String(form.get('username') || ''),
@@ -287,6 +288,14 @@ function CredentialDialog() {
 
   const title = server ? t('modals.addServerCredentialTitle', { name: server.name }) : t('modals.addCredentialTitle')
   const description = server ? t('modals.addServerCredentialDescription') : t('modals.addCredentialDescription')
+
+  if (!server) {
+    return (
+      <DialogShell compact open onOpenChange={(open) => !open && app.setModal(null)} title={t('modals.selectAssetForCredentialTitle')} description={t('modals.selectAssetForCredentialDescription')}>
+        <EmptyState title={t('modals.selectAssetForCredentialTitle')} body={t('modals.selectAssetForCredentialDescription')} />
+      </DialogShell>
+    )
+  }
 
   return (
     <DialogShell open onOpenChange={(open) => !open && app.setModal(null)} title={title} description={description}>

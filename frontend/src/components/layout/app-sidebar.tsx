@@ -8,7 +8,7 @@ import { Badge } from '../ui/badge'
 
 export const consoleNavItems = [
   { to: '/app', label: 'overview', icon: Home },
-  { to: '/app/servers', label: 'servers', icon: Server },
+  { to: '/app/servers', label: 'assets', icon: Server },
   { to: '/app/sessions', label: 'sessions', icon: MonitorUp },
   { to: '/app/audit', label: 'audit', icon: FileClock },
 ] as const

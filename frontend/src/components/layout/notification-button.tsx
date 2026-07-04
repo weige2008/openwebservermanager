@@ -21,6 +21,7 @@ export function NotificationButton({
 }) {
   const { data } = useApp()
   const { t } = useTranslation()
+  const productName = t('productName')
   const [activeTab, setActiveTab] = useState<'notice' | 'timeline'>('notice')
   const readKeys = useNotificationStore((state) => state.readKeys)
   const markRead = useNotificationStore((state) => state.markRead)
@@ -61,8 +62,8 @@ export function NotificationButton({
         <span className='sr-only'>{t('notifications')}</span>
       </BaseMenu.Trigger>
       <BaseMenu.Portal>
-        <BaseMenu.Positioner sideOffset={8} align='end'>
-          <BaseMenu.Popup className='z-50 grid w-[min(26rem,calc(100vw-1rem))] gap-3 rounded-xl bg-popover p-3 text-sm text-popover-foreground shadow-md ring-1 ring-foreground/10 outline-none'>
+        <BaseMenu.Positioner sideOffset={8} align='end' className='z-[200]'>
+          <BaseMenu.Popup className='z-[200] grid w-[min(26rem,calc(100vw-1rem))] gap-3 rounded-xl bg-popover p-3 text-sm text-popover-foreground shadow-md ring-1 ring-foreground/10 outline-none'>
             <div className='px-1'>
               <div className='font-medium'>{t('systemAnnouncements')}</div>
               <p className='mt-1 text-xs text-muted-foreground'>{t('latestUpdates')}</p>
@@ -80,7 +81,7 @@ export function NotificationButton({
                 <div className='flex items-start gap-3'>
                   <Bell className='mt-0.5 size-4 text-muted-foreground' />
                   <div>
-                    <div className='font-medium'>{t('connectionWorkspaceLive')}</div>
+                    <div className='font-medium'>{t('connectionWorkspaceLive', { productName })}</div>
                     <p className='mt-1 text-xs leading-5 text-muted-foreground'>{t('connectionWorkspaceLiveBody')}</p>
                   </div>
                 </div>

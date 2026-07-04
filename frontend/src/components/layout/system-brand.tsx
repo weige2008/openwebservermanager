@@ -1,6 +1,6 @@
 import { Link } from '@tanstack/react-router'
+import { useTranslation } from 'react-i18next'
 
-import { useApp } from '@/app/app-provider'
 import { cn } from '@/lib/utils'
 
 import { BrandLogo } from './brand-logo'
@@ -14,26 +14,28 @@ export function SystemBrand({
   clickable?: boolean
   variant?: 'inline' | 'auth'
 }) {
-  const { publicConfig } = useApp()
-  const siteName = publicConfig.site_name || 'openwebservermanager'
+  const { t } = useTranslation()
+  const siteName = t('productName')
 
   const content = (
     <span
       className={cn(
-        'inline-flex items-center gap-1.5 rounded-md text-sm font-medium transition-colors',
-        variant === 'inline' && 'h-7 px-1.5 hover:bg-accent',
+        'inline-flex min-w-0 items-center rounded-md text-sm font-medium transition-colors',
+        variant === 'inline' && 'min-h-7 gap-1.5 px-1.5 py-0.5 hover:bg-accent',
         variant === 'auth' && 'gap-2 text-xl',
         className
       )}
     >
       <BrandLogo className={variant === 'auth' ? 'size-9' : 'size-6'} title={siteName} />
-      <span className='max-w-[12rem] truncate'>{siteName}</span>
+      <span className={cn('min-w-0 text-left leading-tight whitespace-normal break-words', variant === 'inline' ? 'max-w-[8.5rem] sm:max-w-[11rem]' : 'max-w-[18rem]')}>
+        {siteName}
+      </span>
     </span>
   )
 
   if (!clickable) return content
   return (
-    <Link to='/' className='transition-opacity hover:opacity-80'>
+    <Link to='/' className='inline-flex min-w-0 transition-opacity hover:opacity-80'>
       {content}
     </Link>
   )

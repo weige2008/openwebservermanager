@@ -44,6 +44,7 @@ function AboutContent() {
   const app = useApp()
   const { t } = useTranslation()
   const version = app.publicConfig.version || 'dev'
+  const productName = t('productName')
 
   return (
     <section className='grid gap-4'>
@@ -51,8 +52,8 @@ function AboutContent() {
         <div className='flex flex-wrap items-start justify-between gap-4'>
           <div>
             <p className='text-xs font-medium tracking-[0.14em] text-muted-foreground uppercase'>{t('about')}</p>
-            <h1 className='mt-2 text-2xl font-semibold tracking-tight md:text-3xl'>{t('aboutPage.title')}</h1>
-            <p className='mt-3 max-w-3xl text-sm leading-6 text-muted-foreground'>{t('aboutPage.description')}</p>
+            <h1 className='mt-2 text-2xl font-semibold tracking-tight md:text-3xl'>{t('aboutPage.title', { productName })}</h1>
+            <p className='mt-3 max-w-3xl text-sm leading-6 text-muted-foreground'>{t('aboutPage.description', { productName })}</p>
           </div>
           <div className='rounded-lg border border-border bg-muted/30 px-3 py-2 font-mono text-xs'>
             {t('version')} {version}

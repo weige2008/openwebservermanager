@@ -32,6 +32,7 @@ export function AppHeader({ sidebarOpen, onToggleSidebar }: { sidebarOpen: boole
   const navigate = useNavigate()
   const pathname = useRouterState({ select: (state) => state.location.pathname })
   const title = app.t(pageTitleKeys[pathname] || 'dashboard')
+  const productName = app.t('productNameShort')
   const [mobileOpen, setMobileOpen] = useState(false)
 
   const handleSidebarButton = () => {
@@ -59,7 +60,7 @@ export function AppHeader({ sidebarOpen, onToggleSidebar }: { sidebarOpen: boole
             <SystemBrand clickable />
           </div>
           <div className='hidden min-w-0 border-l border-border pl-3 md:block'>
-            <div className='text-xs text-muted-foreground'>openwebservermanager / {title}</div>
+            <div className='text-xs text-muted-foreground'>{productName} / {title}</div>
           </div>
           <div className='ms-auto flex min-w-0 items-center gap-1 sm:gap-2'>
             <div className='hidden lg:flex'>
@@ -110,8 +111,8 @@ function MobileNavDrawer({
   return (
     <BaseDialog.Root open={open} onOpenChange={onOpenChange}>
       <BaseDialog.Portal>
-        <BaseDialog.Backdrop className='fixed inset-0 z-50 bg-black/45 md:hidden' />
-        <BaseDialog.Popup className='fixed inset-y-0 left-0 z-50 flex w-[min(17rem,calc(100vw-2rem))] flex-col border-r border-sidebar-border bg-sidebar text-sidebar-foreground shadow-2xl outline-none md:hidden'>
+        <BaseDialog.Backdrop className='fixed inset-0 z-[200] bg-black/45 md:hidden' />
+        <BaseDialog.Popup className='fixed inset-y-0 left-0 z-[200] flex w-[min(17rem,calc(100vw-2rem))] flex-col border-r border-sidebar-border bg-sidebar text-sidebar-foreground shadow-2xl outline-none md:hidden'>
           <div className='flex h-[var(--app-header-height)] items-center justify-between border-b border-sidebar-border px-4'>
             <SystemBrand clickable />
             <BaseDialog.Close render={<Button size='icon-sm' variant='ghost' aria-label={app.t('closeMenu')} />}>

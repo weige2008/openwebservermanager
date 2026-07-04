@@ -11,6 +11,7 @@ import (
 	"os"
 	"path/filepath"
 	"strconv"
+	"strings"
 	"sync"
 	"time"
 
@@ -199,6 +200,9 @@ func (t Tunnel) handshake(conn net.Conn, reader *bufio.Reader, cfg RDPConfig) er
 }
 
 func (t Tunnel) argValue(name string, cfg RDPConfig) string {
+	if strings.HasPrefix(name, "VERSION_") {
+		return name
+	}
 	recordingPath := cfg.Session.RecordingPath
 	drivePath := filepath.Join(t.DataDir, "drives", cfg.Session.ID)
 	recordingEnabled := recordingPath != ""

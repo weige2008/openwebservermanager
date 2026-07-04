@@ -200,7 +200,12 @@ function RDPWorkspace({
     const tunnel = new Guacamole.WebSocketTunnel(`${proto}://${window.location.host}/api/connections/rdp/${session.id}/tunnel?width=${width}&height=${height}&dpi=96`)
     const client = new Guacamole.Client(tunnel)
     clientRef.current = client
-    container.appendChild(client.getDisplay().getElement())
+    const display = client.getDisplay().getElement()
+    display.style.position = 'relative'
+    display.style.zIndex = '0'
+    display.style.isolation = 'isolate'
+    display.style.backgroundColor = '#000'
+    container.replaceChildren(display)
     client.connect('')
 
     const mouse = new Guacamole.Mouse(client.getDisplay().getElement())
@@ -260,5 +265,5 @@ function RDPWorkspace({
     }
   }, [messages, session.id, setStatus, showToast])
 
-  return <div ref={containerRef} className='h-[calc(100vh-52px)] overflow-hidden bg-background max-md:h-[calc(100vh-120px)]' />
+  return <div ref={containerRef} className='h-[calc(100vh-52px)] overflow-hidden bg-black max-md:h-[calc(100vh-120px)]' />
 }

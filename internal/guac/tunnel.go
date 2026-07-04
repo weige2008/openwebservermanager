@@ -190,9 +190,31 @@ func (t Tunnel) newTrace(sessionID string) func(string, Instruction, int) {
 			"opcode", instruction.Opcode,
 			"count", count,
 			"args", len(instruction.Args),
+			"sample", summarizeTraceArgs(instruction),
 			"bytes", rawLen,
 		)
 	}
+}
+
+func summarizeTraceArgs(instruction Instruction) []string {
+	switch instruction.Opcode {
+	case "blob":
+		if len(instruction.Args) >= 2 {
+			return []string{instruction.Args[0], fmt.Sprintf("<%d chars>", len(instruction.Args[1]))}
+		}
+	case "img", "copy", "size", "cursor", "sync", "mouse", "key", "ack", "ready", "disconnect", "filesystem":
+		return trimTraceArgs(instruction.Args, 10)
+	}
+	return trimTraceArgs(instruction.Args, 4)
+}
+
+func trimTraceArgs(args []string, limit int) []string {
+	if len(args) <= limit {
+		return args
+	}
+	out := append([]string{}, args[:limit]...)
+	out = append(out, fmt.Sprintf("<+%d args>", len(args)-limit))
+	return out
 }
 
 func (t Tunnel) handshake(conn net.Conn, reader *bufio.Reader, cfg RDPConfig) error {
@@ -249,31 +271,36 @@ func (t Tunnel) argValue(name string, cfg RDPConfig) string {
 	_ = ensureGuacdWritableDir(drivePath)
 
 	values := map[string]string{
-		"hostname":                 cfg.Server.Host,
-		"port":                     strconv.Itoa(cfg.Server.RDPPort),
-		"username":                 cfg.Credential.Username,
-		"password":                 cfg.Secret.Password,
-		"domain":                   cfg.Credential.Domain,
-		"security":                 "any",
-		"ignore-cert":              "true",
-		"enable-wallpaper":         "true",
-		"enable-theming":           "true",
-		"resize-method":            "display-update",
-		"enable-drive":             "true",
-		"drive-name":               "ServerManager",
-		"drive-path":               drivePath,
-		"create-drive-path":        "true",
-		"enable-recording":         boolString(recordingEnabled),
-		"recording-path":           recordingPath,
-		"create-recording-path":    boolString(recordingEnabled),
-		"recording-name":           cfg.Session.ID,
-		"recording-exclude-output": "false",
-		"recording-exclude-mouse":  "false",
-		"recording-include-keys":   "false",
-		"console":                  "false",
-		"width":                    strconv.Itoa(cfg.Width),
-		"height":                   strconv.Itoa(cfg.Height),
-		"dpi":                      strconv.Itoa(cfg.DPI),
+		"hostname":                  cfg.Server.Host,
+		"port":                      strconv.Itoa(cfg.Server.RDPPort),
+		"username":                  cfg.Credential.Username,
+		"password":                  cfg.Secret.Password,
+		"domain":                    cfg.Credential.Domain,
+		"security":                  "any",
+		"ignore-cert":               "true",
+		"color-depth":               "24",
+		"enable-wallpaper":          "false",
+		"enable-theming":            "false",
+		"disable-bitmap-caching":    "true",
+		"disable-offscreen-caching": "true",
+		"disable-glyph-caching":     "true",
+		"initial-program":           "explorer.exe",
+		"resize-method":             "display-update",
+		"enable-drive":              "true",
+		"drive-name":                "ServerManager",
+		"drive-path":                drivePath,
+		"create-drive-path":         "true",
+		"enable-recording":          boolString(recordingEnabled),
+		"recording-path":            recordingPath,
+		"create-recording-path":     boolString(recordingEnabled),
+		"recording-name":            cfg.Session.ID,
+		"recording-exclude-output":  "false",
+		"recording-exclude-mouse":   "false",
+		"recording-include-keys":    "false",
+		"console":                   "false",
+		"width":                     strconv.Itoa(cfg.Width),
+		"height":                    strconv.Itoa(cfg.Height),
+		"dpi":                       strconv.Itoa(cfg.DPI),
 	}
 	return values[name]
 }

@@ -7,9 +7,60 @@ import { Button } from '@/components/ui/button'
 import { DialogShell } from '@/components/ui/dialog'
 import { EmptyState } from '@/components/ui/empty-state'
 import { Field, Input, Select, Textarea } from '@/components/ui/field'
+import { INTERFACE_LANGUAGE_OPTIONS } from '@/i18n/languages'
 import { apiRequest } from '@/lib/api'
 import { credentialsForServer, formatDate, serverSupportsProtocol } from '@/lib/utils'
-import type { ConnectionSession, Credential, CredentialType, Locale, ManagedServer, Protocol, ServerOS, Theme, ThemeContentLayout, ThemeSidebarStyle } from '@/types'
+import type {
+  ConnectionSession,
+  Credential,
+  CredentialType,
+  Locale,
+  ManagedServer,
+  Protocol,
+  ServerOS,
+  Theme,
+  ThemeContentLayout,
+  ThemeFont,
+  ThemePreset,
+  ThemeRadius,
+  ThemeScale,
+  ThemeSidebarStyle,
+} from '@/types'
+
+const presetOptions: Array<{ value: ThemePreset; label: string }> = [
+  { value: 'default', label: 'Default' },
+  { value: 'anthropic', label: 'Anthropic' },
+  { value: 'simple-large', label: 'Simple Large-font' },
+  { value: 'underground', label: 'Underground' },
+  { value: 'rose-garden', label: 'Rose Garden' },
+  { value: 'lake-view', label: 'Lake View' },
+  { value: 'sunset-glow', label: 'Sunset Glow' },
+  { value: 'forest-whisper', label: 'Forest Whisper' },
+  { value: 'ocean-breeze', label: 'Ocean Breeze' },
+  { value: 'lavender-dream', label: 'Lavender Dream' },
+]
+
+const fontOptions: Array<{ value: ThemeFont; labelKey: string }> = [
+  { value: 'default', labelKey: 'auto' },
+  { value: 'sans', labelKey: 'sans' },
+  { value: 'serif', labelKey: 'serif' },
+]
+
+const radiusOptions: Array<{ value: ThemeRadius; label: string }> = [
+  { value: 'default', label: 'Auto' },
+  { value: 'none', label: '0' },
+  { value: 'sm', label: '0.3' },
+  { value: 'md', label: '0.5' },
+  { value: 'lg', label: '0.75' },
+  { value: 'xl', label: '1.0' },
+]
+
+const scaleOptions: Array<{ value: ThemeScale; labelKey: string }> = [
+  { value: 'sm', labelKey: 'compact' },
+  { value: 'default', labelKey: 'default' },
+  { value: 'lg', labelKey: 'comfortable' },
+  { value: 'xl', labelKey: 'large' },
+]
 
 export function ModalHost() {
   const app = useApp()
@@ -68,13 +119,37 @@ function SettingsDialog() {
         </Field>
         <Field label={t('language')}>
           <Select value={app.locale} onChange={(event) => app.setLocale(event.currentTarget.value as Locale)}>
-            <option value='zh'>简体中文</option>
-            <option value='en'>English</option>
-            <option value='zh-TW'>繁體中文</option>
-            <option value='fr'>Français</option>
-            <option value='ru'>Русский</option>
-            <option value='ja'>日本語</option>
-            <option value='vi'>Tiếng Việt</option>
+            {INTERFACE_LANGUAGE_OPTIONS.map((option) => (
+              <option key={option.code} value={option.code}>{option.label}</option>
+            ))}
+          </Select>
+        </Field>
+        <Field label={t('colorPreset')}>
+          <Select value={app.appearance.preset} onChange={(event) => app.setAppearance({ preset: event.currentTarget.value as ThemePreset })}>
+            {presetOptions.map((option) => (
+              <option key={option.value} value={option.value}>{t(`preset.${option.value}`, { defaultValue: option.label })}</option>
+            ))}
+          </Select>
+        </Field>
+        <Field label={t('font')}>
+          <Select value={app.appearance.font} onChange={(event) => app.setAppearance({ font: event.currentTarget.value as ThemeFont })}>
+            {fontOptions.map((option) => (
+              <option key={option.value} value={option.value}>{t(option.labelKey)}</option>
+            ))}
+          </Select>
+        </Field>
+        <Field label={t('borderRadius')}>
+          <Select value={app.appearance.radius} onChange={(event) => app.setAppearance({ radius: event.currentTarget.value as ThemeRadius })}>
+            {radiusOptions.map((option) => (
+              <option key={option.value} value={option.value}>{option.label}</option>
+            ))}
+          </Select>
+        </Field>
+        <Field label={t('density')}>
+          <Select value={app.appearance.scale} onChange={(event) => app.setAppearance({ scale: event.currentTarget.value as ThemeScale })}>
+            {scaleOptions.map((option) => (
+              <option key={option.value} value={option.value}>{t(option.labelKey)}</option>
+            ))}
           </Select>
         </Field>
         <Field label={t('contentWidth')}>

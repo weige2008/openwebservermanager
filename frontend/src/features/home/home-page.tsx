@@ -19,7 +19,7 @@ import {
   TerminalSquare,
   type LucideIcon,
 } from 'lucide-react'
-import { useCallback, useEffect, useRef, useState, type ReactNode } from 'react'
+import { useCallback, useEffect, useRef, useState, type ReactNode, type RefObject } from 'react'
 import { useTranslation } from 'react-i18next'
 
 import { useApp } from '@/app/app-provider'
@@ -131,6 +131,7 @@ const securityIcons = [LockKeyhole, KeyRound, ShieldCheck]
 export function HomePage() {
   const { auth, publicConfig, setupRequired } = useApp()
   const { t } = useTranslation()
+  const landingRootRef = useRef<HTMLDivElement>(null)
   const copy = t('home', { returnObjects: true }) as HomeCopy
   const authenticated = Boolean(auth)
   const entryTo = authenticated ? '/app' : '/login'
@@ -139,8 +140,10 @@ export function HomePage() {
   const githubUrl = publicConfig.github_url || 'https://github.com/weige2008/openwebservermanager'
   const copyright = publicConfig.copyright || 'Copyright (c) 2026 weige2008. All rights reserved.'
 
+  useLandingScrollAnimations(landingRootRef)
+
   return (
-    <div className='min-h-svh overflow-x-clip bg-background text-foreground'>
+    <div ref={landingRootRef} className='min-h-svh overflow-x-clip bg-background text-foreground'>
       <PublicHeader authenticated={authenticated} />
       <main className='bg-background text-foreground w-full'>
         <HeroSection copy={copy} entryText={entryText} entryTo={entryTo} siteName={siteName} />
@@ -153,6 +156,36 @@ export function HomePage() {
       <PublicFooter siteName={siteName} entryTo={entryTo} entryText={entryText} copy={copy} githubUrl={githubUrl} copyright={copyright} />
     </div>
   )
+}
+
+function useLandingScrollAnimations(rootRef: RefObject<HTMLElement | null>) {
+  useEffect(() => {
+    const root = rootRef.current
+    if (!root) return
+
+    const elements = Array.from(root.querySelectorAll<HTMLElement>('[class*="landing-animate-"]'))
+    if (elements.length === 0) return
+
+    const reducedMotion = window.matchMedia('(prefers-reduced-motion: reduce)').matches
+    if (reducedMotion || typeof IntersectionObserver === 'undefined') {
+      elements.forEach((element) => element.classList.add('is-in-view'))
+      return
+    }
+
+    const observer = new IntersectionObserver(
+      (entries) => {
+        entries.forEach((entry) => {
+          if (!entry.isIntersecting) return
+          entry.target.classList.add('is-in-view')
+          observer.unobserve(entry.target)
+        })
+      },
+      { threshold: 0.15, rootMargin: '0px 0px -40px 0px' }
+    )
+
+    elements.forEach((element) => observer.observe(element))
+    return () => observer.disconnect()
+  }, [rootRef])
 }
 
 function HeroSection(props: { copy: HomeCopy; entryTo: string; entryText: string; siteName: string }) {

@@ -454,19 +454,40 @@ For commercial licensing, please contact support@quantumnous.com
   }
 }
 
-.landing-animate-fade-up {
+.landing-animate-fade-up,
+.landing-animate-fade-in,
+.landing-animate-scale-in,
+.landing-animate-fade-left,
+.landing-animate-fade-right {
+  will-change: transform, opacity;
+}
+
+.landing-animate-fade-up:not(.is-in-view) {
+  transform: translateY(24px);
+}
+.landing-animate-scale-in:not(.is-in-view) {
+  transform: scale(0.95);
+}
+.landing-animate-fade-left:not(.is-in-view) {
+  transform: translateX(24px);
+}
+.landing-animate-fade-right:not(.is-in-view) {
+  transform: translateX(-24px);
+}
+
+.landing-animate-fade-up.is-in-view {
   animation: landing-fade-up 0.6s cubic-bezier(0.16, 1, 0.3, 1) both;
 }
-.landing-animate-fade-in {
+.landing-animate-fade-in.is-in-view {
   animation: landing-fade-in 0.6s ease-out both;
 }
-.landing-animate-scale-in {
+.landing-animate-scale-in.is-in-view {
   animation: landing-scale-in 0.6s cubic-bezier(0.16, 1, 0.3, 1) both;
 }
-.landing-animate-fade-left {
+.landing-animate-fade-left.is-in-view {
   animation: landing-fade-left 0.6s cubic-bezier(0.16, 1, 0.3, 1) both;
 }
-.landing-animate-fade-right {
+.landing-animate-fade-right.is-in-view {
   animation: landing-fade-right 0.6s cubic-bezier(0.16, 1, 0.3, 1) both;
 }
 

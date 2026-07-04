@@ -65,11 +65,19 @@ jobs:
       - name: Install frontend dependencies
         run: npm --prefix frontend ci
 
+      - name: Audit frontend dependencies
+        if: matrix.goos == 'linux' && matrix.goarch == 'amd64'
+        run: npm --prefix frontend audit
+
       - name: Build frontend
         run: npm --prefix frontend run build
 
       - name: Test Go packages
         run: go test ./...
+
+      - name: Scan Go vulnerabilities
+        if: matrix.goos == 'linux' && matrix.goarch == 'amd64'
+        run: go run golang.org/x/vuln/cmd/govulncheck@v1.5.0 ./...
 
       - name: Build binary
         shell: bash

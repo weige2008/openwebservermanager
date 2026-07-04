@@ -201,18 +201,29 @@ function RDPWorkspace({
     const client = new Guacamole.Client(tunnel)
     clientRef.current = client
     const display = client.getDisplay().getElement()
+    display.tabIndex = 0
     display.style.position = 'relative'
     display.style.zIndex = '0'
     display.style.isolation = 'isolate'
     display.style.backgroundColor = '#000'
+    display.style.outline = 'none'
+    display.style.userSelect = 'none'
+    display.style.touchAction = 'none'
     container.replaceChildren(display)
     client.connect('')
 
-    const mouse = new Guacamole.Mouse(client.getDisplay().getElement())
-    mouse.onmousedown = mouse.onmouseup = mouse.onmousemove = (mouseState: unknown) => client.sendMouseState(mouseState)
-    const keyboard = new Guacamole.Keyboard(document)
+    const focusDisplay = () => display.focus({ preventScroll: true })
+    const preventBrowserPointerAction = (event: Event) => {
+      event.preventDefault()
+      event.stopPropagation()
+    }
+    const mouse = new Guacamole.Mouse(display)
+    const sendMouseState = (mouseState: unknown) => client.sendMouseState(mouseState, true)
+    mouse.onmousedown = mouse.onmouseup = mouse.onmousemove = mouse.onmouseout = sendMouseState
+    const keyboard = new Guacamole.Keyboard(display)
     keyboard.onkeydown = (keysym: number) => client.sendKeyEvent(1, keysym)
     keyboard.onkeyup = (keysym: number) => client.sendKeyEvent(0, keysym)
+    focusDisplay()
     client.onstatechange = (stateCode: number) => {
       if (stateCode === 3) setStatus('connected')
       if (stateCode === 5) setStatus('disconnected')
@@ -248,17 +259,32 @@ function RDPWorkspace({
     const onResize = () => {
       if (typeof client.sendSize === 'function') client.sendSize(window.innerWidth, window.innerHeight - 52)
     }
+    const releaseInputState = () => {
+      mouse.reset?.()
+      keyboard.reset?.()
+    }
     const onBeforeUnload = () => client.disconnect()
+    display.addEventListener('mousedown', focusDisplay, true)
+    display.addEventListener('contextmenu', preventBrowserPointerAction, true)
+    display.addEventListener('dragstart', preventBrowserPointerAction, true)
     window.addEventListener('servermanager:rdp-clipboard', onClipboard)
     window.addEventListener('servermanager:rdp-upload', onUpload)
     window.addEventListener('resize', onResize)
+    window.addEventListener('blur', releaseInputState)
+    document.addEventListener('visibilitychange', releaseInputState)
     window.addEventListener('beforeunload', onBeforeUnload)
 
     return () => {
+      display.removeEventListener('mousedown', focusDisplay, true)
+      display.removeEventListener('contextmenu', preventBrowserPointerAction, true)
+      display.removeEventListener('dragstart', preventBrowserPointerAction, true)
       window.removeEventListener('servermanager:rdp-clipboard', onClipboard)
       window.removeEventListener('servermanager:rdp-upload', onUpload)
       window.removeEventListener('resize', onResize)
+      window.removeEventListener('blur', releaseInputState)
+      document.removeEventListener('visibilitychange', releaseInputState)
       window.removeEventListener('beforeunload', onBeforeUnload)
+      releaseInputState()
       client.disconnect()
       clientRef.current = null
       container.innerHTML = ''

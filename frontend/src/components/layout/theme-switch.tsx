@@ -49,8 +49,8 @@ export function ThemeSwitch({
         <span className='sr-only'>{t('theme')}</span>
       </BaseMenu.Trigger>
       <BaseMenu.Portal>
-        <BaseMenu.Positioner sideOffset={8} align='end' className='z-[200]'>
-          <BaseMenu.Popup className='z-[200] grid w-40 gap-1 rounded-xl bg-popover p-1 text-sm text-popover-foreground shadow-md ring-1 ring-foreground/10 outline-none'>
+        <BaseMenu.Positioner sideOffset={8} align='end' className='z-[240]'>
+          <BaseMenu.Popup className='z-[240] grid w-40 gap-1 rounded-xl bg-popover p-1 text-sm text-popover-foreground shadow-md ring-1 ring-foreground/10 outline-none'>
             <div className='px-2 py-1 text-xs text-muted-foreground'>{t('theme')}</div>
             {themeOptions.map((option) => {
               const Icon = option.icon

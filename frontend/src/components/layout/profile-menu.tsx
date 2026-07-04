@@ -21,8 +21,8 @@ export function ProfileMenu({ onLogout }: { onLogout: () => Promise<void> }) {
         <span className='grid size-6 place-items-center rounded-full bg-primary text-[11px] font-semibold text-primary-foreground'>{initials}</span>
       </BaseMenu.Trigger>
       <BaseMenu.Portal>
-        <BaseMenu.Positioner sideOffset={8} align='end' className='z-[200]'>
-          <BaseMenu.Popup className='z-[200] grid w-56 gap-1 rounded-xl bg-popover p-1 text-sm text-popover-foreground shadow-md ring-1 ring-foreground/10 outline-none'>
+        <BaseMenu.Positioner sideOffset={8} align='end' className='z-[240]'>
+          <BaseMenu.Popup className='z-[240] grid w-56 gap-1 rounded-xl bg-popover p-1 text-sm text-popover-foreground shadow-md ring-1 ring-foreground/10 outline-none'>
             <div className='flex items-center gap-2 px-1.5 py-1.5'>
               <span className='grid size-8 shrink-0 place-items-center rounded-full bg-primary text-xs font-semibold text-primary-foreground'>{initials}</span>
               <div className='min-w-0'>

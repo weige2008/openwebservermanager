@@ -62,8 +62,8 @@ export function NotificationButton({
         <span className='sr-only'>{t('notifications')}</span>
       </BaseMenu.Trigger>
       <BaseMenu.Portal>
-        <BaseMenu.Positioner sideOffset={8} align='end' className='z-[200]'>
-          <BaseMenu.Popup className='z-[200] grid w-[min(26rem,calc(100vw-1rem))] gap-3 rounded-xl bg-popover p-3 text-sm text-popover-foreground shadow-md ring-1 ring-foreground/10 outline-none'>
+        <BaseMenu.Positioner sideOffset={8} align='end' className='z-[240]'>
+          <BaseMenu.Popup className='z-[240] grid w-[min(26rem,calc(100vw-1rem))] gap-3 rounded-xl bg-popover p-3 text-sm text-popover-foreground shadow-md ring-1 ring-foreground/10 outline-none'>
             <div className='px-1'>
               <div className='font-medium'>{t('systemAnnouncements')}</div>
               <p className='mt-1 text-xs text-muted-foreground'>{t('latestUpdates')}</p>

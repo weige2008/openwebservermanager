@@ -10,6 +10,12 @@ import type { ReactNode } from 'react'
 import { useMemo, useState } from 'react'
 import { useTranslation } from 'react-i18next'
 
+import {
+  CardStaggerContainer,
+  CardStaggerItem,
+  TableStaggerContainer,
+  TableStaggerRow,
+} from '@/components/page-transition'
 import { cn } from '@/lib/utils'
 
 import { Button } from '../ui/button'
@@ -85,11 +91,13 @@ export function DataTable<TData>({
         </div>
       ) : (
       <>
-      <div className='grid gap-3 sm:hidden'>
+      <CardStaggerContainer className='grid gap-3 sm:hidden'>
         {table.getRowModel().rows.map((row) => (
-          <MobileRowCard key={row.id} row={row} />
+          <CardStaggerItem key={row.id}>
+            <MobileRowCard row={row} />
+          </CardStaggerItem>
         ))}
-      </div>
+      </CardStaggerContainer>
       <div data-slot='table-container' className='hidden overflow-auto rounded-xl ring-1 ring-foreground/10 sm:block'>
         <table data-slot='table' className='w-full border-collapse text-sm'>
         <thead>
@@ -103,17 +111,17 @@ export function DataTable<TData>({
             </tr>
           ))}
         </thead>
-        <tbody>
+        <TableStaggerContainer>
           {table.getRowModel().rows.map((row) => (
-            <tr key={row.id} className='border-b border-border bg-table-row last:border-b-0 hover:bg-muted/50'>
+            <TableStaggerRow key={row.id} className='border-b border-border bg-table-row last:border-b-0 hover:bg-muted/50'>
               {row.getVisibleCells().map((cell) => (
                 <td key={cell.id} className='h-10 max-w-[20rem] px-3 align-middle tabular-nums'>
                   {flexRender(cell.column.columnDef.cell, cell.getContext())}
                 </td>
               ))}
-            </tr>
+            </TableStaggerRow>
           ))}
-        </tbody>
+        </TableStaggerContainer>
       </table>
       </div>
       </>

@@ -1,7 +1,7 @@
-import { Dialog as BaseDialog } from '@base-ui/react/dialog'
 import { Link, useNavigate, useRouterState } from '@tanstack/react-router'
 import { LogOut, Menu, Plus, RefreshCw, UserCircle, X } from 'lucide-react'
-import { useState } from 'react'
+import { AnimatePresence, motion, type Variants } from 'motion/react'
+import { useEffect, useState } from 'react'
 
 import { useApp } from '@/app/app-provider'
 import { cn } from '@/lib/utils'
@@ -26,6 +26,36 @@ const pageTitleKeys: Record<string, string> = {
   '/app/settings': 'settings',
   '/app/about': 'about',
 }
+
+const mobileDrawerAnimation = {
+  overlay: {
+    hidden: { opacity: 0 },
+    visible: { opacity: 1 },
+    exit: { opacity: 0 },
+  },
+  drawer: {
+    hidden: { opacity: 0, x: -64 },
+    visible: {
+      opacity: 1,
+      x: 0,
+      transition: {
+        type: 'spring',
+        damping: 15,
+        stiffness: 200,
+        staggerChildren: 0.03,
+      },
+    },
+    exit: {
+      opacity: 0,
+      x: -64,
+      transition: { duration: 0.1 },
+    },
+  },
+  menuItem: {
+    hidden: { opacity: 0, x: -8 },
+    visible: { opacity: 1, x: 0 },
+  },
+} as const
 
 export function AppHeader({ sidebarOpen, onToggleSidebar }: { sidebarOpen: boolean; onToggleSidebar: () => void }) {
   const app = useApp()
@@ -108,42 +138,76 @@ function MobileNavDrawer({
 
   const close = () => onOpenChange(false)
 
+  useEffect(() => {
+    if (!open) return
+    document.body.style.overflow = 'hidden'
+
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (event.key === 'Escape') close()
+    }
+
+    window.addEventListener('keydown', onKeyDown)
+    return () => {
+      document.body.style.overflow = ''
+      window.removeEventListener('keydown', onKeyDown)
+    }
+  }, [open])
+
   return (
-    <BaseDialog.Root open={open} onOpenChange={onOpenChange}>
-      <BaseDialog.Portal>
-        <BaseDialog.Backdrop className='fixed inset-0 z-[200] bg-black/45 md:hidden' />
-        <BaseDialog.Popup className='fixed inset-y-0 left-0 z-[200] flex w-[min(17rem,calc(100vw-2rem))] flex-col border-r border-sidebar-border bg-sidebar text-sidebar-foreground shadow-2xl outline-none md:hidden'>
-          <div className='flex h-[var(--app-header-height)] items-center justify-between border-b border-sidebar-border px-4'>
+    <AnimatePresence>
+      {open ? (
+        <>
+          <motion.div
+            className='fixed inset-0 z-[220] bg-black/45 md:hidden'
+            initial='hidden'
+            animate='visible'
+            exit='exit'
+            variants={mobileDrawerAnimation.overlay as Variants}
+            transition={{ duration: 0.2 }}
+            onClick={close}
+          />
+          <motion.aside
+            className='fixed inset-y-0 left-0 z-[220] flex w-[min(17rem,calc(100vw-2rem))] flex-col border-r border-sidebar-border bg-sidebar text-sidebar-foreground shadow-2xl outline-none md:hidden'
+            role='dialog'
+            aria-modal='true'
+            aria-label={app.t('toggleNavigation')}
+            initial='hidden'
+            animate='visible'
+            exit='exit'
+            variants={mobileDrawerAnimation.drawer as Variants}
+          >
+            <div className='flex h-[var(--app-header-height)] items-center justify-between border-b border-sidebar-border px-4'>
             <SystemBrand clickable />
-            <BaseDialog.Close render={<Button size='icon-sm' variant='ghost' aria-label={app.t('closeMenu')} />}>
+            <Button size='icon-sm' variant='ghost' aria-label={app.t('closeMenu')} onClick={close}>
               <X className='size-4' />
-            </BaseDialog.Close>
+            </Button>
           </div>
           <div className='flex-1 overflow-auto py-3'>
             <div className='px-3 pb-2 text-xs font-medium text-muted-foreground'>{app.t('app')}</div>
-            <nav className='grid gap-1 px-2'>
+            <motion.nav className='grid gap-1 px-2' variants={{ hidden: { opacity: 0 }, visible: { opacity: 1 } }}>
               {consoleNavItems.map((item) => {
                 const Icon = item.icon
                 const active = item.to === '/app' ? pathname === '/app' : pathname.startsWith(item.to)
                 const label = item.to === '/app/servers' ? app.t('assets') : app.t(item.label)
                 return (
-                  <Link
-                    key={item.to}
-                    to={item.to}
-                    onClick={close}
-                    className={cn(
-                      'flex h-10 items-center gap-2 rounded-md px-2 text-sm font-medium text-muted-foreground transition-colors hover:bg-sidebar-accent hover:text-sidebar-accent-foreground',
-                      active && 'bg-sidebar-accent text-sidebar-accent-foreground shadow-sm'
-                    )}
-                  >
-                    <span className='grid size-7 place-items-center rounded-md bg-background/70'>
-                      <Icon className='size-4' />
-                    </span>
-                    {label}
-                  </Link>
+                  <motion.div key={item.to} variants={mobileDrawerAnimation.menuItem as Variants}>
+                    <Link
+                      to={item.to}
+                      onClick={close}
+                      className={cn(
+                        'flex h-10 items-center gap-2 rounded-md px-2 text-sm font-medium text-muted-foreground transition-colors hover:bg-sidebar-accent hover:text-sidebar-accent-foreground',
+                        active && 'bg-sidebar-accent text-sidebar-accent-foreground shadow-sm'
+                      )}
+                    >
+                      <span className='grid size-7 place-items-center rounded-md bg-background/70'>
+                        <Icon className='size-4' />
+                      </span>
+                      {label}
+                    </Link>
+                  </motion.div>
                 )
               })}
-            </nav>
+            </motion.nav>
             <div className='mt-4 grid gap-2 px-3'>
               <Button variant='outline' className='justify-start' onClick={() => void app.refresh().then(close)}>
                 <RefreshCw className='size-4' />
@@ -181,8 +245,9 @@ function MobileNavDrawer({
               <span className='truncate'>{app.auth?.username || 'admin'}</span>
             </div>
           </div>
-        </BaseDialog.Popup>
-      </BaseDialog.Portal>
-    </BaseDialog.Root>
+          </motion.aside>
+        </>
+      ) : null}
+    </AnimatePresence>
   )
 }

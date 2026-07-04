@@ -4,6 +4,7 @@ import { useMemo } from 'react'
 import { useTranslation } from 'react-i18next'
 
 import { useApp } from '@/app/app-provider'
+import { CardStaggerContainer, CardStaggerItem } from '@/components/page-transition'
 import { DataTable } from '@/components/data-table/data-table'
 import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
@@ -44,43 +45,47 @@ export function ServersPage() {
   )
 
   return (
-    <Card>
-      <CardHeader className='gap-3 max-sm:grid-cols-1'>
-        <div>
-          <CardTitle className='flex items-center gap-2'>
-            <ServerCog className='size-5 text-primary' />
-            {t('serversPage.title')}
-          </CardTitle>
-          <CardDescription>{t('serversPage.description')}</CardDescription>
-        </div>
-        <div className='flex flex-wrap justify-end gap-2 max-sm:justify-start'>
-          <Button variant='primary' onClick={() => app.setModal({ type: 'server' })}>
-            <Plus className='size-4' />
-            {t('addAsset')}
-          </Button>
-        </div>
-      </CardHeader>
-      <CardContent>
-        <DataTable
-          columns={serverColumns}
-          data={app.data.servers}
-          emptyTitle={t('serversPage.emptyTitle')}
-          emptyBody={t('serversPage.emptyBody')}
-          searchPlaceholder={t('serversPage.searchPlaceholder')}
-          getSearchText={(server) => {
-            const credentials = credentialsForServer(app.data.credentials, server)
-            return [
-              server.name,
-              server.host,
-              server.os,
-              server.group,
-              server.description,
-              ...credentials.flatMap((credential) => [credential.name, credential.username, credential.type, credential.domain]),
-            ].filter(Boolean).join(' ')
-          }}
-        />
-      </CardContent>
-    </Card>
+    <CardStaggerContainer>
+      <CardStaggerItem>
+        <Card>
+          <CardHeader className='gap-3 max-sm:grid-cols-1'>
+            <div>
+              <CardTitle className='flex items-center gap-2'>
+                <ServerCog className='size-5 text-primary' />
+                {t('serversPage.title')}
+              </CardTitle>
+              <CardDescription>{t('serversPage.description')}</CardDescription>
+            </div>
+            <div className='flex flex-wrap justify-end gap-2 max-sm:justify-start'>
+              <Button variant='primary' onClick={() => app.setModal({ type: 'server' })}>
+                <Plus className='size-4' />
+                {t('addAsset')}
+              </Button>
+            </div>
+          </CardHeader>
+          <CardContent>
+            <DataTable
+              columns={serverColumns}
+              data={app.data.servers}
+              emptyTitle={t('serversPage.emptyTitle')}
+              emptyBody={t('serversPage.emptyBody')}
+              searchPlaceholder={t('serversPage.searchPlaceholder')}
+              getSearchText={(server) => {
+                const credentials = credentialsForServer(app.data.credentials, server)
+                return [
+                  server.name,
+                  server.host,
+                  server.os,
+                  server.group,
+                  server.description,
+                  ...credentials.flatMap((credential) => [credential.name, credential.username, credential.type, credential.domain]),
+                ].filter(Boolean).join(' ')
+              }}
+            />
+          </CardContent>
+        </Card>
+      </CardStaggerItem>
+    </CardStaggerContainer>
   )
 }
 

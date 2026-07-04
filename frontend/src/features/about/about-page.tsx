@@ -5,6 +5,7 @@ import { useTranslation } from 'react-i18next'
 import { useApp } from '@/app/app-provider'
 import { PublicHeader } from '@/components/layout/public-header'
 import { SystemBrand } from '@/components/layout/system-brand'
+import { CardStaggerContainer, CardStaggerItem } from '@/components/page-transition'
 import { buttonVariants } from '@/components/ui/button'
 import { cn } from '@/lib/utils'
 
@@ -47,8 +48,8 @@ function AboutContent() {
   const productName = t('productName')
 
   return (
-    <section className='grid gap-4'>
-      <div className='rounded-xl border border-border bg-card p-5 shadow-sm'>
+    <CardStaggerContainer className='grid gap-4'>
+      <CardStaggerItem className='rounded-xl border border-border bg-card p-5 shadow-sm'>
         <div className='flex flex-wrap items-start justify-between gap-4'>
           <div>
             <p className='text-xs font-medium tracking-[0.14em] text-muted-foreground uppercase'>{t('about')}</p>
@@ -59,16 +60,24 @@ function AboutContent() {
             {t('version')} {version}
           </div>
         </div>
-      </div>
+      </CardStaggerItem>
 
-      <div className='grid gap-4 md:grid-cols-2 xl:grid-cols-4'>
-        <AboutCard icon={Server} title={t('aboutPage.assetsTitle')} body={t('aboutPage.assetsBody')} />
-        <AboutCard icon={MonitorUp} title={t('aboutPage.workspaceTitle')} body={t('aboutPage.workspaceBody')} />
-        <AboutCard icon={LockKeyhole} title={t('aboutPage.securityTitle')} body={t('aboutPage.securityBody')} />
-        <AboutCard icon={PackageCheck} title={t('aboutPage.releaseTitle')} body={t('aboutPage.releaseBody')} />
-      </div>
+      <CardStaggerContainer className='grid gap-4 md:grid-cols-2 xl:grid-cols-4'>
+        <CardStaggerItem>
+          <AboutCard icon={Server} title={t('aboutPage.assetsTitle')} body={t('aboutPage.assetsBody')} />
+        </CardStaggerItem>
+        <CardStaggerItem>
+          <AboutCard icon={MonitorUp} title={t('aboutPage.workspaceTitle')} body={t('aboutPage.workspaceBody')} />
+        </CardStaggerItem>
+        <CardStaggerItem>
+          <AboutCard icon={LockKeyhole} title={t('aboutPage.securityTitle')} body={t('aboutPage.securityBody')} />
+        </CardStaggerItem>
+        <CardStaggerItem>
+          <AboutCard icon={PackageCheck} title={t('aboutPage.releaseTitle')} body={t('aboutPage.releaseBody')} />
+        </CardStaggerItem>
+      </CardStaggerContainer>
 
-      <div className='grid gap-4 rounded-xl border border-border bg-card p-5 shadow-sm lg:grid-cols-[1fr_0.9fr]'>
+      <CardStaggerItem className='grid gap-4 rounded-xl border border-border bg-card p-5 shadow-sm lg:grid-cols-[1fr_0.9fr]'>
         <div>
           <h2 className='text-base font-semibold'>{t('aboutPage.boundaryTitle')}</h2>
           <p className='mt-2 text-sm leading-6 text-muted-foreground'>{t('aboutPage.boundaryBody')}</p>
@@ -78,8 +87,8 @@ function AboutContent() {
           <InfoRow label={t('version')} value={version} />
           <InfoRow label={t('copyright')} value={app.publicConfig.copyright || 'Copyright (c) 2026 weige2008. All rights reserved.'} />
         </div>
-      </div>
-    </section>
+      </CardStaggerItem>
+    </CardStaggerContainer>
   )
 }
 

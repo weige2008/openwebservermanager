@@ -3,6 +3,12 @@ import { Activity, Database, KeyRound, RadioTower, Server, ShieldCheck } from 'l
 import { useTranslation } from 'react-i18next'
 
 import { useApp } from '@/app/app-provider'
+import {
+  CardStaggerContainer,
+  CardStaggerItem,
+  StaggerContainer,
+  StaggerItem,
+} from '@/components/page-transition'
 import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
 import { buttonVariants } from '@/components/ui/button'
@@ -46,8 +52,9 @@ export function OverviewPage() {
   const rdpSessions = app.data.sessions.filter((item) => item.protocol === 'rdp').length
 
   return (
-    <>
-      <section className='overflow-hidden rounded-2xl border border-border bg-card shadow-sm'>
+    <div className='flex flex-col gap-4'>
+      <CardStaggerContainer>
+        <CardStaggerItem className='overflow-hidden rounded-2xl border border-border bg-card shadow-sm'>
         <div className='grid xl:grid-cols-[minmax(0,1fr)_19rem]'>
           <div className='flex flex-col gap-4 p-4 sm:p-5'>
             <div className='flex flex-wrap items-start justify-between gap-4'>
@@ -62,12 +69,20 @@ export function OverviewPage() {
               </div>
             </div>
 
-            <div className='grid gap-3 md:grid-cols-2 xl:grid-cols-4'>
-              <SummaryStatCard icon={Server} title={t('overviewPage.serverCount')} value={app.data.servers.length} desc={t('overviewPage.serverCountDesc')} tone='rose' sparkline={makeSparkline(app.data.servers.length, 3)} />
-              <SummaryStatCard icon={KeyRound} title={t('overviewPage.credentialCount')} value={app.data.credentials.length} desc={t('overviewPage.credentialCountDesc')} tone='teal' sparkline={makeSparkline(app.data.credentials.length, 5)} />
-              <SummaryStatCard icon={Activity} title={t('overviewPage.activeSessions')} value={active} desc={t('overviewPage.activeSessionsDesc')} tone='info' sparkline={makeSparkline(active, 7)} />
-              <SummaryStatCard icon={Database} title={t('overviewPage.recordingIndexes')} value={recordings} desc={t('overviewPage.recordingIndexesDesc')} tone='warning' sparkline={makeSparkline(recordings, 11)} />
-            </div>
+            <StaggerContainer className='grid gap-3 md:grid-cols-2 xl:grid-cols-4'>
+              <StaggerItem>
+                <SummaryStatCard icon={Server} title={t('overviewPage.serverCount')} value={app.data.servers.length} desc={t('overviewPage.serverCountDesc')} tone='rose' sparkline={makeSparkline(app.data.servers.length, 3)} />
+              </StaggerItem>
+              <StaggerItem>
+                <SummaryStatCard icon={KeyRound} title={t('overviewPage.credentialCount')} value={app.data.credentials.length} desc={t('overviewPage.credentialCountDesc')} tone='teal' sparkline={makeSparkline(app.data.credentials.length, 5)} />
+              </StaggerItem>
+              <StaggerItem>
+                <SummaryStatCard icon={Activity} title={t('overviewPage.activeSessions')} value={active} desc={t('overviewPage.activeSessionsDesc')} tone='info' sparkline={makeSparkline(active, 7)} />
+              </StaggerItem>
+              <StaggerItem>
+                <SummaryStatCard icon={Database} title={t('overviewPage.recordingIndexes')} value={recordings} desc={t('overviewPage.recordingIndexesDesc')} tone='warning' sparkline={makeSparkline(recordings, 11)} />
+              </StaggerItem>
+            </StaggerContainer>
           </div>
 
           <div className={gatewayOnline ? 'flex flex-col justify-between gap-4 border-t border-border bg-success/10 p-4 sm:p-5 xl:border-t-0 xl:border-l' : 'flex flex-col justify-between gap-4 border-t border-border bg-warning/10 p-4 sm:p-5 xl:border-t-0 xl:border-l'}>
@@ -85,10 +100,12 @@ export function OverviewPage() {
             </div>
           </div>
         </div>
-      </section>
+        </CardStaggerItem>
+      </CardStaggerContainer>
 
-      <section className='grid grid-cols-1 gap-4 xl:grid-cols-[minmax(0,1.35fr)_minmax(320px,0.8fr)]'>
-        <Card>
+      <CardStaggerContainer className='grid grid-cols-1 gap-4 xl:grid-cols-[minmax(0,1.35fr)_minmax(320px,0.8fr)]'>
+        <CardStaggerItem>
+          <Card className='h-full'>
           <CardHeader>
             <div>
               <CardTitle>{t('overviewPage.recentSessions')}</CardTitle>
@@ -96,8 +113,10 @@ export function OverviewPage() {
             <Link to='/app/sessions' className={buttonVariants({ variant: 'ghost' })}>{t('overviewPage.viewAll')}</Link>
           </CardHeader>
           <SessionsTable sessions={app.data.sessions.slice(-6).reverse()} />
-        </Card>
-        <Card>
+          </Card>
+        </CardStaggerItem>
+        <CardStaggerItem>
+          <Card className='h-full'>
           <CardHeader>
             <div>
               <CardTitle>{t('overviewPage.quickAssets')}</CardTitle>
@@ -128,9 +147,10 @@ export function OverviewPage() {
           ) : (
             <div className='p-4 text-sm text-muted-foreground'>{t('overviewPage.noQuickServers')}</div>
           )}
-        </Card>
-      </section>
-    </>
+          </Card>
+        </CardStaggerItem>
+      </CardStaggerContainer>
+    </div>
   )
 }
 

@@ -27,11 +27,11 @@ export function DialogShell({
   return (
     <BaseDialog.Root data-slot='dialog' open={open} onOpenChange={onOpenChange}>
       <BaseDialog.Portal>
-        <BaseDialog.Backdrop data-slot='dialog-overlay' className='fixed inset-0 isolate z-[200] bg-black/10 duration-100 supports-backdrop-filter:backdrop-blur-xs' />
+        <BaseDialog.Backdrop data-slot='dialog-overlay' className='fixed inset-0 isolate z-[230] bg-black/10 duration-100 supports-backdrop-filter:backdrop-blur-xs' />
         <BaseDialog.Popup
           data-slot='dialog-content'
           className={cn(
-            'fixed top-1/2 left-1/2 z-[200] grid max-h-[calc(100vh-2rem)] w-[calc(100vw-2rem)] -translate-x-1/2 -translate-y-1/2 grid-rows-[auto_minmax(0,1fr)] gap-4 overflow-hidden rounded-xl bg-popover p-4 text-sm text-popover-foreground ring-1 ring-foreground/10 shadow-md outline-none',
+            'fixed top-1/2 left-1/2 z-[230] grid max-h-[calc(100vh-2rem)] w-[calc(100vw-2rem)] -translate-x-1/2 -translate-y-1/2 grid-rows-[auto_minmax(0,1fr)] gap-4 overflow-hidden rounded-xl bg-popover p-4 text-sm text-popover-foreground ring-1 ring-foreground/10 shadow-md outline-none',
             compact ? 'max-w-xl' : 'max-w-3xl'
           )}
         >

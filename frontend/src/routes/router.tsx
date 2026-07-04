@@ -13,6 +13,7 @@ import { useTranslation } from 'react-i18next'
 import { useApp } from '@/app/app-provider'
 import { SystemBrand } from '@/components/layout/system-brand'
 import { AuthenticatedLayout } from '@/components/layout/authenticated-layout'
+import { NavigationProgress } from '@/components/navigation-progress'
 import { ConsoleAboutPage, PublicAboutPage } from '@/features/about/about-page'
 import { AuthPage } from '@/features/auth/auth-page'
 import { AuditPage } from '@/features/console/audit-page'
@@ -28,6 +29,7 @@ function RootLayout() {
   const app = useApp()
   return (
     <>
+      <NavigationProgress />
       {app.workspace ? <WorkspaceView /> : <Outlet />}
       <ModalHost />
       <Toaster richColors position='bottom-right' />

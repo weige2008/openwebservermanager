@@ -143,7 +143,7 @@ func (s *Server) serveAPI(w http.ResponseWriter, r *http.Request) {
 func (s *Server) handlePublicConfig(w http.ResponseWriter, _ *http.Request) {
 	cfg := s.cfg.Public
 	if cfg.SiteName == "" {
-		cfg.SiteName = "openwebservermanager"
+		cfg.SiteName = "Open Web Server Manager"
 	}
 	if cfg.Version == "" {
 		cfg.Version = "dev"

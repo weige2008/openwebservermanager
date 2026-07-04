@@ -15,9 +15,9 @@ import (
 	"sync"
 	"time"
 
-	"servermanager/internal/model"
-	"servermanager/internal/store"
-	"servermanager/internal/ws"
+	"openwebservermanager/internal/model"
+	"openwebservermanager/internal/store"
+	"openwebservermanager/internal/ws"
 )
 
 type Tunnel struct {
@@ -168,7 +168,7 @@ func filterBrowserInstructions(payload []byte, trace func(Instruction, []byte)) 
 }
 
 func (t Tunnel) newTrace(sessionID string) func(string, Instruction, int) {
-	if os.Getenv("SERVERMANAGER_GUAC_TRACE") != "1" || t.Logger == nil {
+	if envAny("OPENWEBSERVERMANAGER_GUAC_TRACE", "SERVERMANAGER_GUAC_TRACE") != "1" || t.Logger == nil {
 		return func(string, Instruction, int) {}
 	}
 	var mu sync.Mutex
@@ -263,7 +263,7 @@ func (t Tunnel) argValue(name string, cfg RDPConfig) string {
 	recordingPath := cfg.Session.RecordingPath
 	drivePath := filepath.Join(t.DataDir, "drives", cfg.Session.ID)
 	recordingEnabled := recordingPath != ""
-	// guacd often runs as a different OS user than ServerManager.
+	// guacd often runs as a different OS user than openwebservermanager.
 	// Session-scoped transfer/recording directories must be writable by that process.
 	if recordingEnabled {
 		_ = ensureGuacdWritableDir(recordingPath)
@@ -287,7 +287,7 @@ func (t Tunnel) argValue(name string, cfg RDPConfig) string {
 		"initial-program":           "explorer.exe",
 		"resize-method":             "display-update",
 		"enable-drive":              "true",
-		"drive-name":                "ServerManager",
+		"drive-name":                "openwebservermanager",
 		"drive-path":                drivePath,
 		"create-drive-path":         "true",
 		"enable-recording":          boolString(recordingEnabled),
@@ -317,7 +317,7 @@ func ensureGuacdWritableDir(path string) error {
 }
 
 func sharedDirMode() os.FileMode {
-	value := strings.TrimSpace(os.Getenv("SERVERMANAGER_SHARED_DIR_MODE"))
+	value := strings.TrimSpace(envAny("OPENWEBSERVERMANAGER_SHARED_DIR_MODE", "SERVERMANAGER_SHARED_DIR_MODE"))
 	if value == "" {
 		return 0o770
 	}
@@ -330,6 +330,15 @@ func sharedDirMode() os.FileMode {
 		return 0o770
 	}
 	return mode
+}
+
+func envAny(names ...string) string {
+	for _, name := range names {
+		if value := os.Getenv(name); value != "" {
+			return value
+		}
+	}
+	return ""
 }
 
 func boolString(value bool) string {

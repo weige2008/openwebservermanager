@@ -73,7 +73,7 @@ function AboutContent() {
           <p className='mt-2 text-sm leading-6 text-muted-foreground'>{t('aboutPage.boundaryBody')}</p>
         </div>
         <div className='grid gap-2 rounded-lg border border-border bg-muted/25 p-3 text-sm'>
-          <InfoRow label={t('github')} value={app.publicConfig.github_url || 'https://github.com/weige2008/servermanager'} />
+          <InfoRow label={t('github')} value={app.publicConfig.github_url || 'https://github.com/weige2008/openwebservermanager'} />
           <InfoRow label={t('version')} value={version} />
           <InfoRow label={t('copyright')} value={app.publicConfig.copyright || 'Copyright (c) 2026 weige2008. All rights reserved.'} />
         </div>
@@ -106,7 +106,7 @@ function InfoRow({ label, value }: { label: string; value: string }) {
 function GitHubButton() {
   const app = useApp()
   const { t } = useTranslation()
-  const href = app.publicConfig.github_url || 'https://github.com/weige2008/servermanager'
+  const href = app.publicConfig.github_url || 'https://github.com/weige2008/openwebservermanager'
 
   return (
     <a href={href} target='_blank' rel='noreferrer' className={cn(buttonVariants({ variant: 'outline' }), 'rounded-lg')}>

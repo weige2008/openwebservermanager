@@ -35,7 +35,7 @@ export default defineConfig(({ envMode }) => {
       minify: isProd,
       cleanDistPath: true,
       distPath: {
-        root: '../cmd/servermanager/static',
+        root: '../cmd/openwebservermanager/static',
         js: 'assets',
         css: 'assets',
         font: 'assets',

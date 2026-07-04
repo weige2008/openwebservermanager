@@ -10,11 +10,11 @@ import (
 	"sync"
 	"time"
 
-	"servermanager/internal/store"
+	"openwebservermanager/internal/store"
 )
 
 const (
-	authCookieName = "servermanager_session"
+	authCookieName = "openwebservermanager_session"
 	authSessionTTL = 24 * time.Hour
 )
 

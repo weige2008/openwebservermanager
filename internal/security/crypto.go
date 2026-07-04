@@ -18,6 +18,10 @@ type Cipher struct {
 }
 
 func LoadMasterKey(dataDir string) ([]byte, error) {
+	if value := os.Getenv("OPENWEBSERVERMANAGER_MASTER_KEY"); value != "" {
+		sum := sha256.Sum256([]byte(value))
+		return sum[:], nil
+	}
 	if value := os.Getenv("SERVERMANAGER_MASTER_KEY"); value != "" {
 		sum := sha256.Sum256([]byte(value))
 		return sum[:], nil

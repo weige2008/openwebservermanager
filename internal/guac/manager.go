@@ -98,7 +98,7 @@ func (m *Manager) runtimePath() (string, error) {
 	path := filepath.Join(m.cfg.RuntimeDir, runtime.GOOS, name)
 	info, err := os.Stat(path)
 	if err != nil {
-		return "", fmt.Errorf("guacd not found at %s; set SERVERMANAGER_GUACD_HOST or place bundled guacd runtime: %w", path, err)
+		return "", fmt.Errorf("guacd not found at %s; set OPENWEBSERVERMANAGER_GUACD_HOST or place bundled guacd runtime: %w", path, err)
 	}
 	if info.IsDir() {
 		return "", fmt.Errorf("guacd path is a directory: %s", path)

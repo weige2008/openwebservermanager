@@ -91,13 +91,13 @@ jobs:
           if [[ "${GITHUB_REF_TYPE}" == "tag" && "${GITHUB_REF_NAME}" == v* ]]; then
             version="${GITHUB_REF_NAME#v}"
           fi
-          package="servermanager-${version}-${GOOS}-${GOARCH}"
+          package="openwebservermanager-${version}-${GOOS}-${GOARCH}"
           stage="dist/${package}"
           mkdir -p "${stage}"
           go build -trimpath \
             -ldflags "-s -w -X main.version=${version} -X main.commit=${GITHUB_SHA}" \
-            -o "${stage}/servermanager${{ matrix.ext }}" \
-            ./cmd/servermanager
+            -o "${stage}/openwebservermanager${{ matrix.ext }}" \
+            ./cmd/openwebservermanager
           cp README.md VERSION "${stage}/"
           cp -R runtime "${stage}/runtime"
           if [[ "${{ matrix.archive }}" == "zip" ]]; then
@@ -121,7 +121,7 @@ jobs:
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
-          name: servermanager-${{ matrix.goos }}-${{ matrix.goarch }}
+          name: openwebservermanager-${{ matrix.goos }}-${{ matrix.goarch }}
           path: |
             dist/*.tar.gz
             dist/*.zip
@@ -147,9 +147,9 @@ jobs:
           tag="${GITHUB_REF_NAME}"
           version="${tag#v}"
           cat > RELEASE_NOTES.md <<EOF
-          ServerManager ${version}
+          openwebservermanager ${version}
 
-          - Cross-platform servermanager binaries for Linux, Windows, and macOS.
+          - Cross-platform openwebservermanager binaries for Linux, Windows, and macOS.
           - Bundled static web frontend.
           - Runtime guacd directory placeholder is included; place native guacd builds under runtime/guacd/<platform>/ when needed.
           EOF
@@ -159,5 +159,5 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           gh release create "${GITHUB_REF_NAME}" release-assets/* \
-            --title "ServerManager ${GITHUB_REF_NAME#v}" \
+            --title "openwebservermanager ${GITHUB_REF_NAME#v}" \
             --notes-file RELEASE_NOTES.md

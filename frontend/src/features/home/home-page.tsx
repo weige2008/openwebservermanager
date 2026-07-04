@@ -135,8 +135,8 @@ export function HomePage() {
   const authenticated = Boolean(auth)
   const entryTo = authenticated ? '/app' : '/login'
   const entryText = authenticated ? t('enterConsole') : setupRequired ? t('initializeAdmin') : t('signInConsole')
-  const siteName = publicConfig.site_name || 'ServerManager'
-  const githubUrl = publicConfig.github_url || 'https://github.com/weige2008/servermanager'
+  const siteName = publicConfig.site_name || 'openwebservermanager'
+  const githubUrl = publicConfig.github_url || 'https://github.com/weige2008/openwebservermanager'
   const copyright = publicConfig.copyright || 'Copyright (c) 2026 weige2008. All rights reserved.'
 
   return (
@@ -266,7 +266,7 @@ function ServerProtocolDemo({ copy }: { copy: HomeCopy }) {
       id: 'ssh',
       label: 'SSH',
       method: 'SSH',
-      endpoint: 'wss://servermanager/connections/ssh/{session}/ws',
+      endpoint: 'wss://openwebservermanager/connections/ssh/{session}/ws',
       accent: 'emerald',
       status: 'pty attached',
       latency: 28,
@@ -287,7 +287,7 @@ function ServerProtocolDemo({ copy }: { copy: HomeCopy }) {
       id: 'rdp',
       label: 'RDP',
       method: 'RDP',
-      endpoint: 'wss://servermanager/connections/rdp/{session}/tunnel',
+      endpoint: 'wss://openwebservermanager/connections/rdp/{session}/tunnel',
       accent: 'blue',
       status: 'guacamole tunnel',
       latency: 34,

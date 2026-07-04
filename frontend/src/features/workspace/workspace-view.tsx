@@ -63,8 +63,8 @@ export function WorkspaceView() {
         <div className='flex flex-wrap gap-2'>
           {workspace.type === 'rdp' ? (
             <>
-              <Button variant='outline' onClick={() => window.dispatchEvent(new Event('servermanager:rdp-clipboard'))}><Clipboard className='size-4' />{t('workspace.clipboard')}</Button>
-              <Button variant='outline' onClick={() => window.dispatchEvent(new Event('servermanager:rdp-upload'))}><Upload className='size-4' />{t('workspace.uploadFile')}</Button>
+              <Button variant='outline' onClick={() => window.dispatchEvent(new Event('openwebservermanager:rdp-clipboard'))}><Clipboard className='size-4' />{t('workspace.clipboard')}</Button>
+              <Button variant='outline' onClick={() => window.dispatchEvent(new Event('openwebservermanager:rdp-upload'))}><Upload className='size-4' />{t('workspace.uploadFile')}</Button>
             </>
           ) : null}
           <Button variant='outline' onClick={() => void leave()}>{t('workspace.returnConsole')}</Button>
@@ -307,8 +307,8 @@ function RDPWorkspace({
     display.addEventListener('contextmenu', preventBrowserPointerAction, true)
     display.addEventListener('dragstart', preventBrowserPointerAction, true)
     document.addEventListener('pointerdown', onDocumentPointerDown, true)
-    window.addEventListener('servermanager:rdp-clipboard', onClipboard)
-    window.addEventListener('servermanager:rdp-upload', onUpload)
+    window.addEventListener('openwebservermanager:rdp-clipboard', onClipboard)
+    window.addEventListener('openwebservermanager:rdp-upload', onUpload)
     window.addEventListener('resize', onResize)
     window.addEventListener('keyup', onWindowKeyUp)
     window.addEventListener('blur', releaseInputState)
@@ -324,8 +324,8 @@ function RDPWorkspace({
       display.removeEventListener('contextmenu', preventBrowserPointerAction, true)
       display.removeEventListener('dragstart', preventBrowserPointerAction, true)
       document.removeEventListener('pointerdown', onDocumentPointerDown, true)
-      window.removeEventListener('servermanager:rdp-clipboard', onClipboard)
-      window.removeEventListener('servermanager:rdp-upload', onUpload)
+      window.removeEventListener('openwebservermanager:rdp-clipboard', onClipboard)
+      window.removeEventListener('openwebservermanager:rdp-upload', onUpload)
       window.removeEventListener('resize', onResize)
       window.removeEventListener('keyup', onWindowKeyUp)
       window.removeEventListener('blur', releaseInputState)

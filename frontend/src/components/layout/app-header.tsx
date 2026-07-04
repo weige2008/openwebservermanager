@@ -59,7 +59,7 @@ export function AppHeader({ sidebarOpen, onToggleSidebar }: { sidebarOpen: boole
             <SystemBrand clickable />
           </div>
           <div className='hidden min-w-0 border-l border-border pl-3 md:block'>
-            <div className='text-xs text-muted-foreground'>ServerManager / {title}</div>
+            <div className='text-xs text-muted-foreground'>openwebservermanager / {title}</div>
           </div>
           <div className='ms-auto flex min-w-0 items-center gap-1 sm:gap-2'>
             <div className='hidden lg:flex'>

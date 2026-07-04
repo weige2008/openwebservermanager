@@ -15,11 +15,11 @@ import (
 	"strconv"
 	"strings"
 
-	"servermanager/internal/guac"
-	"servermanager/internal/model"
-	sshrunner "servermanager/internal/ssh"
-	"servermanager/internal/store"
-	"servermanager/internal/ws"
+	"openwebservermanager/internal/guac"
+	"openwebservermanager/internal/model"
+	sshrunner "openwebservermanager/internal/ssh"
+	"openwebservermanager/internal/store"
+	"openwebservermanager/internal/ws"
 )
 
 type Config struct {
@@ -143,13 +143,13 @@ func (s *Server) serveAPI(w http.ResponseWriter, r *http.Request) {
 func (s *Server) handlePublicConfig(w http.ResponseWriter, _ *http.Request) {
 	cfg := s.cfg.Public
 	if cfg.SiteName == "" {
-		cfg.SiteName = "ServerManager"
+		cfg.SiteName = "openwebservermanager"
 	}
 	if cfg.Version == "" {
 		cfg.Version = "dev"
 	}
 	if cfg.GitHubURL == "" {
-		cfg.GitHubURL = "https://github.com/weige2008/servermanager"
+		cfg.GitHubURL = "https://github.com/weige2008/openwebservermanager"
 	}
 	if cfg.Copyright == "" {
 		cfg.Copyright = "Copyright (c) 2026 weige2008. All rights reserved."

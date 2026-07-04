@@ -12,8 +12,8 @@ import (
 	"sync"
 	"time"
 
-	"servermanager/internal/model"
-	"servermanager/internal/security"
+	"openwebservermanager/internal/model"
+	"openwebservermanager/internal/security"
 
 	"golang.org/x/crypto/bcrypt"
 )

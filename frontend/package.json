@@ -1,6 +1,6 @@
 {
-  "name": "servermanager-web",
-  "version": "1.0.3",
+  "name": "openwebservermanager-web",
+  "version": "1.0.4",
   "private": true,
   "type": "module",
   "scripts": {

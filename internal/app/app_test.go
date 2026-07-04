@@ -4,7 +4,7 @@ import (
 	"path/filepath"
 	"testing"
 
-	"servermanager/internal/model"
+	"openwebservermanager/internal/model"
 )
 
 func TestEnsureChildPathRejectsEscape(t *testing.T) {

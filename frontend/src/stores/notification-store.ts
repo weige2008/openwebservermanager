@@ -20,7 +20,7 @@ export const useNotificationStore = create<NotificationState>()(
       resetReadState: () => set({ readKeys: [] }),
     }),
     {
-      name: 'servermanager:notifications',
+      name: 'openwebservermanager:notifications',
       partialize: (state) => ({
         readKeys: state.readKeys,
       }),

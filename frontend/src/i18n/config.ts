@@ -5,9 +5,10 @@ import { initReactI18next } from 'react-i18next'
 import { normalizeInterfaceLanguage } from './languages'
 import { resources } from './resources'
 
-const legacyLocale = localStorage.getItem('servermanager:locale')
+const legacyLocale = localStorage.getItem('openwebservermanager:locale') || localStorage.getItem('servermanager:locale')
 if (legacyLocale && !localStorage.getItem('i18nextLng')) {
   localStorage.setItem('i18nextLng', normalizeInterfaceLanguage(legacyLocale))
+  localStorage.removeItem('openwebservermanager:locale')
   localStorage.removeItem('servermanager:locale')
 }
 

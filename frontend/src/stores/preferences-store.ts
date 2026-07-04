@@ -34,12 +34,12 @@ function migrateAppearance(value: unknown): ThemeAppearance {
 }
 
 function readLegacyTheme(): Theme {
-  const stored = localStorage.getItem('servermanager:theme')
+  const stored = localStorage.getItem('openwebservermanager:theme') || localStorage.getItem('servermanager:theme')
   return stored === 'light' || stored === 'dark' || stored === 'system' ? stored : 'system'
 }
 
 function readLegacyAppearance(): ThemeAppearance {
-  const stored = localStorage.getItem('servermanager:appearance')
+  const stored = localStorage.getItem('openwebservermanager:appearance') || localStorage.getItem('servermanager:appearance')
   if (!stored) return defaultAppearance
   try {
     return migrateAppearance(JSON.parse(stored))
@@ -61,7 +61,7 @@ export const usePreferencesStore = create<PreferencesState>()(
       resetAppearance: () => set({ appearance: defaultAppearance }),
     }),
     {
-      name: 'servermanager:preferences',
+      name: 'openwebservermanager:preferences',
       partialize: (state) => ({
         theme: state.theme,
         appearance: state.appearance,

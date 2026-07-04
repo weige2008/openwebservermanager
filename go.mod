@@ -1,4 +1,4 @@
-module servermanager
+module openwebservermanager
 
 go 1.25.0
 

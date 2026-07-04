@@ -16,9 +16,9 @@ import (
 	"golang.org/x/crypto/ssh"
 	"golang.org/x/crypto/ssh/knownhosts"
 
-	"servermanager/internal/model"
-	"servermanager/internal/store"
-	"servermanager/internal/ws"
+	"openwebservermanager/internal/model"
+	"openwebservermanager/internal/store"
+	"openwebservermanager/internal/ws"
 )
 
 type Message struct {

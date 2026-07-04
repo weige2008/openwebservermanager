@@ -43,9 +43,9 @@ const emptyBootstrap: BootstrapData = {
 }
 
 const defaultPublicConfig: PublicConfig = {
-  site_name: 'ServerManager',
+  site_name: 'openwebservermanager',
   version: 'dev',
-  github_url: 'https://github.com/weige2008/servermanager',
+  github_url: 'https://github.com/weige2008/openwebservermanager',
   copyright: 'Copyright (c) 2026 weige2008. All rights reserved.',
   nav_links: [
     { title: 'product', href: '/#product' },

@@ -5,10 +5,13 @@ import { AppHeader } from './app-header'
 import { AppSidebar } from './app-sidebar'
 
 export function AuthenticatedLayout({ children }: { children: ReactNode }) {
-  const [sidebarOpen, setSidebarOpen] = useState(() => localStorage.getItem('servermanager:sidebar') !== 'collapsed')
+  const [sidebarOpen, setSidebarOpen] = useState(() => {
+    const stored = localStorage.getItem('openwebservermanager:sidebar') || localStorage.getItem('servermanager:sidebar')
+    return stored !== 'collapsed'
+  })
 
   useEffect(() => {
-    localStorage.setItem('servermanager:sidebar', sidebarOpen ? 'expanded' : 'collapsed')
+    localStorage.setItem('openwebservermanager:sidebar', sidebarOpen ? 'expanded' : 'collapsed')
   }, [sidebarOpen])
 
   return (

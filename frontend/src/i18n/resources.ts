@@ -74,7 +74,7 @@ const en = {
   gatewayOffline: 'offline',
   guacdOffline: 'guacd is offline',
   dashboard: 'Dashboard',
-  connectionWorkspaceLive: 'ServerManager connection workspace is live',
+  connectionWorkspaceLive: 'openwebservermanager connection workspace is live',
   connectionWorkspaceLiveBody: 'This version focuses on online SSH, RDP, encrypted credentials, file transfer, and recording audit.',
   rdpGatewayOnline: 'RDP gateway online',
   rdpGatewayOffline: 'RDP gateway offline',
@@ -173,8 +173,8 @@ const en = {
     description: 'Manage theme mode, language, color preset, density, content width, and sidebar style in an independent settings page.',
   },
   aboutPage: {
-    title: 'About ServerManager',
-    description: 'ServerManager is a self-hosted browser workspace for SSH terminals, RDP desktops, encrypted credentials, session recordings, and audit logs.',
+    title: 'About openwebservermanager',
+    description: 'openwebservermanager is a self-hosted browser workspace for SSH terminals, RDP desktops, encrypted credentials, session recordings, and audit logs.',
     assetsTitle: 'Unified assets',
     assetsBody: 'Linux and Windows servers are registered in one asset view with protocol-aware connection accounts.',
     workspaceTitle: 'Online workspace',
@@ -444,7 +444,7 @@ const zh = {
   gateway: '网关',
   guacdOffline: 'guacd 未连接',
   dashboard: '控制台',
-  connectionWorkspaceLive: 'ServerManager 连接工作台已上线',
+  connectionWorkspaceLive: 'openwebservermanager 连接工作台已上线',
   connectionWorkspaceLiveBody: '当前版本聚焦在线 SSH、RDP、凭据加密、文件传输与录屏审计。',
   rdpGatewayOnline: 'RDP 网关在线',
   rdpGatewayOffline: 'RDP 网关未连接',
@@ -548,8 +548,8 @@ const zh = {
     description: '在独立设置页中管理主题模式、语言、配色、界面密度、内容宽度与侧栏样式。',
   },
   aboutPage: {
-    title: '关于 ServerManager',
-    description: 'ServerManager 是一个自托管浏览器工作台，用于在线 SSH 终端、RDP 桌面、凭据加密、会话录屏与审计日志。',
+    title: '关于 openwebservermanager',
+    description: 'openwebservermanager 是一个自托管浏览器工作台，用于在线 SSH 终端、RDP 桌面、凭据加密、会话录屏与审计日志。',
     assetsTitle: '统一资产',
     assetsBody: 'Linux 与 Windows 服务器在同一个资产视图中登记，并绑定协议匹配的连接账号。',
     workspaceTitle: '在线工作区',
@@ -698,7 +698,7 @@ const zh = {
     highlights: ['自托管部署', '浏览器直连', '凭据加密', '会话审计'],
     productTitle: '把分散的远程连接收进同一个控制台',
     productBody:
-      'ServerManager 的公开页只展示产品信息；登录后才进入服务器列表、凭据管理和连接工作区。首阶段聚焦在线 SSH 与 RDP，让日常登录、排障、文件流转和审计留痕更顺手。',
+      'openwebservermanager 的公开页只展示产品信息；登录后才进入服务器列表、凭据管理和连接工作区。首阶段聚焦在线 SSH 与 RDP，让日常登录、排障、文件流转和审计留痕更顺手。',
     capabilities: [
       ['统一资产入口', '按系统类型、主机地址和连接端口登记服务器，为 SSH/RDP 会话提供清晰入口。'],
       ['内置轻量数据层', '服务器、凭据、会话和审计记录本地保存，默认即可在单机测试环境运行。'],
@@ -865,7 +865,7 @@ const zhTW = {
     highlights: ['自託管部署', '瀏覽器直連', '憑證加密', '工作階段稽核'],
     productTitle: '把分散的遠端連線收進同一個控制台',
     productBody:
-      'ServerManager 的公開頁只展示產品資訊；登入後才進入伺服器列表、憑證管理與連線工作區。第一階段聚焦線上 SSH 與 RDP，讓日常登入、排障、檔案流轉與稽核留痕更順手。',
+      'openwebservermanager 的公開頁只展示產品資訊；登入後才進入伺服器列表、憑證管理與連線工作區。第一階段聚焦線上 SSH 與 RDP，讓日常登入、排障、檔案流轉與稽核留痕更順手。',
     footerProduct: '產品',
     preview: {
       ...zh.home.preview,

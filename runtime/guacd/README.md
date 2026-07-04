@@ -1,19 +1,21 @@
 # guacd runtime
 
-这里放置按平台构建好的 Apache Guacamole `guacd` 运行时。
+Place native Apache Guacamole `guacd` runtime builds in this directory when you want ServerManager to start a bundled gateway process.
 
-期望路径：
+Expected paths:
 
 - `runtime/guacd/linux/guacd`
 - `runtime/guacd/windows/guacd.exe`
 
-服务端也支持外部 `guacd`：
+You can also use an externally managed local `guacd`:
 
 ```bash
 SERVERMANAGER_GUACD_HOST=127.0.0.1 SERVERMANAGER_GUACD_PORT=4822 ./servermanager
 ```
 
-构建建议：
+Build notes:
 
-- Linux: 使用 Apache Guacamole server + FreeRDP 构建 `guacd`。
-- Windows: 使用 MSYS2/MinGW + FreeRDP 构建 `guacd.exe`，并将必需 DLL 放在同目录。
+- Linux: build Apache Guacamole server with FreeRDP support.
+- Windows: build with MSYS2/MinGW and FreeRDP, then place required DLLs next to `guacd.exe`.
+
+Recording and drive transfer directories are created by ServerManager. The default mode is `0770`; set `SERVERMANAGER_SHARED_DIR_MODE` only when your guacd deployment requires a different sharing model.

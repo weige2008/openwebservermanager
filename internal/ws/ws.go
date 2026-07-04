@@ -16,6 +16,7 @@ import (
 )
 
 const websocketGUID = "258EAFA5-E914-47DA-95CA-C5AB0DC85B11"
+const maxFramePayload = 16 * 1024 * 1024
 
 type Conn struct {
 	conn net.Conn
@@ -27,9 +28,15 @@ func Upgrade(w http.ResponseWriter, r *http.Request) (*Conn, error) {
 	if !strings.EqualFold(r.Header.Get("Upgrade"), "websocket") {
 		return nil, errors.New("missing websocket upgrade")
 	}
+	if !strings.Contains(strings.ToLower(r.Header.Get("Connection")), "upgrade") {
+		return nil, errors.New("missing websocket connection upgrade")
+	}
+	if r.Header.Get("Sec-WebSocket-Version") != "13" {
+		return nil, errors.New("unsupported websocket version")
+	}
 	key := r.Header.Get("Sec-WebSocket-Key")
-	if key == "" {
-		return nil, errors.New("missing websocket key")
+	if !validWebSocketKey(key) {
+		return nil, errors.New("invalid websocket key")
 	}
 	hijacker, ok := w.(http.Hijacker)
 	if !ok {
@@ -64,6 +71,11 @@ func websocketAccept(key string) string {
 	return base64.StdEncoding.EncodeToString(sum[:])
 }
 
+func validWebSocketKey(key string) bool {
+	decoded, err := base64.StdEncoding.DecodeString(key)
+	return err == nil && len(decoded) == 16
+}
+
 func acceptedSubprotocol(header string) string {
 	for _, protocol := range strings.Split(header, ",") {
 		protocol = strings.TrimSpace(protocol)
@@ -94,6 +106,13 @@ func (c *Conn) SendBinary(raw []byte) error {
 	return c.writeFrame(2, raw)
 }
 
+func (c *Conn) SendPong(raw []byte) error {
+	if len(raw) > 125 {
+		raw = raw[:125]
+	}
+	return c.writeFrame(10, raw)
+}
+
 func (c *Conn) ReadJSON(v any) error {
 	for {
 		op, payload, err := c.ReadFrame()
@@ -121,9 +140,19 @@ func (c *Conn) ReadFrame() (byte, []byte, error) {
 		return 0, nil, err
 	}
 
+	fin := first&0x80 != 0
 	opcode := first & 0x0f
 	masked := second&0x80 != 0
 	length := uint64(second & 0x7f)
+	if !masked {
+		return 0, nil, errors.New("client websocket frames must be masked")
+	}
+	if !fin {
+		return 0, nil, errors.New("fragmented websocket frames are not supported")
+	}
+	if opcode >= 8 && length > 125 {
+		return 0, nil, errors.New("websocket control frame too large")
+	}
 
 	switch length {
 	case 126:
@@ -139,7 +168,7 @@ func (c *Conn) ReadFrame() (byte, []byte, error) {
 		}
 		length = binary.BigEndian.Uint64(ext[:])
 	}
-	if length > 16*1024*1024 {
+	if length > maxFramePayload {
 		return 0, nil, fmt.Errorf("websocket frame too large: %d", length)
 	}
 

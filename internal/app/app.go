@@ -9,6 +9,7 @@ import (
 	"log/slog"
 	"net"
 	"net/http"
+	"net/url"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -22,16 +23,20 @@ import (
 )
 
 type Config struct {
-	Store    *store.Store
-	Guacd    *guac.Manager
-	StaticFS fs.FS
-	DataDir  string
-	Public   PublicConfig
+	Store             *store.Store
+	Guacd             *guac.Manager
+	StaticFS          fs.FS
+	DataDir           string
+	Public            PublicConfig
+	TrustProxyHeaders bool
 }
 
 type PublicConfig struct {
-	SiteName string          `json:"site_name"`
-	NavLinks []PublicNavLink `json:"nav_links"`
+	SiteName  string          `json:"site_name"`
+	Version   string          `json:"version"`
+	GitHubURL string          `json:"github_url"`
+	Copyright string          `json:"copyright"`
+	NavLinks  []PublicNavLink `json:"nav_links"`
 }
 
 type PublicNavLink struct {
@@ -61,6 +66,7 @@ func New(cfg Config) http.Handler {
 }
 
 func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	writeBaseSecurityHeaders(w)
 	if strings.HasPrefix(r.URL.Path, "/api/") {
 		s.serveAPI(w, r)
 		return
@@ -79,6 +85,12 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) serveAPI(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Cache-Control", "no-store")
+	if isUnsafeMethod(r.Method) && !s.sameOriginRequest(r) {
+		writeError(w, http.StatusForbidden, "cross-origin request rejected")
+		return
+	}
+
 	switch {
 	case r.Method == http.MethodGet && r.URL.Path == "/api/auth/status":
 		s.handleAuthStatus(w, r)
@@ -133,12 +145,22 @@ func (s *Server) handlePublicConfig(w http.ResponseWriter, _ *http.Request) {
 	if cfg.SiteName == "" {
 		cfg.SiteName = "ServerManager"
 	}
+	if cfg.Version == "" {
+		cfg.Version = "dev"
+	}
+	if cfg.GitHubURL == "" {
+		cfg.GitHubURL = "https://github.com/weige2008/servermanager"
+	}
+	if cfg.Copyright == "" {
+		cfg.Copyright = "Copyright (c) 2026 weige2008. All rights reserved."
+	}
 	if len(cfg.NavLinks) == 0 {
 		cfg.NavLinks = []PublicNavLink{
 			{Title: "product", Href: "#product"},
 			{Title: "connections", Href: "#connections"},
 			{Title: "security", Href: "#security"},
 			{Title: "deploy", Href: "#deploy"},
+			{Title: "about", Href: "/about"},
 		}
 	}
 	writeJSON(w, http.StatusOK, cfg)
@@ -162,8 +184,16 @@ func (s *Server) handleCreateServer(w http.ResponseWriter, r *http.Request) {
 	if !decodeJSON(w, r, &req) {
 		return
 	}
+	req.Name = strings.TrimSpace(req.Name)
+	req.Host = strings.TrimSpace(req.Host)
+	req.Group = strings.TrimSpace(req.Group)
+	req.Description = strings.TrimSpace(req.Description)
 	if req.Name == "" || req.Host == "" {
 		writeError(w, http.StatusBadRequest, "name and host are required")
+		return
+	}
+	if err := validateServer(req); err != nil {
+		writeError(w, http.StatusBadRequest, err.Error())
 		return
 	}
 	if req.OS == "" {
@@ -194,8 +224,15 @@ func (s *Server) handleCreateCredential(w http.ResponseWriter, r *http.Request) 
 	if !decodeJSON(w, r, &req) {
 		return
 	}
+	req.Name = strings.TrimSpace(req.Name)
+	req.Username = strings.TrimSpace(req.Username)
+	req.Domain = strings.TrimSpace(req.Domain)
 	if req.Name == "" || req.Username == "" || req.Type == "" {
 		writeError(w, http.StatusBadRequest, "name, username and type are required")
+		return
+	}
+	if err := validateCredentialRequest(req); err != nil {
+		writeError(w, http.StatusBadRequest, err.Error())
 		return
 	}
 	if req.ServerID != "" {
@@ -259,13 +296,15 @@ func (s *Server) handleCreateSSH(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "ssh is only supported for linux servers")
 		return
 	}
+	req.Cols = clampInt(req.Cols, 40, 300, 120)
+	req.Rows = clampInt(req.Rows, 10, 120, 32)
 
 	session, err := s.cfg.Store.CreateSession(model.ConnectionSession{
 		Protocol:     model.ProtocolSSH,
 		ServerID:     server.ID,
 		CredentialID: credential.ID,
 		UserID:       s.currentUserID(r),
-		ClientIP:     clientIP(r),
+		ClientIP:     s.clientIP(r),
 		Width:        req.Cols,
 		Height:       req.Rows,
 	})
@@ -278,8 +317,12 @@ func (s *Server) handleCreateSSH(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleSSHWebSocket(w http.ResponseWriter, r *http.Request) {
+	if !s.sameOriginRequest(r) {
+		writeError(w, http.StatusForbidden, "cross-origin websocket rejected")
+		return
+	}
 	id := pathSegment(r.URL.Path, 3)
-	session, server, credential, secret, ok := s.connectionParts(w, id, model.ProtocolSSH)
+	session, server, credential, secret, ok := s.connectionParts(w, r, id, model.ProtocolSSH)
 	if !ok {
 		return
 	}
@@ -292,7 +335,7 @@ func (s *Server) handleSSHWebSocket(w http.ResponseWriter, r *http.Request) {
 	cols, _ := strconv.Atoi(r.URL.Query().Get("cols"))
 	rows, _ := strconv.Atoi(r.URL.Query().Get("rows"))
 	_ = s.audit(r, "connection.ssh.open", session.ID, model.ProtocolSSH, "opened ssh websocket")
-	sshrunner.Runner{Store: s.cfg.Store, Logger: slog.Default()}.Run(conn, session, server, credential, secret, term, cols, rows)
+	sshrunner.Runner{Store: s.cfg.Store, Logger: slog.Default(), KnownHostsPath: filepath.Join(s.cfg.DataDir, "known_hosts")}.Run(conn, session, server, credential, secret, term, cols, rows)
 }
 
 func (s *Server) handleCreateRDP(w http.ResponseWriter, r *http.Request) {
@@ -326,13 +369,16 @@ func (s *Server) handleCreateRDP(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "rdp is only supported for windows servers")
 		return
 	}
+	req.Width = clampInt(req.Width, 640, 7680, 1440)
+	req.Height = clampInt(req.Height, 480, 4320, 900)
+	req.DPI = clampInt(req.DPI, 72, 240, 96)
 
 	session, err := s.cfg.Store.CreateSession(model.ConnectionSession{
 		Protocol:     model.ProtocolRDP,
 		ServerID:     server.ID,
 		CredentialID: credential.ID,
 		UserID:       s.currentUserID(r),
-		ClientIP:     clientIP(r),
+		ClientIP:     s.clientIP(r),
 		Width:        req.Width,
 		Height:       req.Height,
 	})
@@ -345,11 +391,11 @@ func (s *Server) handleCreateRDP(w http.ResponseWriter, r *http.Request) {
 		_, _ = s.cfg.Store.UpdateSession(session.ID, func(item *model.ConnectionSession) {
 			item.RecordingPath = recordingPath
 		})
-		if err := os.MkdirAll(recordingPath, 0o777); err != nil {
+		if err := os.MkdirAll(recordingPath, 0o770); err != nil {
 			writeError(w, http.StatusInternalServerError, err.Error())
 			return
 		}
-		_ = os.Chmod(recordingPath, 0o777)
+		_ = os.Chmod(recordingPath, 0o770)
 		session.RecordingPath = recordingPath
 	}
 	_ = s.audit(r, "connection.rdp.create", session.ID, model.ProtocolRDP, "created rdp session")
@@ -357,8 +403,12 @@ func (s *Server) handleCreateRDP(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleRDPTunnel(w http.ResponseWriter, r *http.Request) {
+	if !s.sameOriginRequest(r) {
+		writeError(w, http.StatusForbidden, "cross-origin websocket rejected")
+		return
+	}
 	id := pathSegment(r.URL.Path, 3)
-	session, server, credential, secret, ok := s.connectionParts(w, id, model.ProtocolRDP)
+	session, server, credential, secret, ok := s.connectionParts(w, r, id, model.ProtocolRDP)
 	if !ok {
 		return
 	}
@@ -391,6 +441,10 @@ func (s *Server) handleRecordingDownload(w http.ResponseWriter, r *http.Request)
 	}
 	if session.Protocol != model.ProtocolRDP || session.RecordingPath == "" {
 		writeError(w, http.StatusNotFound, "recording not found")
+		return
+	}
+	if !s.canAccessSession(r, session) {
+		writeError(w, http.StatusForbidden, "session access denied")
 		return
 	}
 	if err := ensureChildPath(filepath.Join(s.cfg.DataDir, "recordings"), session.RecordingPath); err != nil {
@@ -429,6 +483,15 @@ func (s *Server) handleRecordingDownload(w http.ResponseWriter, r *http.Request)
 }
 func (s *Server) handleClose(w http.ResponseWriter, r *http.Request) {
 	id := pathSegment(r.URL.Path, 2)
+	existing, ok := s.cfg.Store.GetSession(id)
+	if !ok {
+		writeError(w, http.StatusNotFound, "session not found")
+		return
+	}
+	if !s.canAccessSession(r, existing) {
+		writeError(w, http.StatusForbidden, "session access denied")
+		return
+	}
 	session, err := s.cfg.Store.CloseSession(id, "closed by user")
 	if err != nil {
 		if errors.Is(err, os.ErrNotExist) {
@@ -442,7 +505,7 @@ func (s *Server) handleClose(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, session)
 }
 
-func (s *Server) connectionParts(w http.ResponseWriter, sessionID string, protocol model.Protocol) (model.ConnectionSession, model.Server, model.Credential, store.CredentialSecret, bool) {
+func (s *Server) connectionParts(w http.ResponseWriter, r *http.Request, sessionID string, protocol model.Protocol) (model.ConnectionSession, model.Server, model.Credential, store.CredentialSecret, bool) {
 	session, ok := s.cfg.Store.GetSession(sessionID)
 	if !ok {
 		writeError(w, http.StatusNotFound, "session not found")
@@ -450,6 +513,10 @@ func (s *Server) connectionParts(w http.ResponseWriter, sessionID string, protoc
 	}
 	if session.Protocol != protocol {
 		writeError(w, http.StatusBadRequest, "session protocol mismatch")
+		return model.ConnectionSession{}, model.Server{}, model.Credential{}, store.CredentialSecret{}, false
+	}
+	if !s.canAccessSession(r, session) {
+		writeError(w, http.StatusForbidden, "session access denied")
 		return model.ConnectionSession{}, model.Server{}, model.Credential{}, store.CredentialSecret{}, false
 	}
 	server, ok := s.cfg.Store.GetServer(session.ServerID)
@@ -476,7 +543,7 @@ func (s *Server) audit(r *http.Request, action, targetID string, protocol model.
 		TargetID: targetID,
 		Protocol: protocol,
 		Detail:   detail,
-		ClientIP: clientIP(r),
+		ClientIP: s.clientIP(r),
 	})
 }
 
@@ -517,17 +584,22 @@ func ensureChildPath(root, child string) error {
 	if err != nil {
 		return err
 	}
-	if rel == "." || strings.HasPrefix(rel, "..") || filepath.IsAbs(rel) {
+	if rel == "." || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) || filepath.IsAbs(rel) {
 		return errors.New("recording path escapes data directory")
 	}
 	return nil
 }
 func decodeJSON(w http.ResponseWriter, r *http.Request, out any) bool {
 	defer r.Body.Close()
+	r.Body = http.MaxBytesReader(w, r.Body, 1<<20)
 	decoder := json.NewDecoder(r.Body)
 	decoder.DisallowUnknownFields()
 	if err := decoder.Decode(out); err != nil {
 		writeError(w, http.StatusBadRequest, err.Error())
+		return false
+	}
+	if err := decoder.Decode(&struct{}{}); err != io.EOF {
+		writeError(w, http.StatusBadRequest, "request body must contain a single JSON object")
 		return false
 	}
 	return true
@@ -543,15 +615,142 @@ func writeError(w http.ResponseWriter, status int, message string) {
 	writeJSON(w, status, map[string]string{"error": message})
 }
 
-func clientIP(r *http.Request) string {
-	if forwarded := r.Header.Get("X-Forwarded-For"); forwarded != "" {
-		return strings.TrimSpace(strings.Split(forwarded, ",")[0])
+func (s *Server) clientIP(r *http.Request) string {
+	if s.cfg.TrustProxyHeaders {
+		if forwarded := r.Header.Get("X-Forwarded-For"); forwarded != "" {
+			return strings.TrimSpace(strings.Split(forwarded, ",")[0])
+		}
+		if realIP := strings.TrimSpace(r.Header.Get("X-Real-IP")); realIP != "" {
+			return realIP
+		}
 	}
 	host, _, err := net.SplitHostPort(r.RemoteAddr)
 	if err == nil {
 		return host
 	}
 	return r.RemoteAddr
+}
+
+func writeBaseSecurityHeaders(w http.ResponseWriter) {
+	header := w.Header()
+	header.Set("X-Content-Type-Options", "nosniff")
+	header.Set("X-Frame-Options", "DENY")
+	header.Set("Referrer-Policy", "strict-origin-when-cross-origin")
+	header.Set("Cross-Origin-Opener-Policy", "same-origin")
+	header.Set("Permissions-Policy", "camera=(), microphone=(), geolocation=()")
+}
+
+func isUnsafeMethod(method string) bool {
+	switch method {
+	case http.MethodPost, http.MethodPut, http.MethodPatch, http.MethodDelete:
+		return true
+	default:
+		return false
+	}
+}
+
+func (s *Server) sameOriginRequest(r *http.Request) bool {
+	origin := r.Header.Get("Origin")
+	if origin == "" {
+		return true
+	}
+	parsed, err := url.Parse(origin)
+	if err != nil || parsed.Host == "" {
+		return false
+	}
+	if parsed.Scheme != "http" && parsed.Scheme != "https" {
+		return false
+	}
+	return canonicalHost(parsed.Host) == canonicalHost(effectiveHost(r, s.cfg.TrustProxyHeaders))
+}
+
+func effectiveHost(r *http.Request, trustProxy bool) string {
+	if trustProxy {
+		if forwarded := strings.TrimSpace(strings.Split(r.Header.Get("X-Forwarded-Host"), ",")[0]); forwarded != "" {
+			return forwarded
+		}
+	}
+	return r.Host
+}
+
+func canonicalHost(value string) string {
+	value = strings.ToLower(strings.TrimSpace(value))
+	if host, port, err := net.SplitHostPort(value); err == nil {
+		if port == "80" || port == "443" {
+			return strings.ToLower(host)
+		}
+		return strings.ToLower(net.JoinHostPort(host, port))
+	}
+	return strings.TrimSuffix(value, ".")
+}
+
+func (s *Server) canAccessSession(r *http.Request, session model.ConnectionSession) bool {
+	if r == nil {
+		return true
+	}
+	_, authSession, ok := s.auth.session(r)
+	if !ok {
+		return false
+	}
+	return authSession.Role == "admin" || session.UserID == authSession.UserID
+}
+
+func validateServer(server model.Server) error {
+	if len(server.Name) > 120 {
+		return errors.New("server name is too long")
+	}
+	if len(server.Host) > 255 || strings.ContainsAny(server.Host, "/\\\x00\r\n\t") {
+		return errors.New("server host is invalid")
+	}
+	if server.OS != "" && server.OS != model.ServerOSLinux && server.OS != model.ServerOSWindows {
+		return errors.New("unsupported server os")
+	}
+	if server.SSHPort != 0 && !validPort(server.SSHPort) {
+		return errors.New("ssh port must be between 1 and 65535")
+	}
+	if server.RDPPort != 0 && !validPort(server.RDPPort) {
+		return errors.New("rdp port must be between 1 and 65535")
+	}
+	return nil
+}
+
+func validateCredentialRequest(req credentialRequest) error {
+	if len(req.Name) > 120 || len(req.Username) > 120 || len(req.Domain) > 120 {
+		return errors.New("credential metadata is too long")
+	}
+	switch req.Type {
+	case model.CredentialSSHPassword, model.CredentialRDPPassword:
+		if req.Password == "" {
+			return errors.New("password is required")
+		}
+	case model.CredentialSSHKey:
+		if req.PrivateKey == "" {
+			return errors.New("private key is required")
+		}
+	default:
+		return errors.New("unsupported credential type")
+	}
+	if len(req.Password) > 32*1024 || len(req.PrivateKey) > 128*1024 || len(req.Passphrase) > 32*1024 {
+		return errors.New("credential secret is too large")
+	}
+	return nil
+}
+
+func validPort(port int) bool {
+	return port >= 1 && port <= 65535
+}
+
+func clampInt(value, min, max, fallback int) int {
+	if value == 0 {
+		return fallback
+	}
+	if value < min {
+		return min
+	}
+	if value > max {
+		return max
+	}
+	return value
 }
 
 func pathSegment(value string, index int) string {

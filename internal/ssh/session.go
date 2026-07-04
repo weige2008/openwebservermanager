@@ -2,14 +2,19 @@ package sshsession
 
 import (
 	"encoding/base64"
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
+	"net"
+	"os"
+	"path/filepath"
 	"strconv"
 	"sync"
 	"time"
 
 	"golang.org/x/crypto/ssh"
+	"golang.org/x/crypto/ssh/knownhosts"
 
 	"servermanager/internal/model"
 	"servermanager/internal/store"
@@ -24,8 +29,9 @@ type Message struct {
 }
 
 type Runner struct {
-	Store  *store.Store
-	Logger *slog.Logger
+	Store          *store.Store
+	Logger         *slog.Logger
+	KnownHostsPath string
 }
 
 func (r Runner) Run(conn *ws.Conn, session model.ConnectionSession, server model.Server, credential model.Credential, secret store.CredentialSecret, term string, cols, rows int) {
@@ -41,7 +47,7 @@ func (r Runner) Run(conn *ws.Conn, session model.ConnectionSession, server model
 		term = "xterm-256color"
 	}
 
-	client, err := dial(server, credential, secret)
+	client, err := dial(server, credential, secret, r.KnownHostsPath)
 	if err != nil {
 		r.fail(conn, session.ID, err)
 		return
@@ -167,18 +173,23 @@ func (r Runner) fail(conn *ws.Conn, sessionID string, err error) {
 	_ = conn.SendJSON(Message{Type: "error", Data: err.Error()})
 }
 
-func dial(server model.Server, credential model.Credential, secret store.CredentialSecret) (*ssh.Client, error) {
+func dial(server model.Server, credential model.Credential, secret store.CredentialSecret, knownHostsPath string) (*ssh.Client, error) {
 	auth, err := authMethods(credential, secret)
+	if err != nil {
+		return nil, err
+	}
+	addr := net.JoinHostPort(server.Host, strconv.Itoa(server.SSHPort))
+	hostKeyCallback, err := hostKeyCallback(knownHostsPath)
 	if err != nil {
 		return nil, err
 	}
 	config := &ssh.ClientConfig{
 		User:            credential.Username,
 		Auth:            auth,
-		HostKeyCallback: ssh.InsecureIgnoreHostKey(),
+		HostKeyCallback: hostKeyCallback,
 		Timeout:         15 * time.Second,
 	}
-	return ssh.Dial("tcp", server.Host+":"+strconv.Itoa(server.SSHPort), config)
+	return ssh.Dial("tcp", addr, config)
 }
 
 func authMethods(credential model.Credential, secret store.CredentialSecret) ([]ssh.AuthMethod, error) {
@@ -200,4 +211,43 @@ func authMethods(credential model.Credential, secret store.CredentialSecret) ([]
 	default:
 		return nil, fmt.Errorf("credential %s is not usable for ssh", credential.ID)
 	}
+}
+
+var knownHostsMu sync.Mutex
+
+func hostKeyCallback(path string) (ssh.HostKeyCallback, error) {
+	if path == "" {
+		return nil, fmt.Errorf("known hosts path is required")
+	}
+	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+		return nil, fmt.Errorf("prepare known_hosts directory: %w", err)
+	}
+	callback, err := knownhosts.New(path)
+	if err != nil && !os.IsNotExist(err) {
+		return nil, fmt.Errorf("load known_hosts: %w", err)
+	}
+	return func(hostname string, remote net.Addr, key ssh.PublicKey) error {
+		if callback != nil {
+			err := callback(hostname, remote, key)
+			if err == nil {
+				return nil
+			}
+			var keyErr *knownhosts.KeyError
+			if !errors.As(err, &keyErr) || len(keyErr.Want) > 0 {
+				return err
+			}
+		}
+		knownHostsMu.Lock()
+		defer knownHostsMu.Unlock()
+		line := knownhosts.Line([]string{hostname}, key)
+		file, err := os.OpenFile(path, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0o600)
+		if err != nil {
+			return fmt.Errorf("save known host key: %w", err)
+		}
+		defer file.Close()
+		if _, err := file.WriteString(line + "\n"); err != nil {
+			return fmt.Errorf("write known host key: %w", err)
+		}
+		return nil
+	}, nil
 }

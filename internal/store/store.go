@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"sort"
 	"sync"
 	"time"
 
@@ -163,16 +164,28 @@ func (s *Store) Bootstrap() ([]model.Server, []model.CredentialPublic, []model.C
 	for _, item := range s.state.Servers {
 		servers = append(servers, item)
 	}
+	sort.Slice(servers, func(i, j int) bool {
+		return servers[i].CreatedAt.After(servers[j].CreatedAt)
+	})
 	credentials := make([]model.CredentialPublic, 0, len(s.state.Credentials))
 	for _, item := range s.state.Credentials {
 		credentials = append(credentials, item.Public())
 	}
+	sort.Slice(credentials, func(i, j int) bool {
+		return credentials[i].CreatedAt.After(credentials[j].CreatedAt)
+	})
 	sessions := make([]model.ConnectionSession, 0, len(s.state.Sessions))
 	for _, item := range s.state.Sessions {
 		sessions = append(sessions, item)
 	}
+	sort.Slice(sessions, func(i, j int) bool {
+		return sessions[i].StartedAt.After(sessions[j].StartedAt)
+	})
 	logs := make([]model.AuditLog, len(s.state.AuditLogs))
 	copy(logs, s.state.AuditLogs)
+	sort.Slice(logs, func(i, j int) bool {
+		return logs[i].CreatedAt.After(logs[j].CreatedAt)
+	})
 	return servers, credentials, sessions, logs
 }
 
@@ -320,7 +333,27 @@ func (s *Store) saveLocked() error {
 	if err := os.WriteFile(tmp, raw, 0o600); err != nil {
 		return err
 	}
-	return os.Rename(tmp, s.path)
+	return replaceFile(tmp, s.path)
+}
+
+func replaceFile(tmp, target string) error {
+	backup := target + ".bak"
+	if _, err := os.Stat(target); err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return os.Rename(tmp, target)
+		}
+		return err
+	}
+	_ = os.Remove(backup)
+	if err := os.Rename(target, backup); err != nil {
+		return err
+	}
+	if err := os.Rename(tmp, target); err != nil {
+		_ = os.Rename(backup, target)
+		return err
+	}
+	_ = os.Remove(backup)
+	return nil
 }
 
 func newID(prefix string) string {

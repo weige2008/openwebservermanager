@@ -134,6 +134,8 @@ export function HomePage() {
   const entryTo = authenticated ? '/app' : '/login'
   const entryText = authenticated ? t('enterConsole') : setupRequired ? t('initializeAdmin') : t('signInConsole')
   const siteName = publicConfig.site_name || 'ServerManager'
+  const githubUrl = publicConfig.github_url || 'https://github.com/weige2008/servermanager'
+  const copyright = publicConfig.copyright || 'Copyright (c) 2026 weige2008. All rights reserved.'
 
   return (
     <div className='min-h-svh overflow-x-clip bg-background text-foreground'>
@@ -146,7 +148,7 @@ export function HomePage() {
         <SecurityAndWorkflow copy={copy} />
         <CtaSection authenticated={authenticated} copy={copy} entryText={entryText} entryTo={entryTo} />
       </main>
-      <PublicFooter siteName={siteName} entryTo={entryTo} entryText={entryText} copy={copy} />
+      <PublicFooter siteName={siteName} entryTo={entryTo} entryText={entryText} copy={copy} githubUrl={githubUrl} copyright={copyright} />
     </div>
   )
 }
@@ -915,7 +917,23 @@ function CodeLine(props: { children: ReactNode; kind: DemoConfig['rows'][number]
   return <div className={cn('break-words whitespace-pre-wrap', className)}>{props.children}</div>
 }
 
-function PublicFooter({ siteName, entryTo, entryText, copy }: { siteName: string; entryTo: string; entryText: string; copy: HomeCopy }) {
+function PublicFooter({
+  siteName,
+  entryTo,
+  entryText,
+  copy,
+  githubUrl,
+  copyright,
+}: {
+  siteName: string
+  entryTo: string
+  entryText: string
+  copy: HomeCopy
+  githubUrl: string
+  copyright: string
+}) {
+  const { t } = useTranslation()
+
   return (
     <footer className='border-t border-border bg-background'>
       <div className='mx-auto grid w-[min(72rem,calc(100%-2rem))] gap-8 py-10 md:grid-cols-[1.2fr_0.8fr_0.8fr]'>
@@ -935,6 +953,7 @@ function PublicFooter({ siteName, entryTo, entryText, copy }: { siteName: string
             [copy.footerLinks[1], '#connections'],
             [copy.footerLinks[2], '#security'],
             [copy.footerLinks[3], '#deploy'],
+            [t('about'), '/about'],
           ]}
         />
         <div>
@@ -946,8 +965,13 @@ function PublicFooter({ siteName, entryTo, entryText, copy }: { siteName: string
         </div>
       </div>
       <div className='mx-auto flex w-[min(72rem,calc(100%-2rem))] flex-col gap-2 border-t border-border py-5 text-xs text-muted-foreground sm:flex-row sm:items-center sm:justify-between'>
-        <span>&copy; 2026 {siteName}. Self-hosted server operations console.</span>
-        <span>{copy.footerBuilt}</span>
+        <span>{copyright}</span>
+        <span className='flex flex-wrap items-center gap-3'>
+          <a href={githubUrl} target='_blank' rel='noreferrer' className='transition-colors hover:text-foreground'>
+            {t('github')}
+          </a>
+          <span>{copy.footerBuilt}</span>
+        </span>
       </div>
     </footer>
   )

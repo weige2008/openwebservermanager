@@ -1,5 +1,5 @@
 import { Link, useRouterState } from '@tanstack/react-router'
-import { FileClock, Home, MonitorUp, Server, Settings } from 'lucide-react'
+import { FileClock, Home, Info, MonitorUp, Server, Settings } from 'lucide-react'
 
 import { useApp } from '@/app/app-provider'
 import { cn } from '@/lib/utils'
@@ -11,6 +11,8 @@ export const consoleNavItems = [
   { to: '/app/servers', label: 'assets', icon: Server },
   { to: '/app/sessions', label: 'sessions', icon: MonitorUp },
   { to: '/app/audit', label: 'audit', icon: FileClock },
+  { to: '/app/settings', label: 'settings', icon: Settings },
+  { to: '/app/about', label: 'about', icon: Info },
 ] as const
 
 export function AppSidebar({ collapsed = false }: { collapsed?: boolean }) {

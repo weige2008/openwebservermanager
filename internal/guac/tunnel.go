@@ -137,7 +137,7 @@ func (t Tunnel) Run(ctx context.Context, browser *ws.Conn, cfg RDPConfig) {
 			closeSession("")
 			return
 		case 9:
-			_ = browser.SendText(Encode("nop"))
+			_ = browser.SendPong(payload)
 		}
 	}
 }
@@ -309,10 +309,27 @@ func ensureGuacdWritableDir(path string) error {
 	if path == "" {
 		return nil
 	}
-	if err := os.MkdirAll(path, 0o777); err != nil {
+	mode := sharedDirMode()
+	if err := os.MkdirAll(path, mode); err != nil {
 		return err
 	}
-	return os.Chmod(path, 0o777)
+	return os.Chmod(path, mode)
+}
+
+func sharedDirMode() os.FileMode {
+	value := strings.TrimSpace(os.Getenv("SERVERMANAGER_SHARED_DIR_MODE"))
+	if value == "" {
+		return 0o770
+	}
+	parsed, err := strconv.ParseUint(value, 8, 32)
+	if err != nil {
+		return 0o770
+	}
+	mode := os.FileMode(parsed) & 0o777
+	if mode == 0 {
+		return 0o770
+	}
+	return mode
 }
 
 func boolString(value bool) string {

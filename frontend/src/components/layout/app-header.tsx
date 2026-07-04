@@ -23,6 +23,8 @@ const pageTitleKeys: Record<string, string> = {
   '/app/credentials': 'assets',
   '/app/sessions': 'sessions',
   '/app/audit': 'audit',
+  '/app/settings': 'settings',
+  '/app/about': 'about',
 }
 
 export function AppHeader({ sidebarOpen, onToggleSidebar }: { sidebarOpen: boolean; onToggleSidebar: () => void }) {

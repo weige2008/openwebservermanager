@@ -10,6 +10,7 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
+	"strings"
 	"syscall"
 	"time"
 
@@ -21,6 +22,11 @@ import (
 
 //go:embed static
 var staticFS embed.FS
+
+var (
+	version = "dev"
+	commit  = "unknown"
+)
 
 func main() {
 	if err := run(); err != nil {
@@ -65,7 +71,7 @@ func run() error {
 
 	srv := &http.Server{
 		Addr:              addr,
-		Handler:           app.New(app.Config{Store: st, Guacd: guacd, StaticFS: staticFS, DataDir: dataDir, Public: publicConfig()}),
+		Handler:           app.New(app.Config{Store: st, Guacd: guacd, StaticFS: staticFS, DataDir: dataDir, Public: publicConfig(), TrustProxyHeaders: envBool("SERVERMANAGER_TRUST_PROXY_HEADERS")}),
 		ReadHeaderTimeout: 10 * time.Second,
 	}
 
@@ -99,14 +105,23 @@ func env(name, fallback string) string {
 	return fallback
 }
 
+func envBool(name string) bool {
+	value := strings.ToLower(strings.TrimSpace(os.Getenv(name)))
+	return value == "1" || value == "true" || value == "yes" || value == "on"
+}
+
 func publicConfig() app.PublicConfig {
 	return app.PublicConfig{
-		SiteName: env("SERVERMANAGER_SITE_NAME", "ServerManager"),
+		SiteName:  env("SERVERMANAGER_SITE_NAME", "ServerManager"),
+		Version:   env("SERVERMANAGER_VERSION", version),
+		GitHubURL: env("SERVERMANAGER_GITHUB_URL", "https://github.com/weige2008/servermanager"),
+		Copyright: env("SERVERMANAGER_COPYRIGHT", "Copyright (c) 2026 weige2008. All rights reserved."),
 		NavLinks: []app.PublicNavLink{
 			{Title: "product", Href: "#product"},
 			{Title: "connections", Href: "#connections"},
 			{Title: "security", Href: "#security"},
 			{Title: "deploy", Href: "#deploy"},
+			{Title: "about", Href: "/about"},
 		},
 	}
 }

@@ -13,6 +13,11 @@ type Instruction struct {
 	Args   []string
 }
 
+const (
+	maxInstructionElements = 1024
+	maxInstructionBytes    = 16 * 1024 * 1024
+)
+
 func Encode(opcode string, args ...string) []byte {
 	parts := append([]string{opcode}, args...)
 	var b strings.Builder
@@ -33,6 +38,9 @@ func ReadInstruction(reader *bufio.Reader) (Instruction, []byte, error) {
 	values := []string{}
 
 	for {
+		if len(values) >= maxInstructionElements {
+			return Instruction{}, nil, fmt.Errorf("guacamole instruction has too many elements")
+		}
 		lengthText, err := readUntil(reader, '.')
 		if err != nil {
 			return Instruction{}, nil, err
@@ -45,6 +53,9 @@ func ReadInstruction(reader *bufio.Reader) (Instruction, []byte, error) {
 		}
 		if length < 0 || length > 1024*1024 {
 			return Instruction{}, nil, fmt.Errorf("invalid guacamole element length %d", length)
+		}
+		if raw.Len()+length+1 > maxInstructionBytes {
+			return Instruction{}, nil, fmt.Errorf("guacamole instruction too large")
 		}
 		buf := make([]byte, length)
 		if _, err := io.ReadFull(reader, buf); err != nil {

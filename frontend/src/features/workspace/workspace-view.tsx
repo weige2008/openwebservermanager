@@ -213,16 +213,34 @@ function RDPWorkspace({
     client.connect('')
 
     const focusDisplay = () => display.focus({ preventScroll: true })
+    const pressedKeysyms = new Set<number>()
+    const releaseKeysyms = (keysyms: Iterable<number>) => {
+      for (const keysym of keysyms) {
+        if (!pressedKeysyms.delete(keysym)) continue
+        client.sendKeyEvent(0, keysym)
+      }
+    }
     const preventBrowserPointerAction = (event: Event) => {
       event.preventDefault()
       event.stopPropagation()
+    }
+    const preventBrowserKeyboardAction = (event: KeyboardEvent) => {
+      if (event.altKey || event.ctrlKey || event.metaKey || event.key === 'Alt' || event.key === 'Control' || event.key === 'Meta') {
+        event.preventDefault()
+      }
     }
     const mouse = new Guacamole.Mouse(display)
     const sendMouseState = (mouseState: unknown) => client.sendMouseState(mouseState, true)
     mouse.onmousedown = mouse.onmouseup = mouse.onmousemove = mouse.onmouseout = sendMouseState
     const keyboard = new Guacamole.Keyboard(display)
-    keyboard.onkeydown = (keysym: number) => client.sendKeyEvent(1, keysym)
-    keyboard.onkeyup = (keysym: number) => client.sendKeyEvent(0, keysym)
+    keyboard.onkeydown = (keysym: number) => {
+      pressedKeysyms.add(keysym)
+      client.sendKeyEvent(1, keysym)
+    }
+    keyboard.onkeyup = (keysym: number) => {
+      pressedKeysyms.delete(keysym)
+      client.sendKeyEvent(0, keysym)
+    }
     focusDisplay()
     client.onstatechange = (stateCode: number) => {
       if (stateCode === 3) setStatus('connected')
@@ -262,25 +280,54 @@ function RDPWorkspace({
     const releaseInputState = () => {
       mouse.reset?.()
       keyboard.reset?.()
+      releaseKeysyms(Array.from(pressedKeysyms))
+    }
+    const releaseStaleModifiers = (event: MouseEvent) => {
+      if (!event.shiftKey) releaseKeysyms([65505, 65506])
+      if (!event.ctrlKey) releaseKeysyms([65507, 65508])
+      if (!event.altKey) releaseKeysyms([65513, 65514, 65027])
+      if (!event.metaKey) releaseKeysyms([65511, 65512, 65515, 65516])
+    }
+    const onDocumentPointerDown = (event: PointerEvent) => {
+      if (event.target instanceof Node && !display.contains(event.target)) {
+        releaseInputState()
+      }
+    }
+    const onWindowKeyUp = (event: KeyboardEvent) => {
+      if (!(event.target instanceof Node) || !display.contains(event.target)) {
+        releaseInputState()
+      }
     }
     const onBeforeUnload = () => client.disconnect()
+    display.addEventListener('mousedown', releaseStaleModifiers, true)
     display.addEventListener('mousedown', focusDisplay, true)
+    display.addEventListener('blur', releaseInputState)
+    display.addEventListener('keydown', preventBrowserKeyboardAction, true)
+    display.addEventListener('keyup', preventBrowserKeyboardAction, true)
     display.addEventListener('contextmenu', preventBrowserPointerAction, true)
     display.addEventListener('dragstart', preventBrowserPointerAction, true)
+    document.addEventListener('pointerdown', onDocumentPointerDown, true)
     window.addEventListener('servermanager:rdp-clipboard', onClipboard)
     window.addEventListener('servermanager:rdp-upload', onUpload)
     window.addEventListener('resize', onResize)
+    window.addEventListener('keyup', onWindowKeyUp)
     window.addEventListener('blur', releaseInputState)
     document.addEventListener('visibilitychange', releaseInputState)
     window.addEventListener('beforeunload', onBeforeUnload)
 
     return () => {
+      display.removeEventListener('mousedown', releaseStaleModifiers, true)
       display.removeEventListener('mousedown', focusDisplay, true)
+      display.removeEventListener('blur', releaseInputState)
+      display.removeEventListener('keydown', preventBrowserKeyboardAction, true)
+      display.removeEventListener('keyup', preventBrowserKeyboardAction, true)
       display.removeEventListener('contextmenu', preventBrowserPointerAction, true)
       display.removeEventListener('dragstart', preventBrowserPointerAction, true)
+      document.removeEventListener('pointerdown', onDocumentPointerDown, true)
       window.removeEventListener('servermanager:rdp-clipboard', onClipboard)
       window.removeEventListener('servermanager:rdp-upload', onUpload)
       window.removeEventListener('resize', onResize)
+      window.removeEventListener('keyup', onWindowKeyUp)
       window.removeEventListener('blur', releaseInputState)
       document.removeEventListener('visibilitychange', releaseInputState)
       window.removeEventListener('beforeunload', onBeforeUnload)

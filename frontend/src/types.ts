@@ -100,6 +100,9 @@ export interface PublicNavLink {
 
 export interface PublicConfig {
   site_name: string
+  version?: string
+  github_url?: string
+  copyright?: string
   nav_links: PublicNavLink[]
 }
 

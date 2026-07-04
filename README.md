@@ -1,77 +1,115 @@
 # ServerManager
 
-跨平台 Web 服务器管理程序，第一阶段聚焦浏览器在线 SSH 与 RDP 连接。
+ServerManager is a self-hosted web console for browser-based SSH and RDP access. Phase one focuses on server assets, encrypted connection accounts, online SSH terminals, online RDP desktops, file transfer, session recording, and audit logs.
 
-## 当前能力
+## Features
 
-- Go 后端单进程服务，内嵌新版前端静态资源。
-- 前端使用 NewAPI 当前同类技术栈：Rsbuild、React 19、TypeScript、Tailwind CSS v4、TanStack Router、TanStack Query、TanStack Table、Base UI。
-- 公开首页、首次设置页与登录页；服务器、凭据、会话和审计数据需要登录后查看。
-- SSH：浏览器 WebSocket 到服务端 SSH PTY，支持密码、私钥和私钥 passphrase。
-- RDP：浏览器 Guacamole tunnel 到 `guacd`，服务端注入 RDP 凭据、录屏目录和文件传输参数。
-- 数据：本地 JSON 文件存储，模型覆盖服务器、凭据、连接会话和审计日志。
-- 安全：凭据字段 AES-GCM 加密保存，API 响应不返回明文凭据。
+- Go backend with embedded static frontend.
+- Frontend stack aligned with NewAPI-style conventions: Rsbuild, React 19, TypeScript, Tailwind CSS v4, TanStack Router, TanStack Query, TanStack Table, Base UI, i18next, and Zustand.
+- First-run administrator setup and authenticated console.
+- SSH: WebSocket to SSH PTY bridge with password, private key, and private key passphrase authentication.
+- RDP: Guacamole WebSocket tunnel to `guacd`; credentials stay server-side.
+- Local JSON data store with AES-GCM encrypted credential fields.
+- RDP recording index and recording ZIP download for authenticated administrators.
+- GitHub Actions release workflow for Linux, Windows, and macOS binaries.
 
-## 启动
+## Run Locally
 
 ```powershell
 go run ./cmd/servermanager
 ```
 
-默认监听 `http://127.0.0.1:23876`，数据目录为 `data/`。建议设置固定主密钥：
+The default listener is `http://127.0.0.1:23876` and the default data directory is `data/`.
+
+Set a stable master key before using real credentials:
 
 ```powershell
-$env:SERVERMANAGER_MASTER_KEY="change-this-to-a-long-random-secret"
+$env:SERVERMANAGER_MASTER_KEY = "replace-with-a-long-random-secret"
 go run ./cmd/servermanager
 ```
 
-首次启动时数据库没有管理员账号，访问 `/login` 会进入首次设置页面。创建管理员后，密码只以 bcrypt 哈希形式写入服务端数据库，不保存明文。
+If no administrator exists, open `/login` and create the first admin password. Passwords are stored as bcrypt hashes. Plaintext credentials are encrypted before persistence and are never returned by API responses.
 
-## RDP / guacd
+## Configuration
 
-RDP 依赖 Apache Guacamole 的 `guacd`。服务启动时会按以下顺序寻找：
+| Variable | Default | Purpose |
+| --- | --- | --- |
+| `SERVERMANAGER_ADDR` | `127.0.0.1:23876` | HTTP listen address |
+| `SERVERMANAGER_DATA_DIR` | `data` | Data, key, recordings, and drive directory |
+| `SERVERMANAGER_MASTER_KEY` | generated `data/master.key` | Credential encryption key source |
+| `SERVERMANAGER_GUACD_HOST` | bundled runtime lookup | External guacd host |
+| `SERVERMANAGER_GUACD_PORT` | `4822` | guacd port |
+| `SERVERMANAGER_GUACD_RUNTIME` | `runtime/guacd` | Bundled guacd runtime root |
+| `SERVERMANAGER_SHARED_DIR_MODE` | `0770` | Recording/drive directory mode for guacd sharing |
+| `SERVERMANAGER_TRUST_PROXY_HEADERS` | `false` | Trust `X-Forwarded-*` and `X-Real-IP` headers |
+| `SERVERMANAGER_VERSION` | build version | Version exposed in public config |
+| `SERVERMANAGER_GITHUB_URL` | project repository | GitHub link shown in the UI |
+| `SERVERMANAGER_COPYRIGHT` | weige2008 copyright | Copyright text shown in the UI |
 
-1. 环境变量 `SERVERMANAGER_GUACD_HOST` / `SERVERMANAGER_GUACD_PORT` 指向的外部 `guacd`。
-2. 当前工作目录中的 `runtime/guacd/<goos>/guacd` 或 `guacd.exe`。
+## RDP and guacd
 
-原生捆绑构建产物请放入：
+RDP requires Apache Guacamole `guacd`.
+
+Lookup order:
+
+1. Use `SERVERMANAGER_GUACD_HOST` and `SERVERMANAGER_GUACD_PORT` when set.
+2. Use bundled `runtime/guacd/<goos>/guacd` or `guacd.exe`.
+
+Expected bundled paths:
 
 - Linux: `runtime/guacd/linux/guacd`
 - Windows: `runtime/guacd/windows/guacd.exe`
 
-录屏默认保存到 `data/recordings/{session_id}/`。
+RDP recordings are stored under `data/recordings/{session_id}/`. Drive transfer directories are stored under `data/drives/{session_id}/`.
 
-## API 摘要
+## Security Notes
 
-- `GET /api/auth/status` 判断是否已经完成管理员初始化。
-- `POST /api/auth/setup` 首次创建管理员并设置 HttpOnly Cookie。
-- `POST /api/auth/login` 登录并设置 HttpOnly Cookie。
-- `POST /api/auth/logout` 退出登录。
-- `GET /api/auth/me` 获取当前登录用户。
-- `GET /api/bootstrap` 获取登录后的页面初始化数据。
-- `POST /api/servers` 创建服务器。
-- `POST /api/credentials` 创建凭据。
-- `POST /api/connections/ssh` 创建 SSH 会话。
-- `GET /api/connections/ssh/{session_id}/ws` 连接 SSH WebSocket。
-- `POST /api/connections/rdp` 创建 RDP 会话。
-- `GET /api/connections/rdp/{session_id}/tunnel` 连接 Guacamole WebSocket tunnel。
-- `POST /api/connections/{session_id}/close` 关闭会话。
+- Business APIs require an authenticated admin session.
+- Unsafe API methods reject cross-origin requests when an `Origin` header is present.
+- Session cookies are `HttpOnly`, `SameSite=Lax`, and `Secure` when served through HTTPS.
+- Login failures are rate-limited per username and client IP.
+- SSH host keys are stored in `data/known_hosts`; unknown hosts are accepted on first use and later mismatches fail.
+- WebSocket upgrades validate version, key, masking, frame size, and unsupported fragmentation.
+- `X-Forwarded-*` headers are ignored unless `SERVERMANAGER_TRUST_PROXY_HEADERS=1`.
 
-除认证接口外，业务 API 都需要登录。
-
-## 部署
-
-```powershell
-.\scripts\deploy.ps1
-```
-
-默认部署到 `/opt/servermanager` 并监听 `0.0.0.0:23876`。部署脚本会先在服务器执行 `npm --prefix frontend ci && npm --prefix frontend run build`，再执行 Go 构建。
-
-## 前端开发
+## Development
 
 ```powershell
 npm --prefix frontend install
 npm --prefix frontend run dev
 ```
 
-生产构建输出到 `cmd/servermanager/static/`，由 Go `embed` 打进最终二进制。
+Production frontend builds write to `cmd/servermanager/static/` and are embedded by Go.
+
+```powershell
+npm --prefix frontend run build
+go test ./...
+```
+
+## Deployment
+
+```powershell
+.\scripts\deploy.ps1
+```
+
+The default script deploys to `/opt/servermanager`, builds the frontend and backend on the server, and runs the service on port `23876`.
+
+## Releases
+
+The project version starts at `1.0.0` in `VERSION`. Push a semantic version tag to trigger the GitHub Actions release workflow:
+
+```powershell
+git tag v1.0.0
+git push origin v1.0.0
+```
+
+The workflow builds:
+
+- `linux-amd64`
+- `linux-arm64`
+- `windows-amd64`
+- `windows-arm64`
+- `darwin-amd64`
+- `darwin-arm64`
+
+Release archives include the `servermanager` binary, `README.md`, `VERSION`, and the `runtime/` directory.

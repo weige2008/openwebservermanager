@@ -5,6 +5,7 @@ import (
 	"encoding/hex"
 	"errors"
 	"net/http"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -20,6 +21,7 @@ const (
 type authManager struct {
 	mu       sync.RWMutex
 	sessions map[string]authSession
+	failures map[string]loginFailure
 }
 
 type authSession struct {
@@ -27,6 +29,12 @@ type authSession struct {
 	Username  string    `json:"username"`
 	Role      string    `json:"role"`
 	ExpiresAt time.Time `json:"expires_at"`
+}
+
+type loginFailure struct {
+	Count       int
+	LastFailure time.Time
+	LockedUntil time.Time
 }
 
 type authStatus struct {
@@ -44,7 +52,10 @@ type loginRequest struct {
 }
 
 func newAuthManager() *authManager {
-	return &authManager{sessions: map[string]authSession{}}
+	return &authManager{
+		sessions: map[string]authSession{},
+		failures: map[string]loginFailure{},
+	}
 }
 
 func (m *authManager) create(admin store.AdminPublic) (string, authSession, error) {
@@ -89,6 +100,42 @@ func (m *authManager) session(r *http.Request) (string, authSession, bool) {
 		return "", authSession{}, false
 	}
 	return token, session, true
+}
+
+func (m *authManager) checkLoginAllowed(key string) (time.Duration, bool) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	failure := m.failures[key]
+	now := time.Now().UTC()
+	if !failure.LockedUntil.IsZero() && now.Before(failure.LockedUntil) {
+		return time.Until(failure.LockedUntil).Round(time.Second), false
+	}
+	if !failure.LastFailure.IsZero() && now.Sub(failure.LastFailure) > 15*time.Minute {
+		delete(m.failures, key)
+	}
+	return 0, true
+}
+
+func (m *authManager) recordLoginFailure(key string) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	now := time.Now().UTC()
+	failure := m.failures[key]
+	if !failure.LastFailure.IsZero() && now.Sub(failure.LastFailure) > 15*time.Minute {
+		failure = loginFailure{}
+	}
+	failure.Count++
+	failure.LastFailure = now
+	if failure.Count >= 5 {
+		failure.LockedUntil = now.Add(5 * time.Minute)
+	}
+	m.failures[key] = failure
+}
+
+func (m *authManager) resetLoginFailures(key string) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	delete(m.failures, key)
 }
 
 func (s *Server) requireAuth(w http.ResponseWriter, r *http.Request) bool {
@@ -165,15 +212,25 @@ func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
 		})
 		return
 	}
-	admin, ok, err := s.cfg.Store.VerifyAdmin(strings.TrimSpace(req.Username), req.Password)
+	username := strings.TrimSpace(req.Username)
+	failureKey := s.clientIP(r) + ":" + strings.ToLower(username)
+	if retryAfter, ok := s.auth.checkLoginAllowed(failureKey); !ok {
+		w.Header().Set("Retry-After", strconv.Itoa(int(retryAfter.Seconds())))
+		writeError(w, http.StatusTooManyRequests, "too many failed login attempts; try again later")
+		return
+	}
+
+	admin, ok, err := s.cfg.Store.VerifyAdmin(username, req.Password)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
 	if !ok {
+		s.auth.recordLoginFailure(failureKey)
 		writeError(w, http.StatusUnauthorized, "invalid username or password")
 		return
 	}
+	s.auth.resetLoginFailures(failureKey)
 
 	token, session, err := s.auth.create(admin)
 	if err != nil {

@@ -44,11 +44,15 @@ const emptyBootstrap: BootstrapData = {
 
 const defaultPublicConfig: PublicConfig = {
   site_name: 'ServerManager',
+  version: 'dev',
+  github_url: 'https://github.com/weige2008/servermanager',
+  copyright: 'Copyright (c) 2026 weige2008. All rights reserved.',
   nav_links: [
     { title: 'product', href: '#product' },
     { title: 'connections', href: '#connections' },
     { title: 'security', href: '#security' },
     { title: 'deploy', href: '#deploy' },
+    { title: 'about', href: '/about' },
   ],
 }
 
@@ -220,6 +224,9 @@ export function AppProvider({ children }: { children: ReactNode }) {
   const publicConfig = publicConfigQuery.data
     ? {
         site_name: publicConfigQuery.data.site_name || defaultPublicConfig.site_name,
+        version: publicConfigQuery.data.version || defaultPublicConfig.version,
+        github_url: publicConfigQuery.data.github_url || defaultPublicConfig.github_url,
+        copyright: publicConfigQuery.data.copyright || defaultPublicConfig.copyright,
         nav_links: publicConfigQuery.data.nav_links?.length ? publicConfigQuery.data.nav_links : defaultPublicConfig.nav_links,
       }
     : defaultPublicConfig

@@ -794,6 +794,108 @@ func TestAccessAuthorizationSupportsDepartmentsGroupsAndExpiry(t *testing.T) {
 	assertStatus(t, handler, http.MethodPost, "/api/access/ssh/"+expiredAsset.ID, nil, userCookie, http.StatusForbidden)
 }
 
+func TestBulkAuthorizationGrantsAccessAcrossResourceTypes(t *testing.T) {
+	handler, adminCookie := newTestHandler(t)
+
+	userRec := assertStatus(t, handler, http.MethodPost, "/api/admin/users", map[string]any{
+		"name":     "bulk-user",
+		"type":     "local",
+		"status":   "enabled",
+		"password": "password123",
+		"metadata": map[string]any{"role": "user"},
+	}, adminCookie, http.StatusCreated)
+	var user model.PlatformItem
+	decodeResponse(t, userRec, &user)
+
+	assetRec := assertStatus(t, handler, http.MethodPost, "/api/admin/assets", map[string]any{
+		"name":     "bulk-ssh",
+		"type":     "linux",
+		"status":   "active",
+		"protocol": "ssh",
+		"host":     "10.20.0.10",
+		"port":     22,
+	}, adminCookie, http.StatusCreated)
+	var asset model.PlatformItem
+	decodeResponse(t, assetRec, &asset)
+	expiredAssetRec := assertStatus(t, handler, http.MethodPost, "/api/admin/assets", map[string]any{
+		"name":     "bulk-expired-ssh",
+		"type":     "linux",
+		"status":   "active",
+		"protocol": "ssh",
+		"host":     "10.20.0.11",
+		"port":     22,
+	}, adminCookie, http.StatusCreated)
+	var expiredAsset model.PlatformItem
+	decodeResponse(t, expiredAssetRec, &expiredAsset)
+	webRec := assertStatus(t, handler, http.MethodPost, "/api/admin/websites", map[string]any{
+		"name":     "bulk-web",
+		"type":     "http",
+		"status":   "enabled",
+		"protocol": "http",
+		"host":     "https://example.test",
+	}, adminCookie, http.StatusCreated)
+	var webAsset model.PlatformItem
+	decodeResponse(t, webRec, &webAsset)
+	dbRec := assertStatus(t, handler, http.MethodPost, "/api/admin/database-assets", map[string]any{
+		"name":     "bulk-db",
+		"type":     "sqlite",
+		"status":   "enabled",
+		"protocol": "database",
+		"metadata": map[string]any{"sqlite_path": "bulk.db"},
+	}, adminCookie, http.StatusCreated)
+	var databaseAsset model.PlatformItem
+	decodeResponse(t, dbRec, &databaseAsset)
+
+	bulkRec := assertStatus(t, handler, http.MethodPost, "/api/admin/authorizations/assets/bulk", map[string]any{
+		"subject_ids": []string{user.ID},
+		"target_ids":  []string{asset.ID},
+		"expires_at":  time.Now().Add(time.Hour).UTC().Format(time.RFC3339),
+	}, adminCookie, http.StatusCreated)
+	if !strings.Contains(bulkRec.Body.String(), `"created":1`) {
+		t.Fatalf("bulk asset authorization did not create record: %s", bulkRec.Body.String())
+	}
+	skipRec := assertStatus(t, handler, http.MethodPost, "/api/admin/authorizations/assets/bulk", map[string]any{
+		"subject_ids": []string{user.ID},
+		"target_ids":  []string{asset.ID},
+	}, adminCookie, http.StatusCreated)
+	if !strings.Contains(skipRec.Body.String(), `"skipped":1`) {
+		t.Fatalf("duplicate bulk authorization was not skipped: %s", skipRec.Body.String())
+	}
+	assertStatus(t, handler, http.MethodPost, "/api/admin/authorizations/assets/bulk", map[string]any{
+		"subject_ids": []string{user.ID},
+		"target_ids":  []string{expiredAsset.ID},
+		"expires_at":  time.Now().Add(-time.Hour).UTC().Format(time.RFC3339),
+	}, adminCookie, http.StatusCreated)
+	assertStatus(t, handler, http.MethodPost, "/api/admin/authorizations/websites/bulk", map[string]any{
+		"subject_ids": []string{user.ID},
+		"target_ids":  []string{webAsset.ID},
+	}, adminCookie, http.StatusCreated)
+	assertStatus(t, handler, http.MethodPost, "/api/admin/authorizations/databases/bulk", map[string]any{
+		"subject_ids": []string{user.ID},
+		"target_ids":  []string{databaseAsset.ID},
+	}, adminCookie, http.StatusCreated)
+
+	loginRec := assertStatus(t, handler, http.MethodPost, "/api/auth/login", map[string]any{"username": "bulk-user", "password": "password123"}, nil, http.StatusOK)
+	userCookie := loginRec.Result().Cookies()[0]
+	accessRec := assertStatus(t, handler, http.MethodGet, "/api/access/assets", nil, userCookie, http.StatusOK)
+	accessBody := accessRec.Body.String()
+	for _, want := range []string{asset.ID, webAsset.ID, databaseAsset.ID} {
+		if !strings.Contains(accessBody, want) {
+			t.Fatalf("bulk authorization did not expose %s in access portal: %s", want, accessBody)
+		}
+	}
+	if strings.Contains(accessBody, expiredAsset.ID) {
+		t.Fatalf("expired bulk authorization exposed asset: %s", accessBody)
+	}
+	operationRec := assertStatus(t, handler, http.MethodGet, "/api/admin/audit/operation-logs", nil, adminCookie, http.StatusOK)
+	operationBody := operationRec.Body.String()
+	for _, want := range []string{"authorized_assets.bulk_create", "authorized_web_assets.bulk_create", "authorized_database_assets.bulk_create"} {
+		if !strings.Contains(operationBody, want) {
+			t.Fatalf("bulk authorization audit missing %s: %s", want, operationBody)
+		}
+	}
+}
+
 func TestDepartmentTreeMetadataAndMemberCounts(t *testing.T) {
 	handler, adminCookie := newTestHandler(t)
 

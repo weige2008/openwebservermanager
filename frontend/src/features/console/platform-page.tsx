@@ -71,6 +71,7 @@ const filePermissionActions = [
 type ResourceOperation =
   | { type: 'asset-import' }
   | { type: 'user-import' }
+  | { type: 'bulk-authorize'; collection: string; items: PlatformItem[] }
   | { type: 'agent-token'; item: PlatformItem }
   | { type: 'certificate-create' }
   | { type: 'certificate-upload' }
@@ -369,7 +370,7 @@ export function PlatformTablePage({ config }: { config: PlatformPageConfig }) {
               <CardDescription>{description}</CardDescription>
             </div>
             <div className='flex flex-wrap justify-end gap-2 max-sm:justify-start'>
-              <ResourceHeaderActions config={config} onOperation={setOperation} />
+              <ResourceHeaderActions config={config} rows={rows} onOperation={setOperation} />
               <Button variant='outline' onClick={() => void app.refresh()}>
                 <RefreshCw className='size-4' />
                 {app.t('refresh', '刷新')}
@@ -413,7 +414,7 @@ export function PlatformTablePage({ config }: { config: PlatformPageConfig }) {
   )
 }
 
-function ResourceHeaderActions({ config, onOperation }: { config: PlatformPageConfig; onOperation: (operation: ResourceOperation) => void }) {
+function ResourceHeaderActions({ config, rows, onOperation }: { config: PlatformPageConfig; rows: PlatformItem[]; onOperation: (operation: ResourceOperation) => void }) {
   const app = useApp()
 
   const exportAssets = async () => {
@@ -429,6 +430,10 @@ function ResourceHeaderActions({ config, onOperation }: { config: PlatformPageCo
   if (config.collection === 'assets') {
     return (
       <>
+        <Button variant='outline' onClick={() => onOperation({ type: 'bulk-authorize', collection: config.collection, items: rows })}>
+          <Save className='size-4' />
+          批量授权
+        </Button>
         <Button variant='outline' onClick={() => void exportAssets()}>
           <Download className='size-4' />
           导出
@@ -438,6 +443,15 @@ function ResourceHeaderActions({ config, onOperation }: { config: PlatformPageCo
           导入
         </Button>
       </>
+    )
+  }
+
+  if (config.collection === 'web_assets' || config.collection === 'database_assets') {
+    return (
+      <Button variant='outline' onClick={() => onOperation({ type: 'bulk-authorize', collection: config.collection, items: rows })}>
+        <Save className='size-4' />
+        批量授权
+      </Button>
     )
   }
 
@@ -640,6 +654,7 @@ function ResourceOperationDialog({ operation, onOpenChange }: { operation: Resou
   if (!operation) return null
   if (operation.type === 'asset-import') return <AssetImportDialog onClose={() => onOpenChange(null)} />
   if (operation.type === 'user-import') return <UserImportDialog onClose={() => onOpenChange(null)} />
+  if (operation.type === 'bulk-authorize') return <BulkAuthorizeDialog collection={operation.collection} items={operation.items} onClose={() => onOpenChange(null)} />
   if (operation.type === 'agent-token') return <AgentGatewayTokenDialog item={operation.item} onClose={() => onOpenChange(null)} />
   if (operation.type === 'certificate-create') return <CertificateCreateDialog onClose={() => onOpenChange(null)} />
   if (operation.type === 'certificate-upload') return <CertificateUploadDialog onClose={() => onOpenChange(null)} />
@@ -734,6 +749,73 @@ function UserImportDialog({ onClose }: { onClose: () => void }) {
       </div>
     </DialogShell>
   )
+}
+
+function BulkAuthorizeDialog({ collection, items, onClose }: { collection: string; items: PlatformItem[]; onClose: () => void }) {
+  const app = useApp()
+  const [subjectIDs, setSubjectIDs] = useState('')
+  const [targetIDs, setTargetIDs] = useState(items.map((item) => item.id).join('\n'))
+  const [expiresAt, setExpiresAt] = useState('')
+  const [saving, setSaving] = useState(false)
+  const [summary, setSummary] = useState<Record<string, number> | null>(null)
+  const route = authorizationBulkRoute(collection)
+
+  const submit = async () => {
+    setSaving(true)
+    try {
+      const data = await apiRequest<{ summary?: Record<string, number> }>(`/api/admin/authorizations/${route}/bulk`, {
+        method: 'POST',
+        body: JSON.stringify({
+          subject_ids: splitLines(subjectIDs),
+          target_ids: splitLines(targetIDs),
+          expires_at: expiresAt || undefined,
+          type: 'bulk',
+          status: 'enabled',
+        }),
+      })
+      setSummary(data.summary || null)
+      await app.refresh(true)
+      app.showToast('批量授权已完成')
+    } catch (error) {
+      app.handleApiError(error)
+    } finally {
+      setSaving(false)
+    }
+  }
+
+  return (
+    <DialogShell open onOpenChange={(open) => !open && onClose()} title='批量授权' description='按用户、部门或资产组 ID 批量生成授权记录；重复的主体/目标组合会自动跳过。'>
+      <div className='grid gap-4'>
+        <Field label='主体 ID'>
+          <Textarea className='min-h-32 font-mono text-xs' value={subjectIDs} onChange={(event) => setSubjectIDs(event.currentTarget.value)} placeholder='每行一个用户 ID、用户名、部门 ID 或部门名称' />
+        </Field>
+        <Field label='目标资源 ID'>
+          <Textarea className='min-h-40 font-mono text-xs' value={targetIDs} onChange={(event) => setTargetIDs(event.currentTarget.value)} />
+        </Field>
+        <Field label='失效时间'>
+          <Input value={expiresAt} onChange={(event) => setExpiresAt(event.currentTarget.value)} placeholder='2026-12-31T23:59:59Z，可留空' />
+        </Field>
+        {summary ? (
+          <div className='rounded-lg border border-border bg-muted/30 p-3 text-xs text-muted-foreground'>
+            创建 {summary.created || 0}，跳过 {summary.skipped || 0}，总计 {summary.total || 0}
+          </div>
+        ) : null}
+        <div className='flex justify-end gap-2'>
+          <Button variant='outline' onClick={onClose}>关闭</Button>
+          <Button variant='primary' onClick={() => void submit()} disabled={saving || !splitLines(subjectIDs).length || !splitLines(targetIDs).length}>
+            <Save className='size-4' />
+            {saving ? '授权中' : '生成授权'}
+          </Button>
+        </div>
+      </div>
+    </DialogShell>
+  )
+}
+
+function authorizationBulkRoute(collection: string) {
+  if (collection === 'web_assets') return 'websites'
+  if (collection === 'database_assets') return 'databases'
+  return 'assets'
 }
 
 function AgentGatewayTokenDialog({ item, onClose }: { item: PlatformItem; onClose: () => void }) {

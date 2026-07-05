@@ -36,6 +36,25 @@ type userImportRequest struct {
 	UpdateExisting bool                        `json:"update_existing"`
 }
 
+type authorizationBulkRequest struct {
+	NamePrefix       string         `json:"name_prefix"`
+	Type             string         `json:"type"`
+	Status           string         `json:"status"`
+	SubjectIDs       []string       `json:"subject_ids"`
+	OwnerIDs         []string       `json:"owner_ids"`
+	UserIDs          []string       `json:"user_ids"`
+	DepartmentIDs    []string       `json:"department_ids"`
+	TargetIDs        []string       `json:"target_ids"`
+	AssetIDs         []string       `json:"asset_ids"`
+	AssetGroupIDs    []string       `json:"asset_group_ids"`
+	WebAssetIDs      []string       `json:"web_asset_ids"`
+	WebGroupIDs      []string       `json:"web_group_ids"`
+	DatabaseIDs      []string       `json:"database_ids"`
+	DatabaseGroupIDs []string       `json:"database_group_ids"`
+	ExpiresAt        string         `json:"expires_at"`
+	Metadata         map[string]any `json:"metadata"`
+}
+
 type fileWriteRequest struct {
 	Path     string `json:"path"`
 	Content  string `json:"content"`
@@ -79,6 +98,13 @@ func (s *Server) handleResourceOperation(w http.ResponseWriter, r *http.Request,
 	case path == "admin/users/import":
 		s.handleUserImport(w, r)
 		return true
+	case strings.HasPrefix(path, "admin/authorizations/") && strings.HasSuffix(path, "/bulk"):
+		parts := splitPath(strings.TrimPrefix(path, "admin/authorizations/"))
+		if len(parts) == 2 && parts[1] == "bulk" {
+			s.handleAuthorizationBulk(w, r, parts[0])
+			return true
+		}
+		return false
 	case path == "admin/certificates/self-signed":
 		s.handleCertificateSelfSigned(w, r)
 		return true
@@ -282,6 +308,148 @@ func (s *Server) handleUserImport(w http.ResponseWriter, r *http.Request) {
 			"total":   len(req.Items),
 		},
 	})
+}
+
+func (s *Server) handleAuthorizationBulk(w http.ResponseWriter, r *http.Request, route string) {
+	if r.Method != http.MethodPost {
+		writeError(w, http.StatusMethodNotAllowed, "method not allowed")
+		return
+	}
+	collection, protocol, ok := authorizationBulkCollection(route)
+	if !ok {
+		writeError(w, http.StatusNotFound, "authorization target not found")
+		return
+	}
+	var req authorizationBulkRequest
+	if !decodeJSON(w, r, &req) {
+		return
+	}
+	subjects := uniqueNonEmptyStrings(req.SubjectIDs, req.OwnerIDs, req.UserIDs, req.DepartmentIDs)
+	targets := uniqueNonEmptyStrings(req.TargetIDs, req.AssetIDs, req.AssetGroupIDs, req.WebAssetIDs, req.WebGroupIDs, req.DatabaseIDs, req.DatabaseGroupIDs)
+	if len(subjects) == 0 {
+		writeError(w, http.StatusBadRequest, "subject_ids are required")
+		return
+	}
+	if len(targets) == 0 {
+		writeError(w, http.StatusBadRequest, "target_ids are required")
+		return
+	}
+	if len(subjects)*len(targets) > 2000 {
+		writeError(w, http.StatusBadRequest, "too many authorization pairs")
+		return
+	}
+	existing, err := s.cfg.Store.ListPlatformItems(collection)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	existingPairs := map[string]bool{}
+	for _, item := range existing {
+		existingPairs[authorizationBulkPairKey(item.OwnerID, item.TargetID)] = true
+	}
+	status := strings.TrimSpace(req.Status)
+	if status == "" {
+		status = "enabled"
+	}
+	authType := strings.TrimSpace(req.Type)
+	if authType == "" {
+		authType = "bulk"
+	}
+	namePrefix := strings.TrimSpace(req.NamePrefix)
+	if namePrefix == "" {
+		namePrefix = "Bulk authorization"
+	}
+	created := []model.PlatformItem{}
+	skipped := []map[string]string{}
+	for _, subjectID := range subjects {
+		for _, targetID := range targets {
+			pairKey := authorizationBulkPairKey(subjectID, targetID)
+			if existingPairs[pairKey] {
+				skipped = append(skipped, map[string]string{"subject_id": subjectID, "target_id": targetID, "reason": "authorization already exists"})
+				continue
+			}
+			metadata := cloneMetadata(req.Metadata)
+			metadata["source"] = "bulk_authorization"
+			metadata["subject_id"] = subjectID
+			metadata["target_id"] = targetID
+			metadata["created_by"] = s.currentUserID(r)
+			if strings.TrimSpace(req.ExpiresAt) != "" {
+				metadata["expires_at"] = strings.TrimSpace(req.ExpiresAt)
+			}
+			item, err := s.cfg.Store.CreatePlatformItem(collection, model.PlatformItemRequest{
+				Name:     namePrefix + " " + subjectID + " -> " + targetID,
+				Type:     authType,
+				Status:   status,
+				Protocol: protocol,
+				OwnerID:  subjectID,
+				TargetID: targetID,
+				Metadata: metadata,
+			})
+			if err != nil {
+				writeError(w, http.StatusInternalServerError, err.Error())
+				return
+			}
+			existingPairs[pairKey] = true
+			created = append(created, item)
+		}
+	}
+	_ = s.audit(r, collection+".bulk_create", collection, protocol, "bulk created authorizations")
+	writeJSON(w, http.StatusCreated, map[string]any{
+		"created": created,
+		"skipped": skipped,
+		"summary": map[string]int{
+			"created": len(created),
+			"skipped": len(skipped),
+			"total":   len(subjects) * len(targets),
+		},
+	})
+}
+
+func authorizationBulkCollection(route string) (string, model.Protocol, bool) {
+	switch route {
+	case "assets":
+		return "authorized_assets", "", true
+	case "websites":
+		return "authorized_web_assets", model.ProtocolHTTP, true
+	case "databases":
+		return "authorized_database_assets", model.ProtocolDatabase, true
+	default:
+		return "", "", false
+	}
+}
+
+func authorizationBulkPairKey(subjectID, targetID string) string {
+	return normalizeAuthKey(subjectID) + "\x00" + normalizeAuthKey(targetID)
+}
+
+func uniqueNonEmptyStrings(groups ...[]string) []string {
+	result := []string{}
+	seen := map[string]bool{}
+	for _, group := range groups {
+		for _, value := range group {
+			for _, part := range splitCriteria(value) {
+				trimmed := strings.TrimSpace(part)
+				if trimmed == "" {
+					continue
+				}
+				key := normalizeAuthKey(trimmed)
+				if seen[key] {
+					continue
+				}
+				seen[key] = true
+				result = append(result, trimmed)
+			}
+		}
+	}
+	return result
+}
+
+func cloneMetadata(source map[string]any) map[string]any {
+	next := map[string]any{}
+	for key, value := range source {
+		next[key] = value
+	}
+	return next
 }
 
 func (s *Server) handleStorageFiles(w http.ResponseWriter, r *http.Request, storageID, action string) {

@@ -18,6 +18,7 @@ import (
 
 var adminCollectionRoutes = map[string]string{
 	"users":            "users",
+	"passkeys":         "passkeys",
 	"roles":            "roles",
 	"departments":      "departments",
 	"login-policies":   "login_policies",
@@ -953,6 +954,7 @@ func syntheticAPIRequest(method, path string) *http.Request {
 func emptyPlatformBootstrap() map[string][]model.PlatformItem {
 	return map[string][]model.PlatformItem{
 		"users":                      {},
+		"passkeys":                   {},
 		"roles":                      {},
 		"departments":                {},
 		"login_policies":             {},

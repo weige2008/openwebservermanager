@@ -1,4 +1,4 @@
-import { KeyRound, MessageCircle, Monitor, Moon, Network, RotateCcw, ShieldCheck, Sun, UserCircle } from 'lucide-react'
+import { Fingerprint, KeyRound, MessageCircle, Monitor, Moon, Network, RotateCcw, ShieldCheck, Sun, Trash2, UserCircle } from 'lucide-react'
 import { useEffect, useState } from 'react'
 import { useTranslation } from 'react-i18next'
 
@@ -10,6 +10,14 @@ import { Field, Input, Select } from '@/components/ui/field'
 import { AboutContent } from '@/features/about/about-page'
 import { INTERFACE_LANGUAGE_OPTIONS } from '@/i18n/languages'
 import { apiRequest } from '@/lib/api'
+import {
+  decodePasskeyCreationOptions,
+  passkeyAttestationPayload,
+  passkeySecureContext,
+  passkeySupported,
+  type PasskeyCreationPublicKeyOptions,
+  type PasskeyOptionsResponse,
+} from '@/lib/passkeys'
 import { formatDate } from '@/lib/utils'
 import type { Locale, PlatformItem, Theme, ThemeContentLayout, ThemeFont, ThemePreset, ThemeRadius, ThemeScale, ThemeSidebarStyle } from '@/types'
 
@@ -94,6 +102,16 @@ interface WeComSettingsState {
   setting?: PlatformItem
 }
 
+interface PasskeyItem {
+  id: string
+  name: string
+  credential_id: string
+  sign_count: number
+  last_used_at?: string
+  created_at: string
+  updated_at: string
+}
+
 const loginSecurityTypes = ['security', 'identity', 'login', 'password', 'captcha']
 const captchaKeys = ['captcha_enabled', 'login_captcha', 'enable_captcha', 'captcha', 'require_captcha']
 const disablePasswordKeys = ['disable_password_login', 'password_login_disabled', 'disablePasswordLogin', 'passwordLoginDisabled', 'no_password_login']
@@ -112,6 +130,8 @@ export function SettingsPage() {
   const [mfaCode, setMFACode] = useState('')
   const [mfaPassword, setMFAPassword] = useState('')
   const [mfaBusy, setMFABusy] = useState(false)
+  const [passkeys, setPasskeys] = useState<PasskeyItem[]>([])
+  const [passkeyBusy, setPasskeyBusy] = useState(false)
   const [loginSecurity, setLoginSecurity] = useState<LoginSecurityState>({
     captchaEnabled: app.captchaRequired,
     passwordLoginDisabled: app.passwordLoginDisabled,
@@ -126,6 +146,11 @@ export function SettingsPage() {
     setMFAStatus(await apiRequest<MFAStatus>('/api/auth/mfa/status'))
   }
 
+  const loadPasskeys = async () => {
+    const result = await apiRequest<{ items: PasskeyItem[] }>('/api/auth/passkeys')
+    setPasskeys(result.items || [])
+  }
+
   const loadLoginSecurity = async () => {
     const result = await apiRequest<{ items: PlatformItem[] }>('/api/admin/system-settings')
     setLoginSecurity(loginSecurityFromSettings(result.items, app.captchaRequired, app.passwordLoginDisabled))
@@ -135,6 +160,7 @@ export function SettingsPage() {
 
   useEffect(() => {
     void loadMFAStatus().catch(() => undefined)
+    void loadPasskeys().catch(() => undefined)
     void loadLoginSecurity().catch(() => undefined)
   }, [])
 
@@ -194,6 +220,52 @@ export function SettingsPage() {
       app.handleApiError(error)
     } finally {
       setMFABusy(false)
+    }
+  }
+
+  const registerPasskey = async () => {
+    if (!passkeySupported()) {
+      app.showToast(t('settingsPage.passkeyUnsupported', { defaultValue: 'This browser does not support passkeys.' }))
+      return
+    }
+    if (!passkeySecureContext()) {
+      app.showToast(t('settingsPage.passkeySecureContextRequired', { defaultValue: 'Passkeys require HTTPS or localhost.' }))
+      return
+    }
+    setPasskeyBusy(true)
+    try {
+      const options = await apiRequest<PasskeyOptionsResponse<PasskeyCreationPublicKeyOptions>>('/api/auth/passkeys/register/options', {
+        method: 'POST',
+        body: '{}',
+      })
+      const credential = await navigator.credentials.create({
+        publicKey: decodePasskeyCreationOptions(options.publicKey),
+      })
+      if (!credential) throw new Error(t('operationFailed'))
+      await apiRequest<PasskeyItem>('/api/auth/passkeys/register/verify', {
+        method: 'POST',
+        body: JSON.stringify(passkeyAttestationPayload(credential as PublicKeyCredential, options.challenge_id, `${username} passkey`)),
+      })
+      await loadPasskeys()
+      app.showToast(t('settingsPage.passkeyRegistered', { defaultValue: 'Passkey registered.' }))
+    } catch (error) {
+      app.handleApiError(error)
+    } finally {
+      setPasskeyBusy(false)
+    }
+  }
+
+  const deletePasskey = async (item: PasskeyItem) => {
+    if (!window.confirm(t('settingsPage.passkeyDeleteConfirm', { defaultValue: 'Delete this passkey?' }))) return
+    setPasskeyBusy(true)
+    try {
+      await apiRequest(`/api/auth/passkeys/${item.id}`, { method: 'DELETE' })
+      await loadPasskeys()
+      app.showToast(t('settingsPage.passkeyDeleted', { defaultValue: 'Passkey deleted.' }))
+    } catch (error) {
+      app.handleApiError(error)
+    } finally {
+      setPasskeyBusy(false)
     }
   }
 
@@ -385,6 +457,57 @@ export function SettingsPage() {
             <InfoTile label={t('gateway')} value={app.data.guacd?.address || t('guacdOffline')} />
           </StaggerItem>
         </StaggerContainer>
+      </CardStaggerItem>
+
+      <CardStaggerItem className='grid gap-4 rounded-xl border border-border bg-card p-5 shadow-sm lg:grid-cols-[0.85fr_1.15fr]'>
+        <div className='flex min-w-0 items-start gap-3'>
+          <span className='grid size-12 shrink-0 place-items-center rounded-full bg-primary text-primary-foreground'>
+            <Fingerprint className='size-5' />
+          </span>
+          <div className='min-w-0'>
+            <div className='flex flex-wrap items-center gap-2'>
+              <h2 className='truncate text-base font-semibold'>{t('settingsPage.passkeyTitle', { defaultValue: 'Passkeys' })}</h2>
+              <Badge tone={passkeys.length > 0 ? 'success' : 'warning'}>
+                {passkeys.length > 0 ? t('settingsPage.passkeyEnabled', { defaultValue: '{{count}} registered', count: passkeys.length }) : t('settingsPage.passkeyDisabled', { defaultValue: 'Not registered' })}
+              </Badge>
+              {!passkeySecureContext() ? <Badge tone='danger'>{t('settingsPage.passkeyHttpsRequired', { defaultValue: 'HTTPS required' })}</Badge> : null}
+            </div>
+            <p className='mt-1 max-w-lg text-sm leading-6 text-muted-foreground'>
+              {t('settingsPage.passkeyDescription', { defaultValue: 'Register browser passkeys for passwordless sign-in. Public keys stay on the server; private keys stay in your authenticator.' })}
+            </p>
+          </div>
+        </div>
+        <div className='grid gap-3'>
+          {passkeys.length ? (
+            <div className='grid gap-2'>
+              {passkeys.map((item) => (
+                <div key={item.id} className='flex flex-wrap items-center justify-between gap-3 rounded-lg border border-border bg-background/70 p-3'>
+                  <div className='min-w-0'>
+                    <div className='truncate text-sm font-medium'>{item.name}</div>
+                    <div className='mt-1 flex flex-wrap gap-x-3 gap-y-1 text-xs text-muted-foreground'>
+                      <span>{t('createdAt')}: {formatDate(item.created_at)}</span>
+                      <span>{t('settingsPage.passkeyLastUsed', { defaultValue: 'Last used' })}: {item.last_used_at ? formatDate(item.last_used_at) : t('none')}</span>
+                      <span>{t('settingsPage.passkeySignCount', { defaultValue: 'Sign count' })}: {item.sign_count || 0}</span>
+                    </div>
+                  </div>
+                  <Button type='button' variant='ghost' size='icon-sm' onClick={() => void deletePasskey(item)} disabled={passkeyBusy} aria-label={t('settingsPage.deletePasskey', { defaultValue: 'Delete passkey' })}>
+                    <Trash2 className='size-4' />
+                  </Button>
+                </div>
+              ))}
+            </div>
+          ) : (
+            <div className='rounded-lg border border-dashed border-border bg-background/70 p-3 text-sm text-muted-foreground'>
+              {t('settingsPage.passkeyEmpty', { defaultValue: 'No passkeys are registered for this account yet.' })}
+            </div>
+          )}
+          <div className='flex justify-end'>
+            <Button variant='primary' onClick={() => void registerPasskey()} disabled={passkeyBusy || !passkeySupported() || !passkeySecureContext()}>
+              <Fingerprint className='size-4' />
+              {passkeyBusy ? t('saving') : t('settingsPage.registerPasskey', { defaultValue: 'Register passkey' })}
+            </Button>
+          </div>
+        </div>
       </CardStaggerItem>
 
       <CardStaggerItem className='grid gap-4 rounded-xl border border-border bg-card p-5 shadow-sm lg:grid-cols-[0.85fr_1.15fr]'>

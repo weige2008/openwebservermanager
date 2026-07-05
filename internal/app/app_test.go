@@ -5,10 +5,13 @@ import (
 	"bufio"
 	"bytes"
 	"context"
+	"crypto/ecdsa"
 	"crypto/ed25519"
+	"crypto/elliptic"
 	"crypto/rand"
 	"crypto/sha256"
 	"encoding/base64"
+	"encoding/binary"
 	"encoding/json"
 	"errors"
 	"io"
@@ -30,6 +33,7 @@ import (
 	"openwebservermanager/internal/security"
 	"openwebservermanager/internal/store"
 
+	"github.com/fxamacker/cbor/v2"
 	cryptossh "golang.org/x/crypto/ssh"
 )
 
@@ -189,6 +193,35 @@ func TestPlatformUserLoginAndAccessAuthorization(t *testing.T) {
 	if resolvedServer.Host != asset.Host || resolvedServer.SSHPort != asset.Port || resolvedCredential.Username != "root" || secret.Password != "target-secret" {
 		t.Fatalf("unexpected resolved ssh parts: server=%#v credential=%#v secret=%#v", resolvedServer, resolvedCredential, secret)
 	}
+}
+
+func TestPasskeyRegistrationAndLogin(t *testing.T) {
+	handler, adminCookie := newTestHandler(t)
+
+	privateKey, credentialID := registerTestPasskey(t, handler, adminCookie, "admin")
+
+	listRec := assertStatus(t, handler, http.MethodGet, "/api/auth/passkeys", nil, adminCookie, http.StatusOK)
+	if strings.Contains(listRec.Body.String(), "public_key_x") || strings.Contains(listRec.Body.String(), "public_key_y") {
+		t.Fatalf("passkey list leaked public key internals: %s", listRec.Body.String())
+	}
+
+	loginOptions := testPasskeyLoginOptions(t, handler, "admin")
+	assertionPayload := testPasskeyAssertionPayload(t, loginOptions.ChallengeID, loginOptions.PublicKey.Challenge, loginOptions.PublicKey.RPID, credentialID, privateKey, 2, false)
+	loginRec := assertStatus(t, handler, http.MethodPost, "/api/auth/passkeys/login/verify", assertionPayload, nil, http.StatusOK)
+	cookies := loginRec.Result().Cookies()
+	if len(cookies) == 0 {
+		t.Fatal("passkey login did not set auth cookie")
+	}
+	assertStatus(t, handler, http.MethodGet, "/api/auth/me", nil, cookies[0], http.StatusOK)
+
+	logsRec := assertStatus(t, handler, http.MethodGet, "/api/admin/audit/login-logs", nil, adminCookie, http.StatusOK)
+	if !strings.Contains(logsRec.Body.String(), `"type":"passkey"`) || !strings.Contains(logsRec.Body.String(), `"status":"success"`) {
+		t.Fatalf("passkey login log missing: %s", logsRec.Body.String())
+	}
+
+	badOptions := testPasskeyLoginOptions(t, handler, "admin")
+	badPayload := testPasskeyAssertionPayload(t, badOptions.ChallengeID, badOptions.PublicKey.Challenge, badOptions.PublicKey.RPID, credentialID, privateKey, 3, true)
+	assertStatus(t, handler, http.MethodPost, "/api/auth/passkeys/login/verify", badPayload, nil, http.StatusUnauthorized)
 }
 
 func TestUserImportCreatesSkipsAndUpdatesLoginUsers(t *testing.T) {
@@ -3096,6 +3129,144 @@ func handleFakeSSHExecChannel(channel cryptossh.Channel, requests <-chan *crypto
 		_, _ = channel.SendRequest("exit-status", false, cryptossh.Marshal(struct{ Status uint32 }{Status: status}))
 		return
 	}
+}
+
+type testPasskeyCreationOptionsResponse struct {
+	ChallengeID string                 `json:"challenge_id"`
+	PublicKey   passkeyCreationOptions `json:"publicKey"`
+}
+
+type testPasskeyRequestOptionsResponse struct {
+	ChallengeID string                `json:"challenge_id"`
+	PublicKey   passkeyRequestOptions `json:"publicKey"`
+}
+
+func registerTestPasskey(t *testing.T, handler http.Handler, cookie *http.Cookie, username string) (*ecdsa.PrivateKey, []byte) {
+	t.Helper()
+	optionsRec := assertStatus(t, handler, http.MethodPost, "/api/auth/passkeys/register/options", map[string]any{}, cookie, http.StatusOK)
+	var options testPasskeyCreationOptionsResponse
+	decodeResponse(t, optionsRec, &options)
+	privateKey, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	if err != nil {
+		t.Fatalf("generate passkey key: %v", err)
+	}
+	credentialID := []byte("test-passkey-credential")
+	clientData := testPasskeyClientData(t, "webauthn.create", options.PublicKey.Challenge)
+	attestation := testPasskeyAttestation(t, options.PublicKey.RP.ID, credentialID, privateKey, 1)
+	payload := map[string]any{
+		"challenge_id": options.ChallengeID,
+		"name":         username + " test passkey",
+		"id":           passkeyBase64Encode(credentialID),
+		"raw_id":       passkeyBase64Encode(credentialID),
+		"type":         "public-key",
+		"response": map[string]any{
+			"client_data_json":   passkeyBase64Encode(clientData),
+			"attestation_object": passkeyBase64Encode(attestation),
+		},
+	}
+	assertStatus(t, handler, http.MethodPost, "/api/auth/passkeys/register/verify", payload, cookie, http.StatusCreated)
+	return privateKey, credentialID
+}
+
+func testPasskeyLoginOptions(t *testing.T, handler http.Handler, username string) testPasskeyRequestOptionsResponse {
+	t.Helper()
+	rec := assertStatus(t, handler, http.MethodPost, "/api/auth/passkeys/login/options", map[string]any{"username": username}, nil, http.StatusOK)
+	var options testPasskeyRequestOptionsResponse
+	decodeResponse(t, rec, &options)
+	if options.ChallengeID == "" || options.PublicKey.Challenge == "" || len(options.PublicKey.AllowCredentials) == 0 {
+		t.Fatalf("invalid passkey login options: %#v", options)
+	}
+	return options
+}
+
+func testPasskeyClientData(t *testing.T, typ, challenge string) []byte {
+	t.Helper()
+	raw, err := json.Marshal(map[string]any{
+		"type":      typ,
+		"challenge": challenge,
+		"origin":    "http://example.com",
+	})
+	if err != nil {
+		t.Fatalf("marshal client data: %v", err)
+	}
+	return raw
+}
+
+func testPasskeyAttestation(t *testing.T, rpID string, credentialID []byte, privateKey *ecdsa.PrivateKey, signCount uint32) []byte {
+	t.Helper()
+	x := privateKey.PublicKey.X.FillBytes(make([]byte, 32))
+	y := privateKey.PublicKey.Y.FillBytes(make([]byte, 32))
+	coseKey, err := cbor.Marshal(map[int]any{
+		1:  2,
+		3:  -7,
+		-1: 1,
+		-2: x,
+		-3: y,
+	})
+	if err != nil {
+		t.Fatalf("marshal cose key: %v", err)
+	}
+	rpHash := sha256.Sum256([]byte(rpID))
+	authData := make([]byte, 0, 37+16+2+len(credentialID)+len(coseKey))
+	authData = append(authData, rpHash[:]...)
+	authData = append(authData, 0x41)
+	counter := make([]byte, 4)
+	binary.BigEndian.PutUint32(counter, signCount)
+	authData = append(authData, counter...)
+	authData = append(authData, make([]byte, 16)...)
+	credentialLen := make([]byte, 2)
+	binary.BigEndian.PutUint16(credentialLen, uint16(len(credentialID)))
+	authData = append(authData, credentialLen...)
+	authData = append(authData, credentialID...)
+	authData = append(authData, coseKey...)
+	attestation, err := cbor.Marshal(map[string]any{
+		"fmt":      "none",
+		"authData": authData,
+		"attStmt":  map[string]any{},
+	})
+	if err != nil {
+		t.Fatalf("marshal attestation: %v", err)
+	}
+	return attestation
+}
+
+func testPasskeyAssertionPayload(t *testing.T, challengeID, challenge, rpID string, credentialID []byte, privateKey *ecdsa.PrivateKey, signCount uint32, corruptSignature bool) map[string]any {
+	t.Helper()
+	clientData := testPasskeyClientData(t, "webauthn.get", challenge)
+	authenticatorData := testPasskeyAssertionAuthData(t, rpID, signCount)
+	clientHash := sha256.Sum256(clientData)
+	signed := append(append([]byte{}, authenticatorData...), clientHash[:]...)
+	digest := sha256.Sum256(signed)
+	signature, err := ecdsa.SignASN1(rand.Reader, privateKey, digest[:])
+	if err != nil {
+		t.Fatalf("sign assertion: %v", err)
+	}
+	if corruptSignature && len(signature) > 0 {
+		signature[len(signature)-1] ^= 0xff
+	}
+	return map[string]any{
+		"challenge_id": challengeID,
+		"id":           passkeyBase64Encode(credentialID),
+		"raw_id":       passkeyBase64Encode(credentialID),
+		"type":         "public-key",
+		"response": map[string]any{
+			"client_data_json":   passkeyBase64Encode(clientData),
+			"authenticator_data": passkeyBase64Encode(authenticatorData),
+			"signature":          passkeyBase64Encode(signature),
+		},
+	}
+}
+
+func testPasskeyAssertionAuthData(t *testing.T, rpID string, signCount uint32) []byte {
+	t.Helper()
+	rpHash := sha256.Sum256([]byte(rpID))
+	authData := make([]byte, 0, 37)
+	authData = append(authData, rpHash[:]...)
+	authData = append(authData, 0x01)
+	counter := make([]byte, 4)
+	binary.BigEndian.PutUint32(counter, signCount)
+	authData = append(authData, counter...)
+	return authData
 }
 
 func newTestHandler(t *testing.T) (http.Handler, *http.Cookie) {

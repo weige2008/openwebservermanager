@@ -303,6 +303,7 @@ func (s *Store) ensureMaps() {
 
 var platformCollections = []string{
 	"users",
+	"passkeys",
 	"roles",
 	"departments",
 	"login_policies",
@@ -1651,6 +1652,9 @@ var sensitiveMetadataKeys = map[string]struct{}{
 	"enterprise_wechat_agent_secret_encrypted": {},
 	"corp_secret":                              {},
 	"corpsecret":                               {},
+	"public_key_x":                             {},
+	"public_key_y":                             {},
+	"cose_public_key":                          {},
 }
 
 func sanitizeMetadataValue(value any) {

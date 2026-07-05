@@ -1,5 +1,5 @@
 import { useNavigate } from '@tanstack/react-router'
-import { Loader2 } from 'lucide-react'
+import { Fingerprint, Loader2 } from 'lucide-react'
 import { useEffect, useState, type FormEvent } from 'react'
 import { useTranslation } from 'react-i18next'
 
@@ -8,6 +8,14 @@ import { AuthLayout } from '@/components/layout/auth-layout'
 import { Button } from '@/components/ui/button'
 import { Field, Input } from '@/components/ui/field'
 import { apiRequest } from '@/lib/api'
+import {
+  decodePasskeyRequestOptions,
+  passkeyAssertionPayload,
+  passkeySecureContext,
+  passkeySupported,
+  type PasskeyOptionsResponse,
+  type PasskeyRequestPublicKeyOptions,
+} from '@/lib/passkeys'
 import type { AuthUser } from '@/types'
 
 interface LoginResponse {
@@ -48,23 +56,27 @@ export function AuthPage() {
   const { t } = useTranslation()
   const navigate = useNavigate()
   const [submitting, setSubmitting] = useState(false)
+  const [passkeySubmitting, setPasskeySubmitting] = useState(false)
+  const [username, setUsername] = useState(app.setupRequired ? 'admin' : '')
   const [mfaChallenge, setMFAChallenge] = useState<MFAChallenge | null>(null)
   const [captcha, setCaptcha] = useState<CaptchaChallenge | null>(null)
   const [oidcProviders, setOIDCProviders] = useState<OIDCProvider[]>([])
   const [wecomProviders, setWeComProviders] = useState<WeComProvider[]>([])
   const passwordFormAvailable = !app.passwordLoginDisabled || app.ldapLoginEnabled
+  const canUsePasskey = passkeySupported() && passkeySecureContext()
 
   const loadCaptcha = async () => {
     setCaptcha(await apiRequest<CaptchaChallenge>('/api/auth/captcha'))
   }
 
   useEffect(() => {
+    if (app.setupRequired && !username) setUsername('admin')
     if (!app.setupRequired && app.captchaRequired && !mfaChallenge) {
       void loadCaptcha().catch(() => undefined)
     } else {
       setCaptcha(null)
     }
-  }, [app.setupRequired, app.captchaRequired, mfaChallenge])
+  }, [app.setupRequired, app.captchaRequired, mfaChallenge, username])
 
   useEffect(() => {
     if (app.setupRequired) {
@@ -99,6 +111,46 @@ export function AuthPage() {
     const next = new URLSearchParams(window.location.search).get('next') || '/app'
     const params = new URLSearchParams({ provider: provider.id, next })
     window.location.assign(`/api/auth/wecom/start?${params.toString()}`)
+  }
+
+  const startPasskeyLogin = async () => {
+    const account = username.trim()
+    if (!account) {
+      app.showToast(t('auth.passkeyUsernameRequired', { defaultValue: 'Enter your username first.' }))
+      return
+    }
+    if (!passkeySupported()) {
+      app.showToast(t('auth.passkeyUnsupported', { defaultValue: 'This browser does not support passkeys.' }))
+      return
+    }
+    if (!passkeySecureContext()) {
+      app.showToast(t('auth.passkeySecureContextRequired', { defaultValue: 'Passkeys require HTTPS or localhost.' }))
+      return
+    }
+    setPasskeySubmitting(true)
+    try {
+      const options = await apiRequest<PasskeyOptionsResponse<PasskeyRequestPublicKeyOptions>>('/api/auth/passkeys/login/options', {
+        method: 'POST',
+        body: JSON.stringify({ username: account }),
+      })
+      const credential = await navigator.credentials.get({
+        publicKey: decodePasskeyRequestOptions(options.publicKey),
+      })
+      if (!credential) throw new Error(t('operationFailed'))
+      const result = await apiRequest<LoginResponse>('/api/auth/passkeys/login/verify', {
+        method: 'POST',
+        body: JSON.stringify(passkeyAssertionPayload(credential as PublicKeyCredential, options.challenge_id)),
+      })
+      if (!result.user) throw new Error(t('operationFailed'))
+      app.setAuthenticatedUser(result.user)
+      await app.refresh(true)
+      app.showToast(t('auth.signedIn'))
+      await finishSignIn()
+    } catch (error) {
+      app.handleApiError(error)
+    } finally {
+      setPasskeySubmitting(false)
+    }
   }
 
   const onSubmit = async (event: FormEvent<HTMLFormElement>) => {
@@ -219,7 +271,7 @@ export function AuthPage() {
               </div>
             ) : null}
             <Field label={t('auth.username')}>
-              <Input name='username' autoComplete='username' placeholder='admin' defaultValue={app.setupRequired ? 'admin' : ''} required />
+              <Input name='username' autoComplete='username' placeholder='admin' value={username} onChange={(event) => setUsername(event.currentTarget.value)} required />
             </Field>
             <Field label={app.setupRequired ? t('auth.newPassword') : t('auth.password')}>
               <Input
@@ -253,6 +305,19 @@ export function AuthPage() {
           {mfaChallenge ? 'Verify MFA' : app.setupRequired ? t('auth.setupSubmit') : passwordFormAvailable ? t('auth.loginSubmit') : t('auth.passwordLoginDisabledSubmit')}
         </Button>
       </form>
+      {!app.setupRequired && !mfaChallenge ? (
+        <div className='grid gap-2'>
+          <div className='flex items-center gap-3 text-xs text-muted-foreground'>
+            <span className='h-px flex-1 bg-border' />
+            <span>{t('auth.passwordless', { defaultValue: 'Passwordless' })}</span>
+            <span className='h-px flex-1 bg-border' />
+          </div>
+          <Button type='button' variant='outline' className='w-full' onClick={() => void startPasskeyLogin()} disabled={passkeySubmitting || submitting || !canUsePasskey}>
+            {passkeySubmitting ? <Loader2 className='size-4 animate-spin' /> : <Fingerprint className='size-4' />}
+            {canUsePasskey ? t('auth.passkeyLogin', { defaultValue: 'Sign in with passkey' }) : t('auth.passkeyUnavailable', { defaultValue: 'Passkey requires HTTPS or localhost' })}
+          </Button>
+        </div>
+      ) : null}
       {!app.setupRequired && !mfaChallenge && (oidcProviders.length || wecomProviders.length) ? (
         <div className='grid gap-2'>
           <div className='flex items-center gap-3 text-xs text-muted-foreground'>

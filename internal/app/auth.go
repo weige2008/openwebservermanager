@@ -20,13 +20,15 @@ const (
 )
 
 type authManager struct {
-	mu            sync.RWMutex
-	sessions      map[string]authSession
-	failures      map[string]loginFailure
-	mfaChallenges map[string]mfaChallenge
-	captchas      map[string]captchaChallenge
-	oidcStates    map[string]externalOIDCState
-	wecomStates   map[string]externalWeComState
+	mu                   sync.RWMutex
+	sessions             map[string]authSession
+	failures             map[string]loginFailure
+	mfaChallenges        map[string]mfaChallenge
+	captchas             map[string]captchaChallenge
+	oidcStates           map[string]externalOIDCState
+	wecomStates          map[string]externalWeComState
+	passkeyRegistrations map[string]passkeyChallenge
+	passkeyLogins        map[string]passkeyChallenge
 }
 
 type authSession struct {
@@ -84,12 +86,14 @@ type loginRequest struct {
 
 func newAuthManager() *authManager {
 	return &authManager{
-		sessions:      map[string]authSession{},
-		failures:      map[string]loginFailure{},
-		mfaChallenges: map[string]mfaChallenge{},
-		captchas:      map[string]captchaChallenge{},
-		oidcStates:    map[string]externalOIDCState{},
-		wecomStates:   map[string]externalWeComState{},
+		sessions:             map[string]authSession{},
+		failures:             map[string]loginFailure{},
+		mfaChallenges:        map[string]mfaChallenge{},
+		captchas:             map[string]captchaChallenge{},
+		oidcStates:           map[string]externalOIDCState{},
+		wecomStates:          map[string]externalWeComState{},
+		passkeyRegistrations: map[string]passkeyChallenge{},
+		passkeyLogins:        map[string]passkeyChallenge{},
 	}
 }
 
@@ -198,6 +202,8 @@ func (m *authManager) clearSessions() {
 	m.captchas = map[string]captchaChallenge{}
 	m.oidcStates = map[string]externalOIDCState{}
 	m.wecomStates = map[string]externalWeComState{}
+	m.passkeyRegistrations = map[string]passkeyChallenge{}
+	m.passkeyLogins = map[string]passkeyChallenge{}
 }
 
 func (m *authManager) createMFAChallenge(challenge mfaChallenge) (string, error) {
@@ -230,6 +236,70 @@ func (m *authManager) deleteMFAChallenge(token string) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	delete(m.mfaChallenges, token)
+}
+
+func (m *authManager) createPasskeyRegistrationChallenge(challenge passkeyChallenge) (string, error) {
+	token, err := randomToken()
+	if err != nil {
+		return "", err
+	}
+	challenge.ExpiresAt = time.Now().Add(5 * time.Minute).UTC()
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.passkeyRegistrations[token] = challenge
+	return token, nil
+}
+
+func (m *authManager) passkeyRegistrationChallenge(token string) (passkeyChallenge, bool) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	challenge, ok := m.passkeyRegistrations[token]
+	if !ok {
+		return passkeyChallenge{}, false
+	}
+	if time.Now().UTC().After(challenge.ExpiresAt) {
+		delete(m.passkeyRegistrations, token)
+		return passkeyChallenge{}, false
+	}
+	return challenge, true
+}
+
+func (m *authManager) deletePasskeyRegistrationChallenge(token string) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	delete(m.passkeyRegistrations, token)
+}
+
+func (m *authManager) createPasskeyLoginChallenge(challenge passkeyChallenge) (string, error) {
+	token, err := randomToken()
+	if err != nil {
+		return "", err
+	}
+	challenge.ExpiresAt = time.Now().Add(5 * time.Minute).UTC()
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.passkeyLogins[token] = challenge
+	return token, nil
+}
+
+func (m *authManager) passkeyLoginChallenge(token string) (passkeyChallenge, bool) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	challenge, ok := m.passkeyLogins[token]
+	if !ok {
+		return passkeyChallenge{}, false
+	}
+	if time.Now().UTC().After(challenge.ExpiresAt) {
+		delete(m.passkeyLogins, token)
+		return passkeyChallenge{}, false
+	}
+	return challenge, true
+}
+
+func (m *authManager) deletePasskeyLoginChallenge(token string) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	delete(m.passkeyLogins, token)
 }
 
 func (s *Server) requireAuth(w http.ResponseWriter, r *http.Request) bool {

@@ -140,6 +140,9 @@ func (s *Server) serveAPI(w http.ResponseWriter, r *http.Request) {
 	case strings.HasPrefix(r.URL.Path, "/api/auth/wecom/"):
 		s.handleExternalWeComAPI(w, r)
 		return
+	case strings.HasPrefix(r.URL.Path, "/api/auth/passkeys/login/"):
+		s.handlePasskeyLoginAPI(w, r)
+		return
 	case strings.HasPrefix(r.URL.Path, "/api/oidc/"):
 		s.handleOIDCAPI(w, r)
 		return
@@ -157,6 +160,8 @@ func (s *Server) serveAPI(w http.ResponseWriter, r *http.Request) {
 		s.handleBootstrap(w, r)
 	case strings.HasPrefix(r.URL.Path, "/api/auth/mfa/"):
 		s.handleAuthenticatedMFA(w, r)
+	case strings.HasPrefix(r.URL.Path, "/api/auth/passkeys"):
+		s.handleAuthenticatedPasskeys(w, r)
 	case !s.authorizeAPI(w, r):
 		return
 	case s.handlePlatformAPI(w, r):

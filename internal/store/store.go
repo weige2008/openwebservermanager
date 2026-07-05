@@ -59,6 +59,20 @@ type AdminPublic struct {
 	UpdatedAt time.Time `json:"updated_at"`
 }
 
+type RestoreSummary struct {
+	LegacyStateRestored bool           `json:"legacy_state_restored"`
+	PlatformRecords     int            `json:"platform_records"`
+	RecordsByCollection map[string]int `json:"records_by_collection"`
+}
+
+type platformRecordSnapshot struct {
+	Collection string
+	ID         string
+	Payload    string
+	CreatedAt  string
+	UpdatedAt  string
+}
+
 var ErrAdminAlreadyConfigured = errors.New("admin already configured")
 
 func Open(path string, cipher *security.Cipher) (*Store, error) {
@@ -746,6 +760,121 @@ func (s *Store) DeletePlatformItem(collection, id string) error {
 		return os.ErrNotExist
 	}
 	return nil
+}
+
+func (s *Store) RestoreSnapshot(legacyRaw []byte, sqlitePath string) (RestoreSummary, error) {
+	var nextState *state
+	if len(legacyRaw) > 0 {
+		parsed := state{}
+		if err := json.Unmarshal(legacyRaw, &parsed); err != nil {
+			return RestoreSummary{}, fmt.Errorf("decode legacy store: %w", err)
+		}
+		if parsed.Admin == nil || parsed.Admin.PasswordHash == "" {
+			return RestoreSummary{}, errors.New("backup legacy store does not contain an administrator")
+		}
+		nextState = &parsed
+	}
+
+	var records []platformRecordSnapshot
+	var err error
+	if sqlitePath != "" {
+		records, err = readPlatformRecordSnapshot(sqlitePath)
+		if err != nil {
+			return RestoreSummary{}, err
+		}
+	}
+	if nextState == nil && len(records) == 0 {
+		return RestoreSummary{}, errors.New("backup does not contain restoreable store data")
+	}
+
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	summary := RestoreSummary{RecordsByCollection: map[string]int{}}
+	if nextState != nil {
+		s.state = *nextState
+		s.ensureMaps()
+		if err := s.saveLocked(); err != nil {
+			return RestoreSummary{}, err
+		}
+		summary.LegacyStateRestored = true
+	}
+	if len(records) > 0 {
+		tx, err := s.db.Begin()
+		if err != nil {
+			return RestoreSummary{}, err
+		}
+		if _, err := tx.Exec(`DELETE FROM platform_records`); err != nil {
+			_ = tx.Rollback()
+			return RestoreSummary{}, fmt.Errorf("clear platform records: %w", err)
+		}
+		stmt, err := tx.Prepare(`INSERT INTO platform_records(collection, id, payload, created_at, updated_at) VALUES (?, ?, ?, ?, ?)`)
+		if err != nil {
+			_ = tx.Rollback()
+			return RestoreSummary{}, fmt.Errorf("prepare platform restore: %w", err)
+		}
+		for _, record := range records {
+			if _, err := stmt.Exec(record.Collection, record.ID, record.Payload, record.CreatedAt, record.UpdatedAt); err != nil {
+				_ = stmt.Close()
+				_ = tx.Rollback()
+				return RestoreSummary{}, fmt.Errorf("restore platform record: %w", err)
+			}
+			summary.PlatformRecords++
+			summary.RecordsByCollection[record.Collection]++
+		}
+		if err := stmt.Close(); err != nil {
+			_ = tx.Rollback()
+			return RestoreSummary{}, err
+		}
+		if err := tx.Commit(); err != nil {
+			return RestoreSummary{}, fmt.Errorf("commit platform restore: %w", err)
+		}
+	}
+	return summary, nil
+}
+
+func readPlatformRecordSnapshot(sqlitePath string) ([]platformRecordSnapshot, error) {
+	db, err := sql.Open("sqlite", sqlitePath)
+	if err != nil {
+		return nil, fmt.Errorf("open backup sqlite store: %w", err)
+	}
+	defer db.Close()
+	rows, err := db.Query(`SELECT collection, id, payload, created_at, updated_at FROM platform_records ORDER BY collection, created_at`)
+	if err != nil {
+		return nil, fmt.Errorf("read backup platform records: %w", err)
+	}
+	defer rows.Close()
+	allowedCollections := platformCollectionSet()
+	records := []platformRecordSnapshot{}
+	for rows.Next() {
+		var record platformRecordSnapshot
+		if err := rows.Scan(&record.Collection, &record.ID, &record.Payload, &record.CreatedAt, &record.UpdatedAt); err != nil {
+			return nil, err
+		}
+		if !allowedCollections[record.Collection] {
+			return nil, fmt.Errorf("backup contains unsupported platform collection %q", record.Collection)
+		}
+		if record.Collection == "" || record.ID == "" || record.Payload == "" {
+			return nil, errors.New("backup contains an invalid platform record")
+		}
+		var item model.PlatformItem
+		if err := json.Unmarshal([]byte(record.Payload), &item); err != nil {
+			return nil, fmt.Errorf("decode backup platform record %s/%s: %w", record.Collection, record.ID, err)
+		}
+		records = append(records, record)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return records, nil
+}
+
+func platformCollectionSet() map[string]bool {
+	result := map[string]bool{}
+	for _, collection := range platformCollections {
+		result[collection] = true
+	}
+	return result
 }
 
 func collectionPrefix(collection string) string {

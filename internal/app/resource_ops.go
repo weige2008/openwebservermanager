@@ -73,6 +73,16 @@ func (s *Server) handleResourceOperation(w http.ResponseWriter, r *http.Request,
 	case path == "admin/audit/access-stats":
 		s.handleAccessStats(w, r)
 		return true
+	case path == "admin/backups":
+		s.handleBackups(w, r)
+		return true
+	case path == "admin/backups/restore":
+		s.handleBackupRestore(w, r)
+		return true
+	case strings.HasPrefix(path, "admin/backups/") && strings.HasSuffix(path, "/download"):
+		id := pathSegmentFromTrimmed(path, 2)
+		s.handleBackupDownload(w, r, id)
+		return true
 	case strings.HasPrefix(path, "admin/certificates/") && strings.HasSuffix(path, "/download"):
 		id := pathSegmentFromTrimmed(path, 2)
 		s.handleCertificateDownload(w, r, id)

@@ -140,6 +140,12 @@ func (m *authManager) resetLoginFailures(key string) {
 	delete(m.failures, key)
 }
 
+func (m *authManager) clearSessions() {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.sessions = map[string]authSession{}
+}
+
 func (s *Server) requireAuth(w http.ResponseWriter, r *http.Request) bool {
 	if !s.cfg.Store.AdminConfigured() {
 		writeJSON(w, http.StatusUnauthorized, map[string]any{

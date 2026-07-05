@@ -42,7 +42,7 @@ export interface PlatformPageConfig {
   descriptionEn: string
   icon: LucideIcon
   apiPath?: string
-  kind?: 'table' | 'settings' | 'monitor' | 'tools' | 'access'
+  kind?: 'table' | 'settings' | 'monitor' | 'tools' | 'access' | 'backups'
 }
 
 export interface PlatformNavGroup {
@@ -83,6 +83,7 @@ const auditItems: PlatformPageConfig[] = [
 
 const opsItems: PlatformPageConfig[] = [
   page('/app/scheduled-tasks', 'scheduled_tasks', '定时任务', 'Scheduled tasks', '证书续签、日志清理、资产状态检查和备份任务。', 'Certificate renewal, log cleanup, asset checks, and backup jobs.', CalendarClock, '/api/admin/scheduled-tasks'),
+  { ...page('/app/backups', 'backups', '备份恢复', 'Backup and restore', '查看、下载、立即创建备份，并上传备份恢复系统数据。', 'View, download, create, and restore system backups.', Archive, '/api/admin/backups'), kind: 'backups' },
   { ...page('/app/tools', 'tools', '实用工具', 'Tools', 'Ping 与 TCP Ping 检测工具。', 'Ping and TCP Ping diagnostics.', Gauge, '/api/tools/ping'), kind: 'tools' },
   { ...page('/app/monitoring', 'system_monitoring', '系统监控', 'Monitoring', '集中查看服务、网关、会话、存储和告警运行状态。', 'Centralized service, gateway, session, storage, and alert status.', Activity, '/api/system/monitoring'), kind: 'monitor' },
 ]
@@ -155,4 +156,3 @@ export const platformHomeStats = [
   { key: 'operation_logs', labelZh: '操作日志', labelEn: 'Operation logs', icon: FileClock },
   { key: 'scheduled_tasks', labelZh: '定时任务', labelEn: 'Scheduled tasks', icon: Clock3 },
 ]
-

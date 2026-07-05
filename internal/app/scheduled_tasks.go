@@ -47,7 +47,7 @@ func (s *Server) createBackupSnapshot() (map[string]any, error) {
 	if err := os.MkdirAll(backupDir, 0o770); err != nil {
 		return nil, err
 	}
-	name := "backup-" + time.Now().UTC().Format("20060102-150405") + ".zip"
+	name := "backup-" + time.Now().UTC().Format("20060102-150405-000000000") + ".zip"
 	target := filepath.Join(backupDir, name)
 	output, err := os.OpenFile(target, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0o660)
 	if err != nil {

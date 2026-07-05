@@ -68,9 +68,18 @@ interface StorageEntry {
   modified: string
 }
 
+interface BackupInfo {
+  name: string
+  size: number
+  modified_at: string
+  manifest?: Record<string, unknown>
+  files?: string[]
+}
+
 export function PlatformPage({ config }: { config: PlatformPageConfig }) {
   if (config.kind === 'tools') return <ToolsPage config={config} />
   if (config.kind === 'monitor') return <MonitoringPage config={config} />
+  if (config.kind === 'backups') return <BackupsPage config={config} />
   if (config.collection === 'access_stats') return <AccessStatsPage config={config} />
   return <PlatformTablePage config={config} />
 }
@@ -1333,6 +1342,166 @@ function MonitoringPage({ config }: { config: PlatformPageConfig }) {
       </CardContent>
     </Card>
   )
+}
+
+function BackupsPage({ config }: { config: PlatformPageConfig }) {
+  const app = useApp()
+  const label = platformLabel(config, app.locale)
+  const description = platformDescription(config, app.locale)
+  const Icon = config.icon
+  const [items, setItems] = useState<BackupInfo[]>([])
+  const [loading, setLoading] = useState(false)
+  const [creating, setCreating] = useState(false)
+  const [restoring, setRestoring] = useState(false)
+  const [uploadFile, setUploadFile] = useState<File | null>(null)
+  const [validation, setValidation] = useState<Record<string, unknown> | null>(null)
+
+  const load = async () => {
+    setLoading(true)
+    try {
+      const data = await apiRequest<{ items: BackupInfo[] }>(config.apiPath || '/api/admin/backups')
+      setItems(data.items || [])
+    } catch (error) {
+      app.handleApiError(error)
+    } finally {
+      setLoading(false)
+    }
+  }
+
+  useEffect(() => {
+    void load()
+  }, [config.apiPath])
+
+  const createBackup = async () => {
+    setCreating(true)
+    try {
+      await apiRequest(config.apiPath || '/api/admin/backups', { method: 'POST', body: '{}' })
+      await load()
+      app.showToast('备份已创建')
+    } catch (error) {
+      app.handleApiError(error)
+    } finally {
+      setCreating(false)
+    }
+  }
+
+  const validateUpload = async () => {
+    if (!uploadFile) return
+    setRestoring(true)
+    try {
+      setValidation(await submitBackupFile(uploadFile, true))
+      app.showToast('备份校验通过')
+    } catch (error) {
+      app.handleApiError(error)
+      setValidation(null)
+    } finally {
+      setRestoring(false)
+    }
+  }
+
+  const restoreUpload = async () => {
+    if (!uploadFile) return
+    if (!window.confirm('恢复会覆盖当前系统数据，并在恢复前自动创建一份当前备份。继续?')) return
+    setRestoring(true)
+    try {
+      const result = await submitBackupFile(uploadFile, false)
+      setValidation(result)
+      app.showToast('恢复完成，请重新登录')
+      window.setTimeout(() => window.location.assign('/login'), 800)
+    } catch (error) {
+      app.handleApiError(error)
+    } finally {
+      setRestoring(false)
+    }
+  }
+
+  return (
+    <CardStaggerContainer>
+      <CardStaggerItem>
+        <Card>
+          <CardHeader className='gap-3 max-sm:grid-cols-1'>
+            <div>
+              <CardTitle className='flex items-center gap-2'>
+                <Icon className='size-5 text-primary' />
+                {label}
+              </CardTitle>
+              <CardDescription>{description}</CardDescription>
+            </div>
+            <div className='flex flex-wrap justify-end gap-2 max-sm:justify-start'>
+              <Button variant='outline' onClick={() => void load()} disabled={loading}>
+                <RefreshCw className={cn('size-4', loading && 'animate-spin')} />
+                刷新
+              </Button>
+              <Button variant='primary' onClick={() => void createBackup()} disabled={creating}>
+                <Save className='size-4' />
+                {creating ? '备份中' : '立即备份'}
+              </Button>
+            </div>
+          </CardHeader>
+          <CardContent className='grid gap-5'>
+            <section className='grid gap-3 rounded-xl border border-border bg-background/60 p-4'>
+              <div>
+                <h3 className='text-sm font-semibold'>上传恢复</h3>
+                <p className='mt-1 text-xs leading-5 text-muted-foreground'>上传系统生成的备份 zip。执行恢复前会自动创建一份当前数据备份，恢复后需要重新登录。</p>
+              </div>
+              <div className='grid gap-3 md:grid-cols-[minmax(0,1fr)_auto_auto]'>
+                <Input type='file' accept='.zip,application/zip' onChange={(event) => {
+                  setUploadFile(event.currentTarget.files?.[0] || null)
+                  setValidation(null)
+                }} />
+                <Button variant='outline' onClick={() => void validateUpload()} disabled={!uploadFile || restoring}>
+                  <FileSearch className='size-4' />
+                  校验
+                </Button>
+                <Button variant='destructive' onClick={() => void restoreUpload()} disabled={!uploadFile || restoring}>
+                  <Upload className='size-4' />
+                  {restoring ? '处理中' : '恢复'}
+                </Button>
+              </div>
+              {validation ? (
+                <pre className='max-h-56 overflow-auto rounded-lg bg-muted p-3 text-xs'>{JSON.stringify(validation, null, 2)}</pre>
+              ) : null}
+            </section>
+            <div className='grid gap-3'>
+              {items.length ? items.map((item) => (
+                <article key={item.name} className='grid gap-3 rounded-xl border border-border bg-background/60 p-4 md:grid-cols-[minmax(0,1fr)_auto] md:items-center'>
+                  <div className='min-w-0'>
+                    <div className='flex flex-wrap items-center gap-2'>
+                      <h3 className='truncate text-sm font-semibold'>{item.name}</h3>
+                      <Badge tone='neutral'>{formatBytesValue(item.size)}</Badge>
+                    </div>
+                    <p className='mt-1 text-xs text-muted-foreground'>{formatDate(item.modified_at)} · {(item.files || []).join(', ') || 'manifest only'}</p>
+                  </div>
+                  <Button variant='outline' onClick={() => void downloadResponse(`/api/admin/backups/${encodeURIComponent(item.name)}/download`, item.name)}>
+                    <Download className='size-4' />
+                    下载
+                  </Button>
+                </article>
+              )) : (
+                <div className='rounded-xl border border-dashed border-border p-6 text-sm text-muted-foreground'>暂无备份。点击“立即备份”生成第一份快照。</div>
+              )}
+            </div>
+          </CardContent>
+        </Card>
+      </CardStaggerItem>
+    </CardStaggerContainer>
+  )
+}
+
+async function submitBackupFile(file: File, dryRun: boolean) {
+  const form = new FormData()
+  form.set('file', file)
+  if (dryRun) form.set('dry_run', 'true')
+  const response = await fetch(`/api/admin/backups/restore${dryRun ? '?dry_run=1' : ''}`, {
+    method: 'POST',
+    credentials: 'same-origin',
+    body: form,
+  })
+  const payload = await response.json().catch(() => ({})) as Record<string, unknown> & { error?: string }
+  if (!response.ok) {
+    throw new ApiError(payload.error || response.statusText, response.status, Boolean(payload.setup_required))
+  }
+  return payload
 }
 
 function AccessStatsPage({ config }: { config: PlatformPageConfig }) {

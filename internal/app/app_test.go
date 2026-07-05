@@ -1045,6 +1045,85 @@ func TestResourceOperationEndpoints(t *testing.T) {
 	}
 }
 
+func TestBackupListDownloadAndRestore(t *testing.T) {
+	handler, cookie := newTestHandler(t)
+
+	restoredAssetRec := assertStatus(t, handler, http.MethodPost, "/api/admin/assets", map[string]any{
+		"name":     "restore-kept",
+		"type":     "linux",
+		"status":   "active",
+		"protocol": "ssh",
+		"host":     "127.0.0.1",
+		"port":     22,
+	}, cookie, http.StatusCreated)
+	var restoredAsset model.PlatformItem
+	decodeResponse(t, restoredAssetRec, &restoredAsset)
+
+	createBackupRec := assertStatus(t, handler, http.MethodPost, "/api/admin/backups", nil, cookie, http.StatusCreated)
+	var backupMetadata map[string]any
+	decodeResponse(t, createBackupRec, &backupMetadata)
+	backupPath, _ := backupMetadata["backup_path"].(string)
+	backupName := filepath.Base(filepath.FromSlash(backupPath))
+	if backupName == "." || backupName == "" {
+		t.Fatalf("backup path missing from metadata: %v", backupMetadata)
+	}
+
+	listRec := assertStatus(t, handler, http.MethodGet, "/api/admin/backups", nil, cookie, http.StatusOK)
+	if !strings.Contains(listRec.Body.String(), backupName) || !strings.Contains(listRec.Body.String(), "manifest.json") {
+		t.Fatal("backup list did not include created backup and manifest")
+	}
+
+	downloadRec := assertStatus(t, handler, http.MethodGet, "/api/admin/backups/"+backupName+"/download", nil, cookie, http.StatusOK)
+	if downloadRec.Header().Get("Content-Type") != "application/zip" {
+		t.Fatalf("backup download content type = %q", downloadRec.Header().Get("Content-Type"))
+	}
+	downloadZip, err := zip.NewReader(bytes.NewReader(downloadRec.Body.Bytes()), int64(downloadRec.Body.Len()))
+	if err != nil {
+		t.Fatalf("open downloaded backup zip: %v", err)
+	}
+	if !zipHasEntry(downloadZip, "manifest.json") {
+		t.Fatal("backup download did not include manifest.json")
+	}
+
+	transientAssetRec := assertStatus(t, handler, http.MethodPost, "/api/admin/assets", map[string]any{
+		"name":     "restore-removed",
+		"type":     "linux",
+		"status":   "active",
+		"protocol": "ssh",
+		"host":     "127.0.0.2",
+		"port":     22,
+	}, cookie, http.StatusCreated)
+	var transientAsset model.PlatformItem
+	decodeResponse(t, transientAssetRec, &transientAsset)
+
+	dryRunRec := assertMultipartStatus(t, handler, "/api/admin/backups/restore?dry_run=1", nil, backupName, downloadRec.Body.Bytes(), cookie, http.StatusOK)
+	if !strings.Contains(dryRunRec.Body.String(), `"valid":true`) || !strings.Contains(dryRunRec.Body.String(), "store.db") {
+		t.Fatal("backup dry-run restore did not validate archive")
+	}
+	assertMultipartStatus(t, handler, "/api/admin/backups/restore", nil, "not-a-backup.zip", []byte("not a zip"), cookie, http.StatusBadRequest)
+
+	restoreRec := assertMultipartStatus(t, handler, "/api/admin/backups/restore", nil, backupName, downloadRec.Body.Bytes(), cookie, http.StatusOK)
+	if !strings.Contains(restoreRec.Body.String(), `"restored":true`) || !strings.Contains(restoreRec.Body.String(), "pre_restore_backup") {
+		t.Fatal("backup restore response did not include restore summary and pre-restore backup")
+	}
+
+	assertStatus(t, handler, http.MethodGet, "/api/bootstrap", nil, cookie, http.StatusUnauthorized)
+	loginRec := assertStatus(t, handler, http.MethodPost, "/api/auth/login", map[string]any{"username": "admin", "password": "password123"}, nil, http.StatusOK)
+	newCookie := loginRec.Result().Cookies()[0]
+	assetsRec := assertStatus(t, handler, http.MethodGet, "/api/admin/assets", nil, newCookie, http.StatusOK)
+	assetsBody := assetsRec.Body.String()
+	if !strings.Contains(assetsBody, restoredAsset.ID) {
+		t.Fatal("restored backup did not retain pre-backup asset")
+	}
+	if strings.Contains(assetsBody, transientAsset.ID) {
+		t.Fatal("restored backup retained post-backup transient asset")
+	}
+	logsRec := assertStatus(t, handler, http.MethodGet, "/api/admin/audit/operation-logs", nil, newCookie, http.StatusOK)
+	if !strings.Contains(logsRec.Body.String(), "backup.restore") {
+		t.Fatal("backup restore did not write operation log")
+	}
+}
+
 func TestScheduledTaskRunners(t *testing.T) {
 	handler, cookie := newTestHandler(t)
 
@@ -1463,4 +1542,13 @@ func assertZipContains(t *testing.T, raw []byte, filename, content string) {
 		return
 	}
 	t.Fatalf("zip entry %q not found", filename)
+}
+
+func zipHasEntry(reader *zip.Reader, filename string) bool {
+	for _, file := range reader.File {
+		if file.Name == filename {
+			return true
+		}
+	}
+	return false
 }

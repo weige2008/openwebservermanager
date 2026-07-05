@@ -1,9 +1,13 @@
 package guac
 
 import (
+	"path/filepath"
+	"strings"
 	"testing"
 
 	"openwebservermanager/internal/model"
+	"openwebservermanager/internal/security"
+	"openwebservermanager/internal/store"
 )
 
 func TestDesktopPolicyArguments(t *testing.T) {
@@ -42,4 +46,68 @@ func TestDesktopPolicyArguments(t *testing.T) {
 	assertArg("width", "1600")
 	assertArg("height", "1000")
 	assertArg("dpi", "120")
+}
+
+func TestDesktopInstructionFilterBlocksDisabledClipboardAndFileTransfer(t *testing.T) {
+	filter := newDesktopInstructionFilter(Tunnel{}, DesktopConfig{
+		Protocol:         model.ProtocolRDP,
+		Session:          model.ConnectionSession{ID: "sess_filter"},
+		ClipboardEnabled: false,
+		EnableDrive:      false,
+	})
+	payload := append([]byte{}, Encode("clipboard", "7", "text/plain")...)
+	payload = append(payload, Encode("blob", "7", "secret")...)
+	payload = append(payload, Encode("end", "7")...)
+	payload = append(payload, Encode("file", "8", "text/plain", "secret.txt")...)
+	payload = append(payload, Encode("blob", "8", "payload")...)
+	payload = append(payload, Encode("end", "8")...)
+	payload = append(payload, Encode("key", "1", "65")...)
+
+	filtered, err := filter.filterPayload(directionBrowser, payload, nil)
+	if err != nil {
+		t.Fatalf("filter payload: %v", err)
+	}
+	if string(filtered) != string(Encode("key", "1", "65")) {
+		t.Fatalf("filtered payload = %q", string(filtered))
+	}
+}
+
+func TestDesktopInstructionFilterAuditsFileTransfers(t *testing.T) {
+	key := make([]byte, 32)
+	cipher, err := security.NewCipher(key)
+	if err != nil {
+		t.Fatalf("cipher: %v", err)
+	}
+	st, err := store.Open(filepath.Join(t.TempDir(), "store.json"), cipher)
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	defer st.Close()
+
+	filter := newDesktopInstructionFilter(Tunnel{Store: st}, DesktopConfig{
+		Protocol:         model.ProtocolRDP,
+		Session:          model.ConnectionSession{ID: "sess_audit", UserID: "user_1", ServerID: "asset_1"},
+		ClipboardEnabled: true,
+		EnableDrive:      true,
+	})
+	payload := append([]byte{}, Encode("file", "9", "text/plain", "report.txt")...)
+	payload = append(payload, Encode("blob", "9", "payload")...)
+	payload = append(payload, Encode("end", "9")...)
+	if _, err := filter.filterPayload(directionBrowser, payload, nil); err != nil {
+		t.Fatalf("filter payload: %v", err)
+	}
+
+	items, err := st.ListPlatformItems("file_logs")
+	if err != nil {
+		t.Fatalf("list file logs: %v", err)
+	}
+	body := ""
+	for _, item := range items {
+		body += item.Name + ":" + item.Type + ":" + item.Status + ":" + item.Description + "\n"
+	}
+	for _, expected := range []string{"report.txt:upload:started", "report.txt:upload:completed"} {
+		if !strings.Contains(body, expected) {
+			t.Fatalf("file transfer audit missing %q in %s", expected, body)
+		}
+	}
 }

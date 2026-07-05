@@ -56,6 +56,28 @@ type DesktopConfig struct {
 	ResizeMethod     string
 }
 
+type guacDirection string
+
+const (
+	directionBrowser guacDirection = "browser"
+	directionGuacd   guacDirection = "guacd"
+)
+
+type desktopStream struct {
+	Kind      string
+	Operation string
+	Name      string
+	MimeType  string
+	Blocked   bool
+}
+
+type desktopInstructionFilter struct {
+	tunnel  Tunnel
+	cfg     DesktopConfig
+	mu      sync.Mutex
+	streams map[string]desktopStream
+}
+
 func (t Tunnel) Run(ctx context.Context, browser *ws.Conn, cfg RDPConfig) {
 	port := cfg.Server.RDPPort
 	if port == 0 {
@@ -137,6 +159,8 @@ func (t Tunnel) RunDesktop(ctx context.Context, browser *ws.Conn, cfg DesktopCon
 		})
 	}
 
+	filter := newDesktopInstructionFilter(t, cfg)
+
 	go func() {
 		for {
 			instruction, raw, err := ReadInstruction(reader)
@@ -149,6 +173,9 @@ func (t Tunnel) RunDesktop(ctx context.Context, browser *ws.Conn, cfg DesktopCon
 				return
 			}
 			trace("guacd", instruction, len(raw))
+			if !filter.allowInstruction(directionGuacd, instruction) {
+				continue
+			}
 			if err := browser.SendText(raw); err != nil {
 				closeSession(err.Error())
 				return
@@ -164,7 +191,7 @@ func (t Tunnel) RunDesktop(ctx context.Context, browser *ws.Conn, cfg DesktopCon
 		}
 		switch op {
 		case 1, 2:
-			payload, err := filterBrowserInstructions(payload, func(instruction Instruction, raw []byte) {
+			payload, err := filter.filterPayload(directionBrowser, payload, func(instruction Instruction, raw []byte) {
 				trace("browser", instruction, len(raw))
 			})
 			if err != nil {
@@ -188,7 +215,15 @@ func (t Tunnel) RunDesktop(ctx context.Context, browser *ws.Conn, cfg DesktopCon
 	}
 }
 
-func filterBrowserInstructions(payload []byte, trace func(Instruction, []byte)) ([]byte, error) {
+func newDesktopInstructionFilter(tunnel Tunnel, cfg DesktopConfig) *desktopInstructionFilter {
+	return &desktopInstructionFilter{
+		tunnel:  tunnel,
+		cfg:     cfg,
+		streams: map[string]desktopStream{},
+	}
+}
+
+func (f *desktopInstructionFilter) filterPayload(direction guacDirection, payload []byte, trace func(Instruction, []byte)) ([]byte, error) {
 	reader := bufio.NewReader(bytes.NewReader(payload))
 	var out bytes.Buffer
 	for {
@@ -208,9 +243,129 @@ func filterBrowserInstructions(payload []byte, trace func(Instruction, []byte)) 
 		if instruction.Opcode == "" {
 			continue
 		}
+		if !f.allowInstruction(direction, instruction) {
+			continue
+		}
 		out.Write(raw)
 	}
 	return out.Bytes(), nil
+}
+
+func (f *desktopInstructionFilter) allowInstruction(direction guacDirection, instruction Instruction) bool {
+	streamID := firstArg(instruction)
+	streamKey := string(direction) + ":" + streamID
+	switch instruction.Opcode {
+	case "":
+		return false
+	case "clipboard":
+		stream := desktopStream{Kind: "clipboard", Operation: "clipboard", MimeType: argAt(instruction, 1), Blocked: !f.cfg.ClipboardEnabled}
+		f.setStream(streamKey, stream)
+		f.auditStreamEvent(direction, stream, "started")
+		return !stream.Blocked
+	case "file":
+		operation := "download"
+		if direction == directionBrowser {
+			operation = "upload"
+		}
+		stream := desktopStream{Kind: "file", Operation: operation, MimeType: argAt(instruction, 1), Name: argAt(instruction, 2), Blocked: !f.cfg.EnableDrive}
+		f.setStream(streamKey, stream)
+		f.auditStreamEvent(direction, stream, "started")
+		return !stream.Blocked
+	case "blob", "ack":
+		if stream, ok := f.stream(streamKey); ok && stream.Blocked {
+			return false
+		}
+	case "end":
+		if stream, ok := f.deleteStream(streamKey); ok {
+			if stream.Blocked {
+				return false
+			}
+			f.auditStreamEvent(direction, stream, "completed")
+		}
+	}
+	return true
+}
+
+func (f *desktopInstructionFilter) setStream(key string, stream desktopStream) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.streams[key] = stream
+}
+
+func (f *desktopInstructionFilter) stream(key string) (desktopStream, bool) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	stream, ok := f.streams[key]
+	return stream, ok
+}
+
+func (f *desktopInstructionFilter) deleteStream(key string) (desktopStream, bool) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	stream, ok := f.streams[key]
+	if ok {
+		delete(f.streams, key)
+	}
+	return stream, ok
+}
+
+func (f *desktopInstructionFilter) auditStreamEvent(direction guacDirection, stream desktopStream, status string) {
+	if f.tunnel.Store == nil {
+		return
+	}
+	if stream.Blocked {
+		status = "blocked"
+	}
+	switch stream.Kind {
+	case "file":
+		name := stream.Name
+		if name == "" {
+			name = f.cfg.Session.ID
+		}
+		_, _ = f.tunnel.Store.CreatePlatformItem("file_logs", model.PlatformItemRequest{
+			Name:        name,
+			Type:        stream.Operation,
+			Status:      status,
+			Protocol:    f.cfg.Protocol,
+			OwnerID:     f.cfg.Session.UserID,
+			TargetID:    f.cfg.Session.ServerID,
+			Description: "desktop file transfer " + status,
+			Metadata: map[string]any{
+				"session_id": f.cfg.Session.ID,
+				"direction":  string(direction),
+				"operation":  stream.Operation,
+				"mime_type":  stream.MimeType,
+				"blocked":    stream.Blocked,
+			},
+		})
+	case "clipboard":
+		_, _ = f.tunnel.Store.CreatePlatformItem("operation_logs", model.PlatformItemRequest{
+			Name:        "desktop.clipboard." + status,
+			Type:        "clipboard",
+			Status:      status,
+			Protocol:    f.cfg.Protocol,
+			OwnerID:     f.cfg.Session.UserID,
+			TargetID:    f.cfg.Session.ServerID,
+			Description: "desktop clipboard " + status,
+			Metadata: map[string]any{
+				"session_id": f.cfg.Session.ID,
+				"direction":  string(direction),
+				"mime_type":  stream.MimeType,
+				"blocked":    stream.Blocked,
+			},
+		})
+	}
+}
+
+func firstArg(instruction Instruction) string {
+	return argAt(instruction, 0)
+}
+
+func argAt(instruction Instruction, index int) string {
+	if index < 0 || index >= len(instruction.Args) {
+		return ""
+	}
+	return instruction.Args[index]
 }
 
 func (t Tunnel) newTrace(sessionID string) func(string, Instruction, int) {

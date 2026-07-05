@@ -1,6 +1,6 @@
 import { Menu as BaseMenu } from '@base-ui/react/menu'
 import { useNavigate } from '@tanstack/react-router'
-import { Info, LogOut, RefreshCw, Settings, UserCircle } from 'lucide-react'
+import { LogOut, RefreshCw, Settings } from 'lucide-react'
 import type { ReactNode } from 'react'
 
 import { useApp } from '@/app/app-provider'
@@ -35,17 +35,9 @@ export function ProfileMenu({ onLogout }: { onLogout: () => Promise<void> }) {
               <RefreshCw className='size-4' />
               {app.t('refreshData')}
             </MenuItem>
-            <MenuItem onClick={() => app.setModal({ type: 'profile' })}>
-              <UserCircle className='size-4' />
-              {app.t('profile')}
-            </MenuItem>
             <MenuItem onClick={() => void navigate({ to: '/app/settings' })}>
               <Settings className='size-4' />
               {app.t('settings')}
-            </MenuItem>
-            <MenuItem onClick={() => void navigate({ to: '/app/about' })}>
-              <Info className='size-4' />
-              {app.t('about')}
             </MenuItem>
             <BaseMenu.Separator className='-mx-1 my-1 h-px bg-border' />
             <MenuItem destructive onClick={() => void onLogout()}>

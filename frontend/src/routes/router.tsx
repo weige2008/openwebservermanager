@@ -14,7 +14,7 @@ import { useApp } from '@/app/app-provider'
 import { SystemBrand } from '@/components/layout/system-brand'
 import { AuthenticatedLayout } from '@/components/layout/authenticated-layout'
 import { NavigationProgress } from '@/components/navigation-progress'
-import { ConsoleAboutPage, PublicAboutPage } from '@/features/about/about-page'
+import { PublicAboutPage } from '@/features/about/about-page'
 import { AuthPage } from '@/features/auth/auth-page'
 import { AuditPage } from '@/features/console/audit-page'
 import { OverviewPage } from '@/features/console/overview-page'
@@ -132,7 +132,7 @@ const settingsRoute = createRoute({
 const appAboutRoute = createRoute({
   getParentRoute: () => rootRoute,
   path: '/app/about',
-  component: () => <ConsoleGate><ConsoleAboutPage /></ConsoleGate>,
+  component: () => <Navigate to='/app/settings' replace />,
 })
 
 const legacyDashboardRoute = createRoute({

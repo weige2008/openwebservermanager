@@ -171,8 +171,12 @@ const en = {
     activeLocale: 'Active locale',
   },
   settingsPage: {
-    title: 'Appearance and workspace settings',
-    description: 'Manage theme mode, language, color preset, density, content width, and sidebar style in an independent settings page.',
+    title: 'Settings',
+    description: 'Manage profile, appearance, workspace preferences, system state, and product information from one place.',
+    accountTitle: 'Profile and account',
+    accountDescription: 'Review the signed-in administrator session, resource counts, gateway state, and active connection summary.',
+    appearanceTitle: 'Appearance and workspace',
+    appearanceDescription: 'Adjust theme mode, language, color preset, density, content width, and sidebar style.',
   },
   aboutPage: {
     title: 'About {{productName}}',
@@ -548,8 +552,12 @@ const zh = {
     activeLocale: '当前语言',
   },
   settingsPage: {
-    title: '外观与工作区设置',
-    description: '在独立设置页中管理主题模式、语言、配色、界面密度、内容宽度与侧栏样式。',
+    title: '设置',
+    description: '集中管理个人资料、外观、工作区偏好、系统状态与产品信息。',
+    accountTitle: '个人资料与账号',
+    accountDescription: '查看当前管理员会话、资源数量、网关状态与活跃连接摘要。',
+    appearanceTitle: '外观与工作区',
+    appearanceDescription: '调整主题模式、语言、配色、界面密度、内容宽度与侧栏样式。',
   },
   aboutPage: {
     title: '关于 {{productName}}',

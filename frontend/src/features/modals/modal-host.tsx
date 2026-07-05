@@ -7,60 +7,16 @@ import { Button } from '@/components/ui/button'
 import { DialogShell } from '@/components/ui/dialog'
 import { EmptyState } from '@/components/ui/empty-state'
 import { Field, Input, Select, Textarea } from '@/components/ui/field'
-import { INTERFACE_LANGUAGE_OPTIONS } from '@/i18n/languages'
 import { apiRequest } from '@/lib/api'
-import { credentialsForServer, formatDate, serverSupportsProtocol } from '@/lib/utils'
+import { credentialsForServer, serverSupportsProtocol } from '@/lib/utils'
 import type {
   ConnectionSession,
   Credential,
   CredentialType,
-  Locale,
   ManagedServer,
   Protocol,
   ServerOS,
-  Theme,
-  ThemeContentLayout,
-  ThemeFont,
-  ThemePreset,
-  ThemeRadius,
-  ThemeScale,
-  ThemeSidebarStyle,
 } from '@/types'
-
-const presetOptions: Array<{ value: ThemePreset; label: string }> = [
-  { value: 'default', label: 'Default' },
-  { value: 'anthropic', label: 'Anthropic' },
-  { value: 'simple-large', label: 'Simple Large-font' },
-  { value: 'underground', label: 'Underground' },
-  { value: 'rose-garden', label: 'Rose Garden' },
-  { value: 'lake-view', label: 'Lake View' },
-  { value: 'sunset-glow', label: 'Sunset Glow' },
-  { value: 'forest-whisper', label: 'Forest Whisper' },
-  { value: 'ocean-breeze', label: 'Ocean Breeze' },
-  { value: 'lavender-dream', label: 'Lavender Dream' },
-]
-
-const fontOptions: Array<{ value: ThemeFont; labelKey: string }> = [
-  { value: 'default', labelKey: 'auto' },
-  { value: 'sans', labelKey: 'sans' },
-  { value: 'serif', labelKey: 'serif' },
-]
-
-const radiusOptions: Array<{ value: ThemeRadius; label: string }> = [
-  { value: 'default', label: 'Auto' },
-  { value: 'none', label: '0' },
-  { value: 'sm', label: '0.3' },
-  { value: 'md', label: '0.5' },
-  { value: 'lg', label: '0.75' },
-  { value: 'xl', label: '1.0' },
-]
-
-const scaleOptions: Array<{ value: ThemeScale; labelKey: string }> = [
-  { value: 'sm', labelKey: 'compact' },
-  { value: 'default', labelKey: 'default' },
-  { value: 'lg', labelKey: 'comfortable' },
-  { value: 'xl', labelKey: 'large' },
-]
 
 export function ModalHost() {
   const app = useApp()
@@ -68,127 +24,7 @@ export function ModalHost() {
 
   if (app.modal.type === 'server') return <ServerDialog />
   if (app.modal.type === 'credential') return <CredentialDialog />
-  if (app.modal.type === 'profile') return <ProfileDialog />
-  if (app.modal.type === 'settings') return <SettingsDialog />
   return <ConnectDialog protocol={app.modal.protocol} serverId={app.modal.serverId} />
-}
-
-function ProfileDialog() {
-  const app = useApp()
-  const { t } = useTranslation()
-  const activeSessions = app.data.sessions.filter((session) => session.status === 'active').length
-
-  return (
-    <DialogShell compact open onOpenChange={(open) => !open && app.setModal(null)} title={t('profileDialog.title')} description={t('profileDialog.description')}>
-      <div className='grid gap-3'>
-        <div className='flex items-center gap-3 rounded-xl border border-border bg-muted/30 p-3'>
-          <span className='grid size-10 shrink-0 place-items-center rounded-full bg-primary text-sm font-semibold text-primary-foreground'>
-            {(app.auth?.username || 'admin').slice(0, 2).toUpperCase()}
-          </span>
-          <div className='min-w-0'>
-            <div className='truncate font-medium'>{app.auth?.username || 'admin'}</div>
-            <div className='truncate text-xs text-muted-foreground'>{app.auth?.role || 'admin'}</div>
-          </div>
-        </div>
-        <div className='grid gap-2 sm:grid-cols-2'>
-          <InfoTile label={t('profileDialog.userId')} value={app.auth?.id || '-'} />
-          <InfoTile label={t('profileDialog.sessionExpires')} value={formatDate(app.auth?.expires_at)} />
-          <InfoTile label={t('servers')} value={String(app.data.servers.length)} />
-          <InfoTile label={t('credentials')} value={String(app.data.credentials.length)} />
-          <InfoTile label={t('profileDialog.activeSessions')} value={String(activeSessions)} />
-          <InfoTile label={t('gateway')} value={app.data.guacd?.address || t('guacdOffline')} />
-        </div>
-      </div>
-    </DialogShell>
-  )
-}
-
-function SettingsDialog() {
-  const app = useApp()
-  const { t } = useTranslation()
-
-  return (
-    <DialogShell open onOpenChange={(open) => !open && app.setModal(null)} title={t('settingsDialog.title')} description={t('settingsDialog.description')}>
-      <div className='grid gap-4 md:grid-cols-2'>
-        <Field label={t('theme')}>
-          <Select value={app.theme} onChange={(event) => app.setTheme(event.currentTarget.value as Theme)}>
-            <option value='system'>{t('system')}</option>
-            <option value='light'>{t('light')}</option>
-            <option value='dark'>{t('dark')}</option>
-          </Select>
-        </Field>
-        <Field label={t('language')}>
-          <Select value={app.locale} onChange={(event) => app.setLocale(event.currentTarget.value as Locale)}>
-            {INTERFACE_LANGUAGE_OPTIONS.map((option) => (
-              <option key={option.code} value={option.code}>{option.label}</option>
-            ))}
-          </Select>
-        </Field>
-        <Field label={t('colorPreset')}>
-          <Select value={app.appearance.preset} onChange={(event) => app.setAppearance({ preset: event.currentTarget.value as ThemePreset })}>
-            {presetOptions.map((option) => (
-              <option key={option.value} value={option.value}>{t(`preset.${option.value}`, { defaultValue: option.label })}</option>
-            ))}
-          </Select>
-        </Field>
-        <Field label={t('font')}>
-          <Select value={app.appearance.font} onChange={(event) => app.setAppearance({ font: event.currentTarget.value as ThemeFont })}>
-            {fontOptions.map((option) => (
-              <option key={option.value} value={option.value}>{t(option.labelKey)}</option>
-            ))}
-          </Select>
-        </Field>
-        <Field label={t('borderRadius')}>
-          <Select value={app.appearance.radius} onChange={(event) => app.setAppearance({ radius: event.currentTarget.value as ThemeRadius })}>
-            {radiusOptions.map((option) => (
-              <option key={option.value} value={option.value}>{option.label}</option>
-            ))}
-          </Select>
-        </Field>
-        <Field label={t('density')}>
-          <Select value={app.appearance.scale} onChange={(event) => app.setAppearance({ scale: event.currentTarget.value as ThemeScale })}>
-            {scaleOptions.map((option) => (
-              <option key={option.value} value={option.value}>{t(option.labelKey)}</option>
-            ))}
-          </Select>
-        </Field>
-        <Field label={t('contentWidth')}>
-          <Select value={app.appearance.contentLayout} onChange={(event) => app.setAppearance({ contentLayout: event.currentTarget.value as ThemeContentLayout })}>
-            <option value='full'>{t('fullWidth')}</option>
-            <option value='centered'>{t('centered')}</option>
-          </Select>
-        </Field>
-        <Field label={t('sidebarStyle')}>
-          <Select value={app.appearance.sidebarStyle} onChange={(event) => app.setAppearance({ sidebarStyle: event.currentTarget.value as ThemeSidebarStyle })}>
-            <option value='default'>{t('default')}</option>
-            <option value='inset'>{t('inset')}</option>
-            <option value='floating'>{t('floating')}</option>
-          </Select>
-        </Field>
-        <div className='grid gap-2 rounded-xl border border-border bg-muted/30 p-3 md:col-span-2'>
-          <div className='text-sm font-medium'>{t('settingsDialog.systemState')}</div>
-          <div className='grid gap-2 sm:grid-cols-3'>
-            <InfoTile label={t('gateway')} value={app.data.guacd?.address || t('guacdOffline')} />
-            <InfoTile label={t('settingsDialog.resolvedTheme')} value={app.resolvedTheme} />
-            <InfoTile label={t('settingsDialog.activeLocale')} value={app.locale} />
-          </div>
-        </div>
-        <div className='flex justify-end gap-2 md:col-span-2'>
-          <Button type='button' variant='outline' onClick={app.resetAppearance}>{t('reset')}</Button>
-          <Button type='button' variant='primary' onClick={() => app.setModal(null)}>{t('close')}</Button>
-        </div>
-      </div>
-    </DialogShell>
-  )
-}
-
-function InfoTile({ label, value }: { label: string; value: string }) {
-  return (
-    <div className='min-w-0 rounded-lg border border-border bg-background/70 p-3'>
-      <div className='text-xs text-muted-foreground'>{label}</div>
-      <div className='mt-1 truncate font-mono text-sm'>{value}</div>
-    </div>
-  )
 }
 
 function ServerDialog() {

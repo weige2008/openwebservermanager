@@ -33,15 +33,7 @@ export function PublicAboutPage() {
   )
 }
 
-export function ConsoleAboutPage() {
-  return (
-    <div className='grid gap-4'>
-      <AboutContent />
-    </div>
-  )
-}
-
-function AboutContent() {
+export function AboutContent() {
   const app = useApp()
   const { t } = useTranslation()
   const version = app.publicConfig.version || 'dev'

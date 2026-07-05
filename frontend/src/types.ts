@@ -118,8 +118,6 @@ export interface ThemeAppearance {
 export type ModalState =
   | { type: 'server' }
   | { type: 'credential'; serverId: string }
-  | { type: 'profile' }
-  | { type: 'settings' }
   | { type: 'connect'; protocol: Protocol; serverId: string }
   | null
 

@@ -24,7 +24,6 @@ const pageTitleKeys: Record<string, string> = {
   '/app/sessions': 'sessions',
   '/app/audit': 'audit',
   '/app/settings': 'settings',
-  '/app/about': 'about',
 }
 
 const mobileDrawerAnimation = {

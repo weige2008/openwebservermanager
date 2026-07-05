@@ -245,6 +245,14 @@ func (s *Server) handleAccessAction(w http.ResponseWriter, r *http.Request) {
 		s.handleDatabaseWorkOrderCreate(w, r, asset, userID)
 		return
 	}
+	if len(parts) >= 3 && parts[2] == "exec" {
+		if protocol != model.ProtocolSSH {
+			writeError(w, http.StatusBadRequest, "exec access is only supported for ssh assets")
+			return
+		}
+		s.handleSSHExec(w, r, asset, userID)
+		return
+	}
 	if protocol == model.ProtocolSSH {
 		if r.Method != http.MethodPost {
 			writeError(w, http.StatusMethodNotAllowed, "method not allowed")

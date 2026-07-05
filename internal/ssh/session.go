@@ -1,6 +1,7 @@
 package sshsession
 
 import (
+	"bytes"
 	"encoding/base64"
 	"errors"
 	"fmt"
@@ -10,6 +11,7 @@ import (
 	"os"
 	"path/filepath"
 	"strconv"
+	"strings"
 	"sync"
 	"time"
 
@@ -21,11 +23,32 @@ import (
 	"openwebservermanager/internal/ws"
 )
 
+var (
+	ErrCommandBlocked = errors.New("ssh command blocked")
+	ErrCommandTimeout = errors.New("ssh command timed out")
+)
+
 type Message struct {
 	Type string `json:"type"`
 	Data string `json:"data,omitempty"`
 	Cols int    `json:"cols,omitempty"`
 	Rows int    `json:"rows,omitempty"`
+}
+
+type ExecResult struct {
+	SessionID  string `json:"session_id"`
+	Command    string `json:"command"`
+	Stdout     string `json:"stdout"`
+	Stderr     string `json:"stderr"`
+	ExitCode   int    `json:"exit_code"`
+	Status     string `json:"status"`
+	DurationMs int64  `json:"duration_ms"`
+	Action     string `json:"action"`
+	Risk       string `json:"risk"`
+	RuleID     string `json:"rule_id,omitempty"`
+	RuleName   string `json:"rule_name,omitempty"`
+	Blocked    bool   `json:"blocked"`
+	Error      string `json:"error,omitempty"`
 }
 
 type Runner struct {
@@ -168,6 +191,140 @@ func (r Runner) copyOutput(conn *ws.Conn, sessionID, typ string, reader io.Reade
 			return
 		}
 	}
+}
+
+func (r Runner) RunCommand(session model.ConnectionSession, server model.Server, credential model.Credential, secret store.CredentialSecret, command string, timeout time.Duration) (ExecResult, error) {
+	command = strings.TrimSpace(command)
+	if timeout <= 0 {
+		timeout = 30 * time.Second
+	}
+	started := time.Now()
+	interceptor := newCommandInterceptor(r.Store, session)
+	decision := interceptor.evaluate(command)
+	result := ExecResult{
+		SessionID: session.ID,
+		Command:   command,
+		ExitCode:  -1,
+		Status:    "running",
+		Action:    decision.Action,
+		Risk:      decision.Risk,
+		RuleID:    decision.RuleID,
+		RuleName:  decision.RuleName,
+		Blocked:   decision.Blocked,
+	}
+	if decision.Blocked {
+		result.Status = decision.Status
+		result.Error = commandBlockNotice(command, decision)
+		result.DurationMs = time.Since(started).Milliseconds()
+		interceptor.recordExec(command, decision, "ssh exec command "+decision.Status, map[string]any{
+			"exit_code":   result.ExitCode,
+			"duration_ms": result.DurationMs,
+			"stdout":      "",
+			"stderr":      result.Error,
+			"error":       result.Error,
+		})
+		r.finishExecSession(session.ID, model.SessionFailed, result.Error)
+		return result, ErrCommandBlocked
+	}
+
+	_, _ = r.Store.UpdateSession(session.ID, func(item *model.ConnectionSession) {
+		item.Status = model.SessionActive
+	})
+	client, err := dial(server, credential, secret, r.KnownHostsPath)
+	if err != nil {
+		result.Status = "failed"
+		result.Error = err.Error()
+		result.DurationMs = time.Since(started).Milliseconds()
+		interceptor.recordExec(command, decision, "ssh exec command failed", result.execMetadata())
+		r.finishExecSession(session.ID, model.SessionFailed, err.Error())
+		return result, err
+	}
+	defer client.Close()
+	sshSession, err := client.NewSession()
+	if err != nil {
+		result.Status = "failed"
+		result.Error = err.Error()
+		result.DurationMs = time.Since(started).Milliseconds()
+		interceptor.recordExec(command, decision, "ssh exec command failed", result.execMetadata())
+		r.finishExecSession(session.ID, model.SessionFailed, err.Error())
+		return result, err
+	}
+	defer sshSession.Close()
+
+	var stdout bytes.Buffer
+	var stderr bytes.Buffer
+	sshSession.Stdout = &stdout
+	sshSession.Stderr = &stderr
+	errCh := make(chan error, 1)
+	go func() {
+		errCh <- sshSession.Run(command)
+	}()
+	select {
+	case err = <-errCh:
+	case <-time.After(timeout):
+		_ = sshSession.Close()
+		err = ErrCommandTimeout
+	}
+	result.Stdout = limitExecOutput(stdout.String())
+	result.Stderr = limitExecOutput(stderr.String())
+	result.DurationMs = time.Since(started).Milliseconds()
+	if err == nil {
+		result.ExitCode = 0
+		result.Status = "success"
+		interceptor.recordExec(command, decision, "ssh exec command success", result.execMetadata())
+		r.finishExecSession(session.ID, model.SessionClosed, "")
+		return result, nil
+	}
+	if errors.Is(err, ErrCommandTimeout) {
+		result.Status = "timeout"
+		result.Error = err.Error()
+		interceptor.recordExec(command, decision, "ssh exec command timeout", result.execMetadata())
+		r.finishExecSession(session.ID, model.SessionFailed, err.Error())
+		return result, err
+	}
+	var exitErr *ssh.ExitError
+	if errors.As(err, &exitErr) {
+		result.ExitCode = exitErr.ExitStatus()
+		result.Status = "failed"
+		result.Error = err.Error()
+		interceptor.recordExec(command, decision, "ssh exec command failed", result.execMetadata())
+		r.finishExecSession(session.ID, model.SessionClosed, err.Error())
+		return result, nil
+	}
+	result.Status = "failed"
+	result.Error = err.Error()
+	interceptor.recordExec(command, decision, "ssh exec command failed", result.execMetadata())
+	r.finishExecSession(session.ID, model.SessionFailed, err.Error())
+	return result, err
+}
+
+func (r Runner) finishExecSession(sessionID string, status model.SessionStatus, reason string) {
+	now := time.Now().UTC()
+	_, _ = r.Store.UpdateSession(sessionID, func(item *model.ConnectionSession) {
+		item.Status = status
+		item.EndedAt = &now
+		if reason != "" {
+			item.Error = reason
+		}
+	})
+}
+
+func (r ExecResult) execMetadata() map[string]any {
+	return map[string]any{
+		"exit_code":   r.ExitCode,
+		"duration_ms": r.DurationMs,
+		"stdout":      r.Stdout,
+		"stderr":      r.Stderr,
+		"error":       r.Error,
+	}
+}
+
+func limitExecOutput(value string) string {
+	const limit = 128 * 1024
+	if len(value) <= limit {
+		return value
+	}
+	return value[:limit] + "\n[openwebservermanager] output truncated"
 }
 
 func (r Runner) fail(conn *ws.Conn, sessionID string, err error) {

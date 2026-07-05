@@ -4,6 +4,8 @@ import (
 	"archive/zip"
 	"bufio"
 	"bytes"
+	"crypto/ed25519"
+	"crypto/rand"
 	"crypto/sha256"
 	"encoding/base64"
 	"encoding/json"
@@ -25,6 +27,8 @@ import (
 	"openwebservermanager/internal/model"
 	"openwebservermanager/internal/security"
 	"openwebservermanager/internal/store"
+
+	cryptossh "golang.org/x/crypto/ssh"
 )
 
 func TestEnsureChildPathRejectsEscape(t *testing.T) {
@@ -182,6 +186,103 @@ func TestPlatformUserLoginAndAccessAuthorization(t *testing.T) {
 	}
 	if resolvedServer.Host != asset.Host || resolvedServer.SSHPort != asset.Port || resolvedCredential.Username != "root" || secret.Password != "target-secret" {
 		t.Fatalf("unexpected resolved ssh parts: server=%#v credential=%#v secret=%#v", resolvedServer, resolvedCredential, secret)
+	}
+}
+
+func TestSSHExecAccessRunsCommandAndLogs(t *testing.T) {
+	targetAddr, closeTarget := startFakeSSHExecServer(t, "root", "target-secret")
+	defer closeTarget()
+	host, portText, err := net.SplitHostPort(targetAddr)
+	if err != nil {
+		t.Fatalf("split target addr: %v", err)
+	}
+	port, err := strconv.Atoi(portText)
+	if err != nil {
+		t.Fatalf("parse target port: %v", err)
+	}
+	handler, adminCookie := newTestHandler(t)
+
+	userRec := assertStatus(t, handler, http.MethodPost, "/api/admin/users", map[string]any{
+		"name":     "exec-user",
+		"type":     "local",
+		"status":   "enabled",
+		"password": "password123",
+		"metadata": map[string]any{"role": "user"},
+	}, adminCookie, http.StatusCreated)
+	var user model.PlatformItem
+	decodeResponse(t, userRec, &user)
+
+	assetRec := assertStatus(t, handler, http.MethodPost, "/api/admin/assets", map[string]any{
+		"name":     "exec-host",
+		"type":     "linux",
+		"status":   "enabled",
+		"protocol": "ssh",
+		"host":     host,
+		"port":     port,
+	}, adminCookie, http.StatusCreated)
+	var asset model.PlatformItem
+	decodeResponse(t, assetRec, &asset)
+	credentialRec := assertStatus(t, handler, http.MethodPost, "/api/admin/credentials", map[string]any{
+		"name":      "exec-root",
+		"type":      "ssh_password",
+		"status":    "encrypted",
+		"username":  "root",
+		"password":  "target-secret",
+		"target_id": asset.ID,
+	}, adminCookie, http.StatusCreated)
+	var credential model.PlatformItem
+	decodeResponse(t, credentialRec, &credential)
+
+	loginRec := assertStatus(t, handler, http.MethodPost, "/api/auth/login", map[string]any{"username": "exec-user", "password": "password123"}, nil, http.StatusOK)
+	userCookie := loginRec.Result().Cookies()[0]
+	assertStatus(t, handler, http.MethodPost, "/api/access/ssh/"+asset.ID+"/exec", map[string]any{"command": "printf ok"}, userCookie, http.StatusForbidden)
+
+	assertStatus(t, handler, http.MethodPost, "/api/admin/authorizations/assets", map[string]any{
+		"name":      "exec-user host",
+		"owner_id":  user.ID,
+		"target_id": asset.ID,
+		"status":    "enabled",
+	}, adminCookie, http.StatusCreated)
+	execRec := assertStatus(t, handler, http.MethodPost, "/api/access/ssh/"+asset.ID+"/exec", map[string]any{
+		"command":         "printf ok",
+		"credential_id":   credential.ID,
+		"timeout_seconds": 5,
+	}, userCookie, http.StatusOK)
+	var execResult map[string]any
+	decodeResponse(t, execRec, &execResult)
+	if execResult["status"] != "success" || execResult["exit_code"].(float64) != 0 || !strings.Contains(execResult["stdout"].(string), "ran: printf ok") {
+		t.Fatalf("unexpected ssh exec result: %#v", execResult)
+	}
+
+	assertStatus(t, handler, http.MethodPost, "/api/admin/command-filters", map[string]any{
+		"name":      "deny destructive exec",
+		"type":      "deny",
+		"status":    "enabled",
+		"protocol":  "ssh",
+		"owner_id":  user.ID,
+		"target_id": asset.ID,
+		"metadata":  map[string]any{"pattern": "rm -rf", "risk": "high"},
+	}, adminCookie, http.StatusCreated)
+	deniedRec := assertStatus(t, handler, http.MethodPost, "/api/access/ssh/"+asset.ID+"/exec", map[string]any{
+		"command": "rm -rf /tmp/test",
+	}, userCookie, http.StatusForbidden)
+	var deniedResult map[string]any
+	decodeResponse(t, deniedRec, &deniedResult)
+	if deniedResult["blocked"] != true || deniedResult["status"] != "denied" || deniedResult["risk"] != "high" {
+		t.Fatalf("unexpected denied ssh exec result: %#v", deniedResult)
+	}
+
+	logsRec := assertStatus(t, handler, http.MethodGet, "/api/admin/audit/exec-command-logs", nil, adminCookie, http.StatusOK)
+	logsBody := logsRec.Body.String()
+	for _, want := range []string{"printf ok", "rm -rf /tmp/test", `"exit_code":0`, `"risk":"high"`, `"interactive":false`} {
+		if !strings.Contains(logsBody, want) {
+			t.Fatalf("exec command logs missing %s in %s", want, logsBody)
+		}
+	}
+	operationRec := assertStatus(t, handler, http.MethodGet, "/api/admin/audit/operation-logs", nil, adminCookie, http.StatusOK)
+	operationBody := operationRec.Body.String()
+	if !strings.Contains(operationBody, "connection.ssh.exec") || !strings.Contains(operationBody, "connection.ssh.exec.denied") {
+		t.Fatalf("operation logs missing ssh exec audit: %s", operationBody)
 	}
 }
 
@@ -2358,6 +2459,96 @@ func TestAuditSessionOperations(t *testing.T) {
 	logsRec := assertStatus(t, handler, http.MethodGet, "/api/admin/audit/operation-logs", nil, adminCookie, http.StatusOK)
 	if !strings.Contains(logsRec.Body.String(), "audit.recording.delete") {
 		t.Fatal("recording delete did not write operation log")
+	}
+}
+
+func startFakeSSHExecServer(t *testing.T, username, password string) (string, func()) {
+	t.Helper()
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("listen fake ssh exec server: %v", err)
+	}
+	_, privateKey, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatalf("generate ssh host key: %v", err)
+	}
+	signer, err := cryptossh.NewSignerFromKey(privateKey)
+	if err != nil {
+		t.Fatalf("create ssh signer: %v", err)
+	}
+	config := &cryptossh.ServerConfig{
+		PasswordCallback: func(meta cryptossh.ConnMetadata, payload []byte) (*cryptossh.Permissions, error) {
+			if meta.User() == username && string(payload) == password {
+				return nil, nil
+			}
+			return nil, os.ErrPermission
+		},
+	}
+	config.AddHostKey(signer)
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		for {
+			conn, err := listener.Accept()
+			if err != nil {
+				return
+			}
+			go handleFakeSSHExecConnection(conn, config)
+		}
+	}()
+	return listener.Addr().String(), func() {
+		_ = listener.Close()
+		<-done
+	}
+}
+
+func handleFakeSSHExecConnection(conn net.Conn, config *cryptossh.ServerConfig) {
+	sshConn, channels, requests, err := cryptossh.NewServerConn(conn, config)
+	if err != nil {
+		_ = conn.Close()
+		return
+	}
+	defer sshConn.Close()
+	go cryptossh.DiscardRequests(requests)
+	for newChannel := range channels {
+		if newChannel.ChannelType() != "session" {
+			_ = newChannel.Reject(cryptossh.UnknownChannelType, "session only")
+			continue
+		}
+		channel, reqs, err := newChannel.Accept()
+		if err != nil {
+			continue
+		}
+		go handleFakeSSHExecChannel(channel, reqs)
+	}
+}
+
+func handleFakeSSHExecChannel(channel cryptossh.Channel, requests <-chan *cryptossh.Request) {
+	defer channel.Close()
+	for req := range requests {
+		if req.Type != "exec" {
+			if req.WantReply {
+				_ = req.Reply(false, nil)
+			}
+			continue
+		}
+		var payload struct {
+			Command string
+		}
+		if err := cryptossh.Unmarshal(req.Payload, &payload); err != nil {
+			_ = req.Reply(false, nil)
+			return
+		}
+		_ = req.Reply(true, nil)
+		status := uint32(0)
+		if strings.Contains(payload.Command, "fail") {
+			status = 7
+			_, _ = channel.Stderr().Write([]byte("failed: " + payload.Command + "\n"))
+		} else {
+			_, _ = channel.Write([]byte("ran: " + payload.Command + "\n"))
+		}
+		_, _ = channel.SendRequest("exit-status", false, cryptossh.Marshal(struct{ Status uint32 }{Status: status}))
+		return
 	}
 }
 

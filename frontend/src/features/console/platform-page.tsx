@@ -1,6 +1,6 @@
 import type { ColumnDef } from '@tanstack/react-table'
 import { Link } from '@tanstack/react-router'
-import { ArrowUpRight, Copy, Download, FileDown, FileSearch, FolderPlus, MoveRight, Pencil, Play, Plus, RefreshCw, Save, Trash2, Upload } from 'lucide-react'
+import { ArrowUpRight, Copy, Download, FileDown, FileSearch, FolderPlus, MoveRight, Pencil, Play, Plus, RefreshCw, Save, TerminalSquare, Trash2, Upload } from 'lucide-react'
 import { useEffect, useMemo, useState } from 'react'
 
 import { useApp } from '@/app/app-provider'
@@ -127,6 +127,20 @@ interface DesktopAccessForm {
   watermarkText: string
   watermarkColor: string
   watermarkFontSize: string
+}
+
+interface SSHExecResult {
+  session_id: string
+  command: string
+  stdout: string
+  stderr: string
+  exit_code: number
+  status: string
+  duration_ms: number
+  action: string
+  risk: string
+  blocked: boolean
+  error?: string
 }
 
 export function PlatformPage({ config }: { config: PlatformPageConfig }) {
@@ -1085,6 +1099,72 @@ function TaskLogsDialog({ item, onClose }: { item: PlatformItem; onClose: () => 
         )) : (
           <div className='rounded-xl border border-dashed border-border p-6 text-sm text-muted-foreground'>暂无运行日志。</div>
         )}
+      </div>
+    </DialogShell>
+  )
+}
+
+function SSHExecDialog({ item, onClose }: { item: PlatformItem; onClose: () => void }) {
+  const app = useApp()
+  const [command, setCommand] = useState(stringValue(item.metadata?.command) || 'uptime')
+  const [timeoutSeconds, setTimeoutSeconds] = useState('30')
+  const [result, setResult] = useState<SSHExecResult | null>(null)
+  const [running, setRunning] = useState(false)
+
+  const execute = async () => {
+    setRunning(true)
+    try {
+      const data = await apiRequest<SSHExecResult>(`/api/access/ssh/${item.id}/exec`, {
+        method: 'POST',
+        body: JSON.stringify({
+          command,
+          timeout_seconds: Number(timeoutSeconds) || 30,
+        }),
+      })
+      setResult(data)
+      await app.refresh(true)
+      app.showToast('SSH command executed')
+    } catch (error) {
+      if (error instanceof ApiError && error.status === 403 && error.data) {
+        setResult(error.data as SSHExecResult)
+        await app.refresh(true)
+        return
+      }
+      app.handleApiError(error)
+    } finally {
+      setRunning(false)
+    }
+  }
+
+  return (
+    <DialogShell open onOpenChange={(open) => !open && onClose()} title={`${item.name} Exec`} description='Run a non-interactive SSH command. Output, exit code, risk level, and duration are written to remote command logs.'>
+      <div className='grid gap-4'>
+        <Field label='Command'><Textarea className='min-h-32 font-mono text-xs' value={command} onChange={(event) => setCommand(event.currentTarget.value)} /></Field>
+        <Field label='Timeout seconds'><Input type='number' min={1} max={600} value={timeoutSeconds} onChange={(event) => setTimeoutSeconds(event.currentTarget.value)} /></Field>
+        {result ? (
+          <div className='rounded-xl border border-border bg-background/60 p-3'>
+            <div className='flex flex-wrap items-center justify-between gap-2 text-sm'>
+              <strong>{result.status}</strong>
+              <div className='flex flex-wrap items-center gap-2'>
+                <Badge tone={result.blocked ? 'danger' : statusTone(result.status)}>{result.action || result.status}</Badge>
+                <Badge tone={result.risk === 'high' ? 'danger' : result.risk === 'normal' ? 'neutral' : 'warning'}>{result.risk || 'normal'}</Badge>
+                <span className='font-mono text-xs text-muted-foreground'>exit {result.exit_code} / {result.duration_ms} ms</span>
+              </div>
+            </div>
+            {result.error ? <p className='mt-2 text-xs text-destructive'>{result.error}</p> : null}
+            <div className='mt-3 grid gap-3 md:grid-cols-2'>
+              <pre className='min-h-28 overflow-auto rounded-lg bg-muted p-2 text-xs'>{result.stdout || '(stdout empty)'}</pre>
+              <pre className='min-h-28 overflow-auto rounded-lg bg-muted p-2 text-xs'>{result.stderr || '(stderr empty)'}</pre>
+            </div>
+          </div>
+        ) : null}
+        <div className='flex justify-end gap-2'>
+          <Button variant='outline' onClick={onClose}>Close</Button>
+          <Button variant='primary' onClick={() => void execute()} disabled={running || !command.trim()}>
+            <TerminalSquare className='size-4' />
+            {running ? 'Running...' : 'Run'}
+          </Button>
+        </div>
       </div>
     </DialogShell>
   )
@@ -2081,6 +2161,7 @@ function AccessSection({
   onDatabaseQuery?: (item: PlatformItem) => void
 }) {
   const app = useApp()
+  const [sshExecItem, setSSHExecItem] = useState<PlatformItem | null>(null)
   const connect = async (item: PlatformItem) => {
     const accessProtocol = (protocol || item.protocol || 'ssh') as Protocol
     if (accessProtocol === 'http') {
@@ -2134,12 +2215,19 @@ function AccessSection({
                 <Play className='size-4' />
                 接入
               </Button>
+              {(protocol || item.protocol) === 'ssh' ? (
+                <Button className='mt-2 w-full' variant='outline' size='sm' onClick={() => setSSHExecItem(item)}>
+                  <TerminalSquare className='size-4' />
+                  Exec
+                </Button>
+              ) : null}
             </article>
           ))}
         </div>
       ) : (
         <div className='rounded-xl border border-dashed border-border p-6 text-sm text-muted-foreground'>暂无授权资源。</div>
       )}
+      {sshExecItem ? <SSHExecDialog item={sshExecItem} onClose={() => setSSHExecItem(null)} /> : null}
     </section>
   )
 }

@@ -3,11 +3,13 @@ import type { ApiErrorPayload } from '@/types'
 export class ApiError extends Error {
   readonly setupRequired: boolean
   readonly status: number
+  readonly data?: unknown
 
-  constructor(message: string, status: number, setupRequired = false) {
+  constructor(message: string, status: number, setupRequired = false, data?: unknown) {
     super(message)
     this.status = status
     this.setupRequired = setupRequired
+    this.data = data
   }
 }
 
@@ -25,7 +27,7 @@ export async function apiRequest<T>(path: string, options: RequestInit = {}): Pr
   const payload = (await response.json().catch(() => ({}))) as ApiErrorPayload
 
   if (!response.ok) {
-    throw new ApiError(payload.error || response.statusText, response.status, Boolean(payload.setup_required))
+    throw new ApiError(payload.error || response.statusText, response.status, Boolean(payload.setup_required), payload)
   }
 
   return payload as T

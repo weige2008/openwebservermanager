@@ -123,9 +123,33 @@ func (i *commandInterceptor) evaluate(command string) commandDecision {
 }
 
 func (i *commandInterceptor) record(command string, decision commandDecision) {
+	i.recordCommand(command, decision, true, "interactive ssh command "+decision.Status, nil)
+}
+
+func (i *commandInterceptor) recordExec(command string, decision commandDecision, description string, metadata map[string]any) {
+	i.recordCommand(command, decision, false, description, metadata)
+}
+
+func (i *commandInterceptor) recordCommand(command string, decision commandDecision, interactive bool, description string, metadata map[string]any) {
 	if i.store == nil {
 		return
 	}
+	if metadata == nil {
+		metadata = map[string]any{}
+	}
+	metadata["session_id"] = i.session.ID
+	metadata["server_id"] = i.session.ServerID
+	metadata["credential_id"] = i.session.CredentialID
+	metadata["client_ip"] = i.session.ClientIP
+	metadata["command"] = command
+	metadata["action"] = decision.Action
+	metadata["risk"] = decision.Risk
+	metadata["rule_id"] = decision.RuleID
+	metadata["rule_name"] = decision.RuleName
+	metadata["pattern"] = decision.Pattern
+	metadata["blocked"] = decision.Blocked
+	metadata["interactive"] = interactive
+	metadata["recorded_at"] = time.Now().UTC()
 	_, _ = i.store.CreatePlatformItem("exec_command_logs", model.PlatformItemRequest{
 		Name:        command,
 		Type:        decision.Action,
@@ -133,22 +157,8 @@ func (i *commandInterceptor) record(command string, decision commandDecision) {
 		Protocol:    model.ProtocolSSH,
 		OwnerID:     i.session.UserID,
 		TargetID:    i.session.ServerID,
-		Description: "interactive ssh command " + decision.Status,
-		Metadata: map[string]any{
-			"session_id":    i.session.ID,
-			"server_id":     i.session.ServerID,
-			"credential_id": i.session.CredentialID,
-			"client_ip":     i.session.ClientIP,
-			"command":       command,
-			"action":        decision.Action,
-			"risk":          decision.Risk,
-			"rule_id":       decision.RuleID,
-			"rule_name":     decision.RuleName,
-			"pattern":       decision.Pattern,
-			"blocked":       decision.Blocked,
-			"interactive":   true,
-			"recorded_at":   time.Now().UTC(),
-		},
+		Description: description,
+		Metadata:    metadata,
 	})
 }
 

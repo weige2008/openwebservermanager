@@ -168,12 +168,16 @@ func (s *Server) handleAccessAssets(w http.ResponseWriter, r *http.Request) {
 	assets := filterAuthorizedItems(platform["assets"], platform["authorized_assets"], userID, isAdmin)
 	webAssets := filterAuthorizedItems(platform["web_assets"], platform["authorized_web_assets"], userID, isAdmin)
 	databaseAssets := filterAuthorizedItems(platform["database_assets"], platform["authorized_database_assets"], userID, isAdmin)
+	authorizations := platform["authorized_assets"]
+	if !isAdmin {
+		authorizations = filterAuthorizationsForUser(authorizations, userID)
+	}
 	writeJSON(w, http.StatusOK, map[string]any{
 		"text":       filterPlatformByProtocol(assets, model.ProtocolSSH),
 		"desktop":    filterDesktopAssets(assets),
 		"web":        webAssets,
 		"database":   databaseAssets,
-		"authorized": platform["authorized_assets"],
+		"authorized": authorizations,
 	})
 }
 
@@ -378,6 +382,89 @@ func filterAuthorizedItems(items, authorizations []model.PlatformItem, userID st
 	result := []model.PlatformItem{}
 	for _, item := range items {
 		if allowed[item.ID] {
+			result = append(result, item)
+		}
+	}
+	return result
+}
+
+func accessBootstrapPlatform(platform map[string][]model.PlatformItem, userID string) map[string][]model.PlatformItem {
+	result := emptyPlatformBootstrap()
+	result["assets"] = filterAuthorizedItems(platform["assets"], platform["authorized_assets"], userID, false)
+	result["web_assets"] = filterAuthorizedItems(platform["web_assets"], platform["authorized_web_assets"], userID, false)
+	result["database_assets"] = filterAuthorizedItems(platform["database_assets"], platform["authorized_database_assets"], userID, false)
+	result["asset_groups"] = platform["asset_groups"]
+	result["authorized_assets"] = filterAuthorizationsForUser(platform["authorized_assets"], userID)
+	result["authorized_web_assets"] = filterAuthorizationsForUser(platform["authorized_web_assets"], userID)
+	result["authorized_database_assets"] = filterAuthorizationsForUser(platform["authorized_database_assets"], userID)
+	result["online_sessions"] = filterItemsByOwner(platform["online_sessions"], userID)
+	result["offline_sessions"] = filterItemsByOwner(platform["offline_sessions"], userID)
+	return result
+}
+
+func auditBootstrapPlatform(platform map[string][]model.PlatformItem) map[string][]model.PlatformItem {
+	result := emptyPlatformBootstrap()
+	for _, collection := range auditCollectionRoutes {
+		result[collection] = platform[collection]
+	}
+	result["online_sessions"] = platform["online_sessions"]
+	result["offline_sessions"] = platform["offline_sessions"]
+	return result
+}
+
+func emptyPlatformBootstrap() map[string][]model.PlatformItem {
+	return map[string][]model.PlatformItem{
+		"users":                      {},
+		"roles":                      {},
+		"departments":                {},
+		"login_policies":             {},
+		"login_locks":                {},
+		"oidc_clients":               {},
+		"assets":                     {},
+		"asset_groups":               {},
+		"credentials":                {},
+		"command_snippets":           {},
+		"storages":                   {},
+		"web_assets":                 {},
+		"certificates":               {},
+		"database_assets":            {},
+		"sql_work_orders":            {},
+		"ssh_gateways":               {},
+		"agent_gateways":             {},
+		"gateway_groups":             {},
+		"online_sessions":            {},
+		"offline_sessions":           {},
+		"exec_command_logs":          {},
+		"file_logs":                  {},
+		"access_logs":                {},
+		"access_stats":               {},
+		"login_logs":                 {},
+		"operation_logs":             {},
+		"sql_logs":                   {},
+		"scheduled_tasks":            {},
+		"command_filters":            {},
+		"authorization_strategies":   {},
+		"authorized_assets":          {},
+		"authorized_web_assets":      {},
+		"authorized_database_assets": {},
+		"system_settings":            {},
+	}
+}
+
+func filterAuthorizationsForUser(authorizations []model.PlatformItem, userID string) []model.PlatformItem {
+	result := []model.PlatformItem{}
+	for _, authorization := range authorizations {
+		if authorization.OwnerID == userID || authorization.Username == userID {
+			result = append(result, authorization)
+		}
+	}
+	return result
+}
+
+func filterItemsByOwner(items []model.PlatformItem, userID string) []model.PlatformItem {
+	result := []model.PlatformItem{}
+	for _, item := range items {
+		if item.OwnerID == userID || item.Username == userID {
 			result = append(result, item)
 		}
 	}

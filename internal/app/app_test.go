@@ -142,6 +142,100 @@ func TestPlatformUserLoginAndAccessAuthorization(t *testing.T) {
 	assertStatus(t, handler, http.MethodPost, "/api/access/ssh/"+asset.ID, nil, userCookie, http.StatusAccepted)
 }
 
+func TestRoleBasedAccessControl(t *testing.T) {
+	handler, adminCookie := newTestHandler(t)
+
+	userRec := assertStatus(t, handler, http.MethodPost, "/api/admin/users", map[string]any{
+		"name":     "portal-user",
+		"type":     "local",
+		"status":   "enabled",
+		"password": "password123",
+		"metadata": map[string]any{"role": "user"},
+	}, adminCookie, http.StatusCreated)
+	var user model.PlatformItem
+	decodeResponse(t, userRec, &user)
+
+	allowedRec := assertStatus(t, handler, http.MethodPost, "/api/admin/assets", map[string]any{
+		"name":     "allowed-host",
+		"type":     "linux",
+		"status":   "active",
+		"protocol": "ssh",
+		"host":     "10.0.0.10",
+		"port":     22,
+	}, adminCookie, http.StatusCreated)
+	var allowedAsset model.PlatformItem
+	decodeResponse(t, allowedRec, &allowedAsset)
+
+	deniedRec := assertStatus(t, handler, http.MethodPost, "/api/admin/assets", map[string]any{
+		"name":     "denied-host",
+		"type":     "linux",
+		"status":   "active",
+		"protocol": "ssh",
+		"host":     "10.0.0.11",
+		"port":     22,
+	}, adminCookie, http.StatusCreated)
+	var deniedAsset model.PlatformItem
+	decodeResponse(t, deniedRec, &deniedAsset)
+
+	assertStatus(t, handler, http.MethodPost, "/api/admin/authorizations/assets", map[string]any{
+		"name":      "portal-user allowed-host",
+		"owner_id":  user.ID,
+		"target_id": allowedAsset.ID,
+		"status":    "enabled",
+	}, adminCookie, http.StatusCreated)
+
+	loginRec := assertStatus(t, handler, http.MethodPost, "/api/auth/login", map[string]any{"username": "portal-user", "password": "password123"}, nil, http.StatusOK)
+	userCookie := loginRec.Result().Cookies()[0]
+	assertStatus(t, handler, http.MethodGet, "/api/admin/assets", nil, userCookie, http.StatusForbidden)
+	assertStatus(t, handler, http.MethodPost, "/api/admin/assets", map[string]any{"name": "blocked"}, userCookie, http.StatusForbidden)
+	bootstrapRec := assertStatus(t, handler, http.MethodGet, "/api/bootstrap", nil, userCookie, http.StatusOK)
+	body := bootstrapRec.Body.String()
+	if !strings.Contains(body, allowedAsset.ID) {
+		t.Fatal("user bootstrap did not include authorized asset")
+	}
+	if strings.Contains(body, deniedAsset.ID) {
+		t.Fatal("user bootstrap leaked unauthorized asset")
+	}
+	accessRec := assertStatus(t, handler, http.MethodGet, "/api/access/assets", nil, userCookie, http.StatusOK)
+	if strings.Contains(accessRec.Body.String(), deniedAsset.ID) {
+		t.Fatal("access asset list leaked unauthorized asset")
+	}
+
+	assertStatus(t, handler, http.MethodPost, "/api/admin/users", map[string]any{
+		"name":     "audit-user",
+		"type":     "local",
+		"status":   "enabled",
+		"password": "password123",
+		"metadata": map[string]any{"role": "auditor"},
+	}, adminCookie, http.StatusCreated)
+	auditLogin := assertStatus(t, handler, http.MethodPost, "/api/auth/login", map[string]any{"username": "audit-user", "password": "password123"}, nil, http.StatusOK)
+	auditCookie := auditLogin.Result().Cookies()[0]
+	assertStatus(t, handler, http.MethodGet, "/api/admin/audit/login-logs", nil, auditCookie, http.StatusOK)
+	assertStatus(t, handler, http.MethodGet, "/api/system/monitoring", nil, auditCookie, http.StatusOK)
+	assertStatus(t, handler, http.MethodGet, "/api/admin/assets", nil, auditCookie, http.StatusForbidden)
+	assertStatus(t, handler, http.MethodPost, "/api/admin/assets", map[string]any{"name": "blocked"}, auditCookie, http.StatusForbidden)
+
+	assertStatus(t, handler, http.MethodPost, "/api/admin/roles", map[string]any{
+		"name":   "asset-reader",
+		"type":   "custom",
+		"status": "enabled",
+		"metadata": map[string]any{
+			"api_permissions": []string{"GET /api/admin/assets"},
+		},
+	}, adminCookie, http.StatusCreated)
+	assertStatus(t, handler, http.MethodPost, "/api/admin/users", map[string]any{
+		"name":     "asset-reader-user",
+		"type":     "local",
+		"status":   "enabled",
+		"password": "password123",
+		"metadata": map[string]any{"role": "asset-reader"},
+	}, adminCookie, http.StatusCreated)
+	readerLogin := assertStatus(t, handler, http.MethodPost, "/api/auth/login", map[string]any{"username": "asset-reader-user", "password": "password123"}, nil, http.StatusOK)
+	readerCookie := readerLogin.Result().Cookies()[0]
+	assertStatus(t, handler, http.MethodGet, "/api/admin/assets", nil, readerCookie, http.StatusOK)
+	assertStatus(t, handler, http.MethodPost, "/api/admin/assets", map[string]any{"name": "blocked"}, readerCookie, http.StatusForbidden)
+}
+
 func TestToolsAndMonitoringEndpoints(t *testing.T) {
 	handler, cookie := newTestHandler(t)
 	assertStatus(t, handler, http.MethodGet, "/api/system/monitoring", nil, cookie, http.StatusOK)

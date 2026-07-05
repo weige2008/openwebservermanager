@@ -119,6 +119,8 @@ func (s *Server) serveAPI(w http.ResponseWriter, r *http.Request) {
 	switch {
 	case r.Method == http.MethodGet && r.URL.Path == "/api/bootstrap":
 		s.handleBootstrap(w, r)
+	case !s.authorizeAPI(w, r):
+		return
 	case s.handlePlatformAPI(w, r):
 		return
 	case r.Method == http.MethodPost && r.URL.Path == "/api/servers":
@@ -168,12 +170,27 @@ func (s *Server) handlePublicConfig(w http.ResponseWriter, _ *http.Request) {
 	writeJSON(w, http.StatusOK, cfg)
 }
 
-func (s *Server) handleBootstrap(w http.ResponseWriter, _ *http.Request) {
+func (s *Server) handleBootstrap(w http.ResponseWriter, r *http.Request) {
 	servers, credentials, sessions, auditLogs := s.cfg.Store.Bootstrap()
 	platform, err := s.cfg.Store.PlatformBootstrap()
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, err.Error())
 		return
+	}
+	_, session, _ := s.auth.session(r)
+	switch s.roleDecision(session.Role).Kind {
+	case roleSuperAdmin, roleAdmin:
+	case roleAuditor:
+		servers = nil
+		credentials = nil
+		sessions = nil
+		platform = auditBootstrapPlatform(platform)
+	default:
+		servers = nil
+		credentials = nil
+		sessions = nil
+		auditLogs = nil
+		platform = accessBootstrapPlatform(platform, session.UserID)
 	}
 	writeJSON(w, http.StatusOK, map[string]any{
 		"servers":     servers,

@@ -5,6 +5,7 @@ import { useEffect, useState } from 'react'
 
 import { useApp } from '@/app/app-provider'
 import { platformLabel, platformPageByRoute } from '@/lib/platform'
+import { isAdminRole } from '@/lib/rbac'
 import { cn } from '@/lib/utils'
 
 import { Badge } from '../ui/badge'
@@ -67,6 +68,7 @@ export function AppHeader({ sidebarOpen, onToggleSidebar }: { sidebarOpen: boole
   const title = platformPage ? platformLabel(platformPage, app.locale) : app.t(pageTitleKeys[pathname] || 'dashboard')
   const productName = app.t('productNameShort')
   const [mobileOpen, setMobileOpen] = useState(false)
+  const admin = isAdminRole(app.auth?.role)
 
   const handleSidebarButton = () => {
     if (window.matchMedia('(min-width: 768px)').matches) {
@@ -97,9 +99,11 @@ export function AppHeader({ sidebarOpen, onToggleSidebar }: { sidebarOpen: boole
           </div>
           <div className='ms-auto flex min-w-0 items-center gap-1 sm:gap-2'>
             <div className='hidden lg:flex'>
-              <Link to={'/app/assets' as never} className={buttonVariants({ variant: 'ghost', size: 'sm' })}>
-                {app.t('assets')}
-              </Link>
+              {admin ? (
+                <Link to={'/app/assets' as never} className={buttonVariants({ variant: 'ghost', size: 'sm' })}>
+                  {app.t('assets')}
+                </Link>
+              ) : null}
               <Link to='/access' className={buttonVariants({ variant: 'ghost', size: 'sm' })}>
                 {app.t('accessPortal')}
               </Link>
@@ -110,10 +114,12 @@ export function AppHeader({ sidebarOpen, onToggleSidebar }: { sidebarOpen: boole
                 <RefreshCw className='size-4' />
                 <span>{app.t('refresh')}</span>
               </Button>
-              <Button size='sm' variant='primary' onClick={() => app.setModal({ type: 'server' })}>
-                <Plus className='size-4' />
-                <span>{app.t('addAsset')}</span>
-              </Button>
+              {admin ? (
+                <Button size='sm' variant='primary' onClick={() => app.setModal({ type: 'server' })}>
+                  <Plus className='size-4' />
+                  <span>{app.t('addAsset')}</span>
+                </Button>
+              ) : null}
             </div>
             <NotificationButton size='icon-sm' className='rounded-md' />
             <LanguageSwitcher size='icon-sm' className='rounded-md' />
@@ -138,6 +144,8 @@ function MobileNavDrawer({
 }) {
   const app = useApp()
   const pathname = useRouterState({ select: (state) => state.location.pathname })
+  const admin = isAdminRole(app.auth?.role)
+  const visibleConsoleNav = consoleNavItems.filter((item) => item.to !== '/app/servers' || admin)
 
   const close = () => onOpenChange(false)
 
@@ -188,7 +196,7 @@ function MobileNavDrawer({
           <div className='flex-1 overflow-auto py-3'>
             <div className='px-3 pb-2 text-xs font-medium text-muted-foreground'>{app.t('app')}</div>
             <motion.nav className='grid gap-1 px-2' variants={{ hidden: { opacity: 0 }, visible: { opacity: 1 } }}>
-              {consoleNavItems.map((item) => {
+              {visibleConsoleNav.map((item) => {
                 const Icon = item.icon
                 const active = item.to === '/app' ? pathname === '/app' : pathname.startsWith(item.to)
                 const label = item.to === '/app/servers' ? app.t('assets') : app.t(item.label)
@@ -216,17 +224,19 @@ function MobileNavDrawer({
                 <RefreshCw className='size-4' />
                 {app.t('refreshData')}
               </Button>
-              <Button
-                variant='primary'
-                className='justify-start'
-                onClick={() => {
-                  app.setModal({ type: 'server' })
-                  close()
-                }}
-              >
-                <Plus className='size-4' />
-                {app.t('addAsset')}
-              </Button>
+              {admin ? (
+                <Button
+                  variant='primary'
+                  className='justify-start'
+                  onClick={() => {
+                    app.setModal({ type: 'server' })
+                    close()
+                  }}
+                >
+                  <Plus className='size-4' />
+                  {app.t('addAsset')}
+                </Button>
+              ) : null}
             </div>
           </div>
           <div className='m-3 grid gap-3 rounded-lg border border-sidebar-border bg-card/70 p-3 text-xs'>

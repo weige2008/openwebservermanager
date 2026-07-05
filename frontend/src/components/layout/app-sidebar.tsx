@@ -10,6 +10,7 @@ import {
   SIDEBAR_STAGGER_VARIANTS,
 } from '@/lib/motion'
 import { platformLabel, platformNavGroups } from '@/lib/platform'
+import { canViewPlatformPage, isAdminRole } from '@/lib/rbac'
 import { cn } from '@/lib/utils'
 
 import { Badge } from '../ui/badge'
@@ -21,11 +22,16 @@ export const consoleNavItems = [
 ] as const
 
 export function AppSidebar({ collapsed = false }: { collapsed?: boolean }) {
-  const { appearance, data, t, locale } = useApp()
+  const { appearance, auth, data, t, locale } = useApp()
   const pathname = useRouterState({ select: (state) => state.location.pathname })
   const shouldReduce = useReducedMotion()
   const framed = appearance.sidebarStyle !== 'default'
-  const activeSection = [...consoleNavItems.map((item) => item.to), ...platformNavGroups.flatMap((group) => group.items.map((item) => item.route))]
+  const role = auth?.role
+  const visibleConsoleNav = consoleNavItems.filter((item) => item.to !== '/app/servers' || isAdminRole(role))
+  const visiblePlatformGroups = platformNavGroups
+    .map((group) => ({ ...group, items: group.items.filter((item) => canViewPlatformPage(role, item)) }))
+    .filter((group) => group.items.length > 0)
+  const activeSection = [...visibleConsoleNav.map((item) => item.to), ...visiblePlatformGroups.flatMap((group) => group.items.map((item) => item.route))]
     .find((to) => (to === '/app' ? pathname === '/app' : pathname.startsWith(to))) ?? '/app'
   const animationKey = `${collapsed ? 'collapsed' : 'expanded'}:${activeSection}`
 
@@ -41,7 +47,7 @@ export function AppSidebar({ collapsed = false }: { collapsed?: boolean }) {
           animate={shouldReduce ? undefined : 'animate'}
           className='grid gap-1'
         >
-          {consoleNavItems.map((item) => {
+          {visibleConsoleNav.map((item) => {
             const Icon = item.icon
             const active = item.to === '/app' ? pathname === '/app' : pathname.startsWith(item.to)
             const label = t(item.label)
@@ -64,7 +70,7 @@ export function AppSidebar({ collapsed = false }: { collapsed?: boolean }) {
           })}
         </motion.nav>
       </div>
-      {platformNavGroups.map((group) => {
+      {visiblePlatformGroups.map((group) => {
         const GroupIcon = group.icon
         return (
           <div key={group.labelZh} className='px-2 pb-2'>

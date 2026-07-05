@@ -6,6 +6,7 @@ import { useTranslation } from 'react-i18next'
 import { useApp } from '@/app/app-provider'
 import { DialogShell } from '@/components/ui/dialog'
 import { Input } from '@/components/ui/field'
+import { isAdminRole, isAuditorRole } from '@/lib/rbac'
 import { cn, serverProtocol } from '@/lib/utils'
 
 import { Button } from '../ui/button'
@@ -42,20 +43,32 @@ export function CommandSearch() {
   }
 
   const commands = useMemo<CommandItem[]>(
-    () => [
-      { id: 'overview', label: t('overview'), description: t('commandSearch.overviewDescription'), icon: Activity, run: () => navigate({ to: '/app' }) },
-      { id: 'servers', label: t('assets'), description: t('commandSearch.serversDescription'), icon: Server, run: () => navigate({ to: '/app/servers' }) },
-      { id: 'sessions', label: t('sessions'), description: t('commandSearch.sessionsDescription'), icon: MonitorUp, run: () => navigate({ to: '/app/sessions' }) },
-      { id: 'audit', label: t('audit'), description: t('commandSearch.auditDescription'), icon: FileClock, run: () => navigate({ to: '/app/audit' }) },
-      { id: 'new-server', label: t('addAsset'), description: t('commandSearch.newServerDescription'), icon: Plus, run: () => app.setModal({ type: 'server' }) },
-      ...app.data.servers.map((server) => ({
-        id: `server:${server.id}`,
-        label: server.name,
-        description: `${server.host} / ${server.os}`,
-        icon: Server,
-        run: () => app.setModal({ type: 'connect', protocol: serverProtocol(server), serverId: server.id }),
-      })),
-    ],
+    () => {
+      const admin = isAdminRole(app.auth?.role)
+      const auditor = isAuditorRole(app.auth?.role)
+      const commands: CommandItem[] = [
+        { id: 'overview', label: t('overview'), description: t('commandSearch.overviewDescription'), icon: Activity, run: () => navigate({ to: '/app' }) },
+        { id: 'access', label: t('accessPortal'), description: t('commandSearch.serversDescription'), icon: MonitorUp, run: () => navigate({ to: '/access' }) },
+      ]
+      if (admin) {
+        commands.push(
+          { id: 'servers', label: t('assets'), description: t('commandSearch.serversDescription'), icon: Server, run: () => navigate({ to: '/app/servers' }) },
+          { id: 'sessions', label: t('sessions'), description: t('commandSearch.sessionsDescription'), icon: MonitorUp, run: () => navigate({ to: '/app/sessions' }) },
+          { id: 'new-server', label: t('addAsset'), description: t('commandSearch.newServerDescription'), icon: Plus, run: () => app.setModal({ type: 'server' }) },
+          ...app.data.servers.map((server) => ({
+            id: `server:${server.id}`,
+            label: server.name,
+            description: `${server.host} / ${server.os}`,
+            icon: Server,
+            run: () => app.setModal({ type: 'connect', protocol: serverProtocol(server), serverId: server.id }),
+          }))
+        )
+      }
+      if (admin || auditor) {
+        commands.push({ id: 'audit', label: t('audit'), description: t('commandSearch.auditDescription'), icon: FileClock, run: () => navigate({ to: '/app/audit' }) })
+      }
+      return commands
+    },
     [app, navigate, t]
   )
 

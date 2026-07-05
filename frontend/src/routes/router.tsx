@@ -25,7 +25,8 @@ import { AccessPortalPage, PlatformPage } from '@/features/console/platform-page
 import { HomePage } from '@/features/home/home-page'
 import { ModalHost } from '@/features/modals/modal-host'
 import { WorkspaceView } from '@/features/workspace/workspace-view'
-import { platformPages } from '@/lib/platform'
+import { platformPages, type PlatformPageConfig } from '@/lib/platform'
+import { canViewPlatformPage, isAdminRole } from '@/lib/rbac'
 
 function RootLayout() {
   const app = useApp()
@@ -60,6 +61,14 @@ function ConsoleGate({ children }: { children: ReactNode }) {
   if (!app.booted) return <LoadingScreen />
   if (!app.auth) return <Navigate to='/login' replace />
   return <AuthenticatedLayout>{children}</AuthenticatedLayout>
+}
+
+function RoleGate({ children, adminOnly, page }: { children: ReactNode; adminOnly?: boolean; page?: PlatformPageConfig }) {
+  const app = useApp()
+  const role = app.auth?.role
+  if (adminOnly && !isAdminRole(role)) return <Navigate to='/access' replace />
+  if (page && !canViewPlatformPage(role, page)) return <Navigate to='/access' replace />
+  return children
 }
 
 function LoginGate() {
@@ -104,7 +113,7 @@ const appRoute = createRoute({
 const serversRoute = createRoute({
   getParentRoute: () => rootRoute,
   path: '/app/servers',
-  component: () => <ConsoleGate><ServersPage /></ConsoleGate>,
+  component: () => <ConsoleGate><RoleGate adminOnly><ServersPage /></RoleGate></ConsoleGate>,
 })
 
 const accessRoute = createRoute({
@@ -152,7 +161,7 @@ const legacyDashboardRoute = createRoute({
 const platformRoutes = platformPages.map((page) => createRoute({
   getParentRoute: () => rootRoute,
   path: page.route,
-  component: () => <ConsoleGate><PlatformPage config={page} /></ConsoleGate>,
+  component: () => <ConsoleGate><RoleGate page={page}><PlatformPage config={page} /></RoleGate></ConsoleGate>,
 }))
 
 const routeTree = rootRoute.addChildren([

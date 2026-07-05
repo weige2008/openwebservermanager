@@ -72,6 +72,7 @@ type ResourceOperation =
   | { type: 'asset-import' }
   | { type: 'agent-token'; item: PlatformItem }
   | { type: 'certificate-create' }
+  | { type: 'certificate-upload' }
   | { type: 'storage-files'; item: PlatformItem }
   | { type: 'task-logs'; item: PlatformItem }
   | { type: 'sql-execute'; item: PlatformItem }
@@ -372,10 +373,16 @@ function ResourceHeaderActions({ config, onOperation }: { config: PlatformPageCo
 
   if (config.collection === 'certificates') {
     return (
-      <Button variant='outline' onClick={() => onOperation({ type: 'certificate-create' })}>
-        <Plus className='size-4' />
-        自签证书
-      </Button>
+      <>
+        <Button variant='outline' onClick={() => onOperation({ type: 'certificate-upload' })}>
+          <Upload className='size-4' />
+          上传证书
+        </Button>
+        <Button variant='outline' onClick={() => onOperation({ type: 'certificate-create' })}>
+          <Plus className='size-4' />
+          自签证书
+        </Button>
+      </>
     )
   }
 
@@ -555,6 +562,7 @@ function ResourceOperationDialog({ operation, onOpenChange }: { operation: Resou
   if (operation.type === 'asset-import') return <AssetImportDialog onClose={() => onOpenChange(null)} />
   if (operation.type === 'agent-token') return <AgentGatewayTokenDialog item={operation.item} onClose={() => onOpenChange(null)} />
   if (operation.type === 'certificate-create') return <CertificateCreateDialog onClose={() => onOpenChange(null)} />
+  if (operation.type === 'certificate-upload') return <CertificateUploadDialog onClose={() => onOpenChange(null)} />
   if (operation.type === 'storage-files') return <StorageFilesDialog item={operation.item} onClose={() => onOpenChange(null)} />
   if (operation.type === 'task-logs') return <TaskLogsDialog item={operation.item} onClose={() => onOpenChange(null)} />
   return <SQLExecuteDialog item={operation.item} onClose={() => onOpenChange(null)} />
@@ -731,6 +739,63 @@ function CertificateCreateDialog({ onClose }: { onClose: () => void }) {
           <Button variant='primary' onClick={() => void submit()} disabled={saving || !domain.trim()}>
             <Save className='size-4' />
             {saving ? '生成中' : '生成'}
+          </Button>
+        </div>
+      </div>
+    </DialogShell>
+  )
+}
+
+function CertificateUploadDialog({ onClose }: { onClose: () => void }) {
+  const app = useApp()
+  const [name, setName] = useState('')
+  const [certificateFile, setCertificateFile] = useState<File | null>(null)
+  const [privateKeyFile, setPrivateKeyFile] = useState<File | null>(null)
+  const [chainFile, setChainFile] = useState<File | null>(null)
+  const [saving, setSaving] = useState(false)
+
+  const submit = async () => {
+    if (!certificateFile) return
+    setSaving(true)
+    try {
+      const form = new FormData()
+      form.set('name', name)
+      form.set('certificate', certificateFile)
+      if (privateKeyFile) form.set('private_key', privateKeyFile)
+      if (chainFile) form.set('chain', chainFile)
+      const response = await fetch('/api/admin/certificates/upload', {
+        method: 'POST',
+        credentials: 'same-origin',
+        body: form,
+      })
+      const payload = (await response.json().catch(() => ({}))) as { error?: string; setup_required?: boolean }
+      if (!response.ok) {
+        throw new ApiError(payload.error || response.statusText, response.status, Boolean(payload.setup_required))
+      }
+      await app.refresh(true)
+      app.showToast('证书已上传')
+      onClose()
+    } catch (error) {
+      app.handleApiError(error)
+    } finally {
+      setSaving(false)
+    }
+  }
+
+  return (
+    <DialogShell open onOpenChange={(open) => !open && onClose()} title='上传证书' description='上传 PEM 格式证书和可选私钥，服务端会校验证书与私钥是否匹配，并解析过期时间和 SAN。'>
+      <div className='grid gap-4'>
+        <div className='grid gap-3 sm:grid-cols-2'>
+          <Field label='名称'><Input value={name} onChange={(event) => setName(event.currentTarget.value)} placeholder='production wildcard' /></Field>
+          <Field label='证书 PEM'><Input type='file' accept='.crt,.cer,.pem' onChange={(event) => setCertificateFile(event.currentTarget.files?.[0] || null)} /></Field>
+          <Field label='私钥 PEM'><Input type='file' accept='.key,.pem' onChange={(event) => setPrivateKeyFile(event.currentTarget.files?.[0] || null)} /></Field>
+          <Field label='证书链 PEM'><Input type='file' accept='.crt,.cer,.pem' onChange={(event) => setChainFile(event.currentTarget.files?.[0] || null)} /></Field>
+        </div>
+        <div className='flex justify-end gap-2'>
+          <Button variant='outline' onClick={onClose}>取消</Button>
+          <Button variant='primary' onClick={() => void submit()} disabled={saving || !certificateFile}>
+            <Upload className='size-4' />
+            {saving ? '上传中' : '上传'}
           </Button>
         </div>
       </div>

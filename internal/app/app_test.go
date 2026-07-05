@@ -1626,6 +1626,37 @@ func TestResourceOperationEndpoints(t *testing.T) {
 	if !strings.Contains(certDownload.Body.String(), "BEGIN CERTIFICATE") {
 		t.Fatal("certificate download did not return pem")
 	}
+	uploadCertPEM, uploadKeyPEM, err := makeSelfSignedCertificate(certificateRequest{Domain: "uploaded.example.test", Days: 90})
+	if err != nil {
+		t.Fatalf("make upload certificate: %v", err)
+	}
+	mismatchCertPEM, _, err := makeSelfSignedCertificate(certificateRequest{Domain: "mismatch.example.test", Days: 90})
+	if err != nil {
+		t.Fatalf("make mismatch certificate: %v", err)
+	}
+	assertMultipartFilesStatus(t, handler, "/api/admin/certificates/upload", map[string]string{"name": "uploaded-cert"}, map[string]multipartFile{
+		"certificate": {Name: "uploaded.crt", Content: uploadCertPEM},
+		"private_key": {Name: "uploaded.key", Content: uploadKeyPEM},
+	}, cookie, http.StatusCreated)
+	uploadRec := assertMultipartFilesStatus(t, handler, "/api/admin/certificates/upload", map[string]string{"name": "bad-cert"}, map[string]multipartFile{
+		"certificate": {Name: "bad.crt", Content: mismatchCertPEM},
+		"private_key": {Name: "uploaded.key", Content: uploadKeyPEM},
+	}, cookie, http.StatusBadRequest)
+	if !strings.Contains(uploadRec.Body.String(), "private key does not match certificate") {
+		t.Fatal("mismatched certificate upload did not explain key mismatch")
+	}
+	certificatesRec := assertStatus(t, handler, http.MethodGet, "/api/admin/certificates", nil, cookie, http.StatusOK)
+	certificatesBody := certificatesRec.Body.String()
+	if !strings.Contains(certificatesBody, "uploaded-cert") || !strings.Contains(certificatesBody, "uploaded.example.test") || !strings.Contains(certificatesBody, "expires_at") {
+		t.Fatal("uploaded certificate metadata did not appear in certificate list")
+	}
+	if strings.Contains(certificatesBody, "PRIVATE KEY") {
+		t.Fatal("certificate list leaked uploaded private key")
+	}
+	logsAfterUpload := assertStatus(t, handler, http.MethodGet, "/api/admin/audit/operation-logs", nil, cookie, http.StatusOK)
+	if !strings.Contains(logsAfterUpload.Body.String(), "certificate.upload") {
+		t.Fatal("certificate upload did not write operation log")
+	}
 
 	taskRec := assertStatus(t, handler, http.MethodPost, "/api/admin/scheduled-tasks", map[string]any{
 		"name":   "Backup now",
@@ -2191,6 +2222,45 @@ func assertMultipartStatus(t *testing.T, handler http.Handler, path string, fiel
 	}
 	if _, err := part.Write(fileContent); err != nil {
 		t.Fatalf("write multipart file: %v", err)
+	}
+	if err := writer.Close(); err != nil {
+		t.Fatalf("close multipart writer: %v", err)
+	}
+	req := httptest.NewRequest(http.MethodPost, path, &body)
+	req.Header.Set("Content-Type", writer.FormDataContentType())
+	if cookie != nil {
+		req.AddCookie(cookie)
+	}
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+	if rec.Code != want {
+		t.Fatalf("POST %s multipart status = %d, want %d, body: %s", path, rec.Code, want, rec.Body.String())
+	}
+	return rec
+}
+
+type multipartFile struct {
+	Name    string
+	Content []byte
+}
+
+func assertMultipartFilesStatus(t *testing.T, handler http.Handler, path string, fields map[string]string, files map[string]multipartFile, cookie *http.Cookie, want int) *httptest.ResponseRecorder {
+	t.Helper()
+	var body bytes.Buffer
+	writer := multipart.NewWriter(&body)
+	for key, value := range fields {
+		if err := writer.WriteField(key, value); err != nil {
+			t.Fatalf("write multipart field: %v", err)
+		}
+	}
+	for field, file := range files {
+		part, err := writer.CreateFormFile(field, file.Name)
+		if err != nil {
+			t.Fatalf("create multipart file: %v", err)
+		}
+		if _, err := part.Write(file.Content); err != nil {
+			t.Fatalf("write multipart file: %v", err)
+		}
 	}
 	if err := writer.Close(); err != nil {
 		t.Fatalf("close multipart writer: %v", err)

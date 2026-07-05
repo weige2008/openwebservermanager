@@ -2,6 +2,8 @@ package app
 
 import (
 	"archive/zip"
+	"crypto/ecdsa"
+	"crypto/ed25519"
 	"crypto/rand"
 	"crypto/rsa"
 	"crypto/x509"
@@ -9,6 +11,8 @@ import (
 	"database/sql"
 	"encoding/base64"
 	"encoding/pem"
+	"errors"
+	"fmt"
 	"io"
 	"math/big"
 	"net"
@@ -69,6 +73,9 @@ func (s *Server) handleResourceOperation(w http.ResponseWriter, r *http.Request,
 		return true
 	case path == "admin/certificates/self-signed":
 		s.handleCertificateSelfSigned(w, r)
+		return true
+	case path == "admin/certificates/upload":
+		s.handleCertificateUpload(w, r)
 		return true
 	case path == "admin/audit/access-stats":
 		s.handleAccessStats(w, r)
@@ -820,6 +827,209 @@ func makeSelfSignedCertificate(req certificateRequest) ([]byte, []byte, error) {
 	certPEM := pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: der})
 	keyPEM := pem.EncodeToMemory(&pem.Block{Type: "RSA PRIVATE KEY", Bytes: x509.MarshalPKCS1PrivateKey(key)})
 	return certPEM, keyPEM, nil
+}
+
+func (s *Server) handleCertificateUpload(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		writeError(w, http.StatusMethodNotAllowed, "method not allowed")
+		return
+	}
+	r.Body = http.MaxBytesReader(w, r.Body, 16<<20)
+	if err := r.ParseMultipartForm(16 << 20); err != nil {
+		writeError(w, http.StatusBadRequest, "invalid certificate upload: "+err.Error())
+		return
+	}
+	certPEM, certName, err := readMultipartTextFile(r, "certificate", 8<<20)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	keyPEM, keyName, err := readOptionalMultipartTextFile(r, "private_key", 8<<20)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	chainPEM, chainName, err := readOptionalMultipartTextFile(r, "chain", 8<<20)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	cert, err := parseFirstCertificatePEM([]byte(certPEM))
+	if err != nil {
+		writeError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	if strings.TrimSpace(keyPEM) != "" {
+		key, err := parsePrivateKeyPEM([]byte(keyPEM))
+		if err != nil {
+			writeError(w, http.StatusBadRequest, err.Error())
+			return
+		}
+		if !certificateMatchesPrivateKey(cert, key) {
+			writeError(w, http.StatusBadRequest, "private key does not match certificate")
+			return
+		}
+	}
+	name := strings.TrimSpace(r.FormValue("name"))
+	if name == "" {
+		name = cert.Subject.CommonName
+	}
+	if name == "" {
+		name = strings.TrimSpace(certName)
+	}
+	if name == "" {
+		name = "uploaded certificate"
+	}
+	metadata := certificateMetadata(cert)
+	metadata["certificate"] = certPEM
+	metadata["certificate_filename"] = certName
+	if keyPEM != "" {
+		metadata["private_key"] = keyPEM
+		metadata["private_key_filename"] = keyName
+		metadata["has_private_key"] = true
+	}
+	if chainPEM != "" {
+		metadata["chain"] = chainPEM
+		metadata["chain_filename"] = chainName
+	}
+	item, err := s.cfg.Store.CreatePlatformItem("certificates", model.PlatformItemRequest{
+		Name:        name,
+		Type:        "uploaded",
+		Status:      "issued",
+		Description: "uploaded certificate for " + certificateDisplayName(cert),
+		Metadata:    metadata,
+	})
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	_ = s.audit(r, "certificate.upload", item.ID, "", "uploaded certificate")
+	writeJSON(w, http.StatusCreated, item)
+}
+
+func readMultipartTextFile(r *http.Request, field string, limit int64) (string, string, error) {
+	file, header, err := r.FormFile(field)
+	if err != nil {
+		return "", "", fmt.Errorf("%s file is required", field)
+	}
+	defer file.Close()
+	content, err := io.ReadAll(io.LimitReader(file, limit+1))
+	if err != nil {
+		return "", "", fmt.Errorf("read %s file: %w", field, err)
+	}
+	if int64(len(content)) > limit {
+		return "", "", fmt.Errorf("%s file is too large", field)
+	}
+	if strings.TrimSpace(string(content)) == "" {
+		return "", "", fmt.Errorf("%s file is empty", field)
+	}
+	name := ""
+	if header != nil {
+		name = header.Filename
+	}
+	return string(content), name, nil
+}
+
+func readOptionalMultipartTextFile(r *http.Request, field string, limit int64) (string, string, error) {
+	file, header, err := r.FormFile(field)
+	if err != nil {
+		return "", "", nil
+	}
+	defer file.Close()
+	content, err := io.ReadAll(io.LimitReader(file, limit+1))
+	if err != nil {
+		return "", "", fmt.Errorf("read %s file: %w", field, err)
+	}
+	if int64(len(content)) > limit {
+		return "", "", fmt.Errorf("%s file is too large", field)
+	}
+	name := ""
+	if header != nil {
+		name = header.Filename
+	}
+	return string(content), name, nil
+}
+
+func parseFirstCertificatePEM(raw []byte) (*x509.Certificate, error) {
+	rest := raw
+	for {
+		block, next := pem.Decode(rest)
+		if block == nil {
+			return nil, errors.New("certificate PEM block is required")
+		}
+		rest = next
+		if block.Type != "CERTIFICATE" {
+			continue
+		}
+		cert, err := x509.ParseCertificate(block.Bytes)
+		if err != nil {
+			return nil, fmt.Errorf("parse certificate: %w", err)
+		}
+		return cert, nil
+	}
+}
+
+func parsePrivateKeyPEM(raw []byte) (any, error) {
+	block, _ := pem.Decode(raw)
+	if block == nil {
+		return nil, errors.New("private key PEM block is required")
+	}
+	switch block.Type {
+	case "RSA PRIVATE KEY":
+		return x509.ParsePKCS1PrivateKey(block.Bytes)
+	case "EC PRIVATE KEY":
+		return x509.ParseECPrivateKey(block.Bytes)
+	case "PRIVATE KEY":
+		return x509.ParsePKCS8PrivateKey(block.Bytes)
+	default:
+		return nil, fmt.Errorf("unsupported private key type: %s", block.Type)
+	}
+}
+
+func certificateMatchesPrivateKey(cert *x509.Certificate, key any) bool {
+	switch publicKey := cert.PublicKey.(type) {
+	case *rsa.PublicKey:
+		privateKey, ok := key.(*rsa.PrivateKey)
+		return ok && publicKey.N.Cmp(privateKey.N) == 0 && publicKey.E == privateKey.E
+	case *ecdsa.PublicKey:
+		privateKey, ok := key.(*ecdsa.PrivateKey)
+		return ok && publicKey.X.Cmp(privateKey.X) == 0 && publicKey.Y.Cmp(privateKey.Y) == 0
+	case ed25519.PublicKey:
+		privateKey, ok := key.(ed25519.PrivateKey)
+		return ok && publicKey.Equal(privateKey.Public())
+	default:
+		return false
+	}
+}
+
+func certificateMetadata(cert *x509.Certificate) map[string]any {
+	ips := []string{}
+	for _, ip := range cert.IPAddresses {
+		ips = append(ips, ip.String())
+	}
+	return map[string]any{
+		"domain":        certificateDisplayName(cert),
+		"common_name":   cert.Subject.CommonName,
+		"dns_names":     cert.DNSNames,
+		"ip_addresses":  ips,
+		"issuer":        cert.Issuer.String(),
+		"serial_number": cert.SerialNumber.String(),
+		"not_before":    cert.NotBefore.UTC(),
+		"expires_at":    cert.NotAfter.UTC(),
+	}
+}
+
+func certificateDisplayName(cert *x509.Certificate) string {
+	if cert.Subject.CommonName != "" {
+		return cert.Subject.CommonName
+	}
+	if len(cert.DNSNames) > 0 {
+		return cert.DNSNames[0]
+	}
+	if len(cert.IPAddresses) > 0 {
+		return cert.IPAddresses[0].String()
+	}
+	return cert.SerialNumber.String()
 }
 
 func (s *Server) handleCertificateDownload(w http.ResponseWriter, r *http.Request, id string) {

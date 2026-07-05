@@ -122,6 +122,9 @@ func (s *Server) serveAPI(w http.ResponseWriter, r *http.Request) {
 	case r.Method == http.MethodGet && r.URL.Path == "/api/auth/me":
 		s.handleMe(w, r)
 		return
+	case strings.HasPrefix(r.URL.Path, "/api/auth/oidc/"):
+		s.handleExternalOIDCAPI(w, r)
+		return
 	case strings.HasPrefix(r.URL.Path, "/api/oidc/"):
 		s.handleOIDCAPI(w, r)
 		return

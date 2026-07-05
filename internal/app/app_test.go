@@ -1876,6 +1876,141 @@ func TestOIDCProviderAuthorizationCodeFlow(t *testing.T) {
 	}, http.StatusUnauthorized)
 }
 
+func TestExternalOIDCLoginCreatesUserAndSession(t *testing.T) {
+	handler, adminCookie := newTestHandler(t)
+	var authorizeState string
+	var authorizeNonce string
+	provider := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/authorize":
+			query := r.URL.Query()
+			if query.Get("client_id") != "openweb-client" || query.Get("response_type") != "code" || query.Get("redirect_uri") == "" {
+				http.Error(w, "bad authorize request", http.StatusBadRequest)
+				return
+			}
+			authorizeState = query.Get("state")
+			authorizeNonce = query.Get("nonce")
+			callback, _ := url.Parse(query.Get("redirect_uri"))
+			values := callback.Query()
+			values.Set("code", "external-code")
+			values.Set("state", authorizeState)
+			callback.RawQuery = values.Encode()
+			http.Redirect(w, r, callback.String(), http.StatusFound)
+		case "/token":
+			if err := r.ParseForm(); err != nil {
+				http.Error(w, "bad form", http.StatusBadRequest)
+				return
+			}
+			clientID, clientSecret, _ := r.BasicAuth()
+			if clientID != "openweb-client" || clientSecret != "openweb-secret" || r.PostForm.Get("code") != "external-code" {
+				http.Error(w, "bad token request", http.StatusUnauthorized)
+				return
+			}
+			writeJSON(w, http.StatusOK, map[string]any{"access_token": "external-access", "token_type": "Bearer", "expires_in": 300})
+		case "/userinfo":
+			if r.Header.Get("Authorization") != "Bearer external-access" {
+				http.Error(w, "bad bearer", http.StatusUnauthorized)
+				return
+			}
+			writeJSON(w, http.StatusOK, map[string]any{
+				"sub":                "external-subject-1",
+				"preferred_username": "oidc-operator",
+				"name":               "OIDC Operator",
+				"nonce":              authorizeNonce,
+			})
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer provider.Close()
+
+	assertStatus(t, handler, http.MethodPost, "/api/admin/system-settings", map[string]any{
+		"name":   "External OIDC",
+		"type":   "identity",
+		"status": "enabled",
+		"metadata": map[string]any{
+			"oidc_login_enabled":          true,
+			"oidc_provider_id":            "fake-sso",
+			"oidc_provider_name":          "Fake SSO",
+			"oidc_authorization_endpoint": provider.URL + "/authorize",
+			"oidc_token_endpoint":         provider.URL + "/token",
+			"oidc_userinfo_endpoint":      provider.URL + "/userinfo",
+			"oidc_client_id":              "openweb-client",
+			"oidc_client_secret":          "openweb-secret",
+			"oidc_scopes":                 []string{"openid", "profile", "email"},
+			"oidc_role":                   "user",
+			"oidc_providers": []any{
+				map[string]any{
+					"id":                     "disabled-sso",
+					"enabled":                false,
+					"authorization_endpoint": provider.URL + "/disabled-authorize",
+					"token_endpoint":         provider.URL + "/disabled-token",
+					"client_id":              "disabled-client",
+					"client_secret":          "disabled-secret",
+				},
+			},
+		},
+	}, adminCookie, http.StatusCreated)
+	systemSettingsRec := assertStatus(t, handler, http.MethodGet, "/api/admin/system-settings", nil, adminCookie, http.StatusOK)
+	for _, leaked := range []string{"openweb-secret", "disabled-secret", "oidc_client_secret_encrypted", "client_secret_encrypted"} {
+		if strings.Contains(systemSettingsRec.Body.String(), leaked) {
+			t.Fatalf("external oidc settings leaked sensitive value %q: %s", leaked, systemSettingsRec.Body.String())
+		}
+	}
+
+	providersRec := assertStatus(t, handler, http.MethodGet, "/api/auth/oidc/providers", nil, nil, http.StatusOK)
+	if !strings.Contains(providersRec.Body.String(), "fake-sso") || !strings.Contains(providersRec.Body.String(), "Fake SSO") || strings.Contains(providersRec.Body.String(), "openweb-secret") {
+		t.Fatalf("external oidc providers response invalid: %s", providersRec.Body.String())
+	}
+
+	startRec := assertStatus(t, handler, http.MethodGet, "/api/auth/oidc/start?provider=fake-sso&next=/app/access", nil, nil, http.StatusFound)
+	providerLocation := startRec.Header().Get("Location")
+	if !strings.HasPrefix(providerLocation, provider.URL+"/authorize?") {
+		t.Fatalf("start did not redirect to provider: %s", providerLocation)
+	}
+	noRedirectClient := provider.Client()
+	noRedirectClient.CheckRedirect = func(_ *http.Request, _ []*http.Request) error {
+		return http.ErrUseLastResponse
+	}
+	providerResp, err := noRedirectClient.Get(providerLocation)
+	if err != nil {
+		t.Fatalf("call fake provider authorize: %v", err)
+	}
+	_ = providerResp.Body.Close()
+	if providerResp.StatusCode != http.StatusFound {
+		t.Fatalf("fake provider authorize status = %d", providerResp.StatusCode)
+	}
+	callbackLocation := providerResp.Header.Get("Location")
+	callbackURL, err := url.Parse(callbackLocation)
+	if err != nil {
+		t.Fatalf("parse callback location: %v", err)
+	}
+	if callbackURL.Path != "/api/auth/oidc/callback" || callbackURL.Query().Get("state") != authorizeState || callbackURL.Query().Get("code") == "" {
+		t.Fatalf("bad callback location: %s", callbackLocation)
+	}
+
+	callbackRec := assertStatus(t, handler, http.MethodGet, callbackURL.RequestURI(), nil, nil, http.StatusFound)
+	if callbackRec.Header().Get("Location") != "/app/access" {
+		t.Fatalf("callback did not redirect to requested next path: %s", callbackRec.Header().Get("Location"))
+	}
+	cookies := callbackRec.Result().Cookies()
+	if len(cookies) == 0 {
+		t.Fatal("callback did not set auth cookie")
+	}
+	meRec := assertStatus(t, handler, http.MethodGet, "/api/auth/me", nil, cookies[0], http.StatusOK)
+	if !strings.Contains(meRec.Body.String(), `"username":"oidc-operator"`) || !strings.Contains(meRec.Body.String(), `"role":"user"`) {
+		t.Fatalf("oidc login did not create authenticated user: %s", meRec.Body.String())
+	}
+	usersRec := assertStatus(t, handler, http.MethodGet, "/api/admin/users", nil, adminCookie, http.StatusOK)
+	if !strings.Contains(usersRec.Body.String(), "external-subject-1") || strings.Contains(usersRec.Body.String(), "openweb-secret") || strings.Contains(usersRec.Body.String(), "password_hash") {
+		t.Fatalf("external oidc user list invalid: %s", usersRec.Body.String())
+	}
+	loginLogsRec := assertStatus(t, handler, http.MethodGet, "/api/admin/audit/login-logs", nil, adminCookie, http.StatusOK)
+	if !strings.Contains(loginLogsRec.Body.String(), `"type":"oidc"`) || !strings.Contains(loginLogsRec.Body.String(), "fake-sso") {
+		t.Fatalf("oidc login log missing: %s", loginLogsRec.Body.String())
+	}
+}
+
 func TestToolsAndMonitoringEndpoints(t *testing.T) {
 	handler, cookie := newTestHandler(t)
 	assertStatus(t, handler, http.MethodGet, "/api/system/monitoring", nil, cookie, http.StatusOK)

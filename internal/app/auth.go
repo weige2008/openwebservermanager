@@ -25,6 +25,7 @@ type authManager struct {
 	failures      map[string]loginFailure
 	mfaChallenges map[string]mfaChallenge
 	captchas      map[string]captchaChallenge
+	oidcStates    map[string]externalOIDCState
 }
 
 type authSession struct {
@@ -85,6 +86,7 @@ func newAuthManager() *authManager {
 		failures:      map[string]loginFailure{},
 		mfaChallenges: map[string]mfaChallenge{},
 		captchas:      map[string]captchaChallenge{},
+		oidcStates:    map[string]externalOIDCState{},
 	}
 }
 
@@ -191,6 +193,7 @@ func (m *authManager) clearSessions() {
 	m.sessions = map[string]authSession{}
 	m.mfaChallenges = map[string]mfaChallenge{}
 	m.captchas = map[string]captchaChallenge{}
+	m.oidcStates = map[string]externalOIDCState{}
 }
 
 func (m *authManager) createMFAChallenge(challenge mfaChallenge) (string, error) {

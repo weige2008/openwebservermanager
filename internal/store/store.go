@@ -760,12 +760,14 @@ func (s *Store) UpdatePlatformItem(collection, id string, req model.PlatformItem
 	existingClientSecretHash, _ := item.Metadata["client_secret_hash"].(string)
 	existingAgentTokenHash, _ := item.Metadata["agent_token_hash"].(string)
 	existingCredentialSecrets := copyMetadataSecrets(item.Metadata, "encrypted_password", "encrypted_private_key", "encrypted_passphrase")
-	existingSystemSettingSecrets := copyMetadataSecrets(item.Metadata, "smtp_password_encrypted", "llm_api_key_encrypted")
+	existingSystemSettingSecrets := copyMetadataSecrets(item.Metadata, "smtp_password_encrypted", "llm_api_key_encrypted", "oidc_client_secret_encrypted")
 	existingSystemSettingSecretState := copyMetadataValues(item.Metadata,
 		"smtp_password_set",
 		"smtp_password_updated_at",
 		"llm_api_key_set",
 		"llm_api_key_updated_at",
+		"oidc_client_secret_set",
+		"oidc_client_secret_updated_at",
 	)
 	existingUserMFA := copyMetadataSecrets(item.Metadata, "mfa_secret_encrypted")
 	existingUserMFA["mfa_enabled"] = metadataStringValue(item.Metadata["mfa_enabled"])
@@ -1019,6 +1021,9 @@ func applyUserPlatformSecret(req model.PlatformItemRequest, item *model.Platform
 		item.Metadata["role"] = "user"
 	}
 	if req.Password == "" {
+		if !strings.EqualFold(strings.TrimSpace(item.Type), "local") {
+			return nil
+		}
 		if creating {
 			return errors.New("password is required for local users")
 		}
@@ -1164,6 +1169,10 @@ func (s *Store) applySystemSettingPlatformSecret(req model.PlatformItemRequest, 
 	} {
 		delete(item.Metadata, key)
 	}
+	now := time.Now().UTC().Format(time.RFC3339Nano)
+	if err := s.encryptSystemSettingOIDCSecrets(item.Metadata, now, creating); err != nil {
+		return err
+	}
 	if smtpPassword == "" && llmAPIKey == "" {
 		if creating {
 			delete(item.Metadata, "smtp_password_encrypted")
@@ -1176,7 +1185,6 @@ func (s *Store) applySystemSettingPlatformSecret(req model.PlatformItemRequest, 
 	if len(smtpPassword) > 32*1024 || len(llmAPIKey) > 32*1024 {
 		return errors.New("system setting secret is too large")
 	}
-	now := time.Now().UTC().Format(time.RFC3339Nano)
 	if smtpPassword != "" {
 		encrypted, err := s.cipher.EncryptString(smtpPassword)
 		if err != nil {
@@ -1198,6 +1206,48 @@ func (s *Store) applySystemSettingPlatformSecret(req model.PlatformItemRequest, 
 	return nil
 }
 
+func (s *Store) encryptSystemSettingOIDCSecrets(value any, now string, creating bool) error {
+	switch typed := value.(type) {
+	case map[string]any:
+		secret := firstMetadataString(typed, externalOIDCSecretPlainKeys...)
+		for _, key := range externalOIDCSecretPlainKeys {
+			delete(typed, key)
+		}
+		if secret != "" {
+			if len(secret) > 32*1024 {
+				return errors.New("system setting secret is too large")
+			}
+			encrypted, err := s.cipher.EncryptString(secret)
+			if err != nil {
+				return err
+			}
+			typed["oidc_client_secret_encrypted"] = encrypted
+			typed["oidc_client_secret_set"] = true
+			typed["oidc_client_secret_updated_at"] = now
+		} else if creating {
+			delete(typed, "oidc_client_secret_set")
+		}
+		for _, child := range typed {
+			if err := s.encryptSystemSettingOIDCSecrets(child, now, creating); err != nil {
+				return err
+			}
+		}
+	case []any:
+		for _, child := range typed {
+			if err := s.encryptSystemSettingOIDCSecrets(child, now, creating); err != nil {
+				return err
+			}
+		}
+	case []map[string]any:
+		for _, child := range typed {
+			if err := s.encryptSystemSettingOIDCSecrets(child, now, creating); err != nil {
+				return err
+			}
+		}
+	}
+	return nil
+}
+
 func (s *Store) SystemSettingSMTPPassword(id string) (string, bool, error) {
 	item, ok, err := s.GetPlatformItem("system_settings", id)
 	if err != nil || !ok {
@@ -1212,6 +1262,10 @@ func (s *Store) SystemSettingSMTPPassword(id string) (string, bool, error) {
 		return "", true, err
 	}
 	return secret, true, nil
+}
+
+func (s *Store) DecryptPlatformSecret(encrypted string) (string, error) {
+	return s.cipher.DecryptString(encrypted)
 }
 
 func (s *Store) GetPlatformCredentialSecret(id string) (model.PlatformItem, CredentialSecret, bool, error) {
@@ -1503,37 +1557,72 @@ func sanitizePlatformItem(item *model.PlatformItem) {
 	if item.Metadata == nil {
 		return
 	}
-	delete(item.Metadata, "password")
-	delete(item.Metadata, "password_hash")
-	delete(item.Metadata, "private_key")
-	delete(item.Metadata, "passphrase")
-	delete(item.Metadata, "client_secret")
-	delete(item.Metadata, "clientSecret")
-	delete(item.Metadata, "client_secret_hash")
-	delete(item.Metadata, "secret")
-	delete(item.Metadata, "agent_token_hash")
-	delete(item.Metadata, "registration_token")
-	delete(item.Metadata, "agent_token")
-	delete(item.Metadata, "gateway_token")
-	delete(item.Metadata, "token")
-	delete(item.Metadata, "encrypted_password")
-	delete(item.Metadata, "encrypted_private_key")
-	delete(item.Metadata, "encrypted_passphrase")
-	delete(item.Metadata, "mfa_secret")
-	delete(item.Metadata, "mfa_secret_encrypted")
-	delete(item.Metadata, "mfa_recovery_hashes")
-	delete(item.Metadata, "mfa_recovery_codes")
-	delete(item.Metadata, "plain_password")
-	delete(item.Metadata, "plain_private_key")
-	delete(item.Metadata, "plain_passphrase")
-	delete(item.Metadata, "smtp_password")
-	delete(item.Metadata, "smtpPassword")
-	delete(item.Metadata, "plain_smtp_password")
-	delete(item.Metadata, "smtp_password_encrypted")
-	delete(item.Metadata, "llm_api_key")
-	delete(item.Metadata, "llmApiKey")
-	delete(item.Metadata, "plain_llm_api_key")
-	delete(item.Metadata, "llm_api_key_encrypted")
+	sanitizeMetadataValue(item.Metadata)
+}
+
+var externalOIDCSecretPlainKeys = []string{"client_secret", "clientSecret", "oidc_client_secret", "oidcClientSecret", "external_oidc_client_secret", "externalOidcClientSecret"}
+
+var sensitiveMetadataKeys = map[string]struct{}{
+	"password":                              {},
+	"password_hash":                         {},
+	"private_key":                           {},
+	"privateKey":                            {},
+	"passphrase":                            {},
+	"client_secret":                         {},
+	"clientSecret":                          {},
+	"client_secret_hash":                    {},
+	"client_secret_encrypted":               {},
+	"secret":                                {},
+	"agent_token_hash":                      {},
+	"registration_token":                    {},
+	"agent_token":                           {},
+	"gateway_token":                         {},
+	"token":                                 {},
+	"encrypted_password":                    {},
+	"encrypted_private_key":                 {},
+	"encrypted_passphrase":                  {},
+	"mfa_secret":                            {},
+	"mfa_secret_encrypted":                  {},
+	"mfa_recovery_hashes":                   {},
+	"mfa_recovery_codes":                    {},
+	"plain_password":                        {},
+	"plain_private_key":                     {},
+	"plain_passphrase":                      {},
+	"smtp_password":                         {},
+	"smtpPassword":                          {},
+	"plain_smtp_password":                   {},
+	"smtp_password_encrypted":               {},
+	"llm_api_key":                           {},
+	"llmApiKey":                             {},
+	"plain_llm_api_key":                     {},
+	"llm_api_key_encrypted":                 {},
+	"oidc_client_secret":                    {},
+	"oidcClientSecret":                      {},
+	"external_oidc_client_secret":           {},
+	"externalOidcClientSecret":              {},
+	"oidc_client_secret_encrypted":          {},
+	"external_oidc_client_secret_encrypted": {},
+}
+
+func sanitizeMetadataValue(value any) {
+	switch typed := value.(type) {
+	case map[string]any:
+		for key, child := range typed {
+			if _, sensitive := sensitiveMetadataKeys[key]; sensitive {
+				delete(typed, key)
+				continue
+			}
+			sanitizeMetadataValue(child)
+		}
+	case []any:
+		for _, child := range typed {
+			sanitizeMetadataValue(child)
+		}
+	case []map[string]any:
+		for _, child := range typed {
+			sanitizeMetadataValue(child)
+		}
+	}
 }
 
 func (s *Store) Bootstrap() ([]model.Server, []model.CredentialPublic, []model.ConnectionSession, []model.AuditLog) {

@@ -33,6 +33,11 @@ interface CaptchaChallenge {
   expires_at: string
 }
 
+interface OIDCProvider {
+  id: string
+  name: string
+}
+
 export function AuthPage() {
   const app = useApp()
   const { t } = useTranslation()
@@ -40,6 +45,7 @@ export function AuthPage() {
   const [submitting, setSubmitting] = useState(false)
   const [mfaChallenge, setMFAChallenge] = useState<MFAChallenge | null>(null)
   const [captcha, setCaptcha] = useState<CaptchaChallenge | null>(null)
+  const [oidcProviders, setOIDCProviders] = useState<OIDCProvider[]>([])
 
   const loadCaptcha = async () => {
     setCaptcha(await apiRequest<CaptchaChallenge>('/api/auth/captcha'))
@@ -53,6 +59,16 @@ export function AuthPage() {
     }
   }, [app.setupRequired, app.captchaRequired, mfaChallenge])
 
+  useEffect(() => {
+    if (app.setupRequired) {
+      setOIDCProviders([])
+      return
+    }
+    void apiRequest<{ providers: OIDCProvider[] }>('/api/auth/oidc/providers')
+      .then((payload) => setOIDCProviders(payload.providers || []))
+      .catch(() => setOIDCProviders([]))
+  }, [app.setupRequired])
+
   const finishSignIn = async () => {
     const next = new URLSearchParams(window.location.search).get('next')
     if (next && next.startsWith('/') && !next.startsWith('//')) {
@@ -60,6 +76,12 @@ export function AuthPage() {
       return
     }
     await navigate({ to: '/app' })
+  }
+
+  const startOIDCLogin = (provider: OIDCProvider) => {
+    const next = new URLSearchParams(window.location.search).get('next') || '/app'
+    const params = new URLSearchParams({ provider: provider.id, next })
+    window.location.assign(`/api/auth/oidc/start?${params.toString()}`)
   }
 
   const onSubmit = async (event: FormEvent<HTMLFormElement>) => {
@@ -214,6 +236,20 @@ export function AuthPage() {
           {mfaChallenge ? 'Verify MFA' : app.setupRequired ? t('auth.setupSubmit') : app.passwordLoginDisabled ? t('auth.passwordLoginDisabledSubmit') : t('auth.loginSubmit')}
         </Button>
       </form>
+      {!app.setupRequired && !mfaChallenge && oidcProviders.length ? (
+        <div className='grid gap-2'>
+          <div className='flex items-center gap-3 text-xs text-muted-foreground'>
+            <span className='h-px flex-1 bg-border' />
+            <span>SSO</span>
+            <span className='h-px flex-1 bg-border' />
+          </div>
+          {oidcProviders.map((provider) => (
+            <Button key={provider.id} type='button' variant='outline' className='w-full' onClick={() => startOIDCLogin(provider)}>
+              {provider.name}
+            </Button>
+          ))}
+        </div>
+      ) : null}
       <p className='text-center text-xs text-muted-foreground'>
         {app.setupRequired ? t('auth.setupSecurityNote') : t('auth.loginSecurityNote')}
       </p>

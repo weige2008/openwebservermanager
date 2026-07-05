@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
+	"strings"
 	"testing"
 	"testing/fstest"
 
@@ -21,7 +22,6 @@ func TestEnsureChildPathRejectsEscape(t *testing.T) {
 	if err := ensureChildPath(root, child); err != nil {
 		t.Fatalf("expected child path to pass: %v", err)
 	}
-
 	escape := filepath.Join(root, "..", "outside")
 	if err := ensureChildPath(root, escape); err == nil {
 		t.Fatal("expected escaping path to fail")
@@ -149,6 +149,94 @@ func TestToolsAndMonitoringEndpoints(t *testing.T) {
 	assertStatus(t, handler, http.MethodPost, "/api/tools/ping", map[string]any{"target": "", "count": 1}, cookie, http.StatusBadRequest)
 }
 
+func TestResourceOperationEndpoints(t *testing.T) {
+	handler, cookie := newTestHandler(t)
+
+	assetRec := assertStatus(t, handler, http.MethodPost, "/api/admin/assets", map[string]any{
+		"name":     "linux-export",
+		"type":     "linux",
+		"status":   "active",
+		"protocol": "ssh",
+		"host":     "127.0.0.1",
+		"port":     22,
+	}, cookie, http.StatusCreated)
+	var asset model.PlatformItem
+	decodeResponse(t, assetRec, &asset)
+	exportRec := assertStatus(t, handler, http.MethodGet, "/api/admin/assets/export", nil, cookie, http.StatusOK)
+	if !strings.Contains(exportRec.Body.String(), asset.ID) {
+		t.Fatal("asset export did not include created asset")
+	}
+	assertStatus(t, handler, http.MethodPost, "/api/admin/assets/import", map[string]any{
+		"items": []map[string]any{{
+			"name":     "imported-rdp",
+			"type":     "windows",
+			"status":   "active",
+			"protocol": "rdp",
+			"host":     "192.0.2.10",
+			"port":     3389,
+		}},
+	}, cookie, http.StatusCreated)
+
+	storageRec := assertStatus(t, handler, http.MethodPost, "/api/admin/storages", map[string]any{
+		"name":   "team-drive",
+		"type":   "local",
+		"status": "enabled",
+	}, cookie, http.StatusCreated)
+	var storage model.PlatformItem
+	decodeResponse(t, storageRec, &storage)
+	assertStatus(t, handler, http.MethodGet, "/api/admin/storages/"+storage.ID+"/files", nil, cookie, http.StatusOK)
+	assertStatus(t, handler, http.MethodPost, "/api/admin/storages/"+storage.ID+"/files-mkdir", map[string]any{"path": "docs"}, cookie, http.StatusCreated)
+	assertStatus(t, handler, http.MethodPost, "/api/admin/storages/"+storage.ID+"/files-write", map[string]any{"path": "docs/readme.txt", "content": "hello"}, cookie, http.StatusCreated)
+	listRec := assertStatus(t, handler, http.MethodGet, "/api/admin/storages/"+storage.ID+"/files?path=docs", nil, cookie, http.StatusOK)
+	if !strings.Contains(listRec.Body.String(), "readme.txt") {
+		t.Fatal("storage list did not include written file")
+	}
+	downloadRec := assertStatus(t, handler, http.MethodGet, "/api/admin/storages/"+storage.ID+"/files-download?path=docs/readme.txt", nil, cookie, http.StatusOK)
+	if strings.TrimSpace(downloadRec.Body.String()) != "hello" {
+		t.Fatalf("download body = %q, want hello", downloadRec.Body.String())
+	}
+	assertStatus(t, handler, http.MethodDelete, "/api/admin/storages/"+storage.ID+"/files?path=docs/readme.txt", nil, cookie, http.StatusOK)
+	assertStatus(t, handler, http.MethodDelete, "/api/admin/storages/"+storage.ID+"/files", nil, cookie, http.StatusBadRequest)
+
+	certRec := assertStatus(t, handler, http.MethodPost, "/api/admin/certificates/self-signed", map[string]any{
+		"name":   "local-cert",
+		"domain": "example.test",
+		"days":   30,
+	}, cookie, http.StatusCreated)
+	var cert model.PlatformItem
+	decodeResponse(t, certRec, &cert)
+	certDownload := assertStatus(t, handler, http.MethodGet, "/api/admin/certificates/"+cert.ID+"/download", nil, cookie, http.StatusOK)
+	if !strings.Contains(certDownload.Body.String(), "BEGIN CERTIFICATE") {
+		t.Fatal("certificate download did not return pem")
+	}
+
+	taskRec := assertStatus(t, handler, http.MethodPost, "/api/admin/scheduled-tasks", map[string]any{
+		"name":   "Backup now",
+		"type":   "backup",
+		"status": "enabled",
+	}, cookie, http.StatusCreated)
+	var task model.PlatformItem
+	decodeResponse(t, taskRec, &task)
+	assertStatus(t, handler, http.MethodPost, "/api/admin/scheduled-tasks/"+task.ID+"/run", nil, cookie, http.StatusAccepted)
+	logsRec := assertStatus(t, handler, http.MethodGet, "/api/admin/scheduled-tasks/"+task.ID+"/logs", nil, cookie, http.StatusOK)
+	if !strings.Contains(logsRec.Body.String(), task.ID) {
+		t.Fatal("scheduled task logs did not include run")
+	}
+
+	sqlRec := assertStatus(t, handler, http.MethodPost, "/api/admin/sql-work-orders", map[string]any{
+		"name":     "select-one",
+		"type":     "query",
+		"status":   "approved",
+		"metadata": map[string]any{"sql": "SELECT 1 AS answer"},
+	}, cookie, http.StatusCreated)
+	var order model.PlatformItem
+	decodeResponse(t, sqlRec, &order)
+	sqlLogRec := assertStatus(t, handler, http.MethodPost, "/api/admin/sql-work-orders/"+order.ID+"/execute", map[string]any{}, cookie, http.StatusOK)
+	if !strings.Contains(sqlLogRec.Body.String(), "answer") {
+		t.Fatal("sql execution log did not include query result")
+	}
+}
+
 func newTestHandler(t *testing.T) (http.Handler, *http.Cookie) {
 	t.Helper()
 	key := make([]byte, 32)
@@ -200,4 +288,11 @@ func assertStatus(t *testing.T, handler http.Handler, method, path string, paylo
 		t.Fatalf("%s %s status = %d, want %d, body: %s", method, path, rec.Code, want, rec.Body.String())
 	}
 	return rec
+}
+
+func decodeResponse(t *testing.T, rec *httptest.ResponseRecorder, out any) {
+	t.Helper()
+	if err := json.Unmarshal(rec.Body.Bytes(), out); err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
 }

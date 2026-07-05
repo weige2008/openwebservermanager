@@ -1,7 +1,7 @@
 import type { ColumnDef } from '@tanstack/react-table'
 import { Link } from '@tanstack/react-router'
-import { ArrowUpRight, Pencil, Play, Plus, RefreshCw, Save, Trash2 } from 'lucide-react'
-import { useMemo, useState } from 'react'
+import { ArrowUpRight, Download, FileDown, FileSearch, FolderPlus, Pencil, Play, Plus, RefreshCw, Save, Trash2, Upload } from 'lucide-react'
+import { useEffect, useMemo, useState } from 'react'
 
 import { useApp } from '@/app/app-provider'
 import { DataTable } from '@/components/data-table/data-table'
@@ -52,6 +52,21 @@ const initialForm: PlatformFormState = {
   description: '',
 }
 
+type ResourceOperation =
+  | { type: 'asset-import' }
+  | { type: 'certificate-create' }
+  | { type: 'storage-files'; item: PlatformItem }
+  | { type: 'task-logs'; item: PlatformItem }
+  | { type: 'sql-execute'; item: PlatformItem }
+
+interface StorageEntry {
+  name: string
+  path: string
+  is_dir: boolean
+  size: number
+  modified: string
+}
+
 export function PlatformPage({ config }: { config: PlatformPageConfig }) {
   if (config.kind === 'tools') return <ToolsPage config={config} />
   if (config.kind === 'monitor') return <MonitoringPage config={config} />
@@ -68,6 +83,7 @@ export function PlatformTablePage({ config }: { config: PlatformPageConfig }) {
   const [saving, setSaving] = useState(false)
   const [editing, setEditing] = useState<PlatformItem | null>(null)
   const [form, setForm] = useState<PlatformFormState>(initialForm)
+  const [operation, setOperation] = useState<ResourceOperation | null>(null)
 
   const columns = useMemo<ColumnDef<PlatformItem>[]>(
     () => [
@@ -96,6 +112,7 @@ export function PlatformTablePage({ config }: { config: PlatformPageConfig }) {
         header: '',
         cell: ({ row }) => (
           <div className='flex justify-end gap-1.5'>
+            <ResourceRowActions config={config} item={row.original} onOperation={setOperation} />
             <Button size='sm' variant='outline' onClick={() => startEdit(row.original)}>
               <Pencil className='size-3.5' />
               {app.t('edit', '编辑')}
@@ -108,7 +125,7 @@ export function PlatformTablePage({ config }: { config: PlatformPageConfig }) {
         ),
       },
     ],
-    [app, config.apiPath]
+    [app, config]
   )
 
   const save = async () => {
@@ -167,6 +184,7 @@ export function PlatformTablePage({ config }: { config: PlatformPageConfig }) {
               <CardDescription>{description}</CardDescription>
             </div>
             <div className='flex flex-wrap justify-end gap-2 max-sm:justify-start'>
+              <ResourceHeaderActions config={config} onOperation={setOperation} />
               <Button variant='outline' onClick={() => void app.refresh()}>
                 <RefreshCw className='size-4' />
                 {app.t('refresh', '刷新')}
@@ -202,7 +220,425 @@ export function PlatformTablePage({ config }: { config: PlatformPageConfig }) {
         onChange={(next) => setForm((current) => ({ ...current, ...next }))}
         onSave={() => void save()}
       />
+      <ResourceOperationDialog operation={operation} onOpenChange={setOperation} />
     </CardStaggerContainer>
+  )
+}
+
+function ResourceHeaderActions({ config, onOperation }: { config: PlatformPageConfig; onOperation: (operation: ResourceOperation) => void }) {
+  const app = useApp()
+
+  const exportAssets = async () => {
+    try {
+      const data = await apiRequest<Record<string, unknown>>('/api/admin/assets/export')
+      downloadText('openwebservermanager-assets.json', JSON.stringify(data, null, 2), 'application/json')
+      app.showToast('资产已导出')
+    } catch (error) {
+      app.handleApiError(error)
+    }
+  }
+
+  if (config.collection === 'assets') {
+    return (
+      <>
+        <Button variant='outline' onClick={() => void exportAssets()}>
+          <Download className='size-4' />
+          导出
+        </Button>
+        <Button variant='outline' onClick={() => onOperation({ type: 'asset-import' })}>
+          <Upload className='size-4' />
+          导入
+        </Button>
+      </>
+    )
+  }
+
+  if (config.collection === 'certificates') {
+    return (
+      <Button variant='outline' onClick={() => onOperation({ type: 'certificate-create' })}>
+        <Plus className='size-4' />
+        自签证书
+      </Button>
+    )
+  }
+
+  return null
+}
+
+function ResourceRowActions({ config, item, onOperation }: { config: PlatformPageConfig; item: PlatformItem; onOperation: (operation: ResourceOperation) => void }) {
+  const app = useApp()
+
+  const runTask = async () => {
+    try {
+      await apiRequest(`/api/admin/scheduled-tasks/${item.id}/run`, { method: 'POST', body: '{}' })
+      await app.refresh(true)
+      app.showToast('任务已触发')
+    } catch (error) {
+      app.handleApiError(error)
+    }
+  }
+
+  const downloadCertificate = async () => {
+    try {
+      await downloadResponse(`/api/admin/certificates/${item.id}/download`, `${item.name || item.id}.crt`)
+      app.showToast('证书已下载')
+    } catch (error) {
+      app.handleApiError(error)
+    }
+  }
+
+  if (config.collection === 'storages') {
+    return (
+      <Button size='sm' variant='outline' onClick={() => onOperation({ type: 'storage-files', item })}>
+        <FileSearch className='size-3.5' />
+        文件
+      </Button>
+    )
+  }
+
+  if (config.collection === 'certificates') {
+    return (
+      <Button size='sm' variant='outline' onClick={() => void downloadCertificate()}>
+        <FileDown className='size-3.5' />
+        下载
+      </Button>
+    )
+  }
+
+  if (config.collection === 'scheduled_tasks') {
+    return (
+      <>
+        <Button size='sm' variant='outline' onClick={() => void runTask()}>
+          <Play className='size-3.5' />
+          运行
+        </Button>
+        <Button size='sm' variant='outline' onClick={() => onOperation({ type: 'task-logs', item })}>
+          <FileSearch className='size-3.5' />
+          日志
+        </Button>
+      </>
+    )
+  }
+
+  if (config.collection === 'sql_work_orders') {
+    return (
+      <Button size='sm' variant='outline' onClick={() => onOperation({ type: 'sql-execute', item })}>
+        <Play className='size-3.5' />
+        执行
+      </Button>
+    )
+  }
+
+  return null
+}
+
+function ResourceOperationDialog({ operation, onOpenChange }: { operation: ResourceOperation | null; onOpenChange: (operation: ResourceOperation | null) => void }) {
+  if (!operation) return null
+  if (operation.type === 'asset-import') return <AssetImportDialog onClose={() => onOpenChange(null)} />
+  if (operation.type === 'certificate-create') return <CertificateCreateDialog onClose={() => onOpenChange(null)} />
+  if (operation.type === 'storage-files') return <StorageFilesDialog item={operation.item} onClose={() => onOpenChange(null)} />
+  if (operation.type === 'task-logs') return <TaskLogsDialog item={operation.item} onClose={() => onOpenChange(null)} />
+  return <SQLExecuteDialog item={operation.item} onClose={() => onOpenChange(null)} />
+}
+
+function AssetImportDialog({ onClose }: { onClose: () => void }) {
+  const app = useApp()
+  const [content, setContent] = useState('{\n  "items": []\n}')
+  const [saving, setSaving] = useState(false)
+
+  const submit = async () => {
+    setSaving(true)
+    try {
+      const parsed = JSON.parse(content) as unknown
+      const payload = Array.isArray(parsed) ? { items: parsed } : parsed
+      await apiRequest('/api/admin/assets/import', { method: 'POST', body: JSON.stringify(payload) })
+      await app.refresh(true)
+      app.showToast('资产已导入')
+      onClose()
+    } catch (error) {
+      app.handleApiError(error)
+    } finally {
+      setSaving(false)
+    }
+  }
+
+  return (
+    <DialogShell open onOpenChange={(open) => !open && onClose()} title='导入资产' description='粘贴导出的 JSON，或使用 {"items":[...]} 格式批量导入。'>
+      <div className='grid gap-4'>
+        <Field label='资产 JSON'><Textarea className='min-h-64 font-mono text-xs' value={content} onChange={(event) => setContent(event.currentTarget.value)} /></Field>
+        <div className='flex justify-end gap-2'>
+          <Button variant='outline' onClick={onClose}>取消</Button>
+          <Button variant='primary' onClick={() => void submit()} disabled={saving}>
+            <Upload className='size-4' />
+            {saving ? '导入中' : '导入'}
+          </Button>
+        </div>
+      </div>
+    </DialogShell>
+  )
+}
+
+function CertificateCreateDialog({ onClose }: { onClose: () => void }) {
+  const app = useApp()
+  const [name, setName] = useState('')
+  const [domain, setDomain] = useState('')
+  const [dns, setDNS] = useState('')
+  const [ip, setIP] = useState('')
+  const [days, setDays] = useState('365')
+  const [saving, setSaving] = useState(false)
+
+  const submit = async () => {
+    setSaving(true)
+    try {
+      await apiRequest('/api/admin/certificates/self-signed', {
+        method: 'POST',
+        body: JSON.stringify({
+          name,
+          domain,
+          dns: splitCSV(dns),
+          ip: splitCSV(ip),
+          days: Number(days) || 365,
+        }),
+      })
+      await app.refresh(true)
+      app.showToast('自签证书已生成')
+      onClose()
+    } catch (error) {
+      app.handleApiError(error)
+    } finally {
+      setSaving(false)
+    }
+  }
+
+  return (
+    <DialogShell open onOpenChange={(open) => !open && onClose()} title='生成自签证书' description='生成后会写入证书管理，可从行内操作下载 PEM 证书。'>
+      <div className='grid gap-4'>
+        <div className='grid gap-3 sm:grid-cols-2'>
+          <Field label='名称'><Input value={name} onChange={(event) => setName(event.currentTarget.value)} /></Field>
+          <Field label='主域名'><Input value={domain} onChange={(event) => setDomain(event.currentTarget.value)} placeholder='example.com' /></Field>
+          <Field label='DNS SAN'><Input value={dns} onChange={(event) => setDNS(event.currentTarget.value)} placeholder='www.example.com,api.example.com' /></Field>
+          <Field label='IP SAN'><Input value={ip} onChange={(event) => setIP(event.currentTarget.value)} placeholder='127.0.0.1,10.0.0.1' /></Field>
+          <Field label='有效天数'><Input type='number' value={days} onChange={(event) => setDays(event.currentTarget.value)} /></Field>
+        </div>
+        <div className='flex justify-end gap-2'>
+          <Button variant='outline' onClick={onClose}>取消</Button>
+          <Button variant='primary' onClick={() => void submit()} disabled={saving || !domain.trim()}>
+            <Save className='size-4' />
+            {saving ? '生成中' : '生成'}
+          </Button>
+        </div>
+      </div>
+    </DialogShell>
+  )
+}
+
+function StorageFilesDialog({ item, onClose }: { item: PlatformItem; onClose: () => void }) {
+  const app = useApp()
+  const [path, setPath] = useState('.')
+  const [entries, setEntries] = useState<StorageEntry[]>([])
+  const [loading, setLoading] = useState(false)
+  const [folderName, setFolderName] = useState('')
+  const [filePath, setFilePath] = useState('')
+  const [fileContent, setFileContent] = useState('')
+
+  const load = async (target = path) => {
+    setLoading(true)
+    try {
+      const data = await apiRequest<{ path: string; entries: StorageEntry[] }>(`/api/admin/storages/${item.id}/files?path=${encodeURIComponent(target)}`)
+      setPath(data.path || '.')
+      setEntries(data.entries || [])
+    } catch (error) {
+      app.handleApiError(error)
+    } finally {
+      setLoading(false)
+    }
+  }
+
+  useEffect(() => {
+    void load('.')
+  }, [item.id])
+
+  const createFolder = async () => {
+    try {
+      await apiRequest(`/api/admin/storages/${item.id}/files-mkdir`, {
+        method: 'POST',
+        body: JSON.stringify({ path: joinStoragePath(path, folderName) }),
+      })
+      setFolderName('')
+      await load()
+      await app.refresh(true)
+      app.showToast('目录已创建')
+    } catch (error) {
+      app.handleApiError(error)
+    }
+  }
+
+  const writeFile = async () => {
+    try {
+      await apiRequest(`/api/admin/storages/${item.id}/files-write`, {
+        method: 'POST',
+        body: JSON.stringify({ path: joinStoragePath(path, filePath), content: fileContent }),
+      })
+      setFilePath('')
+      setFileContent('')
+      await load()
+      await app.refresh(true)
+      app.showToast('文件已写入')
+    } catch (error) {
+      app.handleApiError(error)
+    }
+  }
+
+  const deleteEntry = async (entry: StorageEntry) => {
+    if (!window.confirm(`删除 ${entry.path}?`)) return
+    try {
+      await apiRequest(`/api/admin/storages/${item.id}/files?path=${encodeURIComponent(entry.path)}`, { method: 'DELETE' })
+      await load()
+      await app.refresh(true)
+      app.showToast('文件已删除')
+    } catch (error) {
+      app.handleApiError(error)
+    }
+  }
+
+  const downloadEntry = async (entry: StorageEntry) => {
+    try {
+      await downloadResponse(`/api/admin/storages/${item.id}/files-download?path=${encodeURIComponent(entry.path)}`, entry.name)
+      app.showToast('文件已下载')
+    } catch (error) {
+      app.handleApiError(error)
+    }
+  }
+
+  return (
+    <DialogShell open onOpenChange={(open) => !open && onClose()} title={`${item.name} 文件`} description='浏览文件盘，创建目录，写入、下载和删除文件，操作会写入文件日志。'>
+      <div className='grid gap-4'>
+        <div className='grid gap-2 sm:grid-cols-[minmax(0,1fr)_auto_auto]'>
+          <Input value={path} onChange={(event) => setPath(event.currentTarget.value)} />
+          <Button variant='outline' onClick={() => void load()} disabled={loading}><RefreshCw className='size-4' />打开</Button>
+          <Button variant='outline' onClick={() => void load(parentStoragePath(path))} disabled={path === '.' || loading}>上级</Button>
+        </div>
+        <div className='grid gap-2 rounded-xl border border-border bg-background/60 p-3'>
+          {entries.length ? entries.map((entry) => (
+            <div key={entry.path} className='grid gap-2 rounded-lg border border-border bg-card p-2 text-sm sm:grid-cols-[minmax(0,1fr)_7rem_auto] sm:items-center'>
+              <button className='min-w-0 text-left' onClick={() => entry.is_dir && void load(entry.path)}>
+                <span className='block truncate font-medium'>{entry.is_dir ? '目录' : '文件'} / {entry.name}</span>
+                <span className='block truncate text-xs text-muted-foreground'>{entry.path} · {entry.size} B · {formatDate(entry.modified)}</span>
+              </button>
+              <Badge tone={entry.is_dir ? 'neutral' : 'success'}>{entry.is_dir ? 'dir' : 'file'}</Badge>
+              <div className='flex justify-end gap-1.5'>
+                {!entry.is_dir ? (
+                  <Button size='sm' variant='outline' onClick={() => void downloadEntry(entry)}><Download className='size-3.5' />下载</Button>
+                ) : null}
+                <Button size='sm' variant='destructive' onClick={() => void deleteEntry(entry)}><Trash2 className='size-3.5' />删除</Button>
+              </div>
+            </div>
+          )) : (
+            <div className='rounded-lg border border-dashed border-border p-6 text-sm text-muted-foreground'>{loading ? '加载中' : '当前目录为空'}</div>
+          )}
+        </div>
+        <div className='grid gap-3 sm:grid-cols-[minmax(0,1fr)_auto]'>
+          <Input placeholder='新目录名' value={folderName} onChange={(event) => setFolderName(event.currentTarget.value)} />
+          <Button variant='outline' onClick={() => void createFolder()} disabled={!folderName.trim()}><FolderPlus className='size-4' />创建目录</Button>
+        </div>
+        <div className='grid gap-3'>
+          <Input placeholder='文件名，例如 notes/readme.txt' value={filePath} onChange={(event) => setFilePath(event.currentTarget.value)} />
+          <Textarea placeholder='文件内容' value={fileContent} onChange={(event) => setFileContent(event.currentTarget.value)} />
+          <div className='flex justify-end gap-2'>
+            <Button variant='outline' onClick={onClose}>关闭</Button>
+            <Button variant='primary' onClick={() => void writeFile()} disabled={!filePath.trim()}><Save className='size-4' />写入文件</Button>
+          </div>
+        </div>
+      </div>
+    </DialogShell>
+  )
+}
+
+function TaskLogsDialog({ item, onClose }: { item: PlatformItem; onClose: () => void }) {
+  const app = useApp()
+  const [logs, setLogs] = useState<PlatformItem[]>([])
+
+  const load = async () => {
+    try {
+      const data = await apiRequest<{ items: PlatformItem[] }>(`/api/admin/scheduled-tasks/${item.id}/logs`)
+      setLogs(data.items || [])
+    } catch (error) {
+      app.handleApiError(error)
+    }
+  }
+
+  useEffect(() => {
+    void load()
+  }, [item.id])
+
+  return (
+    <DialogShell open onOpenChange={(open) => !open && onClose()} title={`${item.name} 运行日志`} description='查看该定时任务的手动和自动运行记录。'>
+      <div className='grid gap-3'>
+        <div className='flex justify-end'>
+          <Button variant='outline' onClick={() => void load()}><RefreshCw className='size-4' />刷新</Button>
+        </div>
+        {logs.length ? logs.map((log) => (
+          <article key={log.id} className='rounded-xl border border-border bg-background/60 p-3 text-sm'>
+            <div className='flex items-center justify-between gap-3'>
+              <strong>{log.name}</strong>
+              <Badge tone={statusTone(log.status)}>{log.status}</Badge>
+            </div>
+            <p className='mt-2 text-xs text-muted-foreground'>{log.description || log.id}</p>
+            <pre className='mt-3 overflow-auto rounded-lg bg-muted p-2 text-xs'>{JSON.stringify(log.metadata || {}, null, 2)}</pre>
+          </article>
+        )) : (
+          <div className='rounded-xl border border-dashed border-border p-6 text-sm text-muted-foreground'>暂无运行日志。</div>
+        )}
+      </div>
+    </DialogShell>
+  )
+}
+
+function SQLExecuteDialog({ item, onClose }: { item: PlatformItem; onClose: () => void }) {
+  const app = useApp()
+  const [sql, setSQL] = useState(stringValue(item.metadata?.sql))
+  const [result, setResult] = useState<PlatformItem | null>(null)
+  const [running, setRunning] = useState(false)
+
+  const execute = async () => {
+    setRunning(true)
+    try {
+      const data = await apiRequest<PlatformItem>(`/api/admin/sql-work-orders/${item.id}/execute`, {
+        method: 'POST',
+        body: JSON.stringify({ sql }),
+      })
+      setResult(data)
+      await app.refresh(true)
+      app.showToast('SQL 工单已执行')
+    } catch (error) {
+      app.handleApiError(error)
+    } finally {
+      setRunning(false)
+    }
+  }
+
+  return (
+    <DialogShell open onOpenChange={(open) => !open && onClose()} title={`${item.name} 执行`} description='执行结果会写入 SQL 日志；SELECT 查询最多展示前 100 行。'>
+      <div className='grid gap-4'>
+        <Field label='SQL'><Textarea className='min-h-44 font-mono text-xs' value={sql} onChange={(event) => setSQL(event.currentTarget.value)} /></Field>
+        {result ? (
+          <div className='rounded-xl border border-border bg-background/60 p-3'>
+            <div className='flex items-center justify-between gap-3 text-sm'>
+              <strong>{result.description || result.name}</strong>
+              <Badge tone={statusTone(result.status)}>{result.status}</Badge>
+            </div>
+            <pre className='mt-3 max-h-80 overflow-auto rounded-lg bg-muted p-2 text-xs'>{JSON.stringify(result.metadata || {}, null, 2)}</pre>
+          </div>
+        ) : null}
+        <div className='flex justify-end gap-2'>
+          <Button variant='outline' onClick={onClose}>关闭</Button>
+          <Button variant='primary' onClick={() => void execute()} disabled={running || !sql.trim()}>
+            <Play className='size-4' />
+            {running ? '执行中' : '执行'}
+          </Button>
+        </div>
+      </div>
+    </DialogShell>
   )
 }
 
@@ -503,6 +939,51 @@ function MonitoringPage({ config }: { config: PlatformPageConfig }) {
       </CardContent>
     </Card>
   )
+}
+
+function splitCSV(value: string) {
+  return value.split(',').map((item) => item.trim()).filter(Boolean)
+}
+
+function stringValue(value: unknown) {
+  return typeof value === 'string' ? value : ''
+}
+
+function joinStoragePath(base: string, name: string) {
+  const cleanBase = base === '.' ? '' : base.replace(/^\/+|\/+$/g, '')
+  const cleanName = name.replace(/^\/+/g, '')
+  return [cleanBase, cleanName].filter(Boolean).join('/') || '.'
+}
+
+function parentStoragePath(value: string) {
+  const parts = value.split('/').filter(Boolean)
+  if (parts.length <= 1) return '.'
+  return parts.slice(0, -1).join('/')
+}
+
+function downloadText(filename: string, content: string, type: string) {
+  const blob = new Blob([content], { type })
+  downloadBlob(filename, blob)
+}
+
+async function downloadResponse(path: string, filename: string) {
+  const response = await fetch(path, { credentials: 'same-origin' })
+  if (!response.ok) {
+    const payload = await response.json().catch(() => ({})) as { error?: string }
+    throw new Error(payload.error || response.statusText)
+  }
+  downloadBlob(filename, await response.blob())
+}
+
+function downloadBlob(filename: string, blob: Blob) {
+  const href = URL.createObjectURL(blob)
+  const link = document.createElement('a')
+  link.href = href
+  link.download = filename
+  document.body.appendChild(link)
+  link.click()
+  link.remove()
+  URL.revokeObjectURL(href)
 }
 
 function statusTone(status?: string) {

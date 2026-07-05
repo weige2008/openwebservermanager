@@ -14,28 +14,28 @@ import (
 )
 
 var adminCollectionRoutes = map[string]string{
-	"users":             "users",
-	"roles":             "roles",
-	"departments":       "departments",
-	"login-policies":    "login_policies",
-	"login-locked":      "login_locks",
-	"oidc-clients":      "oidc_clients",
-	"assets":            "assets",
-	"asset-groups":      "asset_groups",
-	"credentials":       "credentials",
-	"command-snippets":  "command_snippets",
-	"storages":          "storages",
-	"websites":          "web_assets",
-	"certificates":      "certificates",
-	"database-assets":   "database_assets",
-	"sql-work-orders":   "sql_work_orders",
-	"ssh-gateways":      "ssh_gateways",
-	"agent-gateways":    "agent_gateways",
-	"gateway-groups":    "gateway_groups",
-	"scheduled-tasks":   "scheduled_tasks",
-	"command-filters":   "command_filters",
-	"strategies":        "authorization_strategies",
-	"system-settings":   "system_settings",
+	"users":            "users",
+	"roles":            "roles",
+	"departments":      "departments",
+	"login-policies":   "login_policies",
+	"login-locked":     "login_locks",
+	"oidc-clients":     "oidc_clients",
+	"assets":           "assets",
+	"asset-groups":     "asset_groups",
+	"credentials":      "credentials",
+	"command-snippets": "command_snippets",
+	"storages":         "storages",
+	"websites":         "web_assets",
+	"certificates":     "certificates",
+	"database-assets":  "database_assets",
+	"sql-work-orders":  "sql_work_orders",
+	"ssh-gateways":     "ssh_gateways",
+	"agent-gateways":   "agent_gateways",
+	"gateway-groups":   "gateway_groups",
+	"scheduled-tasks":  "scheduled_tasks",
+	"command-filters":  "command_filters",
+	"strategies":       "authorization_strategies",
+	"system-settings":  "system_settings",
 }
 
 var authorizationCollectionRoutes = map[string]string{
@@ -64,6 +64,8 @@ func (s *Server) handlePlatformAPI(w http.ResponseWriter, r *http.Request) bool 
 		return true
 	case strings.HasPrefix(path, "access/"):
 		s.handleAccessAction(w, r)
+		return true
+	case s.handleResourceOperation(w, r, path):
 		return true
 	case path == "system/monitoring":
 		s.handleSystemMonitoring(w, r)
@@ -167,10 +169,10 @@ func (s *Server) handleAccessAssets(w http.ResponseWriter, r *http.Request) {
 	webAssets := filterAuthorizedItems(platform["web_assets"], platform["authorized_web_assets"], userID, isAdmin)
 	databaseAssets := filterAuthorizedItems(platform["database_assets"], platform["authorized_database_assets"], userID, isAdmin)
 	writeJSON(w, http.StatusOK, map[string]any{
-		"text":      filterPlatformByProtocol(assets, model.ProtocolSSH),
-		"desktop":   filterDesktopAssets(assets),
-		"web":       webAssets,
-		"database":  databaseAssets,
+		"text":       filterPlatformByProtocol(assets, model.ProtocolSSH),
+		"desktop":    filterDesktopAssets(assets),
+		"web":        webAssets,
+		"database":   databaseAssets,
 		"authorized": platform["authorized_assets"],
 	})
 }
@@ -207,8 +209,8 @@ func (s *Server) handleAccessAction(w http.ResponseWriter, r *http.Request) {
 		OwnerID:     userID,
 		Description: "接入门户创建的授权会话。",
 		Metadata: map[string]any{
-			"client_ip": s.clientIP(r),
-			"source":    "access_portal",
+			"client_ip":  s.clientIP(r),
+			"source":     "access_portal",
 			"asset_name": asset.Name,
 		},
 	})

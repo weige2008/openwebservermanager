@@ -1,109 +1,132 @@
 # openwebservermanager
 
-openwebservermanager is a self-hosted web console for browser-based SSH and RDP access. Phase one focuses on server assets, encrypted connection accounts, online SSH terminals, online RDP desktops, file transfer, session recording, and audit logs.
+openwebservermanager 是一个自托管的网页端服务器管理控制台，用于在浏览器中统一管理服务器资产、连接账号、在线 SSH 终端、在线 RDP 桌面、文件传输、会话录屏与审计日志。
 
-## Features
+默认文档语言为简体中文。其它语言版本：
 
-- Go backend with embedded static frontend.
-- Frontend stack aligned with NewAPI-style conventions: Rsbuild, React 19, TypeScript, Tailwind CSS v4, TanStack Router, TanStack Query, TanStack Table, Base UI, i18next, and Zustand.
-- First-run administrator setup and authenticated console.
-- SSH: WebSocket to SSH PTY bridge with password, private key, and private key passphrase authentication.
-- RDP: Guacamole WebSocket tunnel to `guacd`; credentials stay server-side.
-- Local JSON data store with AES-GCM encrypted credential fields.
-- RDP recording index and recording ZIP download for authenticated administrators.
-- GitHub Actions release workflow for Linux, Windows, and macOS binaries.
+- [English](docs/i18n/README.en.md)
+- [繁體中文](docs/i18n/README.zh-TW.md)
+- [Français](docs/i18n/README.fr.md)
+- [Русский](docs/i18n/README.ru.md)
+- [日本語](docs/i18n/README.ja.md)
+- [Tiếng Việt](docs/i18n/README.vi.md)
 
-## Run Locally
+部署指南：
+
+- [简体中文](DEPLOYMENT.md)
+- [English](docs/i18n/DEPLOYMENT.en.md)
+- [繁體中文](docs/i18n/DEPLOYMENT.zh-TW.md)
+- [Français](docs/i18n/DEPLOYMENT.fr.md)
+- [Русский](docs/i18n/DEPLOYMENT.ru.md)
+- [日本語](docs/i18n/DEPLOYMENT.ja.md)
+- [Tiếng Việt](docs/i18n/DEPLOYMENT.vi.md)
+
+## 功能特性
+
+- Go 后端内嵌静态前端，单二进制即可运行。
+- 前端技术栈对齐 NewAPI 新版 UI 方案：Rsbuild、React 19、TypeScript、Tailwind CSS v4、TanStack Router、TanStack Query、TanStack Table、Base UI、i18next、Zustand。
+- 首次启动创建管理员密码，登录后才能查看服务器资产、连接账号、会话和审计数据。
+- SSH：WebSocket 到 SSH PTY 桥接，支持密码、私钥和私钥 passphrase。
+- RDP：通过 Guacamole WebSocket tunnel 连接 `guacd`，真实凭据只在服务端使用。
+- 本地 JSON 数据存储，凭据敏感字段使用 AES-GCM 加密。
+- RDP 会话录屏索引与管理员下载入口。
+- GitHub Actions 自动构建 Linux、Windows、macOS 发布包。
+
+## 本地运行
 
 ```powershell
 go run ./cmd/openwebservermanager
 ```
 
-The default listener is `http://127.0.0.1:23876` and the default data directory is `data/`.
+默认监听地址为 `http://127.0.0.1:23876`，默认数据目录为 `data/`。
 
-Set a stable master key before using real credentials:
+真实使用前建议设置稳定的主密钥：
 
 ```powershell
 $env:OPENWEBSERVERMANAGER_MASTER_KEY = "replace-with-a-long-random-secret"
 go run ./cmd/openwebservermanager
 ```
 
-If no administrator exists, open `/login` and create the first admin password. Passwords are stored as bcrypt hashes. Plaintext credentials are encrypted before persistence and are never returned by API responses.
+首次运行时打开 `/login` 创建管理员密码。管理员密码以 bcrypt 哈希保存；SSH/RDP 明文凭据提交后会在服务端加密存储，API 响应不会返回明文凭据。
 
-## Configuration
+## 配置项
 
-| Variable | Default | Purpose |
+| 环境变量 | 默认值 | 说明 |
 | --- | --- | --- |
-| `OPENWEBSERVERMANAGER_ADDR` | `127.0.0.1:23876` | HTTP listen address |
-| `OPENWEBSERVERMANAGER_DATA_DIR` | `data` | Data, key, recordings, and drive directory |
-| `OPENWEBSERVERMANAGER_MASTER_KEY` | generated `data/master.key` | Credential encryption key source |
-| `OPENWEBSERVERMANAGER_GUACD_HOST` | bundled runtime lookup | External guacd host |
-| `OPENWEBSERVERMANAGER_GUACD_PORT` | `4822` | guacd port |
-| `OPENWEBSERVERMANAGER_GUACD_RUNTIME` | `runtime/guacd` | Bundled guacd runtime root |
-| `OPENWEBSERVERMANAGER_SHARED_DIR_MODE` | `0770` | Recording/drive directory mode for guacd sharing |
-| `OPENWEBSERVERMANAGER_TRUST_PROXY_HEADERS` | `false` | Trust `X-Forwarded-*` and `X-Real-IP` headers |
-| `OPENWEBSERVERMANAGER_VERSION` | build version | Version exposed in public config |
-| `OPENWEBSERVERMANAGER_GITHUB_URL` | project repository | GitHub link shown in the UI |
-| `OPENWEBSERVERMANAGER_COPYRIGHT` | weige2008 copyright | Copyright text shown in the UI |
+| `OPENWEBSERVERMANAGER_ADDR` | `127.0.0.1:23876` | HTTP 监听地址 |
+| `OPENWEBSERVERMANAGER_DATA_DIR` | `data` | 数据、密钥、录屏和文件传输目录 |
+| `OPENWEBSERVERMANAGER_MASTER_KEY` | 自动生成 `data/master.key` | 凭据加密主密钥来源 |
+| `OPENWEBSERVERMANAGER_GUACD_HOST` | 自动查找内置运行时 | 外部 guacd 主机 |
+| `OPENWEBSERVERMANAGER_GUACD_PORT` | `4822` | guacd 端口 |
+| `OPENWEBSERVERMANAGER_GUACD_RUNTIME` | `runtime/guacd` | 内置 guacd 运行时根目录 |
+| `OPENWEBSERVERMANAGER_SHARED_DIR_MODE` | `0770` | guacd 共享录屏/驱动目录权限 |
+| `OPENWEBSERVERMANAGER_TRUST_PROXY_HEADERS` | `false` | 是否信任 `X-Forwarded-*` 和 `X-Real-IP` |
+| `OPENWEBSERVERMANAGER_VERSION` | 构建版本 | 前端公开配置显示的版本 |
+| `OPENWEBSERVERMANAGER_GITHUB_URL` | 项目仓库地址 | UI 中展示的 GitHub 链接 |
+| `OPENWEBSERVERMANAGER_COPYRIGHT` | weige2008 copyright | UI 中展示的版权信息 |
 
-## RDP and guacd
+## RDP 与 guacd
 
-RDP requires Apache Guacamole `guacd`.
+RDP 连接依赖 Apache Guacamole `guacd`。
 
-Lookup order:
+查找顺序：
 
-1. Use `OPENWEBSERVERMANAGER_GUACD_HOST` and `OPENWEBSERVERMANAGER_GUACD_PORT` when set.
-2. Use bundled `runtime/guacd/<goos>/guacd` or `guacd.exe`.
+1. 如果设置了 `OPENWEBSERVERMANAGER_GUACD_HOST` 和 `OPENWEBSERVERMANAGER_GUACD_PORT`，优先连接外部 guacd。
+2. 否则尝试使用 `runtime/guacd/<goos>/guacd` 或 `guacd.exe`。
 
-Expected bundled paths:
+预期内置路径：
 
-- Linux: `runtime/guacd/linux/guacd`
-- Windows: `runtime/guacd/windows/guacd.exe`
+- Linux：`runtime/guacd/linux/guacd`
+- Windows：`runtime/guacd/windows/guacd.exe`
 
-RDP recordings are stored under `data/recordings/{session_id}/`. Drive transfer directories are stored under `data/drives/{session_id}/`.
+RDP 录屏保存到 `data/recordings/{session_id}/`。文件传输 drive 目录保存到 `data/drives/{session_id}/`。
 
-## Security Notes
+## 安全说明
 
-- Business APIs require an authenticated admin session.
-- Unsafe API methods reject cross-origin requests when an `Origin` header is present.
-- Session cookies are `HttpOnly`, `SameSite=Lax`, and `Secure` when served through HTTPS.
-- Login failures are rate-limited per username and client IP.
-- SSH host keys are stored in `data/known_hosts`; unknown hosts are accepted on first use and later mismatches fail.
-- WebSocket upgrades validate version, key, masking, frame size, and unsupported fragmentation.
-- `X-Forwarded-*` headers are ignored unless `OPENWEBSERVERMANAGER_TRUST_PROXY_HEADERS=1`.
+- 业务 API 需要管理员登录会话。
+- 非安全 API 方法在存在 `Origin` 头时会拒绝跨源请求。
+- 会话 Cookie 使用 `HttpOnly`、`SameSite=Lax`，HTTPS 下启用 `Secure`。
+- 登录失败会按用户名和客户端 IP 限流。
+- SSH 主机密钥保存到 `data/known_hosts`；未知主机首次使用时接受，后续不匹配会拒绝。
+- WebSocket 升级会校验版本、key、mask、帧大小和不支持的分片。
+- 除非设置 `OPENWEBSERVERMANAGER_TRUST_PROXY_HEADERS=1`，否则忽略 `X-Forwarded-*` 头。
 
-## Development
+## 开发
 
 ```powershell
 npm --prefix frontend install
 npm --prefix frontend run dev
 ```
 
-Production frontend builds write to `cmd/openwebservermanager/static/` and are embedded by Go.
+生产前端构建会写入 `cmd/openwebservermanager/static/`，并由 Go 后端内嵌。
 
 ```powershell
 npm --prefix frontend run build
 go test ./...
 ```
 
-## Deployment
+## 部署
+
+完整部署说明见 [DEPLOYMENT.md](DEPLOYMENT.md)。
+
+快速部署到默认测试服务器：
 
 ```powershell
 .\scripts\deploy.ps1
 ```
 
-The default script deploys to `/opt/openwebservermanager`, builds the frontend and backend on the server, and runs the service on port `23876`.
+默认脚本部署到 `/opt/openwebservermanager`，在服务器上构建前后端，并让 systemd 服务监听 `23876` 端口。
 
-## Releases
+## 发布
 
-The project version starts at `1.0.0` in `VERSION`. Increment patch, minor, or major versions for each update, then push a matching semantic version tag to trigger the GitHub Actions release workflow:
+项目版本记录在 `VERSION`。每次更新递增 patch、minor 或 major 版本，然后推送对应语义化版本 tag 触发 GitHub Actions 发布：
 
 ```powershell
-git tag v1.0.10
-git push origin v1.0.10
+git tag v1.0.11
+git push origin v1.0.11
 ```
 
-The workflow builds:
+工作流构建：
 
 - `linux-amd64`
 - `linux-arm64`
@@ -112,4 +135,4 @@ The workflow builds:
 - `darwin-amd64`
 - `darwin-arm64`
 
-Release archives include the `openwebservermanager` binary, `README.md`, `VERSION`, and the `runtime/` directory.
+发布包包含 `openwebservermanager` 二进制、默认中文文档、多语言文档、`VERSION` 和 `runtime/` 目录。

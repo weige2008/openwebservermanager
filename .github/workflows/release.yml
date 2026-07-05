@@ -98,7 +98,8 @@ jobs:
             -ldflags "-s -w -X main.version=${version} -X main.commit=${GITHUB_SHA}" \
             -o "${stage}/openwebservermanager${{ matrix.ext }}" \
             ./cmd/openwebservermanager
-          cp README.md VERSION "${stage}/"
+          cp README.md DEPLOYMENT.md VERSION "${stage}/"
+          cp -R docs "${stage}/docs"
           cp -R runtime "${stage}/runtime"
           if [[ "${{ matrix.archive }}" == "zip" ]]; then
             export STAGE="${stage}"

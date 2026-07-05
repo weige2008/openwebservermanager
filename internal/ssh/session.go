@@ -110,6 +110,7 @@ func (r Runner) Run(conn *ws.Conn, session model.ConnectionSession, server model
 
 	go r.copyOutput(conn, session.ID, "stdout", stdout, closeAll)
 	go r.copyOutput(conn, session.ID, "stderr", stderr, closeAll)
+	interceptor := newCommandInterceptor(r.Store, session)
 
 	for {
 		var msg Message
@@ -124,9 +125,18 @@ func (r Runner) Run(conn *ws.Conn, session model.ConnectionSession, server model
 				_ = conn.SendJSON(Message{Type: "error", Data: err.Error()})
 				continue
 			}
-			if _, err := stdin.Write(raw); err != nil {
-				closeAll()
-				return
+			filtered, events := interceptor.Process(raw)
+			for _, event := range events {
+				if event.Blocked {
+					notice := base64.StdEncoding.EncodeToString([]byte(event.Notice))
+					_ = conn.SendJSON(Message{Type: "stdout", Data: notice})
+				}
+			}
+			if len(filtered) > 0 {
+				if _, err := stdin.Write(filtered); err != nil {
+					closeAll()
+					return
+				}
 			}
 		case "resize":
 			if msg.Cols > 0 && msg.Rows > 0 {

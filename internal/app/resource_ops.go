@@ -145,6 +145,9 @@ func (s *Server) handleResourceOperation(w http.ResponseWriter, r *http.Request,
 	case path == "admin/certificates/dns-providers":
 		s.handleCertificateDNSProviders(w, r)
 		return true
+	case path == "admin/proxy-services":
+		s.handleProxyServices(w, r)
+		return true
 	case path == "admin/system-settings/smtp/test":
 		s.handleSMTPTest(w, r)
 		return true

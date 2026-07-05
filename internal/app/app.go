@@ -26,6 +26,7 @@ import (
 type Config struct {
 	Store             *store.Store
 	Guacd             *guac.Manager
+	SSHGatewayAddress string
 	StaticFS          fs.FS
 	DataDir           string
 	Public            PublicConfig

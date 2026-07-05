@@ -761,7 +761,7 @@ func (s *Store) UpdatePlatformItem(collection, id string, req model.PlatformItem
 	existingClientSecretHash, _ := item.Metadata["client_secret_hash"].(string)
 	existingAgentTokenHash, _ := item.Metadata["agent_token_hash"].(string)
 	existingCredentialSecrets := copyMetadataSecrets(item.Metadata, "encrypted_password", "encrypted_private_key", "encrypted_passphrase")
-	existingSystemSettingSecrets := copyMetadataSecrets(item.Metadata, "smtp_password_encrypted", "llm_api_key_encrypted", "oidc_client_secret_encrypted", "ldap_bind_password_encrypted", "wecom_agent_secret_encrypted", "dns_api_token_encrypted")
+	existingSystemSettingSecrets := copyMetadataSecrets(item.Metadata, "smtp_password_encrypted", "llm_api_key_encrypted", "oidc_client_secret_encrypted", "ldap_bind_password_encrypted", "wecom_agent_secret_encrypted", "dns_api_token_encrypted", "proxy_private_key_encrypted")
 	existingSystemSettingSecretState := copyMetadataValues(item.Metadata,
 		"smtp_password_set",
 		"smtp_password_updated_at",
@@ -775,6 +775,8 @@ func (s *Store) UpdatePlatformItem(collection, id string, req model.PlatformItem
 		"wecom_agent_secret_updated_at",
 		"dns_api_token_set",
 		"dns_api_token_updated_at",
+		"proxy_private_key_set",
+		"proxy_private_key_updated_at",
 	)
 	existingUserMFA := copyMetadataSecrets(item.Metadata, "mfa_secret_encrypted")
 	existingUserMFA["mfa_enabled"] = metadataStringValue(item.Metadata["mfa_enabled"])
@@ -1601,6 +1603,12 @@ var externalSystemSettingSecretSpecs = []externalSystemSettingSecretSpec{
 		setKey:       "dns_api_token_set",
 		updatedAtKey: "dns_api_token_updated_at",
 	},
+	{
+		plainKeys:    []string{"proxy_private_key", "proxyPrivateKey", "ssh_private_key", "sshPrivateKey", "proxy_key", "proxyKey"},
+		encryptedKey: "proxy_private_key_encrypted",
+		setKey:       "proxy_private_key_set",
+		updatedAtKey: "proxy_private_key_updated_at",
+	},
 }
 
 var sensitiveMetadataKeys = map[string]struct{}{
@@ -1671,6 +1679,13 @@ var sensitiveMetadataKeys = map[string]struct{}{
 	"secretKey":                                {},
 	"mtls_client_ca":                           {},
 	"client_ca":                                {},
+	"proxy_private_key":                        {},
+	"proxyPrivateKey":                          {},
+	"ssh_private_key":                          {},
+	"sshPrivateKey":                            {},
+	"proxy_key":                                {},
+	"proxyKey":                                 {},
+	"proxy_private_key_encrypted":              {},
 	"public_key_x":                             {},
 	"public_key_y":                             {},
 	"cose_public_key":                          {},

@@ -2723,6 +2723,78 @@ func TestSMTPIntegrationTestEmail(t *testing.T) {
 	}, cookie, http.StatusNotFound)
 }
 
+func TestProxyServiceSettingsPersistStatusAndSyncSSHGateway(t *testing.T) {
+	handler, cookie := newTestHandler(t)
+
+	initialRec := assertStatus(t, handler, http.MethodGet, "/api/admin/proxy-services", nil, cookie, http.StatusOK)
+	if !strings.Contains(initialRec.Body.String(), "ssh_gateway") || !strings.Contains(initialRec.Body.String(), "database_proxy") {
+		t.Fatalf("initial proxy service status missing sections: %s", initialRec.Body.String())
+	}
+
+	saveRec := assertStatus(t, handler, http.MethodPost, "/api/admin/proxy-services", map[string]any{
+		"ssh_enabled":                true,
+		"ssh_listen_address":         "127.0.0.1:22022",
+		"ssh_disable_password_auth":  true,
+		"ssh_forward_allowlist":      []string{"db.internal:5432", "10.0.0.5:22"},
+		"proxy_private_key":          "proxy-secret-key",
+		"rdp_enabled":                true,
+		"rdp_listen_address":         "127.0.0.1:23389",
+		"database_enabled":           true,
+		"database_listen_address":    "127.0.0.1:23306",
+		"database_forward_allowlist": []string{"db.internal:3306"},
+	}, cookie, http.StatusOK)
+	saveBody := saveRec.Body.String()
+	for _, want := range []string{"proxy_private_key_set", "127.0.0.1:22022", "db.internal:5432", "restart_required", "rdp_proxy", "database_proxy"} {
+		if !strings.Contains(saveBody, want) {
+			t.Fatalf("proxy service response missing %s: %s", want, saveBody)
+		}
+	}
+	for _, leaked := range []string{"proxy-secret-key", "proxy_private_key_encrypted", `"proxy_private_key":`, `"ssh_private_key":`} {
+		if strings.Contains(saveBody, leaked) {
+			t.Fatalf("proxy service response leaked %s: %s", leaked, saveBody)
+		}
+	}
+
+	settingsRec := assertStatus(t, handler, http.MethodGet, "/api/admin/system-settings", nil, cookie, http.StatusOK)
+	settingsBody := settingsRec.Body.String()
+	if !strings.Contains(settingsBody, "proxy_private_key_set") || !strings.Contains(settingsBody, "ssh_forward_allowlist") {
+		t.Fatalf("system settings list missing proxy state: %s", settingsBody)
+	}
+	for _, leaked := range []string{"proxy-secret-key", "proxy_private_key_encrypted"} {
+		if strings.Contains(settingsBody, leaked) {
+			t.Fatalf("system settings leaked proxy secret %s: %s", leaked, settingsBody)
+		}
+	}
+
+	sshGatewayRec := assertStatus(t, handler, http.MethodGet, "/api/admin/ssh-gateways", nil, cookie, http.StatusOK)
+	sshGatewayBody := sshGatewayRec.Body.String()
+	for _, want := range []string{`"status":"enabled"`, `"host":"127.0.0.1"`, `"port":22022`, "db.internal:5432", "proxy_services"} {
+		if !strings.Contains(sshGatewayBody, want) {
+			t.Fatalf("ssh gateway sync missing %s: %s", want, sshGatewayBody)
+		}
+	}
+
+	disableRec := assertStatus(t, handler, http.MethodPost, "/api/admin/proxy-services", map[string]any{
+		"ssh_enabled":             false,
+		"ssh_listen_address":      "127.0.0.1:22022",
+		"rdp_enabled":             false,
+		"database_enabled":        false,
+		"database_listen_address": "127.0.0.1:23306",
+	}, cookie, http.StatusOK)
+	if !strings.Contains(disableRec.Body.String(), `"state":"disabled"`) {
+		t.Fatalf("disabled proxy services did not report disabled state: %s", disableRec.Body.String())
+	}
+	disabledGatewayRec := assertStatus(t, handler, http.MethodGet, "/api/admin/ssh-gateways", nil, cookie, http.StatusOK)
+	if !strings.Contains(disabledGatewayRec.Body.String(), `"status":"disabled"`) {
+		t.Fatalf("disabled proxy services did not disable ssh gateway: %s", disabledGatewayRec.Body.String())
+	}
+
+	logsRec := assertStatus(t, handler, http.MethodGet, "/api/admin/audit/operation-logs", nil, cookie, http.StatusOK)
+	if !strings.Contains(logsRec.Body.String(), "proxy_services.update") {
+		t.Fatalf("proxy service update was not audited: %s", logsRec.Body.String())
+	}
+}
+
 func TestBackupListDownloadAndRestore(t *testing.T) {
 	handler, cookie := newTestHandler(t)
 
@@ -2983,7 +3055,11 @@ func TestScheduledTaskSchedulerRunsEnabledTasks(t *testing.T) {
 	defer scheduler.Stop()
 
 	waitForCondition(t, 2*time.Second, func() bool {
-		return len(scheduledTaskLogsForTest(t, srv, task.ID)) > 0
+		if len(scheduledTaskLogsForTest(t, srv, task.ID)) == 0 {
+			return false
+		}
+		savedTask, ok, err := srv.cfg.Store.GetPlatformItem("scheduled_tasks", task.ID)
+		return err == nil && ok && firstMetadataString(savedTask.Metadata, "last_run_status") == "success"
 	})
 	logs := scheduledTaskLogsForTest(t, srv, task.ID)
 	if len(logs) == 0 {

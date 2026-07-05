@@ -135,6 +135,26 @@ interface DesktopAccessForm {
   watermarkFontSize: string
 }
 
+interface ProxyServicesForm {
+  sshEnabled: boolean
+  sshListenAddress: string
+  sshDisablePasswordAuth: boolean
+  sshForwardAllowlist: string
+  rdpEnabled: boolean
+  rdpListenAddress: string
+  databaseEnabled: boolean
+  databaseListenAddress: string
+  databaseForwardAllowlist: string
+  proxyPrivateKey: string
+  proxyPrivateKeySet: boolean
+}
+
+interface ProxyServicesStatus {
+  ssh_gateway?: Record<string, unknown>
+  rdp_proxy?: Record<string, unknown>
+  database_proxy?: Record<string, unknown>
+}
+
 interface SSHExecResult {
   session_id: string
   command: string
@@ -2367,9 +2387,13 @@ export function PlatformSettingsPage({ config }: { config: PlatformPageConfig })
   const Icon = config.icon
   const accessSetting = useMemo(() => items.find((item) => (item.type || '').toLowerCase() === 'access'), [items])
   const integration = useMemo(() => items.find((item) => (item.type || '').toLowerCase() === 'integration'), [items])
+  const proxySetting = useMemo(() => items.find((item) => (item.type || '').toLowerCase() === 'proxy'), [items])
   const [accessForm, setAccessForm] = useState<DesktopAccessForm>(() => desktopAccessFormFromItem(accessSetting))
   const [form, setForm] = useState<SMTPIntegrationForm>(() => smtpIntegrationFormFromItem(integration))
+  const [proxyForm, setProxyForm] = useState<ProxyServicesForm>(() => proxyServicesFormFromItem(proxySetting))
+  const [proxyStatus, setProxyStatus] = useState<ProxyServicesStatus>({})
   const [savingAccess, setSavingAccess] = useState(false)
+  const [savingProxy, setSavingProxy] = useState(false)
   const [saving, setSaving] = useState(false)
   const [testing, setTesting] = useState(false)
 
@@ -2381,8 +2405,31 @@ export function PlatformSettingsPage({ config }: { config: PlatformPageConfig })
     setForm(smtpIntegrationFormFromItem(integration))
   }, [integration?.id, integration?.updated_at])
 
+  useEffect(() => {
+    setProxyForm(proxyServicesFormFromItem(proxySetting))
+  }, [proxySetting?.id, proxySetting?.updated_at])
+
+  useEffect(() => {
+    let alive = true
+    const load = async () => {
+      try {
+        const data = await apiRequest<{ status?: ProxyServicesStatus; settings?: PlatformItem }>('/api/admin/proxy-services')
+        if (!alive) return
+        setProxyStatus(data.status || {})
+        if (data.settings) setProxyForm(proxyServicesFormFromItem(data.settings))
+      } catch {
+        if (alive) setProxyStatus({})
+      }
+    }
+    void load()
+    return () => {
+      alive = false
+    }
+  }, [])
+
   const patchAccessForm = (next: Partial<DesktopAccessForm>) => setAccessForm((current) => ({ ...current, ...next }))
   const patchForm = (next: Partial<SMTPIntegrationForm>) => setForm((current) => ({ ...current, ...next }))
+  const patchProxyForm = (next: Partial<ProxyServicesForm>) => setProxyForm((current) => ({ ...current, ...next }))
 
   const saveAccessSettings = async () => {
     setSavingAccess(true)
@@ -2461,6 +2508,28 @@ export function PlatformSettingsPage({ config }: { config: PlatformPageConfig })
       setTesting(false)
     }
   }
+
+  const saveProxyServices = async () => {
+    setSavingProxy(true)
+    try {
+      const result = await apiRequest<{ status?: ProxyServicesStatus; settings?: PlatformItem }>('/api/admin/proxy-services', {
+        method: 'POST',
+        body: JSON.stringify(proxyServicesPayloadFromForm(proxyForm)),
+      })
+      if (result.status) setProxyStatus(result.status)
+      if (result.settings) {
+        setProxyForm(proxyServicesFormFromItem(result.settings))
+      } else {
+        patchProxyForm({ proxyPrivateKey: '' })
+      }
+      await app.refresh(true)
+      app.showToast(app.t('saved', 'Saved'))
+    } catch (error) {
+      app.handleApiError(error)
+    } finally {
+      setSavingProxy(false)
+    }
+  }
   return (
     <CardStaggerContainer>
       <CardStaggerItem>
@@ -2529,6 +2598,65 @@ export function PlatformSettingsPage({ config }: { config: PlatformPageConfig })
                 <Button variant='outline' onClick={() => void saveAccessSettings()} disabled={savingAccess}>
                   <Save className='size-4' />
                   {savingAccess ? app.t('saving', 'Saving') : app.t('save', 'Save')}
+                </Button>
+              </div>
+            </section>
+
+            <section className='grid gap-4 rounded-xl border border-border bg-background/60 p-4'>
+              <div className='flex flex-wrap items-start justify-between gap-3'>
+                <div>
+                  <h3 className='text-sm font-semibold'>{app.t('proxyServices', 'Proxy services')}</h3>
+                  <p className='mt-1 text-xs leading-5 text-muted-foreground'>
+                    {app.t('proxyServicesDescription', 'Configure native SSH gateway, RDP gateway, and database proxy listener settings. SSH gateway changes are applied on the next service restart.')}
+                  </p>
+                </div>
+                <div className='flex flex-wrap gap-2'>
+                  <Badge tone={proxyStateTone(proxyStatus.ssh_gateway)}>{app.t('sshGateway', 'SSH gateway')}: {metadataText(proxyStatus.ssh_gateway?.state) || '-'}</Badge>
+                  <Badge tone={proxyStateTone(proxyStatus.rdp_proxy)}>{app.t('rdpProxy', 'RDP proxy')}: {metadataText(proxyStatus.rdp_proxy?.state) || '-'}</Badge>
+                  <Badge tone={proxyStateTone(proxyStatus.database_proxy)}>{app.t('databaseProxy', 'Database proxy')}: {metadataText(proxyStatus.database_proxy?.state) || '-'}</Badge>
+                </div>
+              </div>
+              <div className='grid gap-3 lg:grid-cols-3'>
+                <div className='grid gap-3 rounded-lg border border-border bg-muted/20 p-3'>
+                  <CheckboxRow checked={proxyForm.sshEnabled} onChange={(sshEnabled) => patchProxyForm({ sshEnabled })} label={app.t('enableSshGateway', 'Enable SSH gateway')} />
+                  <Field label={app.t('listenAddress', 'Listen address')}>
+                    <Input value={proxyForm.sshListenAddress} onChange={(event) => patchProxyForm({ sshListenAddress: event.currentTarget.value })} placeholder='0.0.0.0:2022' />
+                  </Field>
+                  <CheckboxRow checked={proxyForm.sshDisablePasswordAuth} onChange={(sshDisablePasswordAuth) => patchProxyForm({ sshDisablePasswordAuth })} label={app.t('disablePasswordAuth', 'Disable password authentication')} />
+                  <Field label={app.t('forwardAllowlist', 'Forward allowlist')}>
+                    <Textarea className='min-h-24 font-mono text-xs' value={proxyForm.sshForwardAllowlist} onChange={(event) => patchProxyForm({ sshForwardAllowlist: event.currentTarget.value })} placeholder={'host:22\n10.0.0.5:5432'} />
+                  </Field>
+                </div>
+                <div className='grid gap-3 rounded-lg border border-border bg-muted/20 p-3'>
+                  <CheckboxRow checked={proxyForm.rdpEnabled} onChange={(rdpEnabled) => patchProxyForm({ rdpEnabled })} label={app.t('enableRdpProxy', 'Enable RDP proxy')} />
+                  <Field label={app.t('listenAddress', 'Listen address')}>
+                    <Input value={proxyForm.rdpListenAddress} onChange={(event) => patchProxyForm({ rdpListenAddress: event.currentTarget.value })} placeholder='0.0.0.0:23389' />
+                  </Field>
+                  <div className='rounded-lg border border-border bg-background/60 p-3 text-xs text-muted-foreground'>
+                    <div>{app.t('guacdAddress', 'guacd address')}: {metadataText(proxyStatus.rdp_proxy?.guacd_address) || '-'}</div>
+                    <div>{app.t('state', 'State')}: {metadataText(proxyStatus.rdp_proxy?.state) || '-'}</div>
+                  </div>
+                </div>
+                <div className='grid gap-3 rounded-lg border border-border bg-muted/20 p-3'>
+                  <CheckboxRow checked={proxyForm.databaseEnabled} onChange={(databaseEnabled) => patchProxyForm({ databaseEnabled })} label={app.t('enableDatabaseProxy', 'Enable database proxy')} />
+                  <Field label={app.t('listenAddress', 'Listen address')}>
+                    <Input value={proxyForm.databaseListenAddress} onChange={(event) => patchProxyForm({ databaseListenAddress: event.currentTarget.value })} placeholder='127.0.0.1:23306' />
+                  </Field>
+                  <Field label={app.t('forwardAllowlist', 'Forward allowlist')}>
+                    <Textarea className='min-h-24 font-mono text-xs' value={proxyForm.databaseForwardAllowlist} onChange={(event) => patchProxyForm({ databaseForwardAllowlist: event.currentTarget.value })} placeholder={'db.internal:3306\n10.0.0.10:5432'} />
+                  </Field>
+                </div>
+              </div>
+              <div className='grid gap-3 md:grid-cols-[1fr_auto] md:items-end'>
+                <Field label={app.t('proxyPrivateKey', 'Proxy private key')}>
+                  <Input type='password' value={proxyForm.proxyPrivateKey} onChange={(event) => patchProxyForm({ proxyPrivateKey: event.currentTarget.value })} placeholder={proxyForm.proxyPrivateKeySet ? app.t('leaveBlankToKeepSecret', 'Leave blank to keep current secret') : ''} autoComplete='new-password' />
+                </Field>
+                <Badge tone={proxyForm.proxyPrivateKeySet ? 'success' : 'neutral'}>{proxyForm.proxyPrivateKeySet ? app.t('privateKeySaved', 'Private key saved') : app.t('notConfigured', 'Not configured')}</Badge>
+              </div>
+              <div className='flex justify-end'>
+                <Button variant='outline' onClick={() => void saveProxyServices()} disabled={savingProxy}>
+                  <Save className='size-4' />
+                  {savingProxy ? app.t('saving', 'Saving') : app.t('save', 'Save')}
                 </Button>
               </div>
             </section>
@@ -2675,6 +2803,61 @@ function smtpIntegrationFormFromItem(item?: PlatformItem): SMTPIntegrationForm {
     llmApiKey: '',
     llmApiKeySet: metadataBool(metadata.llm_api_key_set),
   }
+}
+
+function proxyServicesFormFromItem(item?: PlatformItem): ProxyServicesForm {
+  const metadata = item?.metadata || {}
+  return {
+    sshEnabled: metadataBool(metadata.ssh_gateway_enabled),
+    sshListenAddress: metadataText(metadata.ssh_listen_address) || metadataText(metadata.listen_address) || '0.0.0.0:2022',
+    sshDisablePasswordAuth: metadataBool(metadata.ssh_disable_password_auth) || metadataBool(metadata.disable_password_auth),
+    sshForwardAllowlist: metadataListText(metadata.ssh_forward_allowlist || metadata.forward_allowlist),
+    rdpEnabled: metadataBool(metadata.rdp_proxy_enabled),
+    rdpListenAddress: metadataText(metadata.rdp_listen_address) || '0.0.0.0:23389',
+    databaseEnabled: metadataBool(metadata.database_proxy_enabled),
+    databaseListenAddress: metadataText(metadata.database_listen_address) || '127.0.0.1:23306',
+    databaseForwardAllowlist: metadataListText(metadata.database_forward_allowlist),
+    proxyPrivateKey: '',
+    proxyPrivateKeySet: metadataBool(metadata.proxy_private_key_set),
+  }
+}
+
+function proxyServicesPayloadFromForm(form: ProxyServicesForm) {
+  return {
+    ssh_enabled: form.sshEnabled,
+    ssh_listen_address: form.sshListenAddress.trim(),
+    ssh_disable_password_auth: form.sshDisablePasswordAuth,
+    ssh_forward_allowlist: splitLines(form.sshForwardAllowlist),
+    rdp_enabled: form.rdpEnabled,
+    rdp_listen_address: form.rdpListenAddress.trim(),
+    database_enabled: form.databaseEnabled,
+    database_listen_address: form.databaseListenAddress.trim(),
+    database_forward_allowlist: splitLines(form.databaseForwardAllowlist),
+    proxy_private_key: form.proxyPrivateKey.trim() || undefined,
+  }
+}
+
+function metadataListText(value: unknown) {
+  if (Array.isArray(value)) return value.map((item) => String(item).trim()).filter(Boolean).join('\n')
+  if (typeof value === 'string') {
+    const trimmed = value.trim()
+    if (!trimmed) return ''
+    try {
+      const parsed = JSON.parse(trimmed) as unknown
+      if (Array.isArray(parsed)) return parsed.map((item) => String(item).trim()).filter(Boolean).join('\n')
+    } catch {
+      // Plain newline/comma separated text is accepted below.
+    }
+    return trimmed.split(/[\n,;]+/).map((item) => item.trim()).filter(Boolean).join('\n')
+  }
+  return ''
+}
+
+function proxyStateTone(status: Record<string, unknown> | undefined) {
+  const state = metadataText(status?.state)
+  if (['running', 'online', 'configured'].includes(state)) return 'success'
+  if (state === 'disabled' || !state) return 'neutral'
+  return 'warning'
 }
 
 function desktopAccessFormFromItem(item?: PlatformItem): DesktopAccessForm {

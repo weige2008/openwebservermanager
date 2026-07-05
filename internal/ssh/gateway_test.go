@@ -321,11 +321,14 @@ func TestGatewayConfigFromEnabledStoreItem(t *testing.T) {
 		Status: "enabled",
 		Host:   "127.0.0.1",
 		Port:   22022,
+		Metadata: map[string]any{
+			"disable_password_auth": true,
+		},
 	}); err != nil {
 		t.Fatalf("create gateway item: %v", err)
 	}
 	cfg := GatewayConfigFromStore(st, t.TempDir(), "")
-	if !cfg.Enabled || cfg.Address != "127.0.0.1:22022" {
+	if !cfg.Enabled || cfg.Address != "127.0.0.1:22022" || !cfg.DisablePasswordAuth {
 		t.Fatalf("gateway config = %#v", cfg)
 	}
 }

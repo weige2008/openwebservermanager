@@ -26,12 +26,13 @@ import (
 )
 
 type GatewayConfig struct {
-	Enabled        bool
-	Address        string
-	DataDir        string
-	KnownHostsPath string
-	Store          *store.Store
-	Logger         *slog.Logger
+	Enabled             bool
+	Address             string
+	DisablePasswordAuth bool
+	DataDir             string
+	KnownHostsPath      string
+	Store               *store.Store
+	Logger              *slog.Logger
 }
 
 type Gateway struct {
@@ -102,6 +103,7 @@ func GatewayConfigFromStore(st *store.Store, dataDir, overrideAddress string) Ga
 		}
 		cfg.Enabled = true
 		cfg.Address = gatewayListenAddress(item, cfg.Address)
+		cfg.DisablePasswordAuth = gatewayDisablePasswordAuth(item)
 		return cfg
 	}
 	return cfg
@@ -160,7 +162,10 @@ func (g *Gateway) Close() error {
 
 func (g *Gateway) serve(ctx context.Context, signer ssh.Signer) {
 	defer close(g.done)
-	serverConfig := &ssh.ServerConfig{PasswordCallback: g.passwordCallback}
+	serverConfig := &ssh.ServerConfig{}
+	if !g.cfg.DisablePasswordAuth {
+		serverConfig.PasswordCallback = g.passwordCallback
+	}
 	serverConfig.AddHostKey(signer)
 	go func() {
 		<-ctx.Done()
@@ -929,6 +934,45 @@ func gatewayListenAddress(item model.PlatformItem, fallback string) string {
 		return value
 	}
 	return net.JoinHostPort(host, strconv.Itoa(port))
+}
+
+func gatewayDisablePasswordAuth(item model.PlatformItem) bool {
+	for _, key := range []string{"disable_password_auth", "disablePasswordAuth", "password_auth_disabled", "disable_password_login"} {
+		if value, ok := gatewayMetadataBool(item.Metadata[key]); ok {
+			return value
+		}
+	}
+	return false
+}
+
+func gatewayMetadataBool(value any) (bool, bool) {
+	switch typed := value.(type) {
+	case bool:
+		return typed, true
+	case int:
+		return typed != 0, true
+	case int64:
+		return typed != 0, true
+	case float64:
+		return typed != 0, true
+	case string:
+		switch strings.ToLower(strings.TrimSpace(typed)) {
+		case "true", "1", "yes", "enabled", "on":
+			return true, true
+		case "false", "0", "no", "disabled", "off":
+			return false, true
+		default:
+			return false, false
+		}
+	default:
+		values := metadataStrings(value)
+		for _, item := range values {
+			if parsed, ok := gatewayMetadataBool(item); ok {
+				return parsed, true
+			}
+		}
+		return false, false
+	}
 }
 
 func userFromPermissions(permissions *ssh.Permissions) gatewayUser {

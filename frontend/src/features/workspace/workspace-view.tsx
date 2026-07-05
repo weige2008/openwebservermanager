@@ -60,7 +60,8 @@ export function WorkspaceView() {
   const insertCommandSnippet = () => {
     const command = snippetCommand(selectedSnippet)
     if (!command) return
-    window.dispatchEvent(new CustomEvent('openwebservermanager:ssh-snippet', { detail: { command } }))
+    const payload = snippetAppendNewline(selectedSnippet) ? commandWithEnter(command) : command
+    window.dispatchEvent(new CustomEvent('openwebservermanager:ssh-snippet', { detail: { command: payload } }))
     app.showToast(t('workspace.commandSnippetInserted', { defaultValue: 'Command inserted.' }))
   }
 
@@ -216,6 +217,20 @@ function snippetCommand(snippet: PlatformItem | undefined): string {
     if (typeof value === 'string' && value.trim()) return value
   }
   return snippet.description || ''
+}
+
+function snippetAppendNewline(snippet: PlatformItem | undefined): boolean {
+  if (!snippet) return false
+  for (const key of ['append_newline', 'appendNewline', 'auto_enter', 'autoEnter', 'execute']) {
+    const value = snippet.metadata?.[key]
+    if (typeof value === 'boolean') return value
+    if (typeof value === 'string') return ['true', '1', 'yes', 'enabled'].includes(value.trim().toLowerCase())
+  }
+  return false
+}
+
+function commandWithEnter(command: string): string {
+  return command.endsWith('\r') || command.endsWith('\n') ? command : `${command}\r`
 }
 
 function RDPWorkspace({

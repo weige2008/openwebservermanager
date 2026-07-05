@@ -157,7 +157,29 @@ export function PlatformTablePage({ config }: { config: PlatformPageConfig }) {
           cell: ({ row }) => <span className='font-mono text-xs'>{metadataNumber(row.original.metadata?.sort)}</span>,
         },
       ] satisfies ColumnDef<PlatformItem>[] : []),
-      { header: app.t('address'), cell: ({ row }) => row.original.host ? <span className='font-mono text-xs'>{row.original.host}{row.original.port ? `:${row.original.port}` : ''}</span> : '-' },
+      ...(config.collection === 'command_filters' ? [
+        {
+          header: app.t('commandPattern', '命令匹配'),
+          cell: ({ row }) => <span className='font-mono text-xs'>{metadataText(row.original.metadata?.pattern) || '-'}</span>,
+        },
+        {
+          header: app.t('riskLevel', '风险等级'),
+          cell: ({ row }) => <Badge tone={riskTone(metadataText(row.original.metadata?.risk))}>{metadataText(row.original.metadata?.risk) || 'normal'}</Badge>,
+        },
+      ] satisfies ColumnDef<PlatformItem>[] : []),
+      ...(config.collection === 'command_snippets' ? [
+        {
+          header: app.t('commandContent', '命令内容'),
+          cell: ({ row }) => <span className='font-mono text-xs'>{metadataText(row.original.metadata?.command) || row.original.description || '-'}</span>,
+        },
+        {
+          header: app.t('appendNewline', '自动回车'),
+          cell: ({ row }) => <Badge tone={metadataBool(row.original.metadata?.append_newline) ? 'success' : 'neutral'}>{metadataBool(row.original.metadata?.append_newline) ? app.t('enabled', '启用') : app.t('disabled', '禁用')}</Badge>,
+        },
+      ] satisfies ColumnDef<PlatformItem>[] : []),
+      ...(!['command_filters', 'command_snippets'].includes(config.collection) ? [
+        { header: app.t('address'), cell: ({ row }) => row.original.host ? <span className='font-mono text-xs'>{row.original.host}{row.original.port ? `:${row.original.port}` : ''}</span> : '-' },
+      ] satisfies ColumnDef<PlatformItem>[] : []),
       ...(config.collection === 'agent_gateways' ? [
         { header: '延迟', cell: ({ row }) => <span className='font-mono text-xs'>{formatNumberValue(row.original.metadata?.latency_ms)} ms</span> },
         {
@@ -216,7 +238,9 @@ export function PlatformTablePage({ config }: { config: PlatformPageConfig }) {
     setEditing(null)
     setForm({
       ...initialForm,
-      type: config.collection === 'credentials' ? 'ssh_password' : config.collection === 'users' ? 'local' : config.collection === 'departments' ? 'department' : config.collection === 'roles' ? 'custom' : '',
+      type: defaultPlatformType(config.collection),
+      protocol: config.collection === 'command_filters' ? 'ssh' : '',
+      metadata: defaultPlatformMetadata(config.collection),
     })
     setFormOpen(true)
   }
@@ -269,7 +293,7 @@ export function PlatformTablePage({ config }: { config: PlatformPageConfig }) {
               emptyTitle={app.t('empty', '暂无数据')}
               emptyBody={description}
               searchPlaceholder={app.t('filter', '关键词搜索')}
-              getSearchText={(item) => [item.name, item.type, item.status, item.protocol, item.host, item.group, item.username, item.description, metadataText(item.metadata?.last_login_at), metadataText(item.metadata?.last_login_ip), item.tags?.join(' ')].filter(Boolean).join(' ')}
+              getSearchText={(item) => [item.name, item.type, item.status, item.protocol, item.host, item.group, item.username, item.description, metadataText(item.metadata?.pattern), metadataText(item.metadata?.command), metadataText(item.metadata?.risk), metadataText(item.metadata?.last_login_at), metadataText(item.metadata?.last_login_ip), item.tags?.join(' ')].filter(Boolean).join(' ')}
             />
           </CardContent>
         </Card>
@@ -1091,85 +1115,172 @@ function PlatformItemDialog({
   const isUser = collection === 'users'
   const isDepartment = collection === 'departments'
   const isRole = collection === 'roles'
+  const isCommandFilter = collection === 'command_filters'
+  const isCommandSnippet = collection === 'command_snippets'
   const roleItems = app.data.platform?.roles || []
   return (
     <DialogShell open={open} onOpenChange={onOpenChange} title={title} description={description}>
       <div className='grid gap-4'>
         <div className='grid gap-3 sm:grid-cols-2'>
-          <Field label={app.t('name')}><Input value={form.name} onChange={(event) => onChange({ name: event.currentTarget.value })} /></Field>
-          <Field label={app.t('type', '类型')}>
-            {isCredential ? (
-              <Select value={form.type} onChange={(event) => onChange({ type: event.currentTarget.value })}>
-                <option value='ssh_password'>SSH password</option>
-                <option value='ssh_key'>SSH private key</option>
-                <option value='rdp_password'>RDP password</option>
-                <option value='vnc_password'>VNC password</option>
-                <option value='database_password'>Database password</option>
-              </Select>
-            ) : (
-              <Input value={form.type} onChange={(event) => onChange({ type: event.currentTarget.value })} />
-            )}
-          </Field>
-          <Field label={app.t('status')}>
-            {isUser ? (
-              <Select value={form.status || 'enabled'} onChange={(event) => onChange({ status: event.currentTarget.value })}>
-                <option value='enabled'>{app.t('enabled', '启用')}</option>
-                <option value='disabled'>{app.t('disabled', '禁用')}</option>
-              </Select>
-            ) : (
-              <Input value={form.status} onChange={(event) => onChange({ status: event.currentTarget.value })} />
-            )}
-          </Field>
-          <Field label={app.t('protocol')}><Select value={form.protocol} onChange={(event) => onChange({ protocol: event.currentTarget.value })}>
-            <option value=''>{app.t('none', '无')}</option>
-            <option value='ssh'>SSH</option>
-            <option value='rdp'>RDP</option>
-            <option value='vnc'>VNC</option>
-            <option value='http'>HTTP</option>
-            <option value='database'>Database</option>
-          </Select></Field>
-          <Field label={app.t('address')}><Input value={form.host} onChange={(event) => onChange({ host: event.currentTarget.value })} /></Field>
-          <Field label={isDepartment ? app.t('sort', '排序') : app.t('ports')}>
-            <Input type='number' value={form.port} onChange={(event) => onChange({ port: event.currentTarget.value })} />
-          </Field>
-          <Field label={app.t('username', '用户')}><Input value={form.username} onChange={(event) => onChange({ username: event.currentTarget.value })} /></Field>
-          {isUser ? (
-            <Field label={app.t('role', '角色')}>
-              <Select value={roleValue(form.metadata)} onChange={(event) => onChange({ metadata: metadataWithValue(form.metadata, 'role', event.currentTarget.value) })}>
-                <option value='user'>{app.t('normalUser', '普通用户')}</option>
-                <option value='auditor'>{app.t('auditor', '审计员')}</option>
-                <option value='admin'>{app.t('administrator', '管理员')}</option>
-                {roleItems.map((item) => (
-                  <option key={item.id} value={item.name}>{item.name}</option>
-                ))}
-              </Select>
-            </Field>
-          ) : null}
-          {isUser || (isCredential && form.type !== 'ssh_key') ? (
-            <Field label={app.t('password', '密码')}><Input type='password' value={form.password} onChange={(event) => onChange({ password: event.currentTarget.value })} /></Field>
-          ) : null}
-          {isCredential && form.type === 'ssh_key' ? (
+          {isCommandFilter ? (
             <>
-              <Field label='Private key'><Textarea value={form.private_key} onChange={(event) => onChange({ private_key: event.currentTarget.value })} /></Field>
-              <Field label='Passphrase'><Input type='password' value={form.passphrase} onChange={(event) => onChange({ passphrase: event.currentTarget.value })} /></Field>
+              <Field label={app.t('ruleName', '规则名称')}><Input value={form.name} onChange={(event) => onChange({ name: event.currentTarget.value })} /></Field>
+              <Field label={app.t('status')}>
+                <Select value={form.status || 'enabled'} onChange={(event) => onChange({ status: event.currentTarget.value })}>
+                  <option value='enabled'>{app.t('enabled', '启用')}</option>
+                  <option value='disabled'>{app.t('disabled', '禁用')}</option>
+                </Select>
+              </Field>
+              <Field label={app.t('action', '动作')}>
+                <Select value={form.type || 'deny'} onChange={(event) => onChange({ type: event.currentTarget.value })}>
+                  <option value='deny'>{app.t('deny', '拒绝')}</option>
+                  <option value='approval'>{app.t('approval', '审批')}</option>
+                  <option value='allow'>{app.t('allow', '允许')}</option>
+                </Select>
+              </Field>
+              <Field label={app.t('riskLevel', '风险等级')}>
+                <Select value={metadataFormText(form.metadata, 'risk') || 'high'} onChange={(event) => onChange({ metadata: metadataWithValue(form.metadata, 'risk', event.currentTarget.value) })}>
+                  <option value='low'>{app.t('low', '低')}</option>
+                  <option value='medium'>{app.t('medium', '中')}</option>
+                  <option value='high'>{app.t('high', '高')}</option>
+                  <option value='critical'>{app.t('critical', '严重')}</option>
+                </Select>
+              </Field>
+              <Field className='sm:col-span-2' label={app.t('commandPattern', '命令匹配表达式')}>
+                <Textarea
+                  value={metadataFormText(form.metadata, 'pattern')}
+                  onChange={(event) => onChange({ metadata: metadataWithValue(form.metadata, 'pattern', event.currentTarget.value) })}
+                  placeholder={'rm\\s+-rf|mkfs|shutdown|reboot'}
+                />
+              </Field>
+              <Field label={app.t('protocol')}>
+                <Select value={form.protocol || 'ssh'} onChange={(event) => onChange({ protocol: event.currentTarget.value })}>
+                  <option value='ssh'>SSH</option>
+                </Select>
+              </Field>
+              <Field label={app.t('targetAsset', '适用资产')}>
+                <Input placeholder={app.t('emptyMeansAllAssets', '留空表示全部资产')} value={form.target_id} onChange={(event) => onChange({ target_id: event.currentTarget.value })} />
+              </Field>
+              <Field label={app.t('owner', '归属用户/部门')}>
+                <Input placeholder={app.t('emptyMeansAllUsers', '留空表示全部用户')} value={form.owner_id} onChange={(event) => onChange({ owner_id: event.currentTarget.value })} />
+              </Field>
+              <Field label={app.t('tags', '标签')}><Input placeholder='prod,linux,web' value={form.tags} onChange={(event) => onChange({ tags: event.currentTarget.value })} /></Field>
             </>
-          ) : null}
-          <Field label={app.t('group')}><Input value={form.group} onChange={(event) => onChange({ group: event.currentTarget.value })} /></Field>
-          <Field label={app.t('owner', '归属用户/部门')}><Input value={form.owner_id} onChange={(event) => onChange({ owner_id: event.currentTarget.value })} /></Field>
-          <Field label={app.t('target', '目标资源')}><Input value={form.target_id} onChange={(event) => onChange({ target_id: event.currentTarget.value })} /></Field>
-          <Field label={isDepartment ? app.t('parentDepartment', '上级部门') : app.t('parent', '上级/分组')}>
-            {isDepartment ? (
-              <Select value={form.parent_id} onChange={(event) => onChange({ parent_id: event.currentTarget.value })}>
+          ) : isCommandSnippet ? (
+            <>
+              <Field label={app.t('name')}><Input value={form.name} onChange={(event) => onChange({ name: event.currentTarget.value })} /></Field>
+              <Field label={app.t('visibility', '可见性')}>
+                <Select value={form.type || 'public'} onChange={(event) => onChange({ type: event.currentTarget.value })}>
+                  <option value='public'>{app.t('public', '公开')}</option>
+                  <option value='private'>{app.t('private', '私有')}</option>
+                </Select>
+              </Field>
+              <Field label={app.t('status')}>
+                <Select value={form.status || 'enabled'} onChange={(event) => onChange({ status: event.currentTarget.value })}>
+                  <option value='enabled'>{app.t('enabled', '启用')}</option>
+                  <option value='disabled'>{app.t('disabled', '禁用')}</option>
+                </Select>
+              </Field>
+              <Field label={app.t('owner', '归属用户/部门')}>
+                <Input placeholder={form.type === 'private' ? app.t('privateOwnerRequired', '私有片段建议填写用户 ID') : app.t('optional', '可选')} value={form.owner_id} onChange={(event) => onChange({ owner_id: event.currentTarget.value })} />
+              </Field>
+              <Field className='sm:col-span-2' label={app.t('commandContent', '命令内容')}>
+                <Textarea
+                  value={metadataFormText(form.metadata, 'command')}
+                  onChange={(event) => onChange({ metadata: metadataWithValue(form.metadata, 'command', event.currentTarget.value) })}
+                  placeholder='uptime'
+                />
+              </Field>
+              <label className='flex items-center gap-2 rounded-lg border border-border bg-muted/20 px-3 py-2 text-sm sm:col-span-2'>
+                <input
+                  type='checkbox'
+                  className='size-4 accent-primary'
+                  checked={metadataBoolFromForm(form.metadata, 'append_newline')}
+                  onChange={(event) => onChange({ metadata: metadataWithValue(form.metadata, 'append_newline', event.currentTarget.checked) })}
+                />
+                <span>{app.t('appendNewline', '插入后自动回车执行')}</span>
+              </label>
+              <Field label={app.t('group')}><Input value={form.group} onChange={(event) => onChange({ group: event.currentTarget.value })} /></Field>
+              <Field label={app.t('tags', '标签')}><Input placeholder='linux,database' value={form.tags} onChange={(event) => onChange({ tags: event.currentTarget.value })} /></Field>
+            </>
+          ) : (
+            <>
+              <Field label={app.t('name')}><Input value={form.name} onChange={(event) => onChange({ name: event.currentTarget.value })} /></Field>
+              <Field label={app.t('type', '类型')}>
+                {isCredential ? (
+                  <Select value={form.type} onChange={(event) => onChange({ type: event.currentTarget.value })}>
+                    <option value='ssh_password'>SSH password</option>
+                    <option value='ssh_key'>SSH private key</option>
+                    <option value='rdp_password'>RDP password</option>
+                    <option value='vnc_password'>VNC password</option>
+                    <option value='database_password'>Database password</option>
+                  </Select>
+                ) : (
+                  <Input value={form.type} onChange={(event) => onChange({ type: event.currentTarget.value })} />
+                )}
+              </Field>
+              <Field label={app.t('status')}>
+                {isUser ? (
+                  <Select value={form.status || 'enabled'} onChange={(event) => onChange({ status: event.currentTarget.value })}>
+                    <option value='enabled'>{app.t('enabled', '启用')}</option>
+                    <option value='disabled'>{app.t('disabled', '禁用')}</option>
+                  </Select>
+                ) : (
+                  <Input value={form.status} onChange={(event) => onChange({ status: event.currentTarget.value })} />
+                )}
+              </Field>
+              <Field label={app.t('protocol')}><Select value={form.protocol} onChange={(event) => onChange({ protocol: event.currentTarget.value })}>
                 <option value=''>{app.t('none', '无')}</option>
-                {items.filter((item) => item.id !== editingId).map((item) => (
-                  <option key={item.id} value={item.id}>{metadataText(item.metadata?.path) || item.name}</option>
-                ))}
-              </Select>
-            ) : (
-              <Input value={form.parent_id} onChange={(event) => onChange({ parent_id: event.currentTarget.value })} />
-            )}
-          </Field>
-          <Field label={app.t('tags', '标签')}><Input placeholder='prod,linux,web' value={form.tags} onChange={(event) => onChange({ tags: event.currentTarget.value })} /></Field>
+                <option value='ssh'>SSH</option>
+                <option value='rdp'>RDP</option>
+                <option value='vnc'>VNC</option>
+                <option value='http'>HTTP</option>
+                <option value='database'>Database</option>
+              </Select></Field>
+              <Field label={app.t('address')}><Input value={form.host} onChange={(event) => onChange({ host: event.currentTarget.value })} /></Field>
+              <Field label={isDepartment ? app.t('sort', '排序') : app.t('ports')}>
+                <Input type='number' value={form.port} onChange={(event) => onChange({ port: event.currentTarget.value })} />
+              </Field>
+              <Field label={app.t('username', '用户')}><Input value={form.username} onChange={(event) => onChange({ username: event.currentTarget.value })} /></Field>
+              {isUser ? (
+                <Field label={app.t('role', '角色')}>
+                  <Select value={roleValue(form.metadata)} onChange={(event) => onChange({ metadata: metadataWithValue(form.metadata, 'role', event.currentTarget.value) })}>
+                    <option value='user'>{app.t('normalUser', '普通用户')}</option>
+                    <option value='auditor'>{app.t('auditor', '审计员')}</option>
+                    <option value='admin'>{app.t('administrator', '管理员')}</option>
+                    {roleItems.map((item) => (
+                      <option key={item.id} value={item.name}>{item.name}</option>
+                    ))}
+                  </Select>
+                </Field>
+              ) : null}
+              {isUser || (isCredential && form.type !== 'ssh_key') ? (
+                <Field label={app.t('password', '密码')}><Input type='password' value={form.password} onChange={(event) => onChange({ password: event.currentTarget.value })} /></Field>
+              ) : null}
+              {isCredential && form.type === 'ssh_key' ? (
+                <>
+                  <Field label='Private key'><Textarea value={form.private_key} onChange={(event) => onChange({ private_key: event.currentTarget.value })} /></Field>
+                  <Field label='Passphrase'><Input type='password' value={form.passphrase} onChange={(event) => onChange({ passphrase: event.currentTarget.value })} /></Field>
+                </>
+              ) : null}
+              <Field label={app.t('group')}><Input value={form.group} onChange={(event) => onChange({ group: event.currentTarget.value })} /></Field>
+              <Field label={app.t('owner', '归属用户/部门')}><Input value={form.owner_id} onChange={(event) => onChange({ owner_id: event.currentTarget.value })} /></Field>
+              <Field label={app.t('target', '目标资源')}><Input value={form.target_id} onChange={(event) => onChange({ target_id: event.currentTarget.value })} /></Field>
+              <Field label={isDepartment ? app.t('parentDepartment', '上级部门') : app.t('parent', '上级/分组')}>
+                {isDepartment ? (
+                  <Select value={form.parent_id} onChange={(event) => onChange({ parent_id: event.currentTarget.value })}>
+                    <option value=''>{app.t('none', '无')}</option>
+                    {items.filter((item) => item.id !== editingId).map((item) => (
+                      <option key={item.id} value={item.id}>{metadataText(item.metadata?.path) || item.name}</option>
+                    ))}
+                  </Select>
+                ) : (
+                  <Input value={form.parent_id} onChange={(event) => onChange({ parent_id: event.currentTarget.value })} />
+                )}
+              </Field>
+              <Field label={app.t('tags', '标签')}><Input placeholder='prod,linux,web' value={form.tags} onChange={(event) => onChange({ tags: event.currentTarget.value })} /></Field>
+            </>
+          )}
         </div>
         {isRole ? (
           <div className='grid gap-4 rounded-lg border border-border bg-background/70 p-3'>
@@ -1213,6 +1324,22 @@ function PlatformItemDialog({
       </div>
     </DialogShell>
   )
+}
+
+function defaultPlatformType(collection: string) {
+  if (collection === 'credentials') return 'ssh_password'
+  if (collection === 'users') return 'local'
+  if (collection === 'departments') return 'department'
+  if (collection === 'roles') return 'custom'
+  if (collection === 'command_filters') return 'deny'
+  if (collection === 'command_snippets') return 'public'
+  return ''
+}
+
+function defaultPlatformMetadata(collection: string) {
+  if (collection === 'command_filters') return JSON.stringify({ risk: 'high' }, null, 2)
+  if (collection === 'command_snippets') return JSON.stringify({ command: '', append_newline: false }, null, 2)
+  return ''
 }
 
 function formFromPlatformItem(item: PlatformItem): PlatformFormState {
@@ -1817,6 +1944,16 @@ function metadataObject(value: string): Record<string, unknown> {
   }
 }
 
+function metadataFormText(metadata: string, key: string) {
+  const value = metadataObject(metadata)[key]
+  if (Array.isArray(value)) return value.map((item) => metadataText(item)).filter(Boolean).join('\n')
+  return metadataText(value)
+}
+
+function metadataBoolFromForm(metadata: string, key: string) {
+  return metadataBool(metadataObject(metadata)[key])
+}
+
 function metadataWithValue(metadata: string, key: string, value: unknown) {
   const next = metadataObject(metadata)
   if (value === '' || value === undefined || value === null) {
@@ -1939,5 +2076,13 @@ function statusTone(status?: string) {
   if (['active', 'enabled', 'success', 'normal', 'encrypted'].includes(value)) return 'success' as const
   if (['pending', 'disabled', 'offline'].includes(value)) return 'warning' as const
   if (['failed', 'locked', 'denied'].includes(value)) return 'danger' as const
+  return 'neutral' as const
+}
+
+function riskTone(risk?: string) {
+  const value = (risk || '').toLowerCase()
+  if (['critical', 'high'].includes(value)) return 'danger' as const
+  if (['medium', 'warning'].includes(value)) return 'warning' as const
+  if (['low', 'normal'].includes(value)) return 'success' as const
   return 'neutral' as const
 }

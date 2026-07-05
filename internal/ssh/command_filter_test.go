@@ -89,6 +89,97 @@ func TestCommandInterceptorAllowsUnmatchedCommandsAndLogs(t *testing.T) {
 	}
 }
 
+func TestCommandInterceptorRequiresApprovalAndLogs(t *testing.T) {
+	st := newTestStore(t)
+	_, err := st.CreatePlatformItem("command_filters", model.PlatformItemRequest{
+		Name:     "production restart review",
+		Type:     "approval",
+		Status:   "enabled",
+		Protocol: model.ProtocolSSH,
+		Metadata: map[string]any{
+			"pattern": "systemctl restart",
+			"risk":    "medium",
+		},
+	})
+	if err != nil {
+		t.Fatalf("create command filter: %v", err)
+	}
+	interceptor := newCommandInterceptor(st, model.ConnectionSession{ID: "sess_approval", Protocol: model.ProtocolSSH, ServerID: "srv_approval", UserID: "user_approval"})
+
+	filtered, events := interceptor.Process([]byte("systemctl restart nginx\r"))
+	if string(filtered) != "systemctl restart nginx\x15" {
+		t.Fatalf("filtered = %q, want command plus clear-line", string(filtered))
+	}
+	if len(events) != 1 || !events[0].Blocked || !strings.Contains(events[0].Notice, "requires approval") {
+		t.Fatalf("events = %#v, want approval-required blocked event", events)
+	}
+
+	logs, err := st.ListPlatformItems("exec_command_logs")
+	if err != nil {
+		t.Fatalf("list command logs: %v", err)
+	}
+	if len(logs) != 1 {
+		t.Fatalf("logs len = %d, want 1", len(logs))
+	}
+	if logs[0].Status != "approval_required" || logs[0].Type != "approval" {
+		t.Fatalf("log = %#v, want approval_required log", logs[0])
+	}
+	if logs[0].Metadata["blocked"] != true || logs[0].Metadata["action"] != "approval" {
+		t.Fatalf("log metadata = %#v, want blocked approval metadata", logs[0].Metadata)
+	}
+}
+
+func TestCommandInterceptorRespectsSessionScope(t *testing.T) {
+	st := newTestStore(t)
+	_, err := st.CreatePlatformItem("command_filters", model.PlatformItemRequest{
+		Name:     "scoped shell",
+		Type:     "deny",
+		Status:   "enabled",
+		Protocol: model.ProtocolSSH,
+		TargetID: "srv_match",
+		OwnerID:  "user_match",
+		Metadata: map[string]any{
+			"pattern": "reboot",
+			"risk":    "high",
+		},
+	})
+	if err != nil {
+		t.Fatalf("create command filter: %v", err)
+	}
+
+	other := newCommandInterceptor(st, model.ConnectionSession{ID: "sess_other", Protocol: model.ProtocolSSH, ServerID: "srv_other", UserID: "user_match"})
+	filtered, events := other.Process([]byte("reboot\r"))
+	if string(filtered) != "reboot\r" || len(events) != 1 || events[0].Blocked {
+		t.Fatalf("other session filtered = %q events = %#v, want allowed command", string(filtered), events)
+	}
+
+	matching := newCommandInterceptor(st, model.ConnectionSession{ID: "sess_match", Protocol: model.ProtocolSSH, ServerID: "srv_match", UserID: "user_match"})
+	filtered, events = matching.Process([]byte("reboot\r"))
+	if string(filtered) != "reboot\x15" || len(events) != 1 || !events[0].Blocked {
+		t.Fatalf("matching session filtered = %q events = %#v, want blocked command", string(filtered), events)
+	}
+
+	logs, err := st.ListPlatformItems("exec_command_logs")
+	if err != nil {
+		t.Fatalf("list command logs: %v", err)
+	}
+	if len(logs) != 2 {
+		t.Fatalf("logs len = %d, want 2", len(logs))
+	}
+	if commandLogStatusBySession(logs, "sess_other") != "submitted" || commandLogStatusBySession(logs, "sess_match") != "denied" {
+		t.Fatalf("logs = %#v, want submitted other session and denied matching session", logs)
+	}
+}
+
+func commandLogStatusBySession(logs []model.PlatformItem, sessionID string) string {
+	for _, log := range logs {
+		if log.Metadata["session_id"] == sessionID {
+			return log.Status
+		}
+	}
+	return ""
+}
+
 func newTestStore(t *testing.T) *store.Store {
 	t.Helper()
 	cipher, err := security.NewCipher(make([]byte, 32))

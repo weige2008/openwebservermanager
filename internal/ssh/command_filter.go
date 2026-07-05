@@ -29,6 +29,7 @@ type commandDecision struct {
 	RuleID   string
 	RuleName string
 	Pattern  string
+	Status   string
 	Blocked  bool
 }
 
@@ -61,7 +62,7 @@ func (i *commandInterceptor) Process(raw []byte) ([]byte, []commandEvent) {
 				events = append(events, commandEvent{
 					Command: command,
 					Blocked: true,
-					Notice:  "\r\n[openwebservermanager] command blocked by " + decision.RuleName + " (" + decision.Risk + "): " + command + "\r\n",
+					Notice:  commandBlockNotice(command, decision),
 				})
 				continue
 			}
@@ -89,7 +90,7 @@ func (i *commandInterceptor) Process(raw []byte) ([]byte, []commandEvent) {
 }
 
 func (i *commandInterceptor) evaluate(command string) commandDecision {
-	decision := commandDecision{Action: "allow", Risk: "normal", RuleName: "default", Pattern: ""}
+	decision := commandDecision{Action: "allow", Risk: "normal", RuleName: "default", Pattern: "", Status: "submitted"}
 	if i.store == nil {
 		return decision
 	}
@@ -99,6 +100,9 @@ func (i *commandInterceptor) evaluate(command string) commandDecision {
 	}
 	for _, filter := range filters {
 		if !commandFilterEnabled(filter) {
+			continue
+		}
+		if !commandFilterAppliesToSession(filter, i.session) {
 			continue
 		}
 		for _, pattern := range commandFilterPatterns(filter) {
@@ -111,6 +115,7 @@ func (i *commandInterceptor) evaluate(command string) commandDecision {
 			decision.RuleName = filter.Name
 			decision.Pattern = pattern
 			decision.Blocked = commandActionBlocks(decision.Action)
+			decision.Status = commandDecisionStatus(decision.Action, decision.Blocked)
 			return decision
 		}
 	}
@@ -121,28 +126,26 @@ func (i *commandInterceptor) record(command string, decision commandDecision) {
 	if i.store == nil {
 		return
 	}
-	status := "submitted"
-	if decision.Blocked {
-		status = "denied"
-	}
 	_, _ = i.store.CreatePlatformItem("exec_command_logs", model.PlatformItemRequest{
 		Name:        command,
 		Type:        decision.Action,
-		Status:      status,
+		Status:      decision.Status,
 		Protocol:    model.ProtocolSSH,
 		OwnerID:     i.session.UserID,
 		TargetID:    i.session.ServerID,
-		Description: "interactive ssh command " + status,
+		Description: "interactive ssh command " + decision.Status,
 		Metadata: map[string]any{
 			"session_id":    i.session.ID,
 			"server_id":     i.session.ServerID,
 			"credential_id": i.session.CredentialID,
 			"client_ip":     i.session.ClientIP,
 			"command":       command,
+			"action":        decision.Action,
 			"risk":          decision.Risk,
 			"rule_id":       decision.RuleID,
 			"rule_name":     decision.RuleName,
 			"pattern":       decision.Pattern,
+			"blocked":       decision.Blocked,
 			"interactive":   true,
 			"recorded_at":   time.Now().UTC(),
 		},
@@ -152,6 +155,51 @@ func (i *commandInterceptor) record(command string, decision commandDecision) {
 func commandFilterEnabled(item model.PlatformItem) bool {
 	status := strings.ToLower(strings.TrimSpace(item.Status))
 	return status == "" || status == "enabled" || status == "active"
+}
+
+func commandFilterAppliesToSession(item model.PlatformItem, session model.ConnectionSession) bool {
+	if item.Protocol != "" && item.Protocol != session.Protocol {
+		return false
+	}
+	if !commandScopeMatches(commandFilterScopeValues(item, []string{item.TargetID}, "target_id", "target_ids", "targetId", "asset_id", "asset_ids", "assetId", "server_id", "server_ids", "serverId", "resource_id", "resource_ids", "resourceId"), session.ServerID) {
+		return false
+	}
+	if !commandScopeMatches(commandFilterScopeValues(item, []string{item.OwnerID, item.Username}, "user_id", "user_ids", "userId", "username", "usernames", "account", "accounts", "owner_id", "owner_ids", "ownerId"), session.UserID) {
+		return false
+	}
+	return true
+}
+
+func commandFilterScopeValues(item model.PlatformItem, direct []string, metadataKeys ...string) []string {
+	values := []string{}
+	values = append(values, direct...)
+	for _, key := range metadataKeys {
+		values = append(values, metadataStrings(item.Metadata[key])...)
+	}
+	result := []string{}
+	for _, value := range values {
+		for _, part := range splitCriteria(value) {
+			if part != "" {
+				result = append(result, part)
+			}
+		}
+	}
+	return result
+}
+
+func commandScopeMatches(values []string, target string) bool {
+	if len(values) == 0 {
+		return true
+	}
+	for _, value := range values {
+		if value == "*" {
+			return true
+		}
+		if target != "" && strings.EqualFold(strings.TrimSpace(value), strings.TrimSpace(target)) {
+			return true
+		}
+	}
+	return false
 }
 
 func commandFilterPatterns(item model.PlatformItem) []string {
@@ -208,6 +256,29 @@ func commandActionBlocks(action string) bool {
 		return true
 	default:
 		return false
+	}
+}
+
+func commandDecisionStatus(action string, blocked bool) string {
+	switch strings.ToLower(strings.TrimSpace(action)) {
+	case "approval", "approve", "review":
+		return "approval_required"
+	case "deny", "reject", "block", "blocked":
+		return "denied"
+	default:
+		if blocked {
+			return "blocked"
+		}
+		return "submitted"
+	}
+}
+
+func commandBlockNotice(command string, decision commandDecision) string {
+	switch commandDecisionStatus(decision.Action, decision.Blocked) {
+	case "approval_required":
+		return "\r\n[openwebservermanager] command requires approval by " + decision.RuleName + " (" + decision.Risk + "): " + command + "\r\n"
+	default:
+		return "\r\n[openwebservermanager] command blocked by " + decision.RuleName + " (" + decision.Risk + "): " + command + "\r\n"
 	}
 }
 

@@ -747,6 +747,13 @@ func (s *Store) UpdatePlatformItem(collection, id string, req model.PlatformItem
 	existingClientSecretHash, _ := item.Metadata["client_secret_hash"].(string)
 	existingAgentTokenHash, _ := item.Metadata["agent_token_hash"].(string)
 	existingCredentialSecrets := copyMetadataSecrets(item.Metadata, "encrypted_password", "encrypted_private_key", "encrypted_passphrase")
+	existingSystemSettingSecrets := copyMetadataSecrets(item.Metadata, "smtp_password_encrypted", "llm_api_key_encrypted")
+	existingSystemSettingSecretState := copyMetadataValues(item.Metadata,
+		"smtp_password_set",
+		"smtp_password_updated_at",
+		"llm_api_key_set",
+		"llm_api_key_updated_at",
+	)
 	existingUserMFA := copyMetadataSecrets(item.Metadata, "mfa_secret_encrypted")
 	existingUserMFA["mfa_enabled"] = metadataStringValue(item.Metadata["mfa_enabled"])
 	existingUserMFA["mfa_enabled_at"] = metadataStringValue(item.Metadata["mfa_enabled_at"])
@@ -789,6 +796,15 @@ func (s *Store) UpdatePlatformItem(collection, id string, req model.PlatformItem
 					item.Metadata[key] = value
 				}
 			}
+		}
+		if collection == "system_settings" {
+			for key, value := range existingSystemSettingSecrets {
+				delete(item.Metadata, key)
+				if value != "" {
+					item.Metadata[key] = value
+				}
+			}
+			restoreMetadataAnyValues(item.Metadata, existingSystemSettingSecretState)
 		}
 	}
 	if err := s.applyPlatformSecrets(collection, req, &item, false); err != nil {
@@ -972,6 +988,8 @@ func (s *Store) applyPlatformSecrets(collection string, req model.PlatformItemRe
 		return applyAgentGatewayPlatformSecret(item, creating)
 	case "credentials":
 		return s.applyCredentialPlatformSecret(req, item, creating)
+	case "system_settings":
+		return s.applySystemSettingPlatformSecret(req, item, creating)
 	default:
 		return nil
 	}
@@ -1112,6 +1130,75 @@ func (s *Store) applyCredentialPlatformSecret(req model.PlatformItemRequest, ite
 		item.Metadata["encrypted_passphrase"] = encrypted
 	}
 	return nil
+}
+
+func (s *Store) applySystemSettingPlatformSecret(req model.PlatformItemRequest, item *model.PlatformItem, creating bool) error {
+	if item.Metadata == nil {
+		item.Metadata = map[string]any{}
+	}
+	smtpPassword := strings.TrimSpace(req.Password)
+	if smtpPassword == "" {
+		smtpPassword = firstMetadataString(item.Metadata, "smtp_password", "smtpPassword", "plain_smtp_password")
+	}
+	llmAPIKey := firstMetadataString(item.Metadata, "llm_api_key", "llmApiKey", "plain_llm_api_key")
+	for _, key := range []string{
+		"smtp_password",
+		"smtpPassword",
+		"plain_smtp_password",
+		"llm_api_key",
+		"llmApiKey",
+		"plain_llm_api_key",
+	} {
+		delete(item.Metadata, key)
+	}
+	if smtpPassword == "" && llmAPIKey == "" {
+		if creating {
+			delete(item.Metadata, "smtp_password_encrypted")
+			delete(item.Metadata, "smtp_password_set")
+			delete(item.Metadata, "llm_api_key_encrypted")
+			delete(item.Metadata, "llm_api_key_set")
+		}
+		return nil
+	}
+	if len(smtpPassword) > 32*1024 || len(llmAPIKey) > 32*1024 {
+		return errors.New("system setting secret is too large")
+	}
+	now := time.Now().UTC().Format(time.RFC3339Nano)
+	if smtpPassword != "" {
+		encrypted, err := s.cipher.EncryptString(smtpPassword)
+		if err != nil {
+			return err
+		}
+		item.Metadata["smtp_password_encrypted"] = encrypted
+		item.Metadata["smtp_password_set"] = true
+		item.Metadata["smtp_password_updated_at"] = now
+	}
+	if llmAPIKey != "" {
+		encrypted, err := s.cipher.EncryptString(llmAPIKey)
+		if err != nil {
+			return err
+		}
+		item.Metadata["llm_api_key_encrypted"] = encrypted
+		item.Metadata["llm_api_key_set"] = true
+		item.Metadata["llm_api_key_updated_at"] = now
+	}
+	return nil
+}
+
+func (s *Store) SystemSettingSMTPPassword(id string) (string, bool, error) {
+	item, ok, err := s.GetPlatformItem("system_settings", id)
+	if err != nil || !ok {
+		return "", ok, err
+	}
+	encrypted, _ := item.Metadata["smtp_password_encrypted"].(string)
+	if encrypted == "" {
+		return "", true, nil
+	}
+	secret, err := s.cipher.DecryptString(encrypted)
+	if err != nil {
+		return "", true, err
+	}
+	return secret, true, nil
 }
 
 func (s *Store) GetPlatformCredentialSecret(id string) (model.PlatformItem, CredentialSecret, bool, error) {
@@ -1426,6 +1513,14 @@ func sanitizePlatformItem(item *model.PlatformItem) {
 	delete(item.Metadata, "plain_password")
 	delete(item.Metadata, "plain_private_key")
 	delete(item.Metadata, "plain_passphrase")
+	delete(item.Metadata, "smtp_password")
+	delete(item.Metadata, "smtpPassword")
+	delete(item.Metadata, "plain_smtp_password")
+	delete(item.Metadata, "smtp_password_encrypted")
+	delete(item.Metadata, "llm_api_key")
+	delete(item.Metadata, "llmApiKey")
+	delete(item.Metadata, "plain_llm_api_key")
+	delete(item.Metadata, "llm_api_key_encrypted")
 }
 
 func (s *Store) Bootstrap() ([]model.Server, []model.CredentialPublic, []model.ConnectionSession, []model.AuditLog) {

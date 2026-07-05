@@ -93,10 +93,30 @@ interface BackupInfo {
   files?: string[]
 }
 
+interface SMTPIntegrationForm {
+  host: string
+  port: string
+  security: 'none' | 'starttls' | 'tls'
+  serverName: string
+  insecureSkipVerify: boolean
+  username: string
+  password: string
+  passwordSet: boolean
+  from: string
+  to: string
+  testTo: string
+  llmProvider: string
+  llmBaseUrl: string
+  llmModel: string
+  llmApiKey: string
+  llmApiKeySet: boolean
+}
+
 export function PlatformPage({ config }: { config: PlatformPageConfig }) {
   if (config.kind === 'tools') return <ToolsPage config={config} />
   if (config.kind === 'monitor') return <MonitoringPage config={config} />
   if (config.kind === 'backups') return <BackupsPage config={config} />
+  if (config.kind === 'settings') return <PlatformSettingsPage config={config} />
   if (config.collection === 'access_stats') return <AccessStatsPage config={config} />
   return <PlatformTablePage config={config} />
 }
@@ -1603,18 +1623,180 @@ export function PlatformSettingsPage({ config }: { config: PlatformPageConfig })
   const label = platformLabel(config, app.locale)
   const description = platformDescription(config, app.locale)
   const Icon = config.icon
+  const integration = useMemo(() => items.find((item) => (item.type || '').toLowerCase() === 'integration'), [items])
+  const [form, setForm] = useState<SMTPIntegrationForm>(() => smtpIntegrationFormFromItem(integration))
+  const [saving, setSaving] = useState(false)
+  const [testing, setTesting] = useState(false)
+
+  useEffect(() => {
+    setForm(smtpIntegrationFormFromItem(integration))
+  }, [integration?.id, integration?.updated_at])
+
+  const patchForm = (next: Partial<SMTPIntegrationForm>) => setForm((current) => ({ ...current, ...next }))
+
+  const saveIntegration = async (silent = false) => {
+    setSaving(true)
+    try {
+      const saved = await apiRequest<PlatformItem>(integration?.id ? `/api/admin/system-settings/${integration.id}` : '/api/admin/system-settings', {
+        method: integration?.id ? 'PATCH' : 'POST',
+        body: JSON.stringify({
+          name: integration?.name || 'Notification integrations',
+          type: 'integration',
+          status: 'enabled',
+          host: form.host.trim(),
+          port: form.port ? Number(form.port) : 0,
+          username: form.username.trim(),
+          password: form.password.trim() || undefined,
+          metadata: integrationMetadataFromForm(form, integration?.metadata),
+          description: 'SMTP email delivery and LLM integration settings.',
+        }),
+      })
+      patchForm({
+        password: '',
+        passwordSet: Boolean(saved.metadata?.smtp_password_set),
+        llmApiKey: '',
+        llmApiKeySet: Boolean(saved.metadata?.llm_api_key_set),
+      })
+      await app.refresh(true)
+      if (!silent) app.showToast(app.t('saved', 'Saved'))
+      return saved
+    } catch (error) {
+      app.handleApiError(error)
+      return null
+    } finally {
+      setSaving(false)
+    }
+  }
+
+  const testSMTP = async () => {
+    setTesting(true)
+    try {
+      const saved = await saveIntegration(true)
+      if (!saved) return
+      const result = await apiRequest<{ message?: string }>('/api/admin/system-settings/smtp/test', {
+        method: 'POST',
+        body: JSON.stringify({
+          setting_id: saved.id,
+          to: form.testTo.trim() || form.to.trim(),
+          subject: 'Open Web Server Manager SMTP test',
+          body: 'SMTP delivery settings are working.',
+        }),
+      })
+      app.showToast(result.message || 'SMTP test email sent')
+    } catch (error) {
+      app.handleApiError(error)
+    } finally {
+      setTesting(false)
+    }
+  }
   return (
     <CardStaggerContainer>
       <CardStaggerItem>
         <Card>
-          <CardHeader>
+          <CardHeader className='gap-3 max-sm:grid-cols-1'>
             <div>
               <CardTitle className='flex items-center gap-2'><Icon className='size-5 text-primary' />{label}</CardTitle>
               <CardDescription>{description}</CardDescription>
             </div>
             <Button variant='outline' onClick={() => void app.refresh()}><RefreshCw className='size-4' />{app.t('refresh', '刷新')}</Button>
           </CardHeader>
-          <CardContent>
+          <CardContent className='grid gap-5'>
+            <section className='grid gap-4 rounded-xl border border-border bg-background/60 p-4'>
+              <div className='flex flex-wrap items-start justify-between gap-3'>
+                <div>
+                  <h3 className='text-sm font-semibold'>{app.t('smtpDelivery', 'SMTP delivery')}</h3>
+                  <p className='mt-1 text-xs leading-5 text-muted-foreground'>
+                    {app.t('smtpDeliveryDescription', 'Configure the SMTP server used for test email and future notification delivery. Passwords are encrypted server-side and never returned by API responses.')}
+                  </p>
+                </div>
+                <Badge tone={form.passwordSet ? 'success' : 'warning'}>{form.passwordSet ? app.t('passwordSaved', 'Password saved') : app.t('passwordNotSet', 'Password not set')}</Badge>
+              </div>
+              <div className='grid gap-3 md:grid-cols-2 xl:grid-cols-4'>
+                <Field label={app.t('smtpHost', 'SMTP host')}>
+                  <Input value={form.host} onChange={(event) => patchForm({ host: event.currentTarget.value })} placeholder='smtp.example.com' />
+                </Field>
+                <Field label={app.t('smtpPort', 'SMTP port')}>
+                  <Input type='number' value={form.port} onChange={(event) => patchForm({ port: event.currentTarget.value })} placeholder='587' />
+                </Field>
+                <Field label={app.t('smtpSecurity', 'Security')}>
+                  <Select value={form.security} onChange={(event) => patchForm({ security: event.currentTarget.value as SMTPIntegrationForm['security'] })}>
+                    <option value='starttls'>STARTTLS</option>
+                    <option value='tls'>TLS</option>
+                    <option value='none'>{app.t('none', 'None')}</option>
+                  </Select>
+                </Field>
+                <Field label={app.t('smtpServerName', 'TLS server name')}>
+                  <Input value={form.serverName} onChange={(event) => patchForm({ serverName: event.currentTarget.value })} placeholder={form.host || 'smtp.example.com'} />
+                </Field>
+                <Field label={app.t('username', 'Username')}>
+                  <Input value={form.username} onChange={(event) => patchForm({ username: event.currentTarget.value })} autoComplete='username' />
+                </Field>
+                <Field label={app.t('password', 'Password')}>
+                  <Input type='password' value={form.password} onChange={(event) => patchForm({ password: event.currentTarget.value })} placeholder={form.passwordSet ? 'Leave blank to keep current password' : ''} autoComplete='new-password' />
+                </Field>
+                <Field label={app.t('smtpFrom', 'Sender')}>
+                  <Input value={form.from} onChange={(event) => patchForm({ from: event.currentTarget.value })} placeholder='ops@example.com' />
+                </Field>
+                <Field label={app.t('smtpTo', 'Default recipients')}>
+                  <Input value={form.to} onChange={(event) => patchForm({ to: event.currentTarget.value })} placeholder='admin@example.com, audit@example.com' />
+                </Field>
+                <Field className='md:col-span-2' label={app.t('smtpTestTo', 'Test recipient')}>
+                  <Input value={form.testTo} onChange={(event) => patchForm({ testTo: event.currentTarget.value })} placeholder={form.to || form.from || 'admin@example.com'} />
+                </Field>
+                <label className='flex items-center gap-2 rounded-lg border border-border bg-muted/20 px-3 py-2 text-sm md:col-span-2'>
+                  <input
+                    type='checkbox'
+                    className='size-4 accent-primary'
+                    checked={form.insecureSkipVerify}
+                    onChange={(event) => patchForm({ insecureSkipVerify: event.currentTarget.checked })}
+                  />
+                  <span>{app.t('smtpInsecureSkipVerify', 'Allow insecure TLS certificate verification')}</span>
+                </label>
+              </div>
+              <div className='flex flex-wrap justify-end gap-2'>
+                <Button variant='outline' onClick={() => void saveIntegration()} disabled={saving || testing || !form.host.trim() || !form.from.trim()}>
+                  <Save className='size-4' />
+                  {saving ? app.t('saving', 'Saving') : app.t('save', 'Save')}
+                </Button>
+                <Button variant='primary' onClick={() => void testSMTP()} disabled={saving || testing || !form.host.trim() || !form.from.trim()}>
+                  <Play className='size-4' />
+                  {testing ? app.t('testing', 'Testing') : app.t('sendTestEmail', 'Send test')}
+                </Button>
+              </div>
+            </section>
+
+            <section className='grid gap-4 rounded-xl border border-border bg-background/60 p-4'>
+              <div className='flex flex-wrap items-start justify-between gap-3'>
+                <div>
+                  <h3 className='text-sm font-semibold'>{app.t('llmIntegration', 'LLM integration')}</h3>
+                  <p className='mt-1 text-xs leading-5 text-muted-foreground'>
+                    {app.t('llmIntegrationDescription', 'Store provider, endpoint, model, and API key for later AI-assisted operations. This phase only persists configuration.')}
+                  </p>
+                </div>
+                <Badge tone={form.llmApiKeySet ? 'success' : 'neutral'}>{form.llmApiKeySet ? app.t('apiKeySaved', 'API key saved') : app.t('notConfigured', 'Not configured')}</Badge>
+              </div>
+              <div className='grid gap-3 md:grid-cols-2 xl:grid-cols-4'>
+                <Field label={app.t('provider', 'Provider')}>
+                  <Input value={form.llmProvider} onChange={(event) => patchForm({ llmProvider: event.currentTarget.value })} placeholder='openai-compatible' />
+                </Field>
+                <Field className='xl:col-span-2' label={app.t('baseUrl', 'Base URL')}>
+                  <Input value={form.llmBaseUrl} onChange={(event) => patchForm({ llmBaseUrl: event.currentTarget.value })} placeholder='https://api.example.com/v1' />
+                </Field>
+                <Field label={app.t('model', 'Model')}>
+                  <Input value={form.llmModel} onChange={(event) => patchForm({ llmModel: event.currentTarget.value })} placeholder='gpt-4.1-mini' />
+                </Field>
+                <Field className='md:col-span-2 xl:col-span-4' label={app.t('apiKey', 'API key')}>
+                  <Input type='password' value={form.llmApiKey} onChange={(event) => patchForm({ llmApiKey: event.currentTarget.value })} placeholder={form.llmApiKeySet ? 'Leave blank to keep current API key' : ''} autoComplete='new-password' />
+                </Field>
+              </div>
+              <div className='flex justify-end'>
+                <Button variant='outline' onClick={() => void saveIntegration()} disabled={saving || testing}>
+                  <Save className='size-4' />
+                  {saving ? app.t('saving', 'Saving') : app.t('save', 'Save')}
+                </Button>
+              </div>
+            </section>
+
             <div className='grid gap-3 lg:grid-cols-3'>
               {items.map((item) => (
                 <article key={item.id} className='rounded-xl border border-border bg-background/60 p-4'>
@@ -1637,6 +1819,49 @@ export function PlatformSettingsPage({ config }: { config: PlatformPageConfig })
       </CardStaggerItem>
     </CardStaggerContainer>
   )
+}
+
+function smtpIntegrationFormFromItem(item?: PlatformItem): SMTPIntegrationForm {
+  const metadata = item?.metadata || {}
+  const useTLS = metadataBool(metadata.smtp_use_tls) || metadataBool(metadata.smtp_ssl) || metadataBool(metadata.tls)
+  const startTLS = metadataBool(metadata.smtp_start_tls) || metadataBool(metadata.smtp_starttls) || metadataBool(metadata.start_tls) || metadataBool(metadata.starttls)
+  return {
+    host: metadataText(metadata.smtp_host) || item?.host || '',
+    port: metadataText(metadata.smtp_port) || (item?.port ? String(item.port) : '587'),
+    security: useTLS ? 'tls' : startTLS ? 'starttls' : 'none',
+    serverName: metadataText(metadata.smtp_server_name) || metadataText(metadata.server_name),
+    insecureSkipVerify: metadataBool(metadata.smtp_insecure_skip_verify) || metadataBool(metadata.insecure_skip_verify),
+    username: metadataText(metadata.smtp_username) || item?.username || '',
+    password: '',
+    passwordSet: metadataBool(metadata.smtp_password_set),
+    from: metadataText(metadata.smtp_from) || metadataText(metadata.from) || '',
+    to: metadataText(metadata.smtp_to) || metadataText(metadata.to) || '',
+    testTo: metadataText(metadata.smtp_test_to) || metadataText(metadata.test_to) || '',
+    llmProvider: metadataText(metadata.llm_provider),
+    llmBaseUrl: metadataText(metadata.llm_base_url),
+    llmModel: metadataText(metadata.llm_model),
+    llmApiKey: '',
+    llmApiKeySet: metadataBool(metadata.llm_api_key_set),
+  }
+}
+
+function integrationMetadataFromForm(form: SMTPIntegrationForm, existing?: Record<string, unknown>) {
+  const metadata: Record<string, unknown> = { ...(existing || {}) }
+  metadata.smtp_host = form.host.trim()
+  metadata.smtp_port = form.port ? Number(form.port) : 587
+  metadata.smtp_username = form.username.trim()
+  metadata.smtp_from = form.from.trim()
+  metadata.smtp_to = form.to.trim()
+  metadata.smtp_test_to = form.testTo.trim()
+  metadata.smtp_use_tls = form.security === 'tls'
+  metadata.smtp_start_tls = form.security === 'starttls'
+  metadata.smtp_server_name = form.serverName.trim()
+  metadata.smtp_insecure_skip_verify = form.insecureSkipVerify
+  metadata.llm_provider = form.llmProvider.trim()
+  metadata.llm_base_url = form.llmBaseUrl.trim()
+  metadata.llm_model = form.llmModel.trim()
+  if (form.llmApiKey.trim()) metadata.llm_api_key = form.llmApiKey.trim()
+  return metadata
 }
 
 export function AccessPortalPage() {

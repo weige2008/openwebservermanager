@@ -2,12 +2,14 @@ package app
 
 import (
 	"archive/zip"
+	"bufio"
 	"bytes"
 	"crypto/sha256"
 	"encoding/base64"
 	"encoding/json"
 	"io"
 	"mime/multipart"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -1697,6 +1699,80 @@ func TestResourceOperationEndpoints(t *testing.T) {
 	}
 }
 
+func TestSMTPIntegrationTestEmail(t *testing.T) {
+	handler, cookie := newTestHandler(t)
+	smtpServer := newFakeSMTPServer(t)
+	host, portText, err := net.SplitHostPort(smtpServer.addr)
+	if err != nil {
+		t.Fatalf("split smtp address: %v", err)
+	}
+	port, err := strconv.Atoi(portText)
+	if err != nil {
+		t.Fatalf("parse smtp port: %v", err)
+	}
+	settingRec := assertStatus(t, handler, http.MethodPost, "/api/admin/system-settings", map[string]any{
+		"name":     "Notification integrations",
+		"type":     "integration",
+		"status":   "enabled",
+		"host":     host,
+		"port":     port,
+		"username": "smtp-user",
+		"password": "smtp-secret",
+		"metadata": map[string]any{
+			"smtp_host":     host,
+			"smtp_port":     port,
+			"smtp_from":     "sender@example.test",
+			"smtp_to":       "receiver@example.test",
+			"llm_provider":  "openai-compatible",
+			"llm_api_key":   "llm-secret",
+			"llm_base_url":  "https://api.example.test/v1",
+			"llm_model":     "test-model",
+			"smtp_username": "smtp-user",
+		},
+	}, cookie, http.StatusCreated)
+	var setting model.PlatformItem
+	decodeResponse(t, settingRec, &setting)
+	settingsRec := assertStatus(t, handler, http.MethodGet, "/api/admin/system-settings", nil, cookie, http.StatusOK)
+	settingsBody := settingsRec.Body.String()
+	for _, leaked := range []string{"smtp-secret", "llm-secret", "smtp_password_encrypted", "llm_api_key_encrypted"} {
+		if strings.Contains(settingsBody, leaked) {
+			t.Fatalf("system settings leaked sensitive value %q", leaked)
+		}
+	}
+	if !strings.Contains(settingsBody, "smtp_password_set") || !strings.Contains(settingsBody, "llm_api_key_set") {
+		t.Fatal("system settings did not expose secret presence flags")
+	}
+	assertStatus(t, handler, http.MethodPost, "/api/admin/system-settings/smtp/test", map[string]any{
+		"setting_id": setting.ID,
+		"to":         "receiver@example.test",
+		"subject":    "SMTP probe",
+		"body":       "delivery works",
+	}, cookie, http.StatusOK)
+	select {
+	case message := <-smtpServer.messages:
+		if !strings.Contains(message, "Subject: SMTP probe") || !strings.Contains(message, "delivery works") || !strings.Contains(message, "receiver@example.test") {
+			t.Fatalf("SMTP message missing expected content:\n%s", message)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("SMTP server did not receive test email")
+	}
+	logsRec := assertStatus(t, handler, http.MethodGet, "/api/admin/audit/operation-logs", nil, cookie, http.StatusOK)
+	if !strings.Contains(logsRec.Body.String(), "system_settings.smtp_test") {
+		t.Fatal("SMTP test did not write operation log")
+	}
+	smtpServer.close()
+	failedRec := assertStatus(t, handler, http.MethodPost, "/api/admin/system-settings/smtp/test", map[string]any{
+		"setting_id": setting.ID,
+		"to":         "receiver@example.test",
+	}, cookie, http.StatusBadGateway)
+	if !strings.Contains(failedRec.Body.String(), "send SMTP test email") {
+		t.Fatal("failed SMTP test did not return a clear send error")
+	}
+	assertStatus(t, handler, http.MethodPost, "/api/admin/system-settings/smtp/test", map[string]any{
+		"setting_id": "missing",
+	}, cookie, http.StatusNotFound)
+}
+
 func TestBackupListDownloadAndRestore(t *testing.T) {
 	handler, cookie := newTestHandler(t)
 
@@ -2152,6 +2228,109 @@ func newTestHandler(t *testing.T) (http.Handler, *http.Cookie) {
 		t.Fatal("setup did not set auth cookie")
 	}
 	return handler, cookies[0]
+}
+
+type fakeSMTPServer struct {
+	addr     string
+	messages chan string
+	close    func()
+}
+
+func newFakeSMTPServer(t *testing.T) fakeSMTPServer {
+	t.Helper()
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("listen fake smtp: %v", err)
+	}
+	server := fakeSMTPServer{
+		addr:     listener.Addr().String(),
+		messages: make(chan string, 4),
+		close: func() {
+			_ = listener.Close()
+		},
+	}
+	t.Cleanup(server.close)
+	go func() {
+		for {
+			conn, err := listener.Accept()
+			if err != nil {
+				return
+			}
+			go handleFakeSMTPConnection(conn, server.messages)
+		}
+	}()
+	return server
+}
+
+func handleFakeSMTPConnection(conn net.Conn, messages chan<- string) {
+	defer conn.Close()
+	reader := bufio.NewReader(conn)
+	writer := bufio.NewWriter(conn)
+	writeLine := func(value string) bool {
+		if _, err := writer.WriteString(value + "\r\n"); err != nil {
+			return false
+		}
+		return writer.Flush() == nil
+	}
+	if !writeLine("220 fake.smtp.local ESMTP") {
+		return
+	}
+	var data strings.Builder
+	inData := false
+	for {
+		line, err := reader.ReadString('\n')
+		if err != nil {
+			return
+		}
+		trimmed := strings.TrimRight(line, "\r\n")
+		if inData {
+			if trimmed == "." {
+				select {
+				case messages <- data.String():
+				default:
+				}
+				data.Reset()
+				inData = false
+				if !writeLine("250 queued") {
+					return
+				}
+				continue
+			}
+			data.WriteString(line)
+			continue
+		}
+		command := strings.ToUpper(trimmed)
+		switch {
+		case strings.HasPrefix(command, "EHLO"):
+			if !writeLine("250-fake.smtp.local") || !writeLine("250 AUTH PLAIN") {
+				return
+			}
+		case strings.HasPrefix(command, "HELO"):
+			if !writeLine("250 fake.smtp.local") {
+				return
+			}
+		case strings.HasPrefix(command, "AUTH "):
+			if !writeLine("235 authenticated") {
+				return
+			}
+		case strings.HasPrefix(command, "MAIL FROM:"), strings.HasPrefix(command, "RCPT TO:"):
+			if !writeLine("250 ok") {
+				return
+			}
+		case strings.HasPrefix(command, "DATA"):
+			inData = true
+			if !writeLine("354 end data with <CR><LF>.<CR><LF>") {
+				return
+			}
+		case strings.HasPrefix(command, "QUIT"):
+			_ = writeLine("221 bye")
+			return
+		default:
+			if !writeLine("250 ok") {
+				return
+			}
+		}
+	}
 }
 
 func assertStatus(t *testing.T, handler http.Handler, method, path string, payload any, cookie *http.Cookie, want int) *httptest.ResponseRecorder {

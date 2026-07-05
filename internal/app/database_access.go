@@ -4,7 +4,9 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"net"
 	"net/http"
+	"net/url"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -12,6 +14,9 @@ import (
 	"time"
 
 	"openwebservermanager/internal/model"
+
+	"github.com/go-sql-driver/mysql"
+	_ "github.com/jackc/pgx/v5/stdlib"
 )
 
 type databaseSQLExecutionOptions struct {
@@ -27,6 +32,18 @@ type databaseSQLExecutionOptions struct {
 type sqlWorkOrderRequest struct {
 	SQL    string `json:"sql"`
 	Reason string `json:"reason"`
+}
+
+type databaseAssetConnection struct {
+	Driver   string
+	DSN      string
+	Name     string
+	Username string
+}
+
+type databaseAssetSecret struct {
+	Username string
+	Password string
 }
 
 func (s *Server) handleDatabaseAssetQuery(w http.ResponseWriter, r *http.Request, asset model.PlatformItem, userID string) {
@@ -100,11 +117,11 @@ func (s *Server) handleDatabaseWorkOrderCreate(w http.ResponseWriter, r *http.Re
 }
 
 func (s *Server) executeDatabaseAssetSQL(r *http.Request, asset model.PlatformItem, userID, sqlText string, opts databaseSQLExecutionOptions) (model.PlatformItem, int, error) {
-	driver, dsn, err := databaseAssetDriverAndDSN(s.cfg.DataDir, asset)
+	connection, err := s.databaseAssetConnection(asset)
 	if err != nil {
 		return model.PlatformItem{}, http.StatusBadRequest, err
 	}
-	db, err := sql.Open(driver, dsn)
+	db, err := sql.Open(connection.Driver, connection.DSN)
 	if err != nil {
 		return model.PlatformItem{}, http.StatusInternalServerError, err
 	}
@@ -120,13 +137,13 @@ func (s *Server) executeDatabaseAssetSQL(r *http.Request, asset model.PlatformIt
 	}
 	metadata := map[string]any{
 		"sql":         sqlText,
-		"database":    databaseAssetName(asset, dsn),
+		"database":    connection.Name,
 		"asset_id":    asset.ID,
 		"asset_name":  asset.Name,
 		"client_ip":   s.clientIP(r),
 		"source":      valueOrDefault(opts.Source, "access_portal"),
-		"driver":      driver,
-		"db_username": asset.Username,
+		"driver":      connection.Driver,
+		"db_username": connection.Username,
 		"row_limit":   rowLimit,
 	}
 	if opts.WorkOrderID != "" {
@@ -198,7 +215,58 @@ func (s *Server) executeDatabaseAssetSQL(r *http.Request, asset model.PlatformIt
 	return logItem, http.StatusOK, nil
 }
 
-func databaseAssetDriverAndDSN(dataDir string, asset model.PlatformItem) (string, string, error) {
+func (s *Server) databaseAssetConnection(asset model.PlatformItem) (databaseAssetConnection, error) {
+	rawAsset := asset
+	if asset.ID != "" {
+		item, ok, err := s.cfg.Store.GetPlatformItem("database_assets", asset.ID)
+		if err != nil {
+			return databaseAssetConnection{}, err
+		}
+		if ok {
+			rawAsset = item
+		}
+	}
+	secret, err := s.databaseAssetSecret(rawAsset)
+	if err != nil {
+		return databaseAssetConnection{}, err
+	}
+	driver, dsn, err := databaseAssetDriverAndDSN(s.cfg.DataDir, rawAsset, secret)
+	if err != nil {
+		return databaseAssetConnection{}, err
+	}
+	username := secret.Username
+	if username == "" {
+		username = rawAsset.Username
+	}
+	return databaseAssetConnection{
+		Driver:   driver,
+		DSN:      dsn,
+		Name:     databaseAssetName(rawAsset, dsn),
+		Username: username,
+	}, nil
+}
+
+func (s *Server) databaseAssetSecret(asset model.PlatformItem) (databaseAssetSecret, error) {
+	secret := databaseAssetSecret{Username: strings.TrimSpace(asset.Username)}
+	credentialID := firstMetadataString(asset.Metadata, "credential_id", "credentialId", "credential")
+	if credentialID == "" {
+		return secret, nil
+	}
+	credential, credentialSecret, ok, err := s.cfg.Store.GetPlatformCredentialSecret(credentialID)
+	if err != nil {
+		return databaseAssetSecret{}, err
+	}
+	if !ok {
+		return databaseAssetSecret{}, fmt.Errorf("database credential %s not found", credentialID)
+	}
+	if credential.Username != "" {
+		secret.Username = credential.Username
+	}
+	secret.Password = credentialSecret.Password
+	return secret, nil
+}
+
+func databaseAssetDriverAndDSN(dataDir string, asset model.PlatformItem, secret databaseAssetSecret) (string, string, error) {
 	driver := strings.ToLower(strings.TrimSpace(asset.Type))
 	if value, ok := asset.Metadata["driver"].(string); ok && strings.TrimSpace(value) != "" {
 		driver = strings.ToLower(strings.TrimSpace(value))
@@ -210,8 +278,14 @@ func databaseAssetDriverAndDSN(dataDir string, asset model.PlatformItem) (string
 	case "sqlite", "sqlite3":
 		dsn, err := databaseAssetSQLitePath(dataDir, asset)
 		return "sqlite", dsn, err
+	case "mysql", "mariadb":
+		dsn, err := databaseAssetMySQLDSN(asset, secret)
+		return "mysql", dsn, err
+	case "postgres", "postgresql", "pgx":
+		dsn, err := databaseAssetPostgresDSN(asset, secret)
+		return "pgx", dsn, err
 	default:
-		return "", "", errors.New("only sqlite database assets are supported in this build")
+		return "", "", fmt.Errorf("unsupported database driver: %s", driver)
 	}
 }
 
@@ -245,6 +319,104 @@ func databaseAssetSQLitePath(dataDir string, asset model.PlatformItem) (string, 
 		return "", err
 	}
 	return target, nil
+}
+
+func databaseAssetMySQLDSN(asset model.PlatformItem, secret databaseAssetSecret) (string, error) {
+	if dsn := firstMetadataString(asset.Metadata, "dsn", "connection_string", "connectionString", "url"); dsn != "" {
+		return dsn, nil
+	}
+	host, port, err := databaseAssetHostPort(asset, 3306)
+	if err != nil {
+		return "", err
+	}
+	database := firstMetadataString(asset.Metadata, "database", "db_name", "dbName", "dbname", "schema")
+	username := valueOrDefault(secret.Username, asset.Username)
+	cfg := mysql.NewConfig()
+	cfg.User = username
+	cfg.Passwd = secret.Password
+	cfg.Net = "tcp"
+	cfg.Addr = net.JoinHostPort(host, strconv.Itoa(port))
+	cfg.DBName = database
+	cfg.ParseTime = true
+	cfg.Params = map[string]string{"charset": valueOrDefault(firstMetadataString(asset.Metadata, "charset"), "utf8mb4")}
+	if timeout := firstMetadataString(asset.Metadata, "timeout", "connect_timeout"); timeout != "" {
+		cfg.Params["timeout"] = timeout
+	}
+	return cfg.FormatDSN(), nil
+}
+
+func databaseAssetPostgresDSN(asset model.PlatformItem, secret databaseAssetSecret) (string, error) {
+	if dsn := firstMetadataString(asset.Metadata, "dsn", "connection_string", "connectionString", "url"); dsn != "" {
+		return dsn, nil
+	}
+	host, port, err := databaseAssetHostPort(asset, 5432)
+	if err != nil {
+		return "", err
+	}
+	database := firstMetadataString(asset.Metadata, "database", "db_name", "dbName", "dbname")
+	if database == "" {
+		database = "postgres"
+	}
+	username := valueOrDefault(secret.Username, asset.Username)
+	endpoint := url.URL{
+		Scheme: "postgres",
+		Host:   net.JoinHostPort(host, strconv.Itoa(port)),
+		Path:   "/" + database,
+	}
+	if username != "" {
+		if secret.Password != "" {
+			endpoint.User = url.UserPassword(username, secret.Password)
+		} else {
+			endpoint.User = url.User(username)
+		}
+	}
+	query := endpoint.Query()
+	query.Set("sslmode", valueOrDefault(firstMetadataString(asset.Metadata, "sslmode", "ssl_mode"), "disable"))
+	if appName := firstMetadataString(asset.Metadata, "application_name", "applicationName"); appName != "" {
+		query.Set("application_name", appName)
+	}
+	endpoint.RawQuery = query.Encode()
+	return endpoint.String(), nil
+}
+
+func databaseAssetHostPort(asset model.PlatformItem, defaultPort int) (string, int, error) {
+	host := firstMetadataString(asset.Metadata, "host", "hostname", "address")
+	if host == "" {
+		host = strings.TrimSpace(asset.Host)
+	}
+	port := asset.Port
+	if configured, ok := metadataInt(asset.Metadata["port"]); ok {
+		port = configured
+	}
+	if host == "" {
+		return "", 0, errors.New("database host is required")
+	}
+	if port == 0 {
+		if parsedHost, parsedPort, ok := splitHostPortLoose(host); ok {
+			host = parsedHost
+			port = parsedPort
+		}
+	}
+	if port == 0 {
+		port = defaultPort
+	}
+	return host, port, nil
+}
+
+func splitHostPortLoose(value string) (string, int, bool) {
+	host, portText, err := net.SplitHostPort(value)
+	if err != nil {
+		if strings.Count(value, ":") != 1 {
+			return "", 0, false
+		}
+		parts := strings.SplitN(value, ":", 2)
+		host, portText = parts[0], parts[1]
+	}
+	port, err := strconv.Atoi(portText)
+	if err != nil || strings.TrimSpace(host) == "" {
+		return "", 0, false
+	}
+	return strings.Trim(host, "[]"), port, true
 }
 
 func databaseAssetName(asset model.PlatformItem, dsn string) string {

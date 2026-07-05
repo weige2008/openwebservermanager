@@ -261,7 +261,7 @@ export function PlatformTablePage({ config }: { config: PlatformPageConfig }) {
     setForm({
       ...initialForm,
       type: defaultPlatformType(config.collection),
-      protocol: config.collection === 'command_filters' ? 'ssh' : '',
+      protocol: config.collection === 'command_filters' ? 'ssh' : config.collection === 'database_assets' ? 'database' : '',
       permissions: defaultPlatformPermissions(config.collection),
       metadata: defaultPlatformMetadata(config.collection),
     })
@@ -316,7 +316,7 @@ export function PlatformTablePage({ config }: { config: PlatformPageConfig }) {
               emptyTitle={app.t('empty', '暂无数据')}
               emptyBody={description}
               searchPlaceholder={app.t('filter', '关键词搜索')}
-              getSearchText={(item) => [item.name, item.type, item.status, item.protocol, item.host, item.group, item.username, item.description, metadataText(item.metadata?.pattern), metadataText(item.metadata?.command), metadataText(item.metadata?.risk), metadataText(item.metadata?.path_prefix), permissionSummary(item.permissions), metadataText(item.metadata?.last_login_at), metadataText(item.metadata?.last_login_ip), item.tags?.join(' ')].filter(Boolean).join(' ')}
+              getSearchText={(item) => [item.name, item.type, item.status, item.protocol, item.host, item.group, item.username, item.description, metadataText(item.metadata?.database), metadataText(item.metadata?.sqlite_path), metadataText(item.metadata?.credential_id), metadataText(item.metadata?.pattern), metadataText(item.metadata?.command), metadataText(item.metadata?.risk), metadataText(item.metadata?.path_prefix), permissionSummary(item.permissions), metadataText(item.metadata?.last_login_at), metadataText(item.metadata?.last_login_ip), item.tags?.join(' ')].filter(Boolean).join(' ')}
             />
           </CardContent>
         </Card>
@@ -1141,8 +1141,10 @@ function PlatformItemDialog({
   const isCommandFilter = collection === 'command_filters'
   const isCommandSnippet = collection === 'command_snippets'
   const isAuthorizationStrategy = collection === 'authorization_strategies'
+  const isDatabaseAsset = collection === 'database_assets'
   const roleItems = app.data.platform?.roles || []
   const storageItems = app.data.platform?.storages || []
+  const databaseCredentials = (app.data.platform?.credentials || []).filter((item) => item.type === 'database_password')
   return (
     <DialogShell open={open} onOpenChange={onOpenChange} title={title} description={description}>
       <div className='grid gap-4'>
@@ -1236,6 +1238,64 @@ function PlatformItemDialog({
                 </div>
               </div>
               <Field label={app.t('tags', '标签')}><Input placeholder='storage,readonly' value={form.tags} onChange={(event) => onChange({ tags: event.currentTarget.value })} /></Field>
+            </>
+          ) : isDatabaseAsset ? (
+            <>
+              <Field label={app.t('name')}><Input value={form.name} onChange={(event) => onChange({ name: event.currentTarget.value })} /></Field>
+              <Field label={app.t('status')}>
+                <Select value={form.status || 'enabled'} onChange={(event) => onChange({ status: event.currentTarget.value })}>
+                  <option value='enabled'>{app.t('enabled', '启用')}</option>
+                  <option value='disabled'>{app.t('disabled', '禁用')}</option>
+                </Select>
+              </Field>
+              <Field label={app.t('databaseDriver', '数据库类型')}>
+                <Select value={form.type || 'sqlite'} onChange={(event) => onChange({ type: event.currentTarget.value, protocol: 'database' })}>
+                  <option value='sqlite'>SQLite</option>
+                  <option value='mysql'>MySQL / MariaDB</option>
+                  <option value='postgres'>PostgreSQL</option>
+                </Select>
+              </Field>
+              {form.type === 'sqlite' || !form.type ? (
+                <Field label={app.t('sqlitePath', 'SQLite 路径')}>
+                  <Input placeholder='ops.db' value={metadataFormText(form.metadata, 'sqlite_path')} onChange={(event) => onChange({ metadata: metadataWithValue(form.metadata, 'sqlite_path', event.currentTarget.value) })} />
+                </Field>
+              ) : (
+                <>
+                  <Field label={app.t('address')}><Input placeholder='db.internal' value={form.host} onChange={(event) => onChange({ host: event.currentTarget.value })} /></Field>
+                  <Field label={app.t('ports')}><Input type='number' placeholder={form.type === 'postgres' ? '5432' : '3306'} value={form.port} onChange={(event) => onChange({ port: event.currentTarget.value })} /></Field>
+                  <Field label={app.t('databaseName', '数据库名')}>
+                    <Input placeholder={form.type === 'postgres' ? 'postgres' : 'app'} value={metadataFormText(form.metadata, 'database')} onChange={(event) => onChange({ metadata: metadataWithValue(form.metadata, 'database', event.currentTarget.value) })} />
+                  </Field>
+                  <Field label={app.t('username', '用户')}><Input value={form.username} onChange={(event) => onChange({ username: event.currentTarget.value })} /></Field>
+                  <Field label={app.t('credential', '凭据')}>
+                    <Select value={metadataFormText(form.metadata, 'credential_id')} onChange={(event) => onChange({ metadata: metadataWithValue(form.metadata, 'credential_id', event.currentTarget.value) })}>
+                      <option value=''>{app.t('none', '无')}</option>
+                      {databaseCredentials.map((credential) => (
+                        <option key={credential.id} value={credential.id}>{credential.name} {credential.username ? `(${credential.username})` : ''}</option>
+                      ))}
+                    </Select>
+                  </Field>
+                  {form.type === 'postgres' ? (
+                    <Field label='SSL mode'>
+                      <Select value={metadataFormText(form.metadata, 'sslmode') || 'disable'} onChange={(event) => onChange({ metadata: metadataWithValue(form.metadata, 'sslmode', event.currentTarget.value) })}>
+                        <option value='disable'>disable</option>
+                        <option value='require'>require</option>
+                        <option value='verify-ca'>verify-ca</option>
+                        <option value='verify-full'>verify-full</option>
+                      </Select>
+                    </Field>
+                  ) : (
+                    <Field label='Charset'>
+                      <Input placeholder='utf8mb4' value={metadataFormText(form.metadata, 'charset')} onChange={(event) => onChange({ metadata: metadataWithValue(form.metadata, 'charset', event.currentTarget.value) })} />
+                    </Field>
+                  )}
+                </>
+              )}
+              <Field label={app.t('rowLimit', '行数限制')}>
+                <Input type='number' placeholder='100' value={metadataFormText(form.metadata, 'row_limit')} onChange={(event) => onChange({ metadata: metadataWithValue(form.metadata, 'row_limit', event.currentTarget.value ? Number(event.currentTarget.value) : '') })} />
+              </Field>
+              <Field label={app.t('group')}><Input value={form.group} onChange={(event) => onChange({ group: event.currentTarget.value })} /></Field>
+              <Field label={app.t('tags', '标签')}><Input placeholder='mysql,prod' value={form.tags} onChange={(event) => onChange({ tags: event.currentTarget.value })} /></Field>
             </>
           ) : isCommandSnippet ? (
             <>
@@ -1405,6 +1465,7 @@ function defaultPlatformType(collection: string) {
   if (collection === 'command_filters') return 'deny'
   if (collection === 'command_snippets') return 'public'
   if (collection === 'authorization_strategies') return 'file'
+  if (collection === 'database_assets') return 'sqlite'
   return ''
 }
 
@@ -1417,6 +1478,7 @@ function defaultPlatformMetadata(collection: string) {
   if (collection === 'command_filters') return JSON.stringify({ risk: 'high' }, null, 2)
   if (collection === 'command_snippets') return JSON.stringify({ command: '', append_newline: false }, null, 2)
   if (collection === 'authorization_strategies') return JSON.stringify({ path_prefix: '' }, null, 2)
+  if (collection === 'database_assets') return JSON.stringify({ sqlite_path: '', row_limit: 100 }, null, 2)
   return ''
 }
 

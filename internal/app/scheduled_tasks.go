@@ -253,11 +253,11 @@ func (s *Server) checkAssetReachability(collection string, item model.PlatformIt
 		}
 		return "active", resp.Status
 	case "database_assets":
-		driver, dsn, err := databaseAssetDriverAndDSN(s.cfg.DataDir, item)
+		connection, err := s.databaseAssetConnection(item)
 		if err != nil {
 			return "offline", err.Error()
 		}
-		db, err := sql.Open(driver, dsn)
+		db, err := sql.Open(connection.Driver, connection.DSN)
 		if err != nil {
 			return "offline", err.Error()
 		}
@@ -265,7 +265,7 @@ func (s *Server) checkAssetReachability(collection string, item model.PlatformIt
 		if err := db.Ping(); err != nil {
 			return "offline", err.Error()
 		}
-		return "active", driver
+		return "active", connection.Driver
 	default:
 		host := strings.TrimSpace(item.Host)
 		if host == "" {

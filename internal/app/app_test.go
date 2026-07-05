@@ -776,6 +776,97 @@ func TestDatabaseAssetQueryRequiresAuthorizationAndLogs(t *testing.T) {
 	}
 }
 
+func TestDatabaseAssetConnectionBuildsExternalDriverDSN(t *testing.T) {
+	mysqlAsset := model.PlatformItem{
+		ID:       "db_mysql",
+		Name:     "mysql ops",
+		Type:     "mysql",
+		Host:     "mysql.internal",
+		Port:     3307,
+		Username: "asset_user",
+		Metadata: map[string]any{"database": "ops", "charset": "utf8mb4"},
+	}
+	driver, dsn, err := databaseAssetDriverAndDSN(t.TempDir(), mysqlAsset, databaseAssetSecret{Password: "asset-secret"})
+	if err != nil {
+		t.Fatalf("mysql dsn: %v", err)
+	}
+	if driver != "mysql" || !strings.Contains(dsn, "asset_user:asset-secret@tcp(mysql.internal:3307)/ops") || !strings.Contains(dsn, "parseTime=true") {
+		t.Fatalf("mysql driver/dsn = %q %q", driver, dsn)
+	}
+
+	postgresAsset := model.PlatformItem{
+		ID:       "db_postgres",
+		Name:     "postgres ops",
+		Type:     "postgres",
+		Host:     "postgres.internal:5433",
+		Username: "pg_asset",
+		Metadata: map[string]any{"database": "app", "sslmode": "require"},
+	}
+	driver, dsn, err = databaseAssetDriverAndDSN(t.TempDir(), postgresAsset, databaseAssetSecret{Password: "pg-secret"})
+	if err != nil {
+		t.Fatalf("postgres dsn: %v", err)
+	}
+	parsed, err := url.Parse(dsn)
+	if err != nil {
+		t.Fatalf("parse postgres dsn: %v", err)
+	}
+	if driver != "pgx" || parsed.Scheme != "postgres" || parsed.Host != "postgres.internal:5433" || parsed.Path != "/app" || parsed.Query().Get("sslmode") != "require" {
+		t.Fatalf("postgres driver/dsn = %q %q", driver, dsn)
+	}
+	if user := parsed.User.Username(); user != "pg_asset" {
+		t.Fatalf("postgres dsn username = %q, want pg_asset", user)
+	}
+	password, _ := parsed.User.Password()
+	if password != "pg-secret" {
+		t.Fatalf("postgres dsn password = %q, want pg-secret", password)
+	}
+
+	handler, adminCookie := newTestHandler(t)
+	server := handler.(*Server)
+	credentialRec := assertStatus(t, handler, http.MethodPost, "/api/admin/credentials", map[string]any{
+		"name":     "postgres credential",
+		"type":     "database_password",
+		"status":   "enabled",
+		"username": "pg_credential",
+		"password": "credential-secret",
+	}, adminCookie, http.StatusCreated)
+	var credential model.PlatformItem
+	decodeResponse(t, credentialRec, &credential)
+	if strings.Contains(credentialRec.Body.String(), "credential-secret") {
+		t.Fatal("credential secret leaked in API response")
+	}
+	assetRec := assertStatus(t, handler, http.MethodPost, "/api/admin/database-assets", map[string]any{
+		"name":     "credential-backed postgres",
+		"type":     "postgres",
+		"status":   "enabled",
+		"protocol": "database",
+		"host":     "postgres.internal",
+		"port":     5432,
+		"username": "asset-user",
+		"metadata": map[string]any{"database": "app", "credential_id": credential.ID, "sslmode": "disable"},
+	}, adminCookie, http.StatusCreated)
+	var asset model.PlatformItem
+	decodeResponse(t, assetRec, &asset)
+	connection, err := server.databaseAssetConnection(asset)
+	if err != nil {
+		t.Fatalf("database asset connection: %v", err)
+	}
+	parsed, err = url.Parse(connection.DSN)
+	if err != nil {
+		t.Fatalf("parse credential postgres dsn: %v", err)
+	}
+	if connection.Driver != "pgx" || connection.Username != "pg_credential" || parsed.User.Username() != "pg_credential" {
+		t.Fatalf("credential-backed connection = %#v dsn=%q", connection, connection.DSN)
+	}
+	password, _ = parsed.User.Password()
+	if password != "credential-secret" {
+		t.Fatalf("credential-backed dsn password = %q, want credential-secret", password)
+	}
+	if strings.Contains(assetRec.Body.String(), "credential-secret") {
+		t.Fatal("database asset response leaked credential secret")
+	}
+}
+
 func TestRoleBasedAccessControl(t *testing.T) {
 	handler, adminCookie := newTestHandler(t)
 

@@ -1,4 +1,4 @@
-import { KeyRound, Monitor, Moon, RotateCcw, ShieldCheck, Sun, UserCircle } from 'lucide-react'
+import { KeyRound, Monitor, Moon, Network, RotateCcw, ShieldCheck, Sun, UserCircle } from 'lucide-react'
 import { useEffect, useState } from 'react'
 import { useTranslation } from 'react-i18next'
 
@@ -65,10 +65,28 @@ interface LoginSecurityState {
   setting?: PlatformItem
 }
 
+interface LDAPSettingsState {
+  enabled: boolean
+  providerName: string
+  url: string
+  bindDN: string
+  bindPassword: string
+  bindPasswordSet: boolean
+  baseDN: string
+  userFilter: string
+  usernameAttribute: string
+  displayNameAttribute: string
+  emailAttribute: string
+  role: string
+  autoCreate: boolean
+  setting?: PlatformItem
+}
+
 const loginSecurityTypes = ['security', 'identity', 'login', 'password', 'captcha']
 const captchaKeys = ['captcha_enabled', 'login_captcha', 'enable_captcha', 'captcha', 'require_captcha']
 const disablePasswordKeys = ['disable_password_login', 'password_login_disabled', 'disablePasswordLogin', 'passwordLoginDisabled', 'no_password_login']
 const passwordLoginKeys = ['password_login', 'enable_password_login', 'password_auth', 'local_password_login']
+const ldapSettingKeys = ['ldap_enabled', 'ldap_url', 'ldap_base_dn', 'ldap_bind_dn', 'ldap_user_filter', 'ldap_provider_id', 'ldap_provider_name']
 
 export function SettingsPage() {
   const app = useApp()
@@ -86,6 +104,8 @@ export function SettingsPage() {
     passwordLoginDisabled: app.passwordLoginDisabled,
   })
   const [loginSecurityBusy, setLoginSecurityBusy] = useState(false)
+  const [ldapSettings, setLDAPSettings] = useState<LDAPSettingsState>(() => defaultLDAPSettings())
+  const [ldapBusy, setLDAPBusy] = useState(false)
 
   const loadMFAStatus = async () => {
     setMFAStatus(await apiRequest<MFAStatus>('/api/auth/mfa/status'))
@@ -94,6 +114,7 @@ export function SettingsPage() {
   const loadLoginSecurity = async () => {
     const result = await apiRequest<{ items: PlatformItem[] }>('/api/admin/system-settings')
     setLoginSecurity(loginSecurityFromSettings(result.items, app.captchaRequired, app.passwordLoginDisabled))
+    setLDAPSettings(ldapSettingsFromSettings(result.items))
   }
 
   useEffect(() => {
@@ -197,6 +218,56 @@ export function SettingsPage() {
       app.handleApiError(error)
     } finally {
       setLoginSecurityBusy(false)
+    }
+  }
+
+  const patchLDAP = (next: Partial<LDAPSettingsState>) => setLDAPSettings((current) => ({ ...current, ...next }))
+
+  const saveLDAPSettings = async () => {
+    setLDAPBusy(true)
+    try {
+      const target = ldapSettings.setting
+      const metadata: Record<string, unknown> = {
+        ...(target?.metadata ?? {}),
+        ldap_enabled: ldapSettings.enabled,
+        ldap_provider_id: 'default-ldap',
+        ldap_provider_name: ldapSettings.providerName.trim() || 'LDAP',
+        ldap_url: ldapSettings.url.trim(),
+        ldap_bind_dn: ldapSettings.bindDN.trim(),
+        ldap_base_dn: ldapSettings.baseDN.trim(),
+        ldap_user_filter: ldapSettings.userFilter.trim() || '(uid={username})',
+        ldap_username_attribute: ldapSettings.usernameAttribute.trim() || 'uid',
+        ldap_display_name_attribute: ldapSettings.displayNameAttribute.trim() || 'cn',
+        ldap_email_attribute: ldapSettings.emailAttribute.trim() || 'mail',
+        ldap_role: ldapSettings.role || 'user',
+        ldap_auto_create: ldapSettings.autoCreate,
+      }
+      if (ldapSettings.bindPassword.trim()) metadata.ldap_bind_password = ldapSettings.bindPassword.trim()
+      const payload = {
+        name: target?.name || 'LDAP identity',
+        type: 'identity',
+        status: 'enabled',
+        metadata,
+      }
+      if (target?.id) {
+        await apiRequest<PlatformItem>(`/api/admin/system-settings/${target.id}`, {
+          method: 'PATCH',
+          body: JSON.stringify(payload),
+        })
+      } else {
+        await apiRequest<PlatformItem>('/api/admin/system-settings', {
+          method: 'POST',
+          body: JSON.stringify(payload),
+        })
+      }
+      patchLDAP({ bindPassword: '' })
+      await app.refresh(true)
+      await loadLoginSecurity()
+      app.showToast(t('saved'))
+    } catch (error) {
+      app.handleApiError(error)
+    } finally {
+      setLDAPBusy(false)
     }
   }
 
@@ -359,6 +430,89 @@ export function SettingsPage() {
         </div>
       </CardStaggerItem>
 
+      <CardStaggerItem className='grid gap-4 rounded-xl border border-border bg-card p-5 shadow-sm lg:grid-cols-[0.85fr_1.15fr]'>
+        <div className='flex min-w-0 items-start gap-3'>
+          <span className='grid size-12 shrink-0 place-items-center rounded-full bg-primary text-primary-foreground'>
+            <Network className='size-5' />
+          </span>
+          <div className='min-w-0'>
+            <div className='flex flex-wrap items-center gap-2'>
+              <h2 className='truncate text-base font-semibold'>{t('settingsPage.ldapTitle', { defaultValue: 'LDAP directory login' })}</h2>
+              <Badge tone={ldapSettings.enabled ? 'success' : 'warning'}>
+                {ldapSettings.enabled ? t('settingsPage.ldapEnabled', { defaultValue: 'LDAP on' }) : t('settingsPage.ldapDisabled', { defaultValue: 'LDAP off' })}
+              </Badge>
+              <Badge tone={ldapSettings.bindPasswordSet ? 'success' : 'neutral'}>
+                {ldapSettings.bindPasswordSet ? t('passwordSaved') : t('passwordNotSet')}
+              </Badge>
+            </div>
+            <p className='mt-1 max-w-lg text-sm leading-6 text-muted-foreground'>
+              {t('settingsPage.ldapDescription', { defaultValue: 'Allow users to sign in with an external LDAP directory. Service bind passwords are encrypted server-side and never returned by API responses.' })}
+            </p>
+          </div>
+        </div>
+        <div className='grid gap-3'>
+          <label className='flex items-center gap-2 rounded-lg border border-border bg-background/70 px-3 py-2 text-sm'>
+            <input
+              type='checkbox'
+              className='size-4 accent-primary'
+              checked={ldapSettings.enabled}
+              onChange={(event) => patchLDAP({ enabled: event.currentTarget.checked })}
+            />
+            <span>{t('settingsPage.ldapEnableLogin', { defaultValue: 'Enable LDAP login' })}</span>
+          </label>
+          <div className='grid gap-3 md:grid-cols-2'>
+            <Field label={t('name')}>
+              <Input value={ldapSettings.providerName} onChange={(event) => patchLDAP({ providerName: event.currentTarget.value })} placeholder='Corporate LDAP' />
+            </Field>
+            <Field label={t('settingsPage.ldapUrl', { defaultValue: 'LDAP URL' })}>
+              <Input value={ldapSettings.url} onChange={(event) => patchLDAP({ url: event.currentTarget.value })} placeholder='ldap://directory.example.com:389' />
+            </Field>
+            <Field label={t('settingsPage.ldapBindDN', { defaultValue: 'Bind DN' })}>
+              <Input value={ldapSettings.bindDN} onChange={(event) => patchLDAP({ bindDN: event.currentTarget.value })} placeholder='cn=reader,dc=example,dc=com' />
+            </Field>
+            <Field label={t('password')}>
+              <Input type='password' value={ldapSettings.bindPassword} onChange={(event) => patchLDAP({ bindPassword: event.currentTarget.value })} placeholder={ldapSettings.bindPasswordSet ? 'Leave blank to keep current password' : ''} autoComplete='new-password' />
+            </Field>
+            <Field label={t('settingsPage.ldapBaseDN', { defaultValue: 'Base DN' })}>
+              <Input value={ldapSettings.baseDN} onChange={(event) => patchLDAP({ baseDN: event.currentTarget.value })} placeholder='ou=people,dc=example,dc=com' />
+            </Field>
+            <Field label={t('settingsPage.ldapUserFilter', { defaultValue: 'User filter' })}>
+              <Input value={ldapSettings.userFilter} onChange={(event) => patchLDAP({ userFilter: event.currentTarget.value })} placeholder='(uid={username})' />
+            </Field>
+            <Field label={t('settingsPage.ldapUsernameAttribute', { defaultValue: 'Username attribute' })}>
+              <Input value={ldapSettings.usernameAttribute} onChange={(event) => patchLDAP({ usernameAttribute: event.currentTarget.value })} placeholder='uid' />
+            </Field>
+            <Field label={t('settingsPage.ldapDisplayNameAttribute', { defaultValue: 'Display name attribute' })}>
+              <Input value={ldapSettings.displayNameAttribute} onChange={(event) => patchLDAP({ displayNameAttribute: event.currentTarget.value })} placeholder='cn' />
+            </Field>
+            <Field label={t('settingsPage.ldapEmailAttribute', { defaultValue: 'Email attribute' })}>
+              <Input value={ldapSettings.emailAttribute} onChange={(event) => patchLDAP({ emailAttribute: event.currentTarget.value })} placeholder='mail' />
+            </Field>
+            <Field label={t('settingsPage.defaultRole', { defaultValue: 'Default role' })}>
+              <Select value={ldapSettings.role} onChange={(event) => patchLDAP({ role: event.currentTarget.value })}>
+                <option value='user'>user</option>
+                <option value='auditor'>auditor</option>
+                <option value='admin'>admin</option>
+              </Select>
+            </Field>
+          </div>
+          <label className='flex items-center gap-2 rounded-lg border border-border bg-background/70 px-3 py-2 text-sm'>
+            <input
+              type='checkbox'
+              className='size-4 accent-primary'
+              checked={ldapSettings.autoCreate}
+              onChange={(event) => patchLDAP({ autoCreate: event.currentTarget.checked })}
+            />
+            <span>{t('settingsPage.ldapAutoCreate', { defaultValue: 'Create LDAP users on first successful login' })}</span>
+          </label>
+          <div className='flex justify-end'>
+            <Button variant='primary' onClick={() => void saveLDAPSettings()} disabled={ldapBusy || (ldapSettings.enabled && (!ldapSettings.url.trim() || !ldapSettings.baseDN.trim()))}>
+              {ldapBusy ? t('saving') : t('save')}
+            </Button>
+          </div>
+        </div>
+      </CardStaggerItem>
+
       <CardStaggerItem className='grid gap-4 rounded-xl border border-border bg-card p-5 shadow-sm lg:grid-cols-[1.1fr_0.9fr]'>
         <div className='lg:col-span-2'>
           <h2 className='text-base font-semibold'>{t('settingsPage.appearanceTitle')}</h2>
@@ -512,6 +666,55 @@ function loginSecurityFromSettings(items: PlatformItem[], fallbackCaptcha: boole
   return { captchaEnabled, passwordLoginDisabled, setting }
 }
 
+function defaultLDAPSettings(): LDAPSettingsState {
+  return {
+    enabled: false,
+    providerName: 'LDAP',
+    url: '',
+    bindDN: '',
+    bindPassword: '',
+    bindPasswordSet: false,
+    baseDN: '',
+    userFilter: '(uid={username})',
+    usernameAttribute: 'uid',
+    displayNameAttribute: 'cn',
+    emailAttribute: 'mail',
+    role: 'user',
+    autoCreate: true,
+  }
+}
+
+function ldapSettingsFromSettings(items: PlatformItem[]): LDAPSettingsState {
+  const candidates = items.filter((item) => {
+    const type = (item.type || '').trim().toLowerCase()
+    return platformItemEnabled(item) && type === 'identity' && hasLDAPMetadata(item)
+  })
+  const setting = candidates.find((item) => item.name === 'LDAP identity') || candidates[0]
+  if (!setting) return defaultLDAPSettings()
+  const metadata = setting.metadata ?? {}
+  return {
+    enabled: metadataBoolValue(metadata.ldap_enabled) === true || metadataBoolValue(metadata.ldap_login_enabled) === true,
+    providerName: metadataText(metadata.ldap_provider_name) || metadataText(metadata.provider_name) || setting.name || 'LDAP',
+    url: metadataText(metadata.ldap_url) || metadataText(metadata.url) || '',
+    bindDN: metadataText(metadata.ldap_bind_dn) || metadataText(metadata.bind_dn) || '',
+    bindPassword: '',
+    bindPasswordSet: metadataBoolValue(metadata.ldap_bind_password_set) === true,
+    baseDN: metadataText(metadata.ldap_base_dn) || metadataText(metadata.base_dn) || '',
+    userFilter: metadataText(metadata.ldap_user_filter) || metadataText(metadata.user_filter) || '(uid={username})',
+    usernameAttribute: metadataText(metadata.ldap_username_attribute) || metadataText(metadata.username_attribute) || 'uid',
+    displayNameAttribute: metadataText(metadata.ldap_display_name_attribute) || metadataText(metadata.display_name_attribute) || 'cn',
+    emailAttribute: metadataText(metadata.ldap_email_attribute) || metadataText(metadata.email_attribute) || 'mail',
+    role: metadataText(metadata.ldap_role) || metadataText(metadata.role) || 'user',
+    autoCreate: metadata.ldap_auto_create === undefined ? true : metadataBoolValue(metadata.ldap_auto_create) === true,
+    setting,
+  }
+}
+
+function hasLDAPMetadata(item: PlatformItem) {
+  const metadata = item.metadata ?? {}
+  return ldapSettingKeys.some((key) => Object.prototype.hasOwnProperty.call(metadata, key))
+}
+
 function hasLoginSecurityMetadata(item: PlatformItem) {
   const metadata = item.metadata ?? {}
   return [...captchaKeys, ...disablePasswordKeys, ...passwordLoginKeys].some((key) => Object.prototype.hasOwnProperty.call(metadata, key))
@@ -534,4 +737,10 @@ function metadataBoolValue(value: unknown): boolean | null {
   if (['true', '1', 'yes', 'enabled', 'required', 'on'].includes(normalized)) return true
   if (['false', '0', 'no', 'disabled', 'off'].includes(normalized)) return false
   return null
+}
+
+function metadataText(value: unknown): string {
+  if (typeof value === 'string') return value
+  if (typeof value === 'number' || typeof value === 'boolean') return String(value)
+  return ''
 }

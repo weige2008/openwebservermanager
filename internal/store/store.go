@@ -760,7 +760,7 @@ func (s *Store) UpdatePlatformItem(collection, id string, req model.PlatformItem
 	existingClientSecretHash, _ := item.Metadata["client_secret_hash"].(string)
 	existingAgentTokenHash, _ := item.Metadata["agent_token_hash"].(string)
 	existingCredentialSecrets := copyMetadataSecrets(item.Metadata, "encrypted_password", "encrypted_private_key", "encrypted_passphrase")
-	existingSystemSettingSecrets := copyMetadataSecrets(item.Metadata, "smtp_password_encrypted", "llm_api_key_encrypted", "oidc_client_secret_encrypted")
+	existingSystemSettingSecrets := copyMetadataSecrets(item.Metadata, "smtp_password_encrypted", "llm_api_key_encrypted", "oidc_client_secret_encrypted", "ldap_bind_password_encrypted")
 	existingSystemSettingSecretState := copyMetadataValues(item.Metadata,
 		"smtp_password_set",
 		"smtp_password_updated_at",
@@ -768,6 +768,8 @@ func (s *Store) UpdatePlatformItem(collection, id string, req model.PlatformItem
 		"llm_api_key_updated_at",
 		"oidc_client_secret_set",
 		"oidc_client_secret_updated_at",
+		"ldap_bind_password_set",
+		"ldap_bind_password_updated_at",
 	)
 	existingUserMFA := copyMetadataSecrets(item.Metadata, "mfa_secret_encrypted")
 	existingUserMFA["mfa_enabled"] = metadataStringValue(item.Metadata["mfa_enabled"])
@@ -1170,7 +1172,7 @@ func (s *Store) applySystemSettingPlatformSecret(req model.PlatformItemRequest, 
 		delete(item.Metadata, key)
 	}
 	now := time.Now().UTC().Format(time.RFC3339Nano)
-	if err := s.encryptSystemSettingOIDCSecrets(item.Metadata, now, creating); err != nil {
+	if err := s.encryptSystemSettingExternalSecrets(item.Metadata, now, creating); err != nil {
 		return err
 	}
 	if smtpPassword == "" && llmAPIKey == "" {
@@ -1206,41 +1208,43 @@ func (s *Store) applySystemSettingPlatformSecret(req model.PlatformItemRequest, 
 	return nil
 }
 
-func (s *Store) encryptSystemSettingOIDCSecrets(value any, now string, creating bool) error {
+func (s *Store) encryptSystemSettingExternalSecrets(value any, now string, creating bool) error {
 	switch typed := value.(type) {
 	case map[string]any:
-		secret := firstMetadataString(typed, externalOIDCSecretPlainKeys...)
-		for _, key := range externalOIDCSecretPlainKeys {
-			delete(typed, key)
-		}
-		if secret != "" {
-			if len(secret) > 32*1024 {
-				return errors.New("system setting secret is too large")
+		for _, spec := range externalSystemSettingSecretSpecs {
+			secret := firstMetadataString(typed, spec.plainKeys...)
+			for _, key := range spec.plainKeys {
+				delete(typed, key)
 			}
-			encrypted, err := s.cipher.EncryptString(secret)
-			if err != nil {
-				return err
+			if secret != "" {
+				if len(secret) > 32*1024 {
+					return errors.New("system setting secret is too large")
+				}
+				encrypted, err := s.cipher.EncryptString(secret)
+				if err != nil {
+					return err
+				}
+				typed[spec.encryptedKey] = encrypted
+				typed[spec.setKey] = true
+				typed[spec.updatedAtKey] = now
+			} else if creating {
+				delete(typed, spec.setKey)
 			}
-			typed["oidc_client_secret_encrypted"] = encrypted
-			typed["oidc_client_secret_set"] = true
-			typed["oidc_client_secret_updated_at"] = now
-		} else if creating {
-			delete(typed, "oidc_client_secret_set")
 		}
 		for _, child := range typed {
-			if err := s.encryptSystemSettingOIDCSecrets(child, now, creating); err != nil {
+			if err := s.encryptSystemSettingExternalSecrets(child, now, creating); err != nil {
 				return err
 			}
 		}
 	case []any:
 		for _, child := range typed {
-			if err := s.encryptSystemSettingOIDCSecrets(child, now, creating); err != nil {
+			if err := s.encryptSystemSettingExternalSecrets(child, now, creating); err != nil {
 				return err
 			}
 		}
 	case []map[string]any:
 		for _, child := range typed {
-			if err := s.encryptSystemSettingOIDCSecrets(child, now, creating); err != nil {
+			if err := s.encryptSystemSettingExternalSecrets(child, now, creating); err != nil {
 				return err
 			}
 		}
@@ -1560,7 +1564,27 @@ func sanitizePlatformItem(item *model.PlatformItem) {
 	sanitizeMetadataValue(item.Metadata)
 }
 
-var externalOIDCSecretPlainKeys = []string{"client_secret", "clientSecret", "oidc_client_secret", "oidcClientSecret", "external_oidc_client_secret", "externalOidcClientSecret"}
+type externalSystemSettingSecretSpec struct {
+	plainKeys    []string
+	encryptedKey string
+	setKey       string
+	updatedAtKey string
+}
+
+var externalSystemSettingSecretSpecs = []externalSystemSettingSecretSpec{
+	{
+		plainKeys:    []string{"client_secret", "clientSecret", "oidc_client_secret", "oidcClientSecret", "external_oidc_client_secret", "externalOidcClientSecret"},
+		encryptedKey: "oidc_client_secret_encrypted",
+		setKey:       "oidc_client_secret_set",
+		updatedAtKey: "oidc_client_secret_updated_at",
+	},
+	{
+		plainKeys:    []string{"bind_password", "bindPassword", "ldap_bind_password", "ldapBindPassword", "plain_ldap_bind_password"},
+		encryptedKey: "ldap_bind_password_encrypted",
+		setKey:       "ldap_bind_password_set",
+		updatedAtKey: "ldap_bind_password_updated_at",
+	},
+}
 
 var sensitiveMetadataKeys = map[string]struct{}{
 	"password":                              {},
@@ -1602,6 +1626,13 @@ var sensitiveMetadataKeys = map[string]struct{}{
 	"externalOidcClientSecret":              {},
 	"oidc_client_secret_encrypted":          {},
 	"external_oidc_client_secret_encrypted": {},
+	"bind_password":                         {},
+	"bindPassword":                          {},
+	"bind_password_encrypted":               {},
+	"ldap_bind_password":                    {},
+	"ldapBindPassword":                      {},
+	"plain_ldap_bind_password":              {},
+	"ldap_bind_password_encrypted":          {},
 }
 
 func sanitizeMetadataValue(value any) {

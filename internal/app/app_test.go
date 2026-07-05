@@ -4,11 +4,13 @@ import (
 	"archive/zip"
 	"bufio"
 	"bytes"
+	"context"
 	"crypto/ed25519"
 	"crypto/rand"
 	"crypto/sha256"
 	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"io"
 	"mime/multipart"
 	"net"
@@ -2011,6 +2013,104 @@ func TestExternalOIDCLoginCreatesUserAndSession(t *testing.T) {
 	}
 }
 
+func TestExternalLDAPLoginCreatesUserAndSession(t *testing.T) {
+	handler, adminCookie := newTestHandler(t)
+	srv := handler.(*Server)
+	fakeLDAP := &fakeLDAPAuthenticator{
+		users: map[string]fakeLDAPUser{
+			"ldap-operator": {
+				password: "directory-password",
+				claims: externalLDAPClaims{
+					Subject:     "uid=ldap-operator,ou=people,dc=example,dc=test",
+					DN:          "uid=ldap-operator,ou=people,dc=example,dc=test",
+					Username:    "ldap-operator",
+					DisplayName: "LDAP Operator",
+					Email:       "ldap-operator@example.test",
+				},
+			},
+		},
+	}
+	srv.ldap = fakeLDAP
+
+	assertStatus(t, handler, http.MethodPost, "/api/admin/system-settings", map[string]any{
+		"name":   "LDAP identity",
+		"type":   "identity",
+		"status": "enabled",
+		"metadata": map[string]any{
+			"disable_password_login":      true,
+			"ldap_enabled":                true,
+			"ldap_provider_id":            "corp-ldap",
+			"ldap_provider_name":          "Corp LDAP",
+			"ldap_url":                    "ldap://directory.example.test:389",
+			"ldap_bind_dn":                "cn=reader,dc=example,dc=test",
+			"ldap_bind_password":          "directory-secret",
+			"ldap_base_dn":                "ou=people,dc=example,dc=test",
+			"ldap_user_filter":            "(uid={username})",
+			"ldap_username_attribute":     "uid",
+			"ldap_display_name_attribute": "cn",
+			"ldap_email_attribute":        "mail",
+			"ldap_role":                   "user",
+			"ldap_auto_create":            true,
+			"ldap_providers": []any{
+				map[string]any{
+					"id":                 "disabled-ldap",
+					"enabled":            false,
+					"url":                "ldap://disabled.example.test:389",
+					"base_dn":            "dc=disabled,dc=test",
+					"ldap_bind_password": "disabled-secret",
+				},
+			},
+		},
+	}, adminCookie, http.StatusCreated)
+
+	statusRec := assertStatus(t, handler, http.MethodGet, "/api/auth/status", nil, nil, http.StatusOK)
+	if !strings.Contains(statusRec.Body.String(), `"password_login_disabled":true`) {
+		t.Fatalf("auth status did not report disabled local password login: %s", statusRec.Body.String())
+	}
+	settingsRec := assertStatus(t, handler, http.MethodGet, "/api/admin/system-settings", nil, adminCookie, http.StatusOK)
+	for _, leaked := range []string{"directory-secret", "disabled-secret", "ldap_bind_password_encrypted", "bind_password_encrypted"} {
+		if strings.Contains(settingsRec.Body.String(), leaked) {
+			t.Fatalf("ldap settings leaked sensitive value %q: %s", leaked, settingsRec.Body.String())
+		}
+	}
+
+	assertStatus(t, handler, http.MethodPost, "/api/auth/login", map[string]any{
+		"username": "ldap-operator",
+		"password": "wrong-password",
+	}, nil, http.StatusUnauthorized)
+	loginRec := assertStatus(t, handler, http.MethodPost, "/api/auth/login", map[string]any{
+		"username": "ldap-operator",
+		"password": "directory-password",
+	}, nil, http.StatusOK)
+	if fakeLDAP.calls != 2 {
+		t.Fatalf("ldap authenticator calls = %d, want 2", fakeLDAP.calls)
+	}
+	if fakeLDAP.lastProvider.ID != "corp-ldap" || fakeLDAP.lastProvider.BindPassword != "directory-secret" || fakeLDAP.lastProvider.BaseDN != "ou=people,dc=example,dc=test" {
+		t.Fatalf("ldap provider was not parsed/decrypted correctly: %#v", fakeLDAP.lastProvider)
+	}
+	cookies := loginRec.Result().Cookies()
+	if len(cookies) == 0 {
+		t.Fatal("ldap login did not set auth cookie")
+	}
+	meRec := assertStatus(t, handler, http.MethodGet, "/api/auth/me", nil, cookies[0], http.StatusOK)
+	if !strings.Contains(meRec.Body.String(), `"username":"ldap-operator"`) || !strings.Contains(meRec.Body.String(), `"role":"user"`) {
+		t.Fatalf("ldap login did not authenticate synced user: %s", meRec.Body.String())
+	}
+	usersRec := assertStatus(t, handler, http.MethodGet, "/api/admin/users", nil, adminCookie, http.StatusOK)
+	for _, expected := range []string{"ldap-operator", "uid=ldap-operator,ou=people,dc=example,dc=test", `"type":"ldap"`} {
+		if !strings.Contains(usersRec.Body.String(), expected) {
+			t.Fatalf("ldap user list missing %q: %s", expected, usersRec.Body.String())
+		}
+	}
+	if strings.Contains(usersRec.Body.String(), "directory-password") || strings.Contains(usersRec.Body.String(), "password_hash") {
+		t.Fatalf("ldap user list leaked secret material: %s", usersRec.Body.String())
+	}
+	loginLogsRec := assertStatus(t, handler, http.MethodGet, "/api/admin/audit/login-logs", nil, adminCookie, http.StatusOK)
+	if !strings.Contains(loginLogsRec.Body.String(), `"type":"ldap"`) || !strings.Contains(loginLogsRec.Body.String(), "signed in") {
+		t.Fatalf("ldap login log missing: %s", loginLogsRec.Body.String())
+	}
+}
+
 func TestToolsAndMonitoringEndpoints(t *testing.T) {
 	handler, cookie := newTestHandler(t)
 	assertStatus(t, handler, http.MethodGet, "/api/system/monitoring", nil, cookie, http.StatusOK)
@@ -2887,6 +2987,33 @@ func newTestHandler(t *testing.T) (http.Handler, *http.Cookie) {
 		t.Fatal("setup did not set auth cookie")
 	}
 	return handler, cookies[0]
+}
+
+type fakeLDAPUser struct {
+	password string
+	claims   externalLDAPClaims
+}
+
+type fakeLDAPAuthenticator struct {
+	users        map[string]fakeLDAPUser
+	calls        int
+	lastProvider externalLDAPProvider
+}
+
+func (f *fakeLDAPAuthenticator) Authenticate(ctx context.Context, provider externalLDAPProvider, username, password string) (externalLDAPClaims, bool, error) {
+	if err := ctx.Err(); err != nil {
+		return externalLDAPClaims{}, false, err
+	}
+	f.calls++
+	f.lastProvider = provider
+	if provider.BindDN == "" || provider.BindPassword == "" || provider.BaseDN == "" {
+		return externalLDAPClaims{}, false, errors.New("ldap provider missing required bind/search settings")
+	}
+	user, ok := f.users[username]
+	if !ok || user.password != password {
+		return externalLDAPClaims{}, false, nil
+	}
+	return user.claims, true, nil
 }
 
 type fakeSMTPServer struct {

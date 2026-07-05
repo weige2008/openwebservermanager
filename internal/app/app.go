@@ -2,6 +2,7 @@ package app
 
 import (
 	"archive/zip"
+	"context"
 	"encoding/json"
 	"errors"
 	"io"
@@ -29,6 +30,7 @@ type Config struct {
 	DataDir           string
 	Public            PublicConfig
 	TrustProxyHeaders bool
+	LDAPAuthenticator ldapAuthenticator
 }
 
 type PublicConfig struct {
@@ -51,6 +53,7 @@ type Server struct {
 	staticFS fs.FS
 	auth     *authManager
 	oidc     *oidcManager
+	ldap     ldapAuthenticator
 }
 
 func New(cfg Config) http.Handler {
@@ -58,13 +61,22 @@ func New(cfg Config) http.Handler {
 	if err != nil {
 		panic(err)
 	}
+	ldapAuth := cfg.LDAPAuthenticator
+	if ldapAuth == nil {
+		ldapAuth = realLDAPAuthenticator{}
+	}
 	return &Server{
 		cfg:      cfg,
 		static:   http.FileServer(http.FS(sub)),
 		staticFS: sub,
 		auth:     newAuthManager(),
 		oidc:     newOIDCManager(),
+		ldap:     ldapAuth,
 	}
+}
+
+type ldapAuthenticator interface {
+	Authenticate(context.Context, externalLDAPProvider, string, string) (externalLDAPClaims, bool, error)
 }
 
 func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {

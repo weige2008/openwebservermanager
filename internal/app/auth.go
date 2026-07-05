@@ -64,6 +64,7 @@ type authStatus struct {
 	Configured            bool `json:"configured"`
 	CaptchaRequired       bool `json:"captcha_required"`
 	PasswordLoginDisabled bool `json:"password_login_disabled"`
+	LDAPLoginEnabled      bool `json:"ldap_login_enabled"`
 }
 
 type setupRequest struct {
@@ -269,6 +270,7 @@ func (s *Server) handleAuthStatus(w http.ResponseWriter, _ *http.Request) {
 		Configured:            s.cfg.Store.AdminConfigured(),
 		CaptchaRequired:       s.captchaRequired(),
 		PasswordLoginDisabled: s.passwordLoginDisabled(),
+		LDAPLoginEnabled:      s.ldapLoginConfigured(),
 	})
 }
 
@@ -329,7 +331,8 @@ func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
 	}
 	username := strings.TrimSpace(req.Username)
 	clientIP := s.clientIP(r)
-	if s.passwordLoginDisabled() {
+	passwordLoginDisabled := s.passwordLoginDisabled()
+	if passwordLoginDisabled && !s.ldapLoginConfigured() {
 		_, _ = s.cfg.Store.CreatePlatformItem("login_logs", model.PlatformItemRequest{
 			Name:        username,
 			Type:        "password",
@@ -375,32 +378,60 @@ func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	admin, ok, err := s.cfg.Store.VerifyAdmin(username, req.Password)
-	if err != nil {
-		writeError(w, http.StatusInternalServerError, err.Error())
-		return
-	}
-	if !ok {
-		admin, ok, err = s.cfg.Store.VerifyPlatformUser(username, req.Password)
+	var admin store.AdminPublic
+	loginType := "password"
+	ok := false
+	var err error
+	if !passwordLoginDisabled {
+		admin, ok, err = s.cfg.Store.VerifyAdmin(username, req.Password)
 		if err != nil {
 			writeError(w, http.StatusInternalServerError, err.Error())
 			return
 		}
 		if !ok {
-			failure := s.auth.recordLoginFailure(failureKey)
-			if !failure.LockedUntil.IsZero() {
-				s.createLoginLock(username, clientIP, failure)
+			admin, ok, err = s.cfg.Store.VerifyPlatformUser(username, req.Password)
+			if err != nil {
+				writeError(w, http.StatusInternalServerError, err.Error())
+				return
+			}
+		}
+	}
+	if !ok {
+		var providerID string
+		admin, providerID, ok, err = s.authenticateExternalLDAP(r.Context(), username, req.Password)
+		if err != nil {
+			status := http.StatusBadGateway
+			if errors.Is(err, errExternalLDAPUserDisabled) || errors.Is(err, errExternalLDAPUserNotAllowed) {
+				status = http.StatusForbidden
 			}
 			_, _ = s.cfg.Store.CreatePlatformItem("login_logs", model.PlatformItemRequest{
 				Name:        username,
-				Type:        "password",
+				Type:        "ldap",
 				Status:      "failed",
-				Description: "invalid username or password",
-				Metadata:    map[string]any{"client_ip": clientIP, "account": username},
+				Description: err.Error(),
+				Metadata:    map[string]any{"client_ip": clientIP, "account": username, "provider_id": providerID},
 			})
-			writeError(w, http.StatusUnauthorized, "invalid username or password")
+			writeError(w, status, err.Error())
 			return
 		}
+		if ok {
+			loginType = "ldap"
+		}
+	}
+	if !ok {
+		failure := s.auth.recordLoginFailure(failureKey)
+		if !failure.LockedUntil.IsZero() {
+			s.createLoginLock(username, clientIP, failure)
+		}
+		_, _ = s.cfg.Store.CreatePlatformItem("login_logs", model.PlatformItemRequest{
+			Name:        username,
+			Type:        "password",
+			Status:      "failed",
+			Description: "invalid username or password",
+			Metadata:    map[string]any{"client_ip": clientIP, "account": username},
+		})
+		writeError(w, http.StatusUnauthorized, "invalid username or password")
+		return
 	}
 	s.auth.resetLoginFailures(failureKey)
 
@@ -418,10 +449,10 @@ func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
 
 	http.SetCookie(w, s.authCookie(r, token, int(authSessionTTL.Seconds())))
 	_ = s.cfg.Store.RecordUserLogin(session.UserID, clientIP, r.UserAgent())
-	_ = s.audit(r, "auth.login", session.UserID, "", "admin signed in")
+	_ = s.audit(r, "auth.login", session.UserID, "", "signed in with "+loginType)
 	_, _ = s.cfg.Store.CreatePlatformItem("login_logs", model.PlatformItemRequest{
 		Name:        username,
-		Type:        "password",
+		Type:        loginType,
 		Status:      "success",
 		OwnerID:     session.UserID,
 		Description: "signed in",

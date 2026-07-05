@@ -46,6 +46,7 @@ export function AuthPage() {
   const [mfaChallenge, setMFAChallenge] = useState<MFAChallenge | null>(null)
   const [captcha, setCaptcha] = useState<CaptchaChallenge | null>(null)
   const [oidcProviders, setOIDCProviders] = useState<OIDCProvider[]>([])
+  const passwordFormAvailable = !app.passwordLoginDisabled || app.ldapLoginEnabled
 
   const loadCaptcha = async () => {
     setCaptcha(await apiRequest<CaptchaChallenge>('/api/auth/captcha'))
@@ -198,7 +199,7 @@ export function AuthPage() {
           <>
             {!app.setupRequired && app.passwordLoginDisabled ? (
               <div className='rounded-lg border border-amber-500/30 bg-amber-500/10 p-3 text-sm leading-6 text-amber-700 dark:text-amber-200'>
-                {t('auth.passwordLoginDisabledNotice')}
+                {app.ldapLoginEnabled ? t('auth.ldapLoginNotice', { defaultValue: 'Local password login is disabled. Use your LDAP directory account here, or use another SSO provider.' }) : t('auth.passwordLoginDisabledNotice')}
               </div>
             ) : null}
             <Field label={t('auth.username')}>
@@ -233,7 +234,7 @@ export function AuthPage() {
         )}
         <Button type='submit' variant='primary' className='w-full' disabled={submitting}>
           {submitting ? <Loader2 className='size-4 animate-spin' /> : null}
-          {mfaChallenge ? 'Verify MFA' : app.setupRequired ? t('auth.setupSubmit') : app.passwordLoginDisabled ? t('auth.passwordLoginDisabledSubmit') : t('auth.loginSubmit')}
+          {mfaChallenge ? 'Verify MFA' : app.setupRequired ? t('auth.setupSubmit') : passwordFormAvailable ? t('auth.loginSubmit') : t('auth.passwordLoginDisabledSubmit')}
         </Button>
       </form>
       {!app.setupRequired && !mfaChallenge && oidcProviders.length ? (

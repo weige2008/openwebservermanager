@@ -15,6 +15,7 @@ interface AppContextValue {
   setupRequired: boolean
   captchaRequired: boolean
   passwordLoginDisabled: boolean
+  ldapLoginEnabled: boolean
   publicConfig: PublicConfig
   data: BootstrapData
   modal: ModalState
@@ -96,7 +97,7 @@ export function AppProvider({ children }: { children: ReactNode }) {
 
   const authStatus = useQuery({
     queryKey: ['auth-status'],
-    queryFn: () => apiRequest<{ configured: boolean; captcha_required?: boolean; password_login_disabled?: boolean }>('/api/auth/status'),
+    queryFn: () => apiRequest<{ configured: boolean; captcha_required?: boolean; password_login_disabled?: boolean; ldap_login_enabled?: boolean }>('/api/auth/status'),
     retry: false,
   })
 
@@ -249,6 +250,7 @@ export function AppProvider({ children }: { children: ReactNode }) {
       setupRequired: authStatus.isFetched ? !configured : false,
       captchaRequired: Boolean(authStatus.data?.captcha_required),
       passwordLoginDisabled: Boolean(authStatus.data?.password_login_disabled),
+      ldapLoginEnabled: Boolean(authStatus.data?.ldap_login_enabled),
       publicConfig,
       data,
       modal,
@@ -274,6 +276,7 @@ export function AppProvider({ children }: { children: ReactNode }) {
       auth,
       authStatus.isFetched,
       authStatus.data?.captcha_required,
+      authStatus.data?.ldap_login_enabled,
       authStatus.data?.password_login_disabled,
       appearance,
       booted,

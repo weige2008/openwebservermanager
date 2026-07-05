@@ -2498,6 +2498,118 @@ func TestResourceOperationEndpoints(t *testing.T) {
 		t.Fatal("certificate upload did not write operation log")
 	}
 
+	dnsProviderRec := assertStatus(t, handler, http.MethodPost, "/api/admin/certificates/dns-providers", map[string]any{
+		"name":     "cloudflare-test",
+		"provider": "cloudflare",
+		"zone":     "example.test",
+		"token":    "dns-secret-token",
+	}, cookie, http.StatusCreated)
+	var dnsProvider model.PlatformItem
+	decodeResponse(t, dnsProviderRec, &dnsProvider)
+	if dnsProvider.Metadata["dns_api_token_set"] != true {
+		t.Fatal("dns provider response did not mark token as configured")
+	}
+	for _, leaked := range []string{"dns-secret-token", "dns_api_token_encrypted"} {
+		if strings.Contains(dnsProviderRec.Body.String(), leaked) {
+			t.Fatalf("dns provider response leaked %s", leaked)
+		}
+	}
+	dnsProvidersRec := assertStatus(t, handler, http.MethodGet, "/api/admin/certificates/dns-providers", nil, cookie, http.StatusOK)
+	if !strings.Contains(dnsProvidersRec.Body.String(), "cloudflare-test") || !strings.Contains(dnsProvidersRec.Body.String(), "dns_api_token_set") {
+		t.Fatal("dns provider list did not include configured provider state")
+	}
+	for _, leaked := range []string{"dns-secret-token", "dns_api_token_encrypted"} {
+		if strings.Contains(dnsProvidersRec.Body.String(), leaked) {
+			t.Fatalf("dns provider list leaked %s", leaked)
+		}
+	}
+
+	acmeRec := assertStatus(t, handler, http.MethodPost, "/api/admin/certificates/acme", map[string]any{
+		"name":            "acme-cert",
+		"domain":          "acme.example.test",
+		"dns":             []string{"www.acme.example.test"},
+		"ip":              []string{"127.0.0.1"},
+		"email":           "ops@example.test",
+		"challenge_type":  "http-01",
+		"dns_provider_id": dnsProvider.ID,
+		"days":            45,
+		"default":         true,
+		"mtls_enabled":    true,
+		"metadata":        map[string]any{"environment": "test"},
+	}, cookie, http.StatusCreated)
+	var acmeCert model.PlatformItem
+	decodeResponse(t, acmeRec, &acmeCert)
+	if acmeCert.Status != "issued" || acmeCert.Type != "acme" {
+		t.Fatalf("unexpected acme certificate state: %#v", acmeCert)
+	}
+	if acmeCert.Metadata["certificate"] == "" || acmeCert.Metadata["expires_at"] == nil || acmeCert.Metadata["acme_http_url"] == "" {
+		t.Fatalf("acme response missing certificate metadata: %#v", acmeCert.Metadata)
+	}
+	for _, leaked := range []string{"PRIVATE KEY", `"private_key"`, "dns-secret-token"} {
+		if strings.Contains(acmeRec.Body.String(), leaked) {
+			t.Fatalf("acme response leaked %s", leaked)
+		}
+	}
+	token, _ := acmeCert.Metadata["acme_http_token"].(string)
+	keyAuthorization, _ := acmeCert.Metadata["acme_http_key_authorization"].(string)
+	if token == "" || keyAuthorization == "" {
+		t.Fatalf("acme response missing challenge values: %#v", acmeCert.Metadata)
+	}
+	challengeRec := assertStatus(t, handler, http.MethodGet, "/.well-known/acme-challenge/"+token, nil, nil, http.StatusOK)
+	if strings.TrimSpace(challengeRec.Body.String()) != keyAuthorization {
+		t.Fatalf("challenge response = %q, want %q", challengeRec.Body.String(), keyAuthorization)
+	}
+	acmeDownloadRec := assertStatus(t, handler, http.MethodGet, "/api/admin/certificates/"+acmeCert.ID+"/download", nil, cookie, http.StatusOK)
+	if !strings.Contains(acmeDownloadRec.Body.String(), "BEGIN CERTIFICATE") {
+		t.Fatal("acme certificate download did not return pem")
+	}
+	defaultRec := assertStatus(t, handler, http.MethodPost, "/api/admin/certificates/"+cert.ID+"/default", map[string]any{}, cookie, http.StatusOK)
+	var defaultCert model.PlatformItem
+	decodeResponse(t, defaultRec, &defaultCert)
+	if defaultCert.ID != cert.ID || defaultCert.Metadata["default"] != true {
+		t.Fatalf("default certificate response = %#v", defaultCert)
+	}
+	clientCAPEM, _, err := makeSelfSignedCertificate(certificateRequest{Domain: "client-ca.example.test", Days: 365})
+	if err != nil {
+		t.Fatalf("make client ca certificate: %v", err)
+	}
+	mtlsRec := assertStatus(t, handler, http.MethodPost, "/api/admin/certificates/"+cert.ID+"/mtls", map[string]any{
+		"enabled":   true,
+		"client_ca": string(clientCAPEM),
+	}, cookie, http.StatusOK)
+	var mtlsCert model.PlatformItem
+	decodeResponse(t, mtlsRec, &mtlsCert)
+	if mtlsCert.Metadata["mtls_enabled"] != true || mtlsCert.Metadata["mtls_client_ca_set"] != true {
+		t.Fatalf("mTLS response missing enabled/set flags: %#v", mtlsCert.Metadata)
+	}
+	if strings.Contains(mtlsRec.Body.String(), `"mtls_client_ca":`) {
+		t.Fatalf("mTLS response leaked client CA: %s", mtlsRec.Body.String())
+	}
+	if strings.Contains(mtlsRec.Body.String(), string(clientCAPEM)) {
+		t.Fatal("mTLS response leaked client CA PEM")
+	}
+	certificatesAfterOpsRec := assertStatus(t, handler, http.MethodGet, "/api/admin/certificates", nil, cookie, http.StatusOK)
+	certificatesAfterOpsBody := certificatesAfterOpsRec.Body.String()
+	for _, leaked := range []string{"PRIVATE KEY", `"private_key"`, "dns-secret-token", `"mtls_client_ca":`} {
+		if strings.Contains(certificatesAfterOpsBody, leaked) {
+			t.Fatalf("certificate list leaked %s", leaked)
+		}
+	}
+	if strings.Count(certificatesAfterOpsBody, `"default":true`) != 1 || !strings.Contains(certificatesAfterOpsBody, `"mtls_client_ca_set":true`) {
+		t.Fatalf("certificate list missing default/mTLS state: %s", certificatesAfterOpsBody)
+	}
+	certificateLogsRec := assertStatus(t, handler, http.MethodGet, "/api/admin/certificates/"+cert.ID+"/logs", nil, cookie, http.StatusOK)
+	certificateLogsBody := certificateLogsRec.Body.String()
+	for _, want := range []string{"certificate.self_signed", "certificate.default", "certificate.mtls.update"} {
+		if !strings.Contains(certificateLogsBody, want) {
+			t.Fatalf("certificate logs missing %s in %s", want, certificateLogsBody)
+		}
+	}
+	acmeLogsRec := assertStatus(t, handler, http.MethodGet, "/api/admin/certificates/"+acmeCert.ID+"/logs", nil, cookie, http.StatusOK)
+	if !strings.Contains(acmeLogsRec.Body.String(), "certificate.acme.request") || !strings.Contains(acmeLogsRec.Body.String(), "certificate.acme.issue") {
+		t.Fatalf("acme logs missing request/issue events: %s", acmeLogsRec.Body.String())
+	}
+
 	taskRec := assertStatus(t, handler, http.MethodPost, "/api/admin/scheduled-tasks", map[string]any{
 		"name":   "Backup now",
 		"type":   "backup",

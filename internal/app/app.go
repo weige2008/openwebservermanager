@@ -89,6 +89,10 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		s.handleOIDCDiscovery(w, r)
 		return
 	}
+	if r.Method == http.MethodGet && strings.HasPrefix(r.URL.Path, "/.well-known/acme-challenge/") {
+		s.handleACMEHTTPChallenge(w, r)
+		return
+	}
 	if strings.HasPrefix(r.URL.Path, "/api/") {
 		s.serveAPI(w, r)
 		return

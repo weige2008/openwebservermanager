@@ -79,6 +79,34 @@ type certificateRequest struct {
 	Days   int      `json:"days"`
 }
 
+type certificateACMERequest struct {
+	Name          string         `json:"name"`
+	Domain        string         `json:"domain"`
+	DNS           []string       `json:"dns"`
+	IP            []string       `json:"ip"`
+	Email         string         `json:"email"`
+	DirectoryURL  string         `json:"directory_url"`
+	ChallengeType string         `json:"challenge_type"`
+	DNSProviderID string         `json:"dns_provider_id"`
+	Days          int            `json:"days"`
+	Default       bool           `json:"default"`
+	MTLSEnabled   bool           `json:"mtls_enabled"`
+	Metadata      map[string]any `json:"metadata"`
+}
+
+type dnsProviderRequest struct {
+	Name     string         `json:"name"`
+	Provider string         `json:"provider"`
+	Zone     string         `json:"zone"`
+	Token    string         `json:"token"`
+	Metadata map[string]any `json:"metadata"`
+}
+
+type certificateMTLSRequest struct {
+	Enabled  bool   `json:"enabled"`
+	ClientCA string `json:"client_ca"`
+}
+
 type sqlExecuteRequest struct {
 	SQL string `json:"sql"`
 }
@@ -111,6 +139,12 @@ func (s *Server) handleResourceOperation(w http.ResponseWriter, r *http.Request,
 	case path == "admin/certificates/upload":
 		s.handleCertificateUpload(w, r)
 		return true
+	case path == "admin/certificates/acme":
+		s.handleCertificateACME(w, r)
+		return true
+	case path == "admin/certificates/dns-providers":
+		s.handleCertificateDNSProviders(w, r)
+		return true
 	case path == "admin/system-settings/smtp/test":
 		s.handleSMTPTest(w, r)
 		return true
@@ -130,6 +164,18 @@ func (s *Server) handleResourceOperation(w http.ResponseWriter, r *http.Request,
 	case strings.HasPrefix(path, "admin/certificates/") && strings.HasSuffix(path, "/download"):
 		id := pathSegmentFromTrimmed(path, 2)
 		s.handleCertificateDownload(w, r, id)
+		return true
+	case strings.HasPrefix(path, "admin/certificates/") && strings.HasSuffix(path, "/default"):
+		id := pathSegmentFromTrimmed(path, 2)
+		s.handleCertificateDefault(w, r, id)
+		return true
+	case strings.HasPrefix(path, "admin/certificates/") && strings.HasSuffix(path, "/mtls"):
+		id := pathSegmentFromTrimmed(path, 2)
+		s.handleCertificateMTLS(w, r, id)
+		return true
+	case strings.HasPrefix(path, "admin/certificates/") && strings.HasSuffix(path, "/logs"):
+		id := pathSegmentFromTrimmed(path, 2)
+		s.handleCertificateLogs(w, r, id)
 		return true
 	case strings.HasPrefix(path, "admin/storages/") && strings.Contains(path, "/files"):
 		parts := splitPath(strings.TrimPrefix(path, "admin/storages/"))
@@ -1174,6 +1220,166 @@ func (s *Server) handleCertificateUpload(w http.ResponseWriter, r *http.Request)
 	writeJSON(w, http.StatusCreated, item)
 }
 
+func (s *Server) handleCertificateACME(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		writeError(w, http.StatusMethodNotAllowed, "method not allowed")
+		return
+	}
+	var req certificateACMERequest
+	if !decodeJSON(w, r, &req) {
+		return
+	}
+	req.Domain = strings.TrimSpace(req.Domain)
+	if req.Domain == "" {
+		writeError(w, http.StatusBadRequest, "domain is required")
+		return
+	}
+	if len(req.DNS) == 0 {
+		req.DNS = []string{req.Domain}
+	}
+	domains := uniqueNonEmptyStrings(append([]string{req.Domain}, req.DNS...))
+	token, keyAuthorization, err := makeACMEHTTPChallenge()
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	certPEM, keyPEM, err := makeSelfSignedCertificate(certificateRequest{
+		Domain: req.Domain,
+		DNS:    domains,
+		IP:     req.IP,
+		Days:   clampInt(req.Days, 1, 3650, 90),
+	})
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	name := strings.TrimSpace(req.Name)
+	if name == "" {
+		name = req.Domain
+	}
+	challengeType := strings.ToLower(strings.TrimSpace(req.ChallengeType))
+	if challengeType == "" {
+		challengeType = "http-01"
+	}
+	directoryURL := strings.TrimSpace(req.DirectoryURL)
+	if directoryURL == "" {
+		directoryURL = "local-ca"
+	}
+	metadata := cloneMetadata(req.Metadata)
+	metadata["domain"] = req.Domain
+	metadata["dns_names"] = domains
+	metadata["ip_addresses"] = metadataStrings(req.IP)
+	metadata["certificate"] = string(certPEM)
+	metadata["private_key"] = string(keyPEM)
+	metadata["has_private_key"] = true
+	metadata["expires_at"] = time.Now().UTC().Add(time.Duration(clampInt(req.Days, 1, 3650, 90)) * 24 * time.Hour)
+	metadata["acme_directory_url"] = directoryURL
+	metadata["acme_mode"] = "local-ca"
+	metadata["acme_order_status"] = "valid"
+	metadata["acme_challenge_type"] = challengeType
+	metadata["acme_http_token"] = token
+	metadata["acme_http_key_authorization"] = keyAuthorization
+	metadata["acme_http_url"] = "/.well-known/acme-challenge/" + token
+	metadata["issued_at"] = time.Now().UTC()
+	if strings.TrimSpace(req.Email) != "" {
+		metadata["account_email"] = strings.TrimSpace(req.Email)
+	}
+	if strings.TrimSpace(req.DNSProviderID) != "" {
+		metadata["dns_provider_id"] = strings.TrimSpace(req.DNSProviderID)
+	}
+	if req.MTLSEnabled {
+		metadata["mtls_enabled"] = true
+	}
+	item, err := s.cfg.Store.CreatePlatformItem("certificates", model.PlatformItemRequest{
+		Name:        name,
+		Type:        "acme",
+		Status:      "issued",
+		Description: "ACME/local-ca certificate for " + req.Domain,
+		Metadata:    metadata,
+	})
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	_ = s.audit(r, "certificate.acme.request", item.ID, "", "requested ACME certificate for "+req.Domain)
+	_ = s.audit(r, "certificate.acme.issue", item.ID, "", "issued local ACME certificate for "+req.Domain)
+	if req.Default {
+		if _, err := s.setDefaultCertificate(item.ID); err != nil {
+			writeError(w, http.StatusInternalServerError, err.Error())
+			return
+		}
+		item, _, _ = s.cfg.Store.GetPlatformItem("certificates", item.ID)
+		sanitizeCertificateItem(&item)
+	}
+	writeJSON(w, http.StatusCreated, item)
+}
+
+func makeACMEHTTPChallenge() (string, string, error) {
+	tokenBytes := make([]byte, 24)
+	if _, err := rand.Read(tokenBytes); err != nil {
+		return "", "", err
+	}
+	keyBytes := make([]byte, 32)
+	if _, err := rand.Read(keyBytes); err != nil {
+		return "", "", err
+	}
+	token := base64.RawURLEncoding.EncodeToString(tokenBytes)
+	keyAuthorization := token + "." + base64.RawURLEncoding.EncodeToString(keyBytes)
+	return token, keyAuthorization, nil
+}
+
+func (s *Server) handleCertificateDNSProviders(w http.ResponseWriter, r *http.Request) {
+	switch r.Method {
+	case http.MethodGet:
+		items, err := s.cfg.Store.ListPlatformItems("system_settings")
+		if err != nil {
+			writeError(w, http.StatusInternalServerError, err.Error())
+			return
+		}
+		result := []model.PlatformItem{}
+		for _, item := range items {
+			if strings.EqualFold(item.Type, "dns-provider") {
+				result = append(result, item)
+			}
+		}
+		writeJSON(w, http.StatusOK, map[string]any{"items": result})
+	case http.MethodPost:
+		var req dnsProviderRequest
+		if !decodeJSON(w, r, &req) {
+			return
+		}
+		name := strings.TrimSpace(req.Name)
+		if name == "" {
+			name = strings.TrimSpace(req.Provider)
+		}
+		if name == "" {
+			writeError(w, http.StatusBadRequest, "provider name is required")
+			return
+		}
+		metadata := cloneMetadata(req.Metadata)
+		metadata["provider"] = strings.TrimSpace(req.Provider)
+		metadata["zone"] = strings.TrimSpace(req.Zone)
+		if strings.TrimSpace(req.Token) != "" {
+			metadata["dns_api_token"] = strings.TrimSpace(req.Token)
+		}
+		item, err := s.cfg.Store.CreatePlatformItem("system_settings", model.PlatformItemRequest{
+			Name:        name,
+			Type:        "dns-provider",
+			Status:      "enabled",
+			Description: "DNS provider used by ACME DNS-01 challenges",
+			Metadata:    metadata,
+		})
+		if err != nil {
+			writeError(w, http.StatusInternalServerError, err.Error())
+			return
+		}
+		_ = s.audit(r, "certificate.dns_provider.create", item.ID, "", "created DNS provider "+name)
+		writeJSON(w, http.StatusCreated, item)
+	default:
+		writeError(w, http.StatusMethodNotAllowed, "method not allowed")
+	}
+}
+
 func readMultipartTextFile(r *http.Request, field string, limit int64) (string, string, error) {
 	file, header, err := r.FormFile(field)
 	if err != nil {
@@ -1322,6 +1528,175 @@ func (s *Server) handleCertificateDownload(w http.ResponseWriter, r *http.Reques
 	w.Header().Set("Content-Type", "application/x-pem-file")
 	w.Header().Set("Content-Disposition", "attachment; filename=\""+id+".crt\"")
 	_, _ = io.WriteString(w, cert)
+}
+
+func (s *Server) handleACMEHTTPChallenge(w http.ResponseWriter, r *http.Request) {
+	token := strings.TrimPrefix(r.URL.Path, "/.well-known/acme-challenge/")
+	token = strings.TrimSpace(strings.Trim(token, "/"))
+	if token == "" || strings.ContainsAny(token, "/\\\x00\r\n\t") {
+		writeError(w, http.StatusBadRequest, "invalid challenge token")
+		return
+	}
+	items, err := s.cfg.Store.ListPlatformItems("certificates")
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	for _, item := range items {
+		if metadataText := firstMetadataString(item.Metadata, "acme_http_token"); metadataText != token {
+			continue
+		}
+		keyAuthorization := firstMetadataString(item.Metadata, "acme_http_key_authorization")
+		if keyAuthorization == "" {
+			break
+		}
+		w.Header().Set("Content-Type", "text/plain; charset=utf-8")
+		_, _ = io.WriteString(w, keyAuthorization)
+		return
+	}
+	writeError(w, http.StatusNotFound, "challenge token not found")
+}
+
+func (s *Server) handleCertificateDefault(w http.ResponseWriter, r *http.Request, id string) {
+	if r.Method != http.MethodPost {
+		writeError(w, http.StatusMethodNotAllowed, "method not allowed")
+		return
+	}
+	item, err := s.setDefaultCertificate(id)
+	if err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			writeError(w, http.StatusNotFound, "certificate not found")
+			return
+		}
+		writeError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	_ = s.audit(r, "certificate.default", id, "", "set default certificate "+item.Name)
+	sanitizeCertificateItem(&item)
+	writeJSON(w, http.StatusOK, item)
+}
+
+func (s *Server) setDefaultCertificate(id string) (model.PlatformItem, error) {
+	items, err := s.cfg.Store.ListPlatformItems("certificates")
+	if err != nil {
+		return model.PlatformItem{}, err
+	}
+	if _, ok, err := s.cfg.Store.GetPlatformItem("certificates", id); err != nil || !ok {
+		if err != nil {
+			return model.PlatformItem{}, err
+		}
+		return model.PlatformItem{}, os.ErrNotExist
+	}
+	var selected model.PlatformItem
+	for _, item := range items {
+		raw, ok, err := s.cfg.Store.GetPlatformItem("certificates", item.ID)
+		if err != nil {
+			return model.PlatformItem{}, err
+		}
+		if !ok {
+			continue
+		}
+		if raw.Metadata == nil {
+			raw.Metadata = map[string]any{}
+		}
+		if raw.ID == id {
+			raw.Metadata["default"] = true
+			raw.Metadata["default_at"] = time.Now().UTC().Format(time.RFC3339Nano)
+			selected = raw
+		} else {
+			delete(raw.Metadata, "default")
+			delete(raw.Metadata, "default_at")
+		}
+		if _, err := s.cfg.Store.SavePlatformItem("certificates", raw); err != nil {
+			return model.PlatformItem{}, err
+		}
+	}
+	if selected.ID == "" {
+		return model.PlatformItem{}, os.ErrNotExist
+	}
+	return selected, nil
+}
+
+func (s *Server) handleCertificateMTLS(w http.ResponseWriter, r *http.Request, id string) {
+	if r.Method != http.MethodPost {
+		writeError(w, http.StatusMethodNotAllowed, "method not allowed")
+		return
+	}
+	item, ok, err := s.cfg.Store.GetPlatformItem("certificates", id)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	if !ok {
+		writeError(w, http.StatusNotFound, "certificate not found")
+		return
+	}
+	var req certificateMTLSRequest
+	if !decodeJSON(w, r, &req) {
+		return
+	}
+	if item.Metadata == nil {
+		item.Metadata = map[string]any{}
+	}
+	item.Metadata["mtls_enabled"] = req.Enabled
+	if strings.TrimSpace(req.ClientCA) != "" {
+		if _, err := parseFirstCertificatePEM([]byte(req.ClientCA)); err != nil {
+			writeError(w, http.StatusBadRequest, "client_ca is invalid: "+err.Error())
+			return
+		}
+		item.Metadata["mtls_client_ca"] = req.ClientCA
+		item.Metadata["mtls_client_ca_set"] = true
+	}
+	item.Metadata["mtls_updated_at"] = time.Now().UTC().Format(time.RFC3339Nano)
+	saved, err := s.cfg.Store.SavePlatformItem("certificates", item)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	_ = s.audit(r, "certificate.mtls.update", id, "", "updated mTLS settings for "+item.Name)
+	writeJSON(w, http.StatusOK, saved)
+}
+
+func (s *Server) handleCertificateLogs(w http.ResponseWriter, r *http.Request, id string) {
+	if r.Method != http.MethodGet {
+		writeError(w, http.StatusMethodNotAllowed, "method not allowed")
+		return
+	}
+	items, err := s.cfg.Store.ListPlatformItems("operation_logs")
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	result := []model.PlatformItem{}
+	for _, item := range items {
+		if item.TargetID == id && strings.HasPrefix(item.Name, "certificate.") {
+			result = append(result, item)
+		}
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"items": result})
+}
+
+func sanitizeCertificateItem(item *model.PlatformItem) {
+	if item.Metadata == nil {
+		return
+	}
+	if _, ok := item.Metadata["mtls_client_ca_set"]; !ok {
+		if _, hasCA := item.Metadata["mtls_client_ca"]; hasCA {
+			item.Metadata["mtls_client_ca_set"] = true
+		}
+	}
+	for _, key := range []string{
+		"private_key",
+		"privateKey",
+		"mtls_client_ca",
+		"client_ca",
+		"dns_api_token",
+		"dns_api_token_encrypted",
+		"api_token",
+		"secret_key",
+	} {
+		delete(item.Metadata, key)
+	}
 }
 
 func (s *Server) handleScheduledTaskRun(w http.ResponseWriter, r *http.Request, id string) {

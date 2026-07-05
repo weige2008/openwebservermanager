@@ -1,6 +1,6 @@
 import type { ColumnDef } from '@tanstack/react-table'
 import { Link } from '@tanstack/react-router'
-import { ArrowUpRight, Copy, Download, FileDown, FileSearch, FolderPlus, MoveRight, Pencil, Play, Plus, RefreshCw, Save, TerminalSquare, Trash2, Upload } from 'lucide-react'
+import { ArrowUpRight, Copy, Download, FileDown, FileSearch, FolderPlus, MoveRight, Pencil, Play, Plus, RefreshCw, Save, ShieldCheck, TerminalSquare, Trash2, Upload } from 'lucide-react'
 import { useEffect, useMemo, useState } from 'react'
 
 import { useApp } from '@/app/app-provider'
@@ -75,6 +75,10 @@ type ResourceOperation =
   | { type: 'agent-token'; item: PlatformItem }
   | { type: 'certificate-create' }
   | { type: 'certificate-upload' }
+  | { type: 'certificate-acme' }
+  | { type: 'certificate-dns-provider' }
+  | { type: 'certificate-logs'; item: PlatformItem }
+  | { type: 'certificate-mtls'; item: PlatformItem }
   | { type: 'storage-files'; item: PlatformItem }
   | { type: 'task-logs'; item: PlatformItem }
   | { type: 'sql-execute'; item: PlatformItem }
@@ -190,6 +194,22 @@ export function PlatformTablePage({ config }: { config: PlatformPageConfig }) {
         header: app.t('status'),
         cell: ({ row }) => <Badge tone={statusTone(row.original.status)}>{row.original.status || '-'}</Badge>,
       },
+      ...(config.collection === 'certificates' ? [
+        {
+          header: app.t('expiresAt', 'Expires at'),
+          cell: ({ row }) => <span className='text-xs'>{formatDate(metadataText(row.original.metadata?.expires_at))}</span>,
+        },
+        {
+          header: app.t('certificateFlags', 'Flags'),
+          cell: ({ row }) => (
+            <div className='flex flex-wrap gap-1'>
+              {metadataBool(row.original.metadata?.default) ? <Badge tone='success'>default</Badge> : null}
+              {metadataBool(row.original.metadata?.mtls_enabled) ? <Badge tone='warning'>mTLS</Badge> : null}
+              {metadataText(row.original.metadata?.acme_order_status) ? <Badge tone='neutral'>{metadataText(row.original.metadata?.acme_order_status)}</Badge> : null}
+            </div>
+          ),
+        },
+      ] satisfies ColumnDef<PlatformItem>[] : []),
       ...(config.collection === 'scheduled_tasks' ? [
         {
           header: app.t('schedule', 'Schedule'),
@@ -486,6 +506,14 @@ function ResourceHeaderActions({ config, rows, onOperation }: { config: Platform
   if (config.collection === 'certificates') {
     return (
       <>
+        <Button variant='outline' onClick={() => onOperation({ type: 'certificate-acme' })}>
+          <Play className='size-4' />
+          ACME
+        </Button>
+        <Button variant='outline' onClick={() => onOperation({ type: 'certificate-dns-provider' })}>
+          <Save className='size-4' />
+          DNS provider
+        </Button>
         <Button variant='outline' onClick={() => onOperation({ type: 'certificate-upload' })}>
           <Upload className='size-4' />
           上传证书
@@ -518,6 +546,16 @@ function ResourceRowActions({ config, item, onOperation }: { config: PlatformPag
     try {
       await downloadResponse(`/api/admin/certificates/${item.id}/download`, `${item.name || item.id}.crt`)
       app.showToast('证书已下载')
+    } catch (error) {
+      app.handleApiError(error)
+    }
+  }
+
+  const setDefaultCertificate = async () => {
+    try {
+      await apiRequest(`/api/admin/certificates/${item.id}/default`, { method: 'POST', body: '{}' })
+      await app.refresh(true)
+      app.showToast(app.t('defaultCertificateUpdated', 'Default certificate updated'))
     } catch (error) {
       app.handleApiError(error)
     }
@@ -610,10 +648,24 @@ function ResourceRowActions({ config, item, onOperation }: { config: PlatformPag
 
   if (config.collection === 'certificates') {
     return (
-      <Button size='sm' variant='outline' onClick={() => void downloadCertificate()}>
-        <FileDown className='size-3.5' />
-        下载
-      </Button>
+      <>
+        <Button size='sm' variant='outline' onClick={() => void downloadCertificate()}>
+          <FileDown className='size-3.5' />
+          下载
+        </Button>
+        <Button size='sm' variant='outline' onClick={() => void setDefaultCertificate()}>
+          <Save className='size-3.5' />
+          默认
+        </Button>
+        <Button size='sm' variant='outline' onClick={() => onOperation({ type: 'certificate-mtls', item })}>
+          <ShieldCheck className='size-3.5' />
+          mTLS
+        </Button>
+        <Button size='sm' variant='outline' onClick={() => onOperation({ type: 'certificate-logs', item })}>
+          <FileSearch className='size-3.5' />
+          日志
+        </Button>
+      </>
     )
   }
 
@@ -677,6 +729,10 @@ function ResourceOperationDialog({ operation, onOpenChange }: { operation: Resou
   if (operation.type === 'agent-token') return <AgentGatewayTokenDialog item={operation.item} onClose={() => onOpenChange(null)} />
   if (operation.type === 'certificate-create') return <CertificateCreateDialog onClose={() => onOpenChange(null)} />
   if (operation.type === 'certificate-upload') return <CertificateUploadDialog onClose={() => onOpenChange(null)} />
+  if (operation.type === 'certificate-acme') return <CertificateACMEDialog onClose={() => onOpenChange(null)} />
+  if (operation.type === 'certificate-dns-provider') return <CertificateDNSProviderDialog onClose={() => onOpenChange(null)} />
+  if (operation.type === 'certificate-logs') return <CertificateLogsDialog item={operation.item} onClose={() => onOpenChange(null)} />
+  if (operation.type === 'certificate-mtls') return <CertificateMTLSDialog item={operation.item} onClose={() => onOpenChange(null)} />
   if (operation.type === 'storage-files') return <StorageFilesDialog item={operation.item} onClose={() => onOpenChange(null)} />
   if (operation.type === 'task-logs') return <TaskLogsDialog item={operation.item} onClose={() => onOpenChange(null)} />
   return <SQLExecuteDialog item={operation.item} onClose={() => onOpenChange(null)} />
@@ -1030,6 +1086,245 @@ function CertificateUploadDialog({ onClose }: { onClose: () => void }) {
             {saving ? '上传中' : '上传'}
           </Button>
         </div>
+      </div>
+    </DialogShell>
+  )
+}
+
+function CertificateACMEDialog({ onClose }: { onClose: () => void }) {
+  const app = useApp()
+  const [providers, setProviders] = useState<PlatformItem[]>([])
+  const [name, setName] = useState('')
+  const [domain, setDomain] = useState('')
+  const [dns, setDNS] = useState('')
+  const [ip, setIP] = useState('')
+  const [email, setEmail] = useState('')
+  const [days, setDays] = useState('90')
+  const [challengeType, setChallengeType] = useState('http-01')
+  const [dnsProviderID, setDNSProviderID] = useState('')
+  const [defaultCert, setDefaultCert] = useState(false)
+  const [mtlsEnabled, setMTLSEnabled] = useState(false)
+  const [saving, setSaving] = useState(false)
+  const [issued, setIssued] = useState<PlatformItem | null>(null)
+
+  useEffect(() => {
+    let alive = true
+    const load = async () => {
+      try {
+        const data = await apiRequest<{ items: PlatformItem[] }>('/api/admin/certificates/dns-providers')
+        if (alive) setProviders(data.items || [])
+      } catch {
+        if (alive) setProviders([])
+      }
+    }
+    void load()
+    return () => {
+      alive = false
+    }
+  }, [])
+
+  const submit = async () => {
+    setSaving(true)
+    try {
+      const item = await apiRequest<PlatformItem>('/api/admin/certificates/acme', {
+        method: 'POST',
+        body: JSON.stringify({
+          name,
+          domain,
+          dns: splitCSV(dns),
+          ip: splitCSV(ip),
+          email,
+          days: Number(days) || 90,
+          challenge_type: challengeType,
+          dns_provider_id: dnsProviderID || undefined,
+          default: defaultCert,
+          mtls_enabled: mtlsEnabled,
+        }),
+      })
+      setIssued(item)
+      await app.refresh(true)
+      app.showToast(app.t('certificateAcmeIssued', 'ACME certificate issued'))
+    } catch (error) {
+      app.handleApiError(error)
+    } finally {
+      setSaving(false)
+    }
+  }
+
+  return (
+    <DialogShell open onOpenChange={(open) => !open && onClose()} title='ACME / Local CA' description='签发本地可用的 ACME 流程证书，记录 HTTP-01 challenge、订单状态和申请日志。'>
+      <div className='grid gap-4'>
+        <div className='grid gap-3 sm:grid-cols-2'>
+          <Field label='名称'><Input value={name} onChange={(event) => setName(event.currentTarget.value)} /></Field>
+          <Field label='主域名'><Input value={domain} onChange={(event) => setDomain(event.currentTarget.value)} placeholder='example.com' /></Field>
+          <Field label='DNS SAN'><Input value={dns} onChange={(event) => setDNS(event.currentTarget.value)} placeholder='www.example.com,api.example.com' /></Field>
+          <Field label='IP SAN'><Input value={ip} onChange={(event) => setIP(event.currentTarget.value)} placeholder='127.0.0.1,10.0.0.1' /></Field>
+          <Field label='邮箱'><Input value={email} onChange={(event) => setEmail(event.currentTarget.value)} placeholder='ops@example.com' /></Field>
+          <Field label='有效天数'><Input type='number' value={days} onChange={(event) => setDays(event.currentTarget.value)} /></Field>
+          <Field label='Challenge'>
+            <Select value={challengeType} onChange={(event) => setChallengeType(event.currentTarget.value)}>
+              <option value='http-01'>HTTP-01</option>
+              <option value='dns-01'>DNS-01</option>
+            </Select>
+          </Field>
+          <Field label='DNS provider'>
+            <Select value={dnsProviderID} onChange={(event) => setDNSProviderID(event.currentTarget.value)}>
+              <option value=''>{app.t('none', 'None')}</option>
+              {providers.map((provider) => (
+                <option key={provider.id} value={provider.id}>{provider.name}</option>
+              ))}
+            </Select>
+          </Field>
+        </div>
+        <div className='grid gap-2 sm:grid-cols-2'>
+          <CheckboxRow checked={defaultCert} onChange={setDefaultCert} label='设为默认证书' />
+          <CheckboxRow checked={mtlsEnabled} onChange={setMTLSEnabled} label='启用 mTLS 标记' />
+        </div>
+        {issued ? (
+          <div className='rounded-xl border border-border bg-background/60 p-3 text-sm'>
+            <div className='flex items-center justify-between gap-3'>
+              <strong>{issued.name}</strong>
+              <Badge tone={statusTone(issued.status)}>{issued.status}</Badge>
+            </div>
+            <div className='mt-2 grid gap-1 text-xs text-muted-foreground'>
+              <span>{app.t('challenge', 'Challenge')}: {metadataText(issued.metadata?.acme_http_url) || '-'}</span>
+              <span>{app.t('expiresAt', 'Expires at')}: {formatDate(metadataText(issued.metadata?.expires_at))}</span>
+            </div>
+          </div>
+        ) : null}
+        <div className='flex justify-end gap-2'>
+          <Button variant='outline' onClick={onClose}>关闭</Button>
+          <Button variant='primary' onClick={() => void submit()} disabled={saving || !domain.trim()}>
+            <Save className='size-4' />
+            {saving ? '签发中' : '签发'}
+          </Button>
+        </div>
+      </div>
+    </DialogShell>
+  )
+}
+
+function CertificateDNSProviderDialog({ onClose }: { onClose: () => void }) {
+  const app = useApp()
+  const [name, setName] = useState('')
+  const [provider, setProvider] = useState('cloudflare')
+  const [zone, setZone] = useState('')
+  const [token, setToken] = useState('')
+  const [saving, setSaving] = useState(false)
+
+  const submit = async () => {
+    setSaving(true)
+    try {
+      await apiRequest('/api/admin/certificates/dns-providers', {
+        method: 'POST',
+        body: JSON.stringify({ name, provider, zone, token }),
+      })
+      await app.refresh(true)
+      app.showToast(app.t('dnsProviderSaved', 'DNS provider saved'))
+      onClose()
+    } catch (error) {
+      app.handleApiError(error)
+    } finally {
+      setSaving(false)
+    }
+  }
+
+  return (
+    <DialogShell open onOpenChange={(open) => !open && onClose()} title='DNS provider' description='保存 ACME DNS-01 使用的 DNS 供应商配置，令牌在服务端加密，API 响应只返回已配置状态。'>
+      <div className='grid gap-4'>
+        <div className='grid gap-3 sm:grid-cols-2'>
+          <Field label='名称'><Input value={name} onChange={(event) => setName(event.currentTarget.value)} placeholder='Cloudflare production' /></Field>
+          <Field label='供应商'><Input value={provider} onChange={(event) => setProvider(event.currentTarget.value)} placeholder='cloudflare / aliyun / dnspod' /></Field>
+          <Field label='Zone'><Input value={zone} onChange={(event) => setZone(event.currentTarget.value)} placeholder='example.com' /></Field>
+          <Field label='API token'><Input type='password' value={token} onChange={(event) => setToken(event.currentTarget.value)} /></Field>
+        </div>
+        <div className='flex justify-end gap-2'>
+          <Button variant='outline' onClick={onClose}>取消</Button>
+          <Button variant='primary' onClick={() => void submit()} disabled={saving || !provider.trim()}>
+            <Save className='size-4' />
+            {saving ? '保存中' : '保存'}
+          </Button>
+        </div>
+      </div>
+    </DialogShell>
+  )
+}
+
+function CertificateMTLSDialog({ item, onClose }: { item: PlatformItem; onClose: () => void }) {
+  const app = useApp()
+  const [enabled, setEnabled] = useState(metadataBool(item.metadata?.mtls_enabled))
+  const [clientCA, setClientCA] = useState('')
+  const [saving, setSaving] = useState(false)
+
+  const submit = async () => {
+    setSaving(true)
+    try {
+      await apiRequest(`/api/admin/certificates/${item.id}/mtls`, {
+        method: 'POST',
+        body: JSON.stringify({ enabled, client_ca: clientCA || undefined }),
+      })
+      await app.refresh(true)
+      app.showToast(app.t('mtlsSettingsSaved', 'mTLS settings saved'))
+      onClose()
+    } catch (error) {
+      app.handleApiError(error)
+    } finally {
+      setSaving(false)
+    }
+  }
+
+  return (
+    <DialogShell open onOpenChange={(open) => !open && onClose()} title={`${item.name} mTLS`} description='保存证书的 mTLS 标记和可选客户端 CA PEM，用于后续网关/代理服务读取。'>
+      <div className='grid gap-4'>
+        <CheckboxRow checked={enabled} onChange={setEnabled} label='启用 mTLS' />
+        <Field label='Client CA PEM'><Textarea className='min-h-44 font-mono text-xs' value={clientCA} onChange={(event) => setClientCA(event.currentTarget.value)} placeholder='-----BEGIN CERTIFICATE-----' /></Field>
+        <div className='flex justify-end gap-2'>
+          <Button variant='outline' onClick={onClose}>取消</Button>
+          <Button variant='primary' onClick={() => void submit()} disabled={saving}>
+            <Save className='size-4' />
+            {saving ? '保存中' : '保存'}
+          </Button>
+        </div>
+      </div>
+    </DialogShell>
+  )
+}
+
+function CertificateLogsDialog({ item, onClose }: { item: PlatformItem; onClose: () => void }) {
+  const app = useApp()
+  const [logs, setLogs] = useState<PlatformItem[]>([])
+
+  const load = async () => {
+    try {
+      const data = await apiRequest<{ items: PlatformItem[] }>(`/api/admin/certificates/${item.id}/logs`)
+      setLogs(data.items || [])
+    } catch (error) {
+      app.handleApiError(error)
+    }
+  }
+
+  useEffect(() => {
+    void load()
+  }, [item.id])
+
+  return (
+    <DialogShell open onOpenChange={(open) => !open && onClose()} title={`${item.name} 证书日志`} description='查看该证书的申请、签发、下载、默认切换和 mTLS 操作日志。'>
+      <div className='grid gap-3'>
+        <div className='flex justify-end'>
+          <Button variant='outline' onClick={() => void load()}><RefreshCw className='size-4' />刷新</Button>
+        </div>
+        {logs.length ? logs.map((log) => (
+          <article key={log.id} className='rounded-xl border border-border bg-background/60 p-3 text-sm'>
+            <div className='flex items-center justify-between gap-3'>
+              <strong>{log.name}</strong>
+              <Badge tone={statusTone(log.status)}>{log.status}</Badge>
+            </div>
+            <p className='mt-2 text-xs text-muted-foreground'>{log.description || log.id}</p>
+            <pre className='mt-3 overflow-auto rounded-lg bg-muted p-2 text-xs'>{JSON.stringify(log.metadata || {}, null, 2)}</pre>
+          </article>
+        )) : (
+          <div className='rounded-xl border border-dashed border-border p-6 text-sm text-muted-foreground'>暂无证书日志。</div>
+        )}
       </div>
     </DialogShell>
   )

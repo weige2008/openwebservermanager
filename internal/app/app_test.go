@@ -1,10 +1,13 @@
 package app
 
 import (
+	"archive/zip"
 	"bytes"
 	"encoding/json"
+	"io"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -371,6 +374,96 @@ func TestResourceOperationEndpoints(t *testing.T) {
 	}
 }
 
+func TestAuditSessionOperations(t *testing.T) {
+	handler, adminCookie := newTestHandler(t)
+
+	linuxRec := assertStatus(t, handler, http.MethodPost, "/api/servers", map[string]any{
+		"name":     "linux-audit",
+		"host":     "127.0.0.1",
+		"os":       "linux",
+		"ssh_port": 22,
+	}, adminCookie, http.StatusCreated)
+	var linux model.Server
+	decodeResponse(t, linuxRec, &linux)
+	sshCredRec := assertStatus(t, handler, http.MethodPost, "/api/credentials", map[string]any{
+		"name":      "ssh-root",
+		"server_id": linux.ID,
+		"type":      "ssh_password",
+		"username":  "root",
+		"password":  "secret",
+	}, adminCookie, http.StatusCreated)
+	var sshCred model.CredentialPublic
+	decodeResponse(t, sshCredRec, &sshCred)
+	sshSessionRec := assertStatus(t, handler, http.MethodPost, "/api/connections/ssh", map[string]any{
+		"server_id":     linux.ID,
+		"credential_id": sshCred.ID,
+	}, adminCookie, http.StatusCreated)
+	var sshSession model.ConnectionSession
+	decodeResponse(t, sshSessionRec, &sshSession)
+	closeRec := assertStatus(t, handler, http.MethodPost, "/api/admin/audit/online-sessions/"+sshSession.ID+"/disconnect", nil, adminCookie, http.StatusOK)
+	if !strings.Contains(closeRec.Body.String(), string(model.SessionClosed)) {
+		t.Fatal("audit disconnect did not close session")
+	}
+	onlineRec := assertStatus(t, handler, http.MethodGet, "/api/admin/audit/online-sessions", nil, adminCookie, http.StatusOK)
+	if strings.Contains(onlineRec.Body.String(), sshSession.ID) {
+		t.Fatal("closed session still appears in online sessions")
+	}
+
+	windowsRec := assertStatus(t, handler, http.MethodPost, "/api/servers", map[string]any{
+		"name":     "windows-audit",
+		"host":     "127.0.0.1",
+		"os":       "windows",
+		"rdp_port": 3389,
+	}, adminCookie, http.StatusCreated)
+	var windows model.Server
+	decodeResponse(t, windowsRec, &windows)
+	rdpCredRec := assertStatus(t, handler, http.MethodPost, "/api/credentials", map[string]any{
+		"name":      "rdp-admin",
+		"server_id": windows.ID,
+		"type":      "rdp_password",
+		"username":  "Administrator",
+		"password":  "secret",
+	}, adminCookie, http.StatusCreated)
+	var rdpCred model.CredentialPublic
+	decodeResponse(t, rdpCredRec, &rdpCred)
+	rdpSessionRec := assertStatus(t, handler, http.MethodPost, "/api/connections/rdp", map[string]any{
+		"server_id":         windows.ID,
+		"credential_id":     rdpCred.ID,
+		"recording_enabled": true,
+	}, adminCookie, http.StatusCreated)
+	var rdpSession model.ConnectionSession
+	decodeResponse(t, rdpSessionRec, &rdpSession)
+	if rdpSession.RecordingPath == "" {
+		t.Fatal("rdp recording path was not created")
+	}
+	if err := os.WriteFile(filepath.Join(rdpSession.RecordingPath, "recording.guac"), []byte("frames"), 0o660); err != nil {
+		t.Fatalf("write fake recording: %v", err)
+	}
+	assertStatus(t, handler, http.MethodPost, "/api/connections/"+rdpSession.ID+"/close", nil, adminCookie, http.StatusOK)
+
+	assertStatus(t, handler, http.MethodPost, "/api/admin/users", map[string]any{
+		"name":     "recording-auditor",
+		"type":     "local",
+		"status":   "enabled",
+		"password": "password123",
+		"metadata": map[string]any{"role": "auditor"},
+	}, adminCookie, http.StatusCreated)
+	auditorLogin := assertStatus(t, handler, http.MethodPost, "/api/auth/login", map[string]any{"username": "recording-auditor", "password": "password123"}, nil, http.StatusOK)
+	auditorCookie := auditorLogin.Result().Cookies()[0]
+	auditorDownload := assertStatus(t, handler, http.MethodGet, "/api/admin/audit/offline-sessions/"+rdpSession.ID+"/recording", nil, auditorCookie, http.StatusOK)
+	assertZipContains(t, auditorDownload.Body.Bytes(), "recording.guac", "frames")
+	assertStatus(t, handler, http.MethodPost, "/api/admin/audit/online-sessions/"+rdpSession.ID+"/disconnect", nil, auditorCookie, http.StatusForbidden)
+
+	adminDownload := assertStatus(t, handler, http.MethodGet, "/api/admin/audit/offline-sessions/"+rdpSession.ID+"/recording", nil, adminCookie, http.StatusOK)
+	assertZipContains(t, adminDownload.Body.Bytes(), "recording.guac", "frames")
+	assertStatus(t, handler, http.MethodDelete, "/api/admin/audit/offline-sessions/"+rdpSession.ID+"/recording", nil, adminCookie, http.StatusOK)
+	assertStatus(t, handler, http.MethodGet, "/api/admin/audit/offline-sessions/"+rdpSession.ID+"/recording", nil, adminCookie, http.StatusNotFound)
+	logsRec := assertStatus(t, handler, http.MethodGet, "/api/admin/audit/operation-logs", nil, adminCookie, http.StatusOK)
+	if !strings.Contains(logsRec.Body.String(), "audit.recording.delete") {
+		t.Fatal("recording delete did not write operation log")
+	}
+}
+
 func newTestHandler(t *testing.T) (http.Handler, *http.Cookie) {
 	t.Helper()
 	key := make([]byte, 32)
@@ -429,4 +522,31 @@ func decodeResponse(t *testing.T, rec *httptest.ResponseRecorder, out any) {
 	if err := json.Unmarshal(rec.Body.Bytes(), out); err != nil {
 		t.Fatalf("decode response: %v", err)
 	}
+}
+
+func assertZipContains(t *testing.T, raw []byte, filename, content string) {
+	t.Helper()
+	reader, err := zip.NewReader(bytes.NewReader(raw), int64(len(raw)))
+	if err != nil {
+		t.Fatalf("open zip: %v", err)
+	}
+	for _, file := range reader.File {
+		if file.Name != filename {
+			continue
+		}
+		rc, err := file.Open()
+		if err != nil {
+			t.Fatalf("open zip entry: %v", err)
+		}
+		defer rc.Close()
+		data, err := io.ReadAll(rc)
+		if err != nil {
+			t.Fatalf("read zip entry: %v", err)
+		}
+		if string(data) != content {
+			t.Fatalf("zip entry content = %q, want %q", string(data), content)
+		}
+		return
+	}
+	t.Fatalf("zip entry %q not found", filename)
 }

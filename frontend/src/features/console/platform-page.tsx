@@ -287,6 +287,61 @@ function ResourceRowActions({ config, item, onOperation }: { config: PlatformPag
     }
   }
 
+  const disconnectSession = async () => {
+    if (!window.confirm(`断开 ${item.name || item.id}?`)) return
+    try {
+      await apiRequest(`/api/admin/audit/online-sessions/${item.id}/disconnect`, { method: 'POST', body: '{}' })
+      await app.refresh(true)
+      app.showToast('会话已断开')
+    } catch (error) {
+      app.handleApiError(error)
+    }
+  }
+
+  const downloadRecording = async () => {
+    try {
+      await downloadResponse(`/api/admin/audit/offline-sessions/${item.id}/recording`, `${item.name || item.id}.zip`)
+      app.showToast('录屏已下载')
+    } catch (error) {
+      app.handleApiError(error)
+    }
+  }
+
+  const deleteRecording = async () => {
+    if (!window.confirm(`删除 ${item.name || item.id} 的录屏?`)) return
+    try {
+      await apiRequest(`/api/admin/audit/offline-sessions/${item.id}/recording`, { method: 'DELETE' })
+      await app.refresh(true)
+      app.showToast('录屏已删除')
+    } catch (error) {
+      app.handleApiError(error)
+    }
+  }
+
+  if (config.collection === 'online_sessions') {
+    return (
+      <Button size='sm' variant='destructive' onClick={() => void disconnectSession()}>
+        <Trash2 className='size-3.5' />
+        断开
+      </Button>
+    )
+  }
+
+  if (config.collection === 'offline_sessions' && itemHasRecording(item)) {
+    return (
+      <>
+        <Button size='sm' variant='outline' onClick={() => void downloadRecording()}>
+          <Download className='size-3.5' />
+          下载录屏
+        </Button>
+        <Button size='sm' variant='destructive' onClick={() => void deleteRecording()}>
+          <Trash2 className='size-3.5' />
+          删除录屏
+        </Button>
+      </>
+    )
+  }
+
   if (config.collection === 'storages') {
     return (
       <Button size='sm' variant='outline' onClick={() => onOperation({ type: 'storage-files', item })}>
@@ -947,6 +1002,10 @@ function splitCSV(value: string) {
 
 function stringValue(value: unknown) {
   return typeof value === 'string' ? value : ''
+}
+
+function itemHasRecording(item: PlatformItem) {
+  return Boolean(stringValue(item.metadata?.recording_path))
 }
 
 function joinStoragePath(base: string, name: string) {

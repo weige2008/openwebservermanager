@@ -717,7 +717,8 @@ func (s *Server) canAccessSession(r *http.Request, session model.ConnectionSessi
 	if !ok {
 		return false
 	}
-	return authSession.Role == "admin" || session.UserID == authSession.UserID
+	kind := s.roleDecision(authSession.Role).Kind
+	return kind == roleSuperAdmin || kind == roleAdmin || kind == roleAuditor || session.UserID == authSession.UserID
 }
 
 func validateServer(server model.Server) error {

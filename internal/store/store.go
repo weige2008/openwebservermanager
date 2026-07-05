@@ -709,6 +709,15 @@ func (s *Store) GetPlatformItem(collection, id string) (model.PlatformItem, bool
 	return item, true, nil
 }
 
+func (s *Store) SavePlatformItem(collection string, item model.PlatformItem) (model.PlatformItem, error) {
+	item.Module = collection
+	item.UpdatedAt = time.Now().UTC()
+	if item.CreatedAt.IsZero() {
+		item.CreatedAt = item.UpdatedAt
+	}
+	return s.createPlatformItem(collection, item)
+}
+
 func (s *Store) DeletePlatformItem(collection, id string) error {
 	result, err := s.db.Exec(`DELETE FROM platform_records WHERE collection = ? AND id = ?`, collection, id)
 	if err != nil {
@@ -1012,14 +1021,14 @@ func sessionPlatformItem(collection string, session model.ConnectionSession) mod
 		TargetID:    session.ServerID,
 		Description: session.Error,
 		Metadata: map[string]any{
-			"credential_id":   session.CredentialID,
-			"client_ip":       session.ClientIP,
-			"recording_path":  session.RecordingPath,
-			"recording_size":  session.RecordingSize,
-			"workspace_width": session.Width,
+			"credential_id":    session.CredentialID,
+			"client_ip":        session.ClientIP,
+			"recording_path":   session.RecordingPath,
+			"recording_size":   session.RecordingSize,
+			"workspace_width":  session.Width,
 			"workspace_height": session.Height,
-			"started_at":      session.StartedAt,
-			"ended_at":        session.EndedAt,
+			"started_at":       session.StartedAt,
+			"ended_at":         session.EndedAt,
 		},
 		CreatedAt: session.StartedAt,
 		UpdatedAt: session.LastActivityAt,

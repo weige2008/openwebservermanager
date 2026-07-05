@@ -1,6 +1,7 @@
 package app
 
 import (
+	"archive/zip"
 	"crypto/rand"
 	"crypto/rsa"
 	"crypto/x509"
@@ -82,6 +83,14 @@ func (s *Server) handleResourceOperation(w http.ResponseWriter, r *http.Request,
 	case strings.HasPrefix(path, "admin/sql-work-orders/") && strings.HasSuffix(path, "/execute"):
 		id := pathSegmentFromTrimmed(path, 2)
 		s.handleSQLWorkOrderExecute(w, r, id)
+		return true
+	case strings.HasPrefix(path, "admin/audit/online-sessions/") && strings.HasSuffix(path, "/disconnect"):
+		id := pathSegmentFromTrimmed(path, 3)
+		s.handleAuditSessionDisconnect(w, r, id)
+		return true
+	case strings.HasPrefix(path, "admin/audit/offline-sessions/") && strings.HasSuffix(path, "/recording"):
+		id := pathSegmentFromTrimmed(path, 3)
+		s.handleAuditRecording(w, r, id)
 		return true
 	default:
 		return false
@@ -597,6 +606,204 @@ func (s *Server) handleSQLWorkOrderExecute(w http.ResponseWriter, r *http.Reques
 	_, _ = s.cfg.Store.UpdatePlatformItem("sql_work_orders", id, model.PlatformItemRequest{Status: "executed", Metadata: nextMetadata})
 	_ = s.audit(r, "sql_work_order.execute", id, "", "executed sql work order")
 	writeJSON(w, http.StatusOK, logItem)
+}
+
+func (s *Server) handleAuditSessionDisconnect(w http.ResponseWriter, r *http.Request, id string) {
+	if r.Method != http.MethodPost {
+		writeError(w, http.StatusMethodNotAllowed, "method not allowed")
+		return
+	}
+	if session, ok := s.cfg.Store.GetSession(id); ok {
+		if !s.canAccessSession(r, session) {
+			writeError(w, http.StatusForbidden, "session access denied")
+			return
+		}
+		closed, err := s.cfg.Store.CloseSession(id, "closed by auditor")
+		if err != nil {
+			writeError(w, http.StatusInternalServerError, err.Error())
+			return
+		}
+		_ = s.audit(r, "audit.session.disconnect", id, closed.Protocol, "disconnected online session")
+		writeJSON(w, http.StatusOK, closed)
+		return
+	}
+	item, ok, err := s.cfg.Store.GetPlatformItem("online_sessions", id)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	if !ok {
+		writeError(w, http.StatusNotFound, "session not found")
+		return
+	}
+	now := time.Now().UTC()
+	item.Status = string(model.SessionClosed)
+	item.Description = "closed by auditor"
+	if item.Metadata == nil {
+		item.Metadata = map[string]any{}
+	}
+	item.Metadata["ended_at"] = now
+	item.Metadata["close_reason"] = "closed by auditor"
+	_ = s.cfg.Store.DeletePlatformItem("online_sessions", id)
+	offline, err := s.cfg.Store.SavePlatformItem("offline_sessions", item)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	_ = s.audit(r, "audit.session.disconnect", id, item.Protocol, "disconnected platform online session")
+	writeJSON(w, http.StatusOK, offline)
+}
+
+func (s *Server) handleAuditRecording(w http.ResponseWriter, r *http.Request, id string) {
+	switch r.Method {
+	case http.MethodGet:
+		s.downloadAuditRecording(w, r, id)
+	case http.MethodDelete:
+		s.deleteAuditRecording(w, r, id)
+	default:
+		writeError(w, http.StatusMethodNotAllowed, "method not allowed")
+	}
+}
+
+func (s *Server) downloadAuditRecording(w http.ResponseWriter, r *http.Request, id string) {
+	recording, ok := s.auditRecordingTarget(w, r, id)
+	if !ok {
+		return
+	}
+	_ = s.audit(r, "audit.recording.download", id, recording.protocol, "downloaded offline session recording")
+	s.serveRecordingZip(w, r, id, recording.path)
+}
+
+func (s *Server) deleteAuditRecording(w http.ResponseWriter, r *http.Request, id string) {
+	recording, ok := s.auditRecordingTarget(w, r, id)
+	if !ok {
+		return
+	}
+	if err := os.RemoveAll(recording.path); err != nil {
+		writeError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	if session, exists := s.cfg.Store.GetSession(id); exists {
+		_, _ = s.cfg.Store.UpdateSession(id, func(item *model.ConnectionSession) {
+			item.RecordingPath = ""
+			item.RecordingSize = 0
+			item.Error = "recording deleted"
+		})
+		if offline, ok, err := s.cfg.Store.GetPlatformItem("offline_sessions", id); err == nil && ok {
+			clearRecordingMetadata(&offline)
+			_, _ = s.cfg.Store.SavePlatformItem("offline_sessions", offline)
+		}
+		_ = s.audit(r, "audit.recording.delete", id, session.Protocol, "deleted offline session recording")
+		writeJSON(w, http.StatusOK, map[string]bool{"ok": true})
+		return
+	}
+	item, ok, err := s.cfg.Store.GetPlatformItem("offline_sessions", id)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	if ok {
+		clearRecordingMetadata(&item)
+		if _, err := s.cfg.Store.SavePlatformItem("offline_sessions", item); err != nil {
+			writeError(w, http.StatusInternalServerError, err.Error())
+			return
+		}
+	}
+	_ = s.audit(r, "audit.recording.delete", id, recording.protocol, "deleted platform offline session recording")
+	writeJSON(w, http.StatusOK, map[string]bool{"ok": true})
+}
+
+type auditRecording struct {
+	path     string
+	protocol model.Protocol
+}
+
+func (s *Server) auditRecordingTarget(w http.ResponseWriter, r *http.Request, id string) (auditRecording, bool) {
+	if session, ok := s.cfg.Store.GetSession(id); ok {
+		if !s.canAccessSession(r, session) {
+			writeError(w, http.StatusForbidden, "session access denied")
+			return auditRecording{}, false
+		}
+		return s.validateRecordingPath(w, session.RecordingPath, session.Protocol)
+	}
+	item, ok, err := s.cfg.Store.GetPlatformItem("offline_sessions", id)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err.Error())
+		return auditRecording{}, false
+	}
+	if !ok {
+		writeError(w, http.StatusNotFound, "session not found")
+		return auditRecording{}, false
+	}
+	if !s.canAccessPlatformSession(r, item) {
+		writeError(w, http.StatusForbidden, "session access denied")
+		return auditRecording{}, false
+	}
+	path, _ := item.Metadata["recording_path"].(string)
+	return s.validateRecordingPath(w, path, item.Protocol)
+}
+
+func (s *Server) canAccessPlatformSession(r *http.Request, item model.PlatformItem) bool {
+	_, authSession, ok := s.auth.session(r)
+	if !ok {
+		return false
+	}
+	kind := s.roleDecision(authSession.Role).Kind
+	return kind == roleSuperAdmin || kind == roleAdmin || kind == roleAuditor || item.OwnerID == authSession.UserID || item.Username == authSession.UserID
+}
+
+func (s *Server) validateRecordingPath(w http.ResponseWriter, recordingPath string, protocol model.Protocol) (auditRecording, bool) {
+	if recordingPath == "" {
+		writeError(w, http.StatusNotFound, "recording not found")
+		return auditRecording{}, false
+	}
+	if err := ensureChildPath(filepath.Join(s.cfg.DataDir, "recordings"), recordingPath); err != nil {
+		writeError(w, http.StatusForbidden, err.Error())
+		return auditRecording{}, false
+	}
+	if info, err := os.Stat(recordingPath); err != nil || !info.IsDir() {
+		writeError(w, http.StatusNotFound, "recording not found")
+		return auditRecording{}, false
+	}
+	return auditRecording{path: recordingPath, protocol: protocol}, true
+}
+
+func (s *Server) serveRecordingZip(w http.ResponseWriter, _ *http.Request, id, recordingPath string) {
+	w.Header().Set("Content-Type", "application/zip")
+	w.Header().Set("Content-Disposition", "attachment; filename=\""+id+".zip\"")
+	archive := zip.NewWriter(w)
+	defer archive.Close()
+	_ = filepath.WalkDir(recordingPath, func(filePath string, entry os.DirEntry, err error) error {
+		if err != nil || entry.IsDir() {
+			return nil
+		}
+		rel, err := filepath.Rel(recordingPath, filePath)
+		if err != nil {
+			return nil
+		}
+		writer, err := archive.Create(filepath.ToSlash(rel))
+		if err != nil {
+			return nil
+		}
+		file, err := os.Open(filePath)
+		if err != nil {
+			return nil
+		}
+		defer file.Close()
+		_, _ = io.Copy(writer, file)
+		return nil
+	})
+}
+
+func clearRecordingMetadata(item *model.PlatformItem) {
+	if item.Metadata == nil {
+		item.Metadata = map[string]any{}
+	}
+	item.Metadata["recording_path"] = ""
+	item.Metadata["recording_size"] = 0
+	item.Metadata["recording_deleted"] = true
+	item.Metadata["recording_deleted_at"] = time.Now().UTC()
+	item.Description = strings.TrimSpace(item.Description + " recording deleted")
 }
 
 func isSQLQuery(sqlText string) bool {

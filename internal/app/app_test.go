@@ -12,6 +12,7 @@ import (
 	"strings"
 	"testing"
 	"testing/fstest"
+	"time"
 
 	"openwebservermanager/internal/guac"
 	"openwebservermanager/internal/model"
@@ -239,6 +240,106 @@ func TestConnectionAPIsRequireAssetAuthorization(t *testing.T) {
 		"server_id":     windowsServer.ID,
 		"credential_id": rdpCredential.ID,
 	}, userCookie, http.StatusCreated)
+}
+
+func TestAccessAuthorizationSupportsDepartmentsGroupsAndExpiry(t *testing.T) {
+	handler, adminCookie := newTestHandler(t)
+
+	parentDeptRec := assertStatus(t, handler, http.MethodPost, "/api/admin/departments", map[string]any{
+		"name":   "Engineering",
+		"type":   "department",
+		"status": "enabled",
+	}, adminCookie, http.StatusCreated)
+	var parentDept model.PlatformItem
+	decodeResponse(t, parentDeptRec, &parentDept)
+	childDeptRec := assertStatus(t, handler, http.MethodPost, "/api/admin/departments", map[string]any{
+		"name":      "Platform",
+		"type":      "department",
+		"status":    "enabled",
+		"parent_id": parentDept.ID,
+	}, adminCookie, http.StatusCreated)
+	var childDept model.PlatformItem
+	decodeResponse(t, childDeptRec, &childDept)
+
+	userRec := assertStatus(t, handler, http.MethodPost, "/api/admin/users", map[string]any{
+		"name":      "department-user",
+		"type":      "local",
+		"status":    "enabled",
+		"password":  "password123",
+		"parent_id": childDept.ID,
+		"metadata":  map[string]any{"role": "user"},
+	}, adminCookie, http.StatusCreated)
+	var user model.PlatformItem
+	decodeResponse(t, userRec, &user)
+
+	parentGroupRec := assertStatus(t, handler, http.MethodPost, "/api/admin/asset-groups", map[string]any{
+		"name":   "Linux Fleet",
+		"type":   "ssh",
+		"status": "enabled",
+	}, adminCookie, http.StatusCreated)
+	var parentGroup model.PlatformItem
+	decodeResponse(t, parentGroupRec, &parentGroup)
+	childGroupRec := assertStatus(t, handler, http.MethodPost, "/api/admin/asset-groups", map[string]any{
+		"name":      "Production Linux",
+		"type":      "ssh",
+		"status":    "enabled",
+		"parent_id": parentGroup.ID,
+	}, adminCookie, http.StatusCreated)
+	var childGroup model.PlatformItem
+	decodeResponse(t, childGroupRec, &childGroup)
+
+	groupAssetRec := assertStatus(t, handler, http.MethodPost, "/api/admin/assets", map[string]any{
+		"name":     "group-host",
+		"type":     "linux",
+		"status":   "active",
+		"protocol": "ssh",
+		"host":     "10.10.0.10",
+		"port":     22,
+		"group":    childGroup.ID,
+	}, adminCookie, http.StatusCreated)
+	var groupAsset model.PlatformItem
+	decodeResponse(t, groupAssetRec, &groupAsset)
+	expiredAssetRec := assertStatus(t, handler, http.MethodPost, "/api/admin/assets", map[string]any{
+		"name":     "expired-host",
+		"type":     "linux",
+		"status":   "active",
+		"protocol": "ssh",
+		"host":     "10.10.0.11",
+		"port":     22,
+	}, adminCookie, http.StatusCreated)
+	var expiredAsset model.PlatformItem
+	decodeResponse(t, expiredAssetRec, &expiredAsset)
+
+	assertStatus(t, handler, http.MethodPost, "/api/admin/authorizations/assets", map[string]any{
+		"name":      "expired direct grant",
+		"owner_id":  user.ID,
+		"target_id": expiredAsset.ID,
+		"status":    "enabled",
+		"metadata":  map[string]any{"expires_at": time.Now().Add(-time.Hour).UTC().Format(time.RFC3339)},
+	}, adminCookie, http.StatusCreated)
+
+	loginRec := assertStatus(t, handler, http.MethodPost, "/api/auth/login", map[string]any{"username": "department-user", "password": "password123"}, nil, http.StatusOK)
+	userCookie := loginRec.Result().Cookies()[0]
+	assertStatus(t, handler, http.MethodPost, "/api/access/ssh/"+groupAsset.ID, nil, userCookie, http.StatusForbidden)
+
+	assertStatus(t, handler, http.MethodPost, "/api/admin/authorizations/assets", map[string]any{
+		"name":      "engineering linux fleet",
+		"type":      "department_group",
+		"owner_id":  parentDept.ID,
+		"target_id": parentGroup.ID,
+		"status":    "enabled",
+	}, adminCookie, http.StatusCreated)
+
+	accessRec := assertStatus(t, handler, http.MethodGet, "/api/access/assets", nil, userCookie, http.StatusOK)
+	accessBody := accessRec.Body.String()
+	if !strings.Contains(accessBody, groupAsset.ID) {
+		t.Fatal("department and asset-group authorization did not include grouped asset")
+	}
+	if strings.Contains(accessBody, expiredAsset.ID) {
+		t.Fatal("expired authorization leaked asset into access portal")
+	}
+	assertStatus(t, handler, http.MethodPost, "/api/access/ssh/"+groupAsset.ID, nil, userCookie, http.StatusAccepted)
+	assertStatus(t, handler, http.MethodPost, "/api/access/ssh/"+expiredAsset.ID, nil, userCookie, http.StatusForbidden)
 }
 
 func TestRoleBasedAccessControl(t *testing.T) {

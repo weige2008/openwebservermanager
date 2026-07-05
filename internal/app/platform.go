@@ -165,12 +165,12 @@ func (s *Server) handleAccessAssets(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	userID, isAdmin := s.accessUser(r)
-	assets := filterAuthorizedItems(platform["assets"], platform["authorized_assets"], userID, isAdmin)
-	webAssets := filterAuthorizedItems(platform["web_assets"], platform["authorized_web_assets"], userID, isAdmin)
-	databaseAssets := filterAuthorizedItems(platform["database_assets"], platform["authorized_database_assets"], userID, isAdmin)
+	assets := filterAuthorizedItems(platform, platform["assets"], platform["authorized_assets"], userID, isAdmin)
+	webAssets := filterAuthorizedItems(platform, platform["web_assets"], platform["authorized_web_assets"], userID, isAdmin)
+	databaseAssets := filterAuthorizedItems(platform, platform["database_assets"], platform["authorized_database_assets"], userID, isAdmin)
 	authorizations := platform["authorized_assets"]
 	if !isAdmin {
-		authorizations = filterAuthorizationsForUser(authorizations, userID)
+		authorizations = filterAuthorizationsForUser(platform, authorizations, userID)
 	}
 	writeJSON(w, http.StatusOK, map[string]any{
 		"text":       filterPlatformByProtocol(assets, model.ProtocolSSH),
@@ -370,34 +370,191 @@ func (s *Server) accessUser(r *http.Request) (string, bool) {
 	return session.UserID, kind == roleSuperAdmin || kind == roleAdmin
 }
 
-func filterAuthorizedItems(items, authorizations []model.PlatformItem, userID string, isAdmin bool) []model.PlatformItem {
+type accessAuthorizationContext struct {
+	SubjectKeys map[string]bool
+}
+
+func filterAuthorizedItems(platform map[string][]model.PlatformItem, items, authorizations []model.PlatformItem, userID string, isAdmin bool) []model.PlatformItem {
 	if isAdmin {
 		return items
 	}
-	allowed := map[string]bool{}
-	for _, authorization := range authorizations {
-		if authorization.OwnerID == userID || authorization.Username == userID {
-			allowed[authorization.TargetID] = true
-		}
-	}
+	ctx := accessAuthorizationContextFor(platform, userID)
 	result := []model.PlatformItem{}
 	for _, item := range items {
-		if allowed[item.ID] {
+		if itemAuthorizedByAny(platform, authorizations, item, ctx) {
 			result = append(result, item)
 		}
 	}
 	return result
 }
 
+func itemAuthorizedByAny(platform map[string][]model.PlatformItem, authorizations []model.PlatformItem, asset model.PlatformItem, ctx accessAuthorizationContext) bool {
+	for _, authorization := range authorizations {
+		if authorizationAppliesToAsset(platform, authorization, asset, ctx) {
+			return true
+		}
+	}
+	return false
+}
+
+func authorizationAppliesToAsset(platform map[string][]model.PlatformItem, authorization, asset model.PlatformItem, ctx accessAuthorizationContext) bool {
+	return authorizationRecordActive(authorization) &&
+		authorizationSubjectMatches(ctx, authorization) &&
+		authorizationTargetMatches(platform, authorization, asset)
+}
+
+func accessAuthorizationContextFor(platform map[string][]model.PlatformItem, userID string) accessAuthorizationContext {
+	ctx := accessAuthorizationContext{SubjectKeys: map[string]bool{}}
+	addAuthKeys(ctx.SubjectKeys, userID)
+	for _, user := range platform["users"] {
+		if !authKeyMatches(ctx.SubjectKeys, user.ID) {
+			continue
+		}
+		addAuthKeys(ctx.SubjectKeys, user.ID, user.Name, user.Username, user.OwnerID)
+		addAuthKeys(ctx.SubjectKeys, user.ParentID, user.Group)
+		addMetadataAuthKeys(ctx.SubjectKeys, user.Metadata,
+			"department_id", "department_ids", "departmentId", "dept_id", "dept_ids", "department", "departments", "dept", "depts",
+			"group_id", "group_ids", "groupId",
+		)
+		expandRelatedItemKeys(platform["departments"], ctx.SubjectKeys)
+		return ctx
+	}
+	return ctx
+}
+
+func authorizationSubjectMatches(ctx accessAuthorizationContext, authorization model.PlatformItem) bool {
+	subjectKeys := map[string]bool{}
+	addAuthKeys(subjectKeys, authorization.OwnerID, authorization.Username, authorization.ParentID, authorization.Group)
+	addMetadataAuthKeys(subjectKeys, authorization.Metadata,
+		"subject_id", "subject_ids", "subjectId",
+		"user_id", "user_ids", "userId", "username", "usernames", "account", "accounts",
+		"owner_id", "owner_ids", "ownerId",
+		"department_id", "department_ids", "departmentId", "dept_id", "dept_ids", "department", "departments", "dept", "depts",
+	)
+	return authKeysOverlap(ctx.SubjectKeys, subjectKeys)
+}
+
+func authorizationTargetMatches(platform map[string][]model.PlatformItem, authorization, asset model.PlatformItem) bool {
+	targetKeys := map[string]bool{}
+	addAuthKeys(targetKeys, authorization.TargetID, authorization.ParentID, authorization.Group)
+	addMetadataAuthKeys(targetKeys, authorization.Metadata,
+		"target_id", "target_ids", "targetId",
+		"asset_id", "asset_ids", "assetId", "resource_id", "resource_ids",
+		"asset_group_id", "asset_group_ids", "assetGroupId",
+		"target_group_id", "target_group_ids", "targetGroupId",
+		"group_id", "group_ids", "groupId", "group", "groups",
+	)
+	if targetKeys["*"] {
+		return true
+	}
+	if len(targetKeys) == 0 {
+		return false
+	}
+	assetKeys := assetAuthorizationKeys(platform, asset)
+	return authKeysOverlap(assetKeys, targetKeys)
+}
+
+func assetAuthorizationKeys(platform map[string][]model.PlatformItem, asset model.PlatformItem) map[string]bool {
+	keys := map[string]bool{}
+	addAuthKeys(keys, asset.ID, asset.Name, asset.TargetID, asset.ParentID, asset.Group)
+	addMetadataAuthKeys(keys, asset.Metadata,
+		"asset_id", "asset_ids", "assetId",
+		"group_id", "group_ids", "groupId",
+		"asset_group_id", "asset_group_ids", "assetGroupId",
+		"parent_id", "parent_ids", "parentId",
+	)
+	expandRelatedItemKeys(platform["asset_groups"], keys)
+	return keys
+}
+
+func authorizationRecordActive(authorization model.PlatformItem) bool {
+	if !platformItemEnabled(authorization) {
+		return false
+	}
+	for _, key := range []string{"expires_at", "expire_at", "expiresAt", "expired_at", "valid_until", "not_after"} {
+		expiresAt, ok := metadataTime(authorization.Metadata[key])
+		if ok && !expiresAt.IsZero() && !time.Now().UTC().Before(expiresAt) {
+			return false
+		}
+	}
+	return true
+}
+
+func expandRelatedItemKeys(items []model.PlatformItem, keys map[string]bool) {
+	for {
+		changed := false
+		for _, item := range items {
+			if !authKeyMatches(keys, item.ID) && !authKeyMatches(keys, item.Name) {
+				continue
+			}
+			changed = addAuthKeys(keys, item.ID, item.Name, item.ParentID, item.Group) || changed
+			changed = addMetadataAuthKeys(keys, item.Metadata, "parent_id", "parent_ids", "parentId", "group_id", "group_ids", "groupId") || changed
+		}
+		if !changed {
+			return
+		}
+	}
+}
+
+func addMetadataAuthKeys(keys map[string]bool, metadata map[string]any, names ...string) bool {
+	changed := false
+	for _, name := range names {
+		for _, value := range metadataStrings(metadata[name]) {
+			changed = addAuthKeys(keys, value) || changed
+		}
+	}
+	return changed
+}
+
+func addAuthKeys(keys map[string]bool, values ...string) bool {
+	changed := false
+	for _, value := range values {
+		for _, part := range splitCriteria(value) {
+			key := normalizeAuthKey(part)
+			if key == "" || keys[key] {
+				continue
+			}
+			keys[key] = true
+			changed = true
+		}
+	}
+	return changed
+}
+
+func authKeysOverlap(left, right map[string]bool) bool {
+	if left["*"] || right["*"] {
+		return true
+	}
+	for key := range right {
+		if left[key] {
+			return true
+		}
+	}
+	return false
+}
+
+func authKeyMatches(keys map[string]bool, value string) bool {
+	for _, part := range splitCriteria(value) {
+		if keys[normalizeAuthKey(part)] {
+			return true
+		}
+	}
+	return false
+}
+
+func normalizeAuthKey(value string) string {
+	return strings.ToLower(strings.TrimSpace(value))
+}
+
 func accessBootstrapPlatform(platform map[string][]model.PlatformItem, userID string) map[string][]model.PlatformItem {
 	result := emptyPlatformBootstrap()
-	result["assets"] = filterAuthorizedItems(platform["assets"], platform["authorized_assets"], userID, false)
-	result["web_assets"] = filterAuthorizedItems(platform["web_assets"], platform["authorized_web_assets"], userID, false)
-	result["database_assets"] = filterAuthorizedItems(platform["database_assets"], platform["authorized_database_assets"], userID, false)
+	result["assets"] = filterAuthorizedItems(platform, platform["assets"], platform["authorized_assets"], userID, false)
+	result["web_assets"] = filterAuthorizedItems(platform, platform["web_assets"], platform["authorized_web_assets"], userID, false)
+	result["database_assets"] = filterAuthorizedItems(platform, platform["database_assets"], platform["authorized_database_assets"], userID, false)
 	result["asset_groups"] = platform["asset_groups"]
-	result["authorized_assets"] = filterAuthorizationsForUser(platform["authorized_assets"], userID)
-	result["authorized_web_assets"] = filterAuthorizationsForUser(platform["authorized_web_assets"], userID)
-	result["authorized_database_assets"] = filterAuthorizationsForUser(platform["authorized_database_assets"], userID)
+	result["authorized_assets"] = filterAuthorizationsForUser(platform, platform["authorized_assets"], userID)
+	result["authorized_web_assets"] = filterAuthorizationsForUser(platform, platform["authorized_web_assets"], userID)
+	result["authorized_database_assets"] = filterAuthorizationsForUser(platform, platform["authorized_database_assets"], userID)
 	result["online_sessions"] = filterItemsByOwner(platform["online_sessions"], userID)
 	result["offline_sessions"] = filterItemsByOwner(platform["offline_sessions"], userID)
 	return result
@@ -452,10 +609,11 @@ func emptyPlatformBootstrap() map[string][]model.PlatformItem {
 	}
 }
 
-func filterAuthorizationsForUser(authorizations []model.PlatformItem, userID string) []model.PlatformItem {
+func filterAuthorizationsForUser(platform map[string][]model.PlatformItem, authorizations []model.PlatformItem, userID string) []model.PlatformItem {
+	ctx := accessAuthorizationContextFor(platform, userID)
 	result := []model.PlatformItem{}
 	for _, authorization := range authorizations {
-		if authorization.OwnerID == userID || authorization.Username == userID {
+		if authorizationRecordActive(authorization) && authorizationSubjectMatches(ctx, authorization) {
 			result = append(result, authorization)
 		}
 	}
@@ -499,6 +657,11 @@ func isAccessAuthorized(platform map[string][]model.PlatformItem, protocol model
 	if userID == "" {
 		return false
 	}
+	asset, ok := findAccessAsset(platform, protocol, assetID)
+	if !ok {
+		return false
+	}
+	ctx := accessAuthorizationContextFor(platform, userID)
 	collection := "authorized_assets"
 	switch protocol {
 	case model.ProtocolHTTP:
@@ -507,7 +670,7 @@ func isAccessAuthorized(platform map[string][]model.PlatformItem, protocol model
 		collection = "authorized_database_assets"
 	}
 	for _, item := range platform[collection] {
-		if item.TargetID == assetID && (item.OwnerID == userID || item.Username == userID) {
+		if authorizationAppliesToAsset(platform, item, asset, ctx) {
 			return true
 		}
 	}

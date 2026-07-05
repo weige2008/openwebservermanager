@@ -221,6 +221,24 @@ export function PlatformTablePage({ config }: { config: PlatformPageConfig }) {
           cell: ({ row }) => <span className='font-mono text-xs'>{metadataNumber(row.original.metadata?.sort)}</span>,
         },
       ] satisfies ColumnDef<PlatformItem>[] : []),
+      ...(config.collection === 'asset_groups' ? [
+        {
+          header: app.t('protocol'),
+          cell: ({ row }) => <Badge tone='neutral'>{row.original.protocol || row.original.type || 'custom'}</Badge>,
+        },
+        {
+          header: app.t('parent', '上级/分组'),
+          cell: ({ row }) => <span className='text-xs'>{assetGroupParentName(row.original, app.data.platform?.asset_groups || [])}</span>,
+        },
+        {
+          header: app.t('assets', '资产'),
+          cell: ({ row }) => <span className='font-mono text-xs'>{assetGroupAssetCount(row.original, app.data.platform?.assets || [])}</span>,
+        },
+        {
+          header: app.t('sort', '排序'),
+          cell: ({ row }) => <span className='font-mono text-xs'>{metadataNumber(row.original.metadata?.sort)}</span>,
+        },
+      ] satisfies ColumnDef<PlatformItem>[] : []),
       ...(config.collection === 'command_filters' ? [
         {
           header: app.t('commandPattern', '命令匹配'),
@@ -251,7 +269,7 @@ export function PlatformTablePage({ config }: { config: PlatformPageConfig }) {
           cell: ({ row }) => <span className='font-mono text-xs'>{metadataText(row.original.metadata?.path_prefix) || '*'}</span>,
         },
       ] satisfies ColumnDef<PlatformItem>[] : []),
-      ...(!['command_filters', 'command_snippets', 'authorization_strategies'].includes(config.collection) ? [
+      ...(!['asset_groups', 'command_filters', 'command_snippets', 'authorization_strategies'].includes(config.collection) ? [
         { header: app.t('address'), cell: ({ row }) => row.original.host ? <span className='font-mono text-xs'>{row.original.host}{row.original.port ? `:${row.original.port}` : ''}</span> : '-' },
       ] satisfies ColumnDef<PlatformItem>[] : []),
       ...(config.collection === 'agent_gateways' ? [
@@ -313,7 +331,7 @@ export function PlatformTablePage({ config }: { config: PlatformPageConfig }) {
     setForm({
       ...initialForm,
       type: defaultPlatformType(config.collection),
-      protocol: config.collection === 'command_filters' ? 'ssh' : config.collection === 'database_assets' ? 'database' : '',
+      protocol: config.collection === 'command_filters' || config.collection === 'asset_groups' ? 'ssh' : config.collection === 'database_assets' ? 'database' : '',
       permissions: defaultPlatformPermissions(config.collection),
       metadata: defaultPlatformMetadata(config.collection),
     })
@@ -1319,19 +1337,71 @@ function PlatformItemDialog({
   const isCredential = collection === 'credentials'
   const isUser = collection === 'users'
   const isDepartment = collection === 'departments'
+  const isAssetGroup = collection === 'asset_groups'
   const isRole = collection === 'roles'
   const isCommandFilter = collection === 'command_filters'
   const isCommandSnippet = collection === 'command_snippets'
   const isAuthorizationStrategy = collection === 'authorization_strategies'
   const isDatabaseAsset = collection === 'database_assets'
   const roleItems = app.data.platform?.roles || []
+  const assetGroupItems = (app.data.platform?.asset_groups || items).filter((item) => item.id !== editingId)
   const storageItems = app.data.platform?.storages || []
   const databaseCredentials = (app.data.platform?.credentials || []).filter((item) => item.type === 'database_password')
   return (
     <DialogShell open={open} onOpenChange={onOpenChange} title={title} description={description}>
       <div className='grid gap-4'>
         <div className='grid gap-3 sm:grid-cols-2'>
-          {isCommandFilter ? (
+          {isAssetGroup ? (
+            <>
+              <Field label={app.t('name')}><Input value={form.name} onChange={(event) => onChange({ name: event.currentTarget.value })} /></Field>
+              <Field label={app.t('status')}>
+                <Select value={form.status || 'enabled'} onChange={(event) => onChange({ status: event.currentTarget.value })}>
+                  <option value='enabled'>{app.t('enabled', '启用')}</option>
+                  <option value='disabled'>{app.t('disabled', '禁用')}</option>
+                </Select>
+              </Field>
+              <Field label={app.t('type', '类型')}>
+                <Select value={form.type || 'ssh'} onChange={(event) => onChange({ type: event.currentTarget.value })}>
+                  <option value='ssh'>SSH / Text</option>
+                  <option value='desktop'>RDP / VNC</option>
+                  <option value='web'>Web</option>
+                  <option value='database'>Database</option>
+                  <option value='custom'>{app.t('custom', '自定义')}</option>
+                </Select>
+              </Field>
+              <Field label={app.t('protocol')}>
+                <Select value={form.protocol} onChange={(event) => onChange({ protocol: event.currentTarget.value })}>
+                  <option value=''>{app.t('none', '无')}</option>
+                  <option value='ssh'>SSH</option>
+                  <option value='rdp'>RDP</option>
+                  <option value='vnc'>VNC</option>
+                  <option value='http'>HTTP</option>
+                  <option value='database'>Database</option>
+                </Select>
+              </Field>
+              <Field label={app.t('parent', '上级/分组')}>
+                <Select value={form.parent_id} onChange={(event) => onChange({ parent_id: event.currentTarget.value })}>
+                  <option value=''>{app.t('none', '无')}</option>
+                  {assetGroupItems.map((item) => (
+                    <option key={item.id} value={item.id}>{item.name}</option>
+                  ))}
+                </Select>
+              </Field>
+              <Field label={app.t('sort', '排序')}>
+                <Input type='number' value={metadataFormText(form.metadata, 'sort')} onChange={(event) => onChange({ metadata: metadataWithValue(form.metadata, 'sort', event.currentTarget.value ? Number(event.currentTarget.value) : '') })} />
+              </Field>
+              <label className='flex items-center gap-2 rounded-lg border border-border bg-muted/20 px-3 py-2 text-sm sm:col-span-2'>
+                <input
+                  type='checkbox'
+                  className='size-4 accent-primary'
+                  checked={metadataBoolFromForm(form.metadata, 'collapsed')}
+                  onChange={(event) => onChange({ metadata: metadataWithValue(form.metadata, 'collapsed', event.currentTarget.checked) })}
+                />
+                <span>{app.t('collapsedByDefault', '默认折叠')}</span>
+              </label>
+              <Field label={app.t('tags', '标签')}><Input placeholder='prod,linux,rdp' value={form.tags} onChange={(event) => onChange({ tags: event.currentTarget.value })} /></Field>
+            </>
+          ) : isCommandFilter ? (
             <>
               <Field label={app.t('ruleName', '规则名称')}><Input value={form.name} onChange={(event) => onChange({ name: event.currentTarget.value })} /></Field>
               <Field label={app.t('status')}>
@@ -1643,6 +1713,7 @@ function defaultPlatformType(collection: string) {
   if (collection === 'credentials') return 'ssh_password'
   if (collection === 'users') return 'local'
   if (collection === 'departments') return 'department'
+  if (collection === 'asset_groups') return 'ssh'
   if (collection === 'roles') return 'custom'
   if (collection === 'command_filters') return 'deny'
   if (collection === 'command_snippets') return 'public'
@@ -1658,6 +1729,7 @@ function defaultPlatformPermissions(collection: string): Record<string, boolean>
 
 function defaultPlatformMetadata(collection: string) {
   if (collection === 'command_filters') return JSON.stringify({ risk: 'high' }, null, 2)
+  if (collection === 'asset_groups') return JSON.stringify({ sort: 0, collapsed: false }, null, 2)
   if (collection === 'command_snippets') return JSON.stringify({ command: '', append_newline: false }, null, 2)
   if (collection === 'authorization_strategies') return JSON.stringify({ path_prefix: '' }, null, 2)
   if (collection === 'database_assets') return JSON.stringify({ sqlite_path: '', row_limit: 100 }, null, 2)
@@ -2603,6 +2675,30 @@ function metadataNumber(value: unknown) {
 
 function departmentLevel(item: PlatformItem) {
   return Math.max(0, metadataNumber(item.metadata?.level))
+}
+
+function assetGroupParentName(item: PlatformItem, groups: PlatformItem[]) {
+  if (!item.parent_id) return '-'
+  return groups.find((group) => group.id === item.parent_id || group.name === item.parent_id)?.name || item.parent_id
+}
+
+function assetGroupAssetCount(group: PlatformItem, assets: PlatformItem[]) {
+  const keys = new Set([group.id, group.name].filter(Boolean))
+  return assets.filter((asset) => assetMatchesGroupKey(asset, keys)).length
+}
+
+function assetMatchesGroupKey(asset: PlatformItem, keys: Set<string>) {
+  const candidates = [
+    asset.group,
+    asset.parent_id,
+    metadataText(asset.metadata?.group_id),
+    metadataText(asset.metadata?.asset_group_id),
+  ].filter((candidate): candidate is string => Boolean(candidate))
+  if (candidates.some((candidate) => keys.has(candidate))) return true
+  return [
+    ...stringArrayValue(asset.metadata?.group_ids),
+    ...stringArrayValue(asset.metadata?.asset_group_ids),
+  ].some((candidate) => keys.has(candidate))
 }
 
 function metadataBool(value: unknown) {

@@ -14,6 +14,7 @@ import {
   FileKey2,
   FileText,
   Fingerprint,
+  FolderTree,
   Gauge,
   Globe2,
   HardDrive,
@@ -54,6 +55,7 @@ export interface PlatformNavGroup {
 
 const resourceItems: PlatformPageConfig[] = [
   page('/app/assets', 'assets', '资产', 'Assets', '统一管理 SSH/RDP/VNC 资产，支持分组、标签、状态、导入导出和批量授权。', 'Manage SSH/RDP/VNC assets with groups, tags, status, import/export, and authorization.', Server, '/api/admin/assets'),
+  page('/app/asset-groups', 'asset_groups', '资产组', 'Asset groups', '管理文本协议、图形协议和自定义资产分组，供授权和接入门户筛选使用。', 'Manage text, desktop, and custom asset groups for authorization and access portal filtering.', FolderTree, '/api/admin/asset-groups'),
   page('/app/database-assets', 'database_assets', '数据库资产', 'Database assets', '管理 MySQL/PostgreSQL 等数据库资产和代理接入信息。', 'Manage database assets and database proxy metadata.', Database, '/api/admin/database-assets'),
   page('/app/credentials', 'credentials', '授权凭证', 'Credentials', '独立凭据库，敏感字段服务端加密保存。', 'Credential vault with server-side encrypted secrets.', KeyRound, '/api/admin/credentials'),
   page('/app/command-snippets', 'command_snippets', '命令片段', 'Command snippets', '维护公开或私有命令片段，供 SSH 终端快速插入。', 'Manage public or private command snippets for SSH terminals.', Code2, '/api/admin/command-snippets'),
@@ -149,6 +151,7 @@ export function platformDescription(config: PlatformPageConfig, locale: string) 
 export const platformHomeStats = [
   { key: 'users', labelZh: '用户', labelEn: 'Users', icon: Users },
   { key: 'assets', labelZh: '资产', labelEn: 'Assets', icon: Server },
+  { key: 'asset_groups', labelZh: '资产组', labelEn: 'Asset groups', icon: FolderTree },
   { key: 'web_assets', labelZh: 'Web资产', labelEn: 'Web assets', icon: Globe2 },
   { key: 'database_assets', labelZh: '数据库资产', labelEn: 'Database assets', icon: Database },
   { key: 'online_sessions', labelZh: '在线会话', labelEn: 'Online sessions', icon: Activity },

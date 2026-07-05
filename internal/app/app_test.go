@@ -140,6 +140,16 @@ func TestPlatformUserLoginAndAccessAuthorization(t *testing.T) {
 	if err := json.Unmarshal(assetRec.Body.Bytes(), &asset); err != nil {
 		t.Fatalf("decode asset: %v", err)
 	}
+	credentialRec := assertStatus(t, handler, http.MethodPost, "/api/admin/credentials", map[string]any{
+		"name":      "linux-1 root",
+		"type":      "ssh_password",
+		"status":    "encrypted",
+		"username":  "root",
+		"password":  "target-secret",
+		"target_id": asset.ID,
+	}, adminCookie, http.StatusCreated)
+	var credential model.PlatformItem
+	decodeResponse(t, credentialRec, &credential)
 
 	loginRec := assertStatus(t, handler, http.MethodPost, "/api/auth/login", map[string]any{"username": "operator", "password": "password123"}, nil, http.StatusOK)
 	userCookie := loginRec.Result().Cookies()[0]
@@ -154,7 +164,25 @@ func TestPlatformUserLoginAndAccessAuthorization(t *testing.T) {
 	}, adminCookie, http.StatusCreated)
 
 	assertStatus(t, handler, http.MethodGet, "/api/access/assets", nil, userCookie, http.StatusOK)
-	assertStatus(t, handler, http.MethodPost, "/api/access/ssh/"+asset.ID, nil, userCookie, http.StatusAccepted)
+	sessionRec := assertStatus(t, handler, http.MethodPost, "/api/access/ssh/"+asset.ID, map[string]any{
+		"cols": 88,
+		"rows": 27,
+	}, userCookie, http.StatusAccepted)
+	var session model.ConnectionSession
+	decodeResponse(t, sessionRec, &session)
+	if session.Protocol != model.ProtocolSSH || session.ServerID != asset.ID || session.CredentialID != credential.ID || session.Width != 88 || session.Height != 27 {
+		t.Fatalf("unexpected ssh access session: %#v", session)
+	}
+	srv := handler.(*Server)
+	req := httptest.NewRequest(http.MethodGet, "/api/connections/ssh/"+session.ID+"/ws", nil)
+	req.AddCookie(userCookie)
+	_, resolvedServer, resolvedCredential, secret, ok := srv.connectionParts(httptest.NewRecorder(), req, session.ID, model.ProtocolSSH)
+	if !ok {
+		t.Fatal("platform ssh session did not resolve for websocket")
+	}
+	if resolvedServer.Host != asset.Host || resolvedServer.SSHPort != asset.Port || resolvedCredential.Username != "root" || secret.Password != "target-secret" {
+		t.Fatalf("unexpected resolved ssh parts: server=%#v credential=%#v secret=%#v", resolvedServer, resolvedCredential, secret)
+	}
 }
 
 func TestVNCPlatformAccessCreatesDesktopSession(t *testing.T) {
@@ -533,6 +561,16 @@ func TestAccessAuthorizationSupportsDepartmentsGroupsAndExpiry(t *testing.T) {
 	}, adminCookie, http.StatusCreated)
 	var groupAsset model.PlatformItem
 	decodeResponse(t, groupAssetRec, &groupAsset)
+	groupCredentialRec := assertStatus(t, handler, http.MethodPost, "/api/admin/credentials", map[string]any{
+		"name":      "group-host root",
+		"type":      "ssh_password",
+		"status":    "encrypted",
+		"username":  "root",
+		"password":  "target-secret",
+		"target_id": groupAsset.ID,
+	}, adminCookie, http.StatusCreated)
+	var groupCredential model.PlatformItem
+	decodeResponse(t, groupCredentialRec, &groupCredential)
 	expiredAssetRec := assertStatus(t, handler, http.MethodPost, "/api/admin/assets", map[string]any{
 		"name":     "expired-host",
 		"type":     "linux",
@@ -572,7 +610,12 @@ func TestAccessAuthorizationSupportsDepartmentsGroupsAndExpiry(t *testing.T) {
 	if strings.Contains(accessBody, expiredAsset.ID) {
 		t.Fatal("expired authorization leaked asset into access portal")
 	}
-	assertStatus(t, handler, http.MethodPost, "/api/access/ssh/"+groupAsset.ID, nil, userCookie, http.StatusAccepted)
+	groupSessionRec := assertStatus(t, handler, http.MethodPost, "/api/access/ssh/"+groupAsset.ID, nil, userCookie, http.StatusAccepted)
+	var groupSession model.ConnectionSession
+	decodeResponse(t, groupSessionRec, &groupSession)
+	if groupSession.Protocol != model.ProtocolSSH || groupSession.ServerID != groupAsset.ID || groupSession.CredentialID != groupCredential.ID {
+		t.Fatalf("unexpected group ssh session: %#v", groupSession)
+	}
 	assertStatus(t, handler, http.MethodPost, "/api/access/ssh/"+expiredAsset.ID, nil, userCookie, http.StatusForbidden)
 }
 

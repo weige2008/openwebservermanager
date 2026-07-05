@@ -23,6 +23,14 @@ type desktopCreateRequest struct {
 	RecordingEnabled bool   `json:"recording_enabled"`
 }
 
+type sshAccessCreateRequest struct {
+	AssetID      string `json:"asset_id"`
+	CredentialID string `json:"credential_id"`
+	Cols         int    `json:"cols"`
+	Rows         int    `json:"rows"`
+	Term         string `json:"term"`
+}
+
 func (s *Server) handleCreateVNC(w http.ResponseWriter, r *http.Request) {
 	var req model.VNCCreateRequest
 	if !decodeJSON(w, r, &req) {
@@ -235,7 +243,64 @@ func (s *Server) createPlatformDesktopSession(w http.ResponseWriter, r *http.Req
 	writeJSON(w, statusCode, session)
 }
 
+func (s *Server) createPlatformSSHSession(w http.ResponseWriter, r *http.Request, req sshAccessCreateRequest, statusCode int) {
+	req.AssetID = strings.TrimSpace(req.AssetID)
+	if req.AssetID == "" {
+		writeError(w, http.StatusBadRequest, "asset_id is required")
+		return
+	}
+	platform, err := s.cfg.Store.PlatformBootstrap()
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	userID, isAdmin := s.accessUser(r)
+	asset, ok := findAccessAsset(platform, model.ProtocolSSH, req.AssetID)
+	if !ok {
+		writeError(w, http.StatusNotFound, "asset not found")
+		return
+	}
+	if !isAccessAuthorized(platform, model.ProtocolSSH, asset.ID, userID, isAdmin) {
+		writeError(w, http.StatusForbidden, "asset access denied")
+		return
+	}
+	credential, secret, ok, err := s.resolvePlatformCredential(asset, model.ProtocolSSH, req.CredentialID)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	if !ok {
+		writeError(w, http.StatusBadRequest, "compatible credential not found")
+		return
+	}
+	if !sshSecretPresent(credential, secret) {
+		writeError(w, http.StatusBadRequest, "credential secret is missing")
+		return
+	}
+	req.Cols = clampInt(req.Cols, 40, 300, 120)
+	req.Rows = clampInt(req.Rows, 10, 120, 32)
+	session, err := s.cfg.Store.CreateSession(model.ConnectionSession{
+		Protocol:     model.ProtocolSSH,
+		ServerID:     asset.ID,
+		CredentialID: credential.ID,
+		UserID:       s.currentUserID(r),
+		ClientIP:     s.clientIP(r),
+		Width:        req.Cols,
+		Height:       req.Rows,
+	})
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	_ = s.audit(r, "connection.ssh.create", session.ID, model.ProtocolSSH, "created ssh session")
+	writeJSON(w, statusCode, session)
+}
+
 func (s *Server) resolvePlatformDesktopCredential(asset model.PlatformItem, protocol model.Protocol, requestedID string) (model.PlatformItem, store.CredentialSecret, bool, error) {
+	return s.resolvePlatformCredential(asset, protocol, requestedID)
+}
+
+func (s *Server) resolvePlatformCredential(asset model.PlatformItem, protocol model.Protocol, requestedID string) (model.PlatformItem, store.CredentialSecret, bool, error) {
 	requestedID = strings.TrimSpace(requestedID)
 	if requestedID != "" {
 		credential, secret, ok, err := s.cfg.Store.GetPlatformCredentialSecret(requestedID)
@@ -284,6 +349,8 @@ func (s *Server) resolvePlatformDesktopCredential(asset model.PlatformItem, prot
 func platformCredentialCompatible(credential model.PlatformItem, protocol model.Protocol) bool {
 	credentialType := strings.ToLower(strings.TrimSpace(credential.Type))
 	switch protocol {
+	case model.ProtocolSSH:
+		return credentialType == string(model.CredentialSSHPassword) || credentialType == string(model.CredentialSSHKey)
 	case model.ProtocolRDP:
 		return credentialType == string(model.CredentialRDPPassword)
 	case model.ProtocolVNC:
@@ -357,6 +424,17 @@ func desktopSecretPresent(protocol model.Protocol, secret store.CredentialSecret
 	}
 }
 
+func sshSecretPresent(credential model.PlatformItem, secret store.CredentialSecret) bool {
+	switch model.CredentialType(strings.ToLower(strings.TrimSpace(credential.Type))) {
+	case model.CredentialSSHPassword:
+		return strings.TrimSpace(secret.Password) != ""
+	case model.CredentialSSHKey:
+		return strings.TrimSpace(secret.PrivateKey) != ""
+	default:
+		return false
+	}
+}
+
 func decodeOptionalDesktopCreateRequest(w http.ResponseWriter, r *http.Request) (desktopCreateRequest, bool) {
 	if r.Body == nil || r.ContentLength == 0 {
 		return desktopCreateRequest{}, true
@@ -366,4 +444,39 @@ func decodeOptionalDesktopCreateRequest(w http.ResponseWriter, r *http.Request) 
 		return desktopCreateRequest{}, false
 	}
 	return req, true
+}
+
+func decodeOptionalSSHAccessCreateRequest(w http.ResponseWriter, r *http.Request) (sshAccessCreateRequest, bool) {
+	if r.Body == nil || r.ContentLength == 0 {
+		return sshAccessCreateRequest{}, true
+	}
+	var req sshAccessCreateRequest
+	if !decodeJSON(w, r, &req) {
+		return sshAccessCreateRequest{}, false
+	}
+	return req, true
+}
+
+func platformSSHServer(asset model.PlatformItem) model.Server {
+	port := asset.Port
+	if port == 0 {
+		port = 22
+	}
+	return model.Server{
+		ID:      asset.ID,
+		Name:    asset.Name,
+		Host:    asset.Host,
+		SSHPort: port,
+		OS:      model.ServerOSLinux,
+		Group:   asset.Group,
+	}
+}
+
+func platformSSHCredential(credential model.PlatformItem) model.Credential {
+	return model.Credential{
+		ID:       credential.ID,
+		Name:     credential.Name,
+		Type:     model.CredentialType(strings.ToLower(strings.TrimSpace(credential.Type))),
+		Username: credential.Username,
+	}
 }

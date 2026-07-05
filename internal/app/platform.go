@@ -245,6 +245,19 @@ func (s *Server) handleAccessAction(w http.ResponseWriter, r *http.Request) {
 		s.handleDatabaseWorkOrderCreate(w, r, asset, userID)
 		return
 	}
+	if protocol == model.ProtocolSSH {
+		if r.Method != http.MethodPost {
+			writeError(w, http.StatusMethodNotAllowed, "method not allowed")
+			return
+		}
+		req, ok := decodeOptionalSSHAccessCreateRequest(w, r)
+		if !ok {
+			return
+		}
+		req.AssetID = assetID
+		s.createPlatformSSHSession(w, r, req, http.StatusAccepted)
+		return
+	}
 	if protocol == model.ProtocolRDP || protocol == model.ProtocolVNC {
 		if r.Method != http.MethodPost {
 			writeError(w, http.StatusMethodNotAllowed, "method not allowed")

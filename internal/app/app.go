@@ -570,6 +570,13 @@ func (s *Server) connectionParts(w http.ResponseWriter, r *http.Request, session
 	}
 	server, ok := s.cfg.Store.GetServer(session.ServerID)
 	if !ok {
+		if protocol == model.ProtocolSSH {
+			asset, platformCredential, secret, ok := s.platformSSHConnectionParts(w, session)
+			if !ok {
+				return model.ConnectionSession{}, model.Server{}, model.Credential{}, store.CredentialSecret{}, false
+			}
+			return session, platformSSHServer(asset), platformSSHCredential(platformCredential), secret, true
+		}
 		writeError(w, http.StatusNotFound, "server not found")
 		return model.ConnectionSession{}, model.Server{}, model.Credential{}, store.CredentialSecret{}, false
 	}
@@ -583,6 +590,36 @@ func (s *Server) connectionParts(w http.ResponseWriter, r *http.Request, session
 		return model.ConnectionSession{}, model.Server{}, model.Credential{}, store.CredentialSecret{}, false
 	}
 	return session, server, credential, secret, true
+}
+
+func (s *Server) platformSSHConnectionParts(w http.ResponseWriter, session model.ConnectionSession) (model.PlatformItem, model.PlatformItem, store.CredentialSecret, bool) {
+	asset, ok, err := s.cfg.Store.GetPlatformItem("assets", session.ServerID)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err.Error())
+		return model.PlatformItem{}, model.PlatformItem{}, store.CredentialSecret{}, false
+	}
+	if !ok || asset.Protocol != model.ProtocolSSH {
+		writeError(w, http.StatusNotFound, "server not found")
+		return model.PlatformItem{}, model.PlatformItem{}, store.CredentialSecret{}, false
+	}
+	credential, secret, ok, err := s.cfg.Store.GetPlatformCredentialSecret(session.CredentialID)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err.Error())
+		return model.PlatformItem{}, model.PlatformItem{}, store.CredentialSecret{}, false
+	}
+	if !ok {
+		writeError(w, http.StatusNotFound, "credential not found")
+		return model.PlatformItem{}, model.PlatformItem{}, store.CredentialSecret{}, false
+	}
+	if !platformCredentialCompatible(credential, model.ProtocolSSH) || !credentialTargetsAsset(credential, asset, false) {
+		writeError(w, http.StatusBadRequest, "credential is not ssh compatible")
+		return model.PlatformItem{}, model.PlatformItem{}, store.CredentialSecret{}, false
+	}
+	if !sshSecretPresent(credential, secret) {
+		writeError(w, http.StatusBadRequest, "credential secret is missing")
+		return model.PlatformItem{}, model.PlatformItem{}, store.CredentialSecret{}, false
+	}
+	return asset, credential, secret, true
 }
 
 func (s *Server) requireAssetAuthorization(w http.ResponseWriter, r *http.Request, protocol model.Protocol, assetID string) bool {

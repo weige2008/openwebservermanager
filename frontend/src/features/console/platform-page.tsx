@@ -2099,9 +2099,13 @@ function AccessSection({
           dpi: 96,
           recording_enabled: true,
         })
-        : '{}'
+        : JSON.stringify({
+          cols: 120,
+          rows: 32,
+          term: 'xterm-256color',
+        })
       const session = await apiRequest<ConnectionSession>(`/api/access/${accessProtocol}/${item.id}`, { method: 'POST', body })
-      if (accessProtocol === 'rdp' || accessProtocol === 'vnc') {
+      if (accessProtocol === 'ssh' || accessProtocol === 'rdp' || accessProtocol === 'vnc') {
         app.setWorkspace({ type: accessProtocol, session, status: 'connecting' })
       } else {
         await app.refresh(true)

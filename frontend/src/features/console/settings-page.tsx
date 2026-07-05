@@ -1,4 +1,4 @@
-import { KeyRound, Monitor, Moon, Network, RotateCcw, ShieldCheck, Sun, UserCircle } from 'lucide-react'
+import { KeyRound, MessageCircle, Monitor, Moon, Network, RotateCcw, ShieldCheck, Sun, UserCircle } from 'lucide-react'
 import { useEffect, useState } from 'react'
 import { useTranslation } from 'react-i18next'
 
@@ -82,11 +82,24 @@ interface LDAPSettingsState {
   setting?: PlatformItem
 }
 
+interface WeComSettingsState {
+  enabled: boolean
+  providerName: string
+  corpID: string
+  agentID: string
+  agentSecret: string
+  agentSecretSet: boolean
+  role: string
+  autoCreate: boolean
+  setting?: PlatformItem
+}
+
 const loginSecurityTypes = ['security', 'identity', 'login', 'password', 'captcha']
 const captchaKeys = ['captcha_enabled', 'login_captcha', 'enable_captcha', 'captcha', 'require_captcha']
 const disablePasswordKeys = ['disable_password_login', 'password_login_disabled', 'disablePasswordLogin', 'passwordLoginDisabled', 'no_password_login']
 const passwordLoginKeys = ['password_login', 'enable_password_login', 'password_auth', 'local_password_login']
 const ldapSettingKeys = ['ldap_enabled', 'ldap_url', 'ldap_base_dn', 'ldap_bind_dn', 'ldap_user_filter', 'ldap_provider_id', 'ldap_provider_name']
+const wecomSettingKeys = ['wecom_enabled', 'wecom_corp_id', 'wecom_agent_id', 'wecom_provider_id', 'wecom_provider_name']
 
 export function SettingsPage() {
   const app = useApp()
@@ -106,6 +119,8 @@ export function SettingsPage() {
   const [loginSecurityBusy, setLoginSecurityBusy] = useState(false)
   const [ldapSettings, setLDAPSettings] = useState<LDAPSettingsState>(() => defaultLDAPSettings())
   const [ldapBusy, setLDAPBusy] = useState(false)
+  const [wecomSettings, setWeComSettings] = useState<WeComSettingsState>(() => defaultWeComSettings())
+  const [wecomBusy, setWeComBusy] = useState(false)
 
   const loadMFAStatus = async () => {
     setMFAStatus(await apiRequest<MFAStatus>('/api/auth/mfa/status'))
@@ -115,6 +130,7 @@ export function SettingsPage() {
     const result = await apiRequest<{ items: PlatformItem[] }>('/api/admin/system-settings')
     setLoginSecurity(loginSecurityFromSettings(result.items, app.captchaRequired, app.passwordLoginDisabled))
     setLDAPSettings(ldapSettingsFromSettings(result.items))
+    setWeComSettings(wecomSettingsFromSettings(result.items))
   }
 
   useEffect(() => {
@@ -222,6 +238,7 @@ export function SettingsPage() {
   }
 
   const patchLDAP = (next: Partial<LDAPSettingsState>) => setLDAPSettings((current) => ({ ...current, ...next }))
+  const patchWeCom = (next: Partial<WeComSettingsState>) => setWeComSettings((current) => ({ ...current, ...next }))
 
   const saveLDAPSettings = async () => {
     setLDAPBusy(true)
@@ -268,6 +285,49 @@ export function SettingsPage() {
       app.handleApiError(error)
     } finally {
       setLDAPBusy(false)
+    }
+  }
+
+  const saveWeComSettings = async () => {
+    setWeComBusy(true)
+    try {
+      const target = wecomSettings.setting
+      const metadata: Record<string, unknown> = {
+        ...(target?.metadata ?? {}),
+        wecom_enabled: wecomSettings.enabled,
+        wecom_provider_id: 'default-wecom',
+        wecom_provider_name: wecomSettings.providerName.trim() || 'Enterprise WeChat',
+        wecom_corp_id: wecomSettings.corpID.trim(),
+        wecom_agent_id: wecomSettings.agentID.trim(),
+        wecom_role: wecomSettings.role || 'user',
+        wecom_auto_create: wecomSettings.autoCreate,
+      }
+      if (wecomSettings.agentSecret.trim()) metadata.wecom_agent_secret = wecomSettings.agentSecret.trim()
+      const payload = {
+        name: target?.name || 'Enterprise WeChat identity',
+        type: 'identity',
+        status: 'enabled',
+        metadata,
+      }
+      if (target?.id) {
+        await apiRequest<PlatformItem>(`/api/admin/system-settings/${target.id}`, {
+          method: 'PATCH',
+          body: JSON.stringify(payload),
+        })
+      } else {
+        await apiRequest<PlatformItem>('/api/admin/system-settings', {
+          method: 'POST',
+          body: JSON.stringify(payload),
+        })
+      }
+      patchWeCom({ agentSecret: '' })
+      await app.refresh(true)
+      await loadLoginSecurity()
+      app.showToast(t('saved'))
+    } catch (error) {
+      app.handleApiError(error)
+    } finally {
+      setWeComBusy(false)
     }
   }
 
@@ -513,6 +573,74 @@ export function SettingsPage() {
         </div>
       </CardStaggerItem>
 
+      <CardStaggerItem className='grid gap-4 rounded-xl border border-border bg-card p-5 shadow-sm lg:grid-cols-[0.85fr_1.15fr]'>
+        <div className='flex min-w-0 items-start gap-3'>
+          <span className='grid size-12 shrink-0 place-items-center rounded-full bg-primary text-primary-foreground'>
+            <MessageCircle className='size-5' />
+          </span>
+          <div className='min-w-0'>
+            <div className='flex flex-wrap items-center gap-2'>
+              <h2 className='truncate text-base font-semibold'>{t('settingsPage.wecomTitle', { defaultValue: 'Enterprise WeChat login' })}</h2>
+              <Badge tone={wecomSettings.enabled ? 'success' : 'warning'}>
+                {wecomSettings.enabled ? t('settingsPage.wecomEnabled', { defaultValue: 'WeCom on' }) : t('settingsPage.wecomDisabled', { defaultValue: 'WeCom off' })}
+              </Badge>
+              <Badge tone={wecomSettings.agentSecretSet ? 'success' : 'neutral'}>
+                {wecomSettings.agentSecretSet ? t('passwordSaved') : t('passwordNotSet')}
+              </Badge>
+            </div>
+            <p className='mt-1 max-w-lg text-sm leading-6 text-muted-foreground'>
+              {t('settingsPage.wecomDescription', { defaultValue: 'Allow users to sign in through Enterprise WeChat OAuth. Agent secrets are encrypted server-side and never returned by API responses.' })}
+            </p>
+          </div>
+        </div>
+        <div className='grid gap-3'>
+          <label className='flex items-center gap-2 rounded-lg border border-border bg-background/70 px-3 py-2 text-sm'>
+            <input
+              type='checkbox'
+              className='size-4 accent-primary'
+              checked={wecomSettings.enabled}
+              onChange={(event) => patchWeCom({ enabled: event.currentTarget.checked })}
+            />
+            <span>{t('settingsPage.wecomEnableLogin', { defaultValue: 'Enable Enterprise WeChat login' })}</span>
+          </label>
+          <div className='grid gap-3 md:grid-cols-2'>
+            <Field label={t('name')}>
+              <Input value={wecomSettings.providerName} onChange={(event) => patchWeCom({ providerName: event.currentTarget.value })} placeholder='Enterprise WeChat' />
+            </Field>
+            <Field label={t('settingsPage.wecomCorpID', { defaultValue: 'Corp ID' })}>
+              <Input value={wecomSettings.corpID} onChange={(event) => patchWeCom({ corpID: event.currentTarget.value })} placeholder='wwxxxxxxxxxxxxxxxx' />
+            </Field>
+            <Field label={t('settingsPage.wecomAgentID', { defaultValue: 'Agent ID' })}>
+              <Input value={wecomSettings.agentID} onChange={(event) => patchWeCom({ agentID: event.currentTarget.value })} placeholder='1000002' />
+            </Field>
+            <Field label={t('settingsPage.wecomAgentSecret', { defaultValue: 'Agent secret' })}>
+              <Input type='password' value={wecomSettings.agentSecret} onChange={(event) => patchWeCom({ agentSecret: event.currentTarget.value })} placeholder={wecomSettings.agentSecretSet ? 'Leave blank to keep current secret' : ''} autoComplete='new-password' />
+            </Field>
+            <Field label={t('settingsPage.defaultRole', { defaultValue: 'Default role' })}>
+              <Select value={wecomSettings.role} onChange={(event) => patchWeCom({ role: event.currentTarget.value })}>
+                <option value='user'>user</option>
+                <option value='auditor'>auditor</option>
+                <option value='admin'>admin</option>
+              </Select>
+            </Field>
+          </div>
+          <label className='flex items-center gap-2 rounded-lg border border-border bg-background/70 px-3 py-2 text-sm'>
+            <input
+              type='checkbox'
+              className='size-4 accent-primary'
+              checked={wecomSettings.autoCreate}
+              onChange={(event) => patchWeCom({ autoCreate: event.currentTarget.checked })}
+            />
+            <span>{t('settingsPage.wecomAutoCreate', { defaultValue: 'Create Enterprise WeChat users on first successful login' })}</span>
+          </label>
+          <div className='flex justify-end'>
+            <Button variant='primary' onClick={() => void saveWeComSettings()} disabled={wecomBusy || (wecomSettings.enabled && (!wecomSettings.corpID.trim() || !wecomSettings.agentSecret.trim() && !wecomSettings.agentSecretSet))}>
+              {wecomBusy ? t('saving') : t('save')}
+            </Button>
+          </div>
+        </div>
+      </CardStaggerItem>
+
       <CardStaggerItem className='grid gap-4 rounded-xl border border-border bg-card p-5 shadow-sm lg:grid-cols-[1.1fr_0.9fr]'>
         <div className='lg:col-span-2'>
           <h2 className='text-base font-semibold'>{t('settingsPage.appearanceTitle')}</h2>
@@ -684,6 +812,19 @@ function defaultLDAPSettings(): LDAPSettingsState {
   }
 }
 
+function defaultWeComSettings(): WeComSettingsState {
+  return {
+    enabled: false,
+    providerName: 'Enterprise WeChat',
+    corpID: '',
+    agentID: '',
+    agentSecret: '',
+    agentSecretSet: false,
+    role: 'user',
+    autoCreate: true,
+  }
+}
+
 function ldapSettingsFromSettings(items: PlatformItem[]): LDAPSettingsState {
   const candidates = items.filter((item) => {
     const type = (item.type || '').trim().toLowerCase()
@@ -710,9 +851,35 @@ function ldapSettingsFromSettings(items: PlatformItem[]): LDAPSettingsState {
   }
 }
 
+function wecomSettingsFromSettings(items: PlatformItem[]): WeComSettingsState {
+  const candidates = items.filter((item) => {
+    const type = (item.type || '').trim().toLowerCase()
+    return platformItemEnabled(item) && type === 'identity' && hasWeComMetadata(item)
+  })
+  const setting = candidates.find((item) => item.name === 'Enterprise WeChat identity') || candidates[0]
+  if (!setting) return defaultWeComSettings()
+  const metadata = setting.metadata ?? {}
+  return {
+    enabled: metadataBoolValue(metadata.wecom_enabled) === true || metadataBoolValue(metadata.wecom_login_enabled) === true || metadataBoolValue(metadata.enterprise_wechat_enabled) === true,
+    providerName: metadataText(metadata.wecom_provider_name) || metadataText(metadata.enterprise_wechat_provider_name) || metadataText(metadata.provider_name) || setting.name || 'Enterprise WeChat',
+    corpID: metadataText(metadata.wecom_corp_id) || metadataText(metadata.enterprise_wechat_corp_id) || metadataText(metadata.corp_id) || '',
+    agentID: metadataText(metadata.wecom_agent_id) || metadataText(metadata.enterprise_wechat_agent_id) || metadataText(metadata.agent_id) || '',
+    agentSecret: '',
+    agentSecretSet: metadataBoolValue(metadata.wecom_agent_secret_set) === true,
+    role: metadataText(metadata.wecom_role) || metadataText(metadata.role) || 'user',
+    autoCreate: metadata.wecom_auto_create === undefined ? true : metadataBoolValue(metadata.wecom_auto_create) === true,
+    setting,
+  }
+}
+
 function hasLDAPMetadata(item: PlatformItem) {
   const metadata = item.metadata ?? {}
   return ldapSettingKeys.some((key) => Object.prototype.hasOwnProperty.call(metadata, key))
+}
+
+function hasWeComMetadata(item: PlatformItem) {
+  const metadata = item.metadata ?? {}
+  return wecomSettingKeys.some((key) => Object.prototype.hasOwnProperty.call(metadata, key))
 }
 
 function hasLoginSecurityMetadata(item: PlatformItem) {

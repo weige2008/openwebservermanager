@@ -38,6 +38,11 @@ interface OIDCProvider {
   name: string
 }
 
+interface WeComProvider {
+  id: string
+  name: string
+}
+
 export function AuthPage() {
   const app = useApp()
   const { t } = useTranslation()
@@ -46,6 +51,7 @@ export function AuthPage() {
   const [mfaChallenge, setMFAChallenge] = useState<MFAChallenge | null>(null)
   const [captcha, setCaptcha] = useState<CaptchaChallenge | null>(null)
   const [oidcProviders, setOIDCProviders] = useState<OIDCProvider[]>([])
+  const [wecomProviders, setWeComProviders] = useState<WeComProvider[]>([])
   const passwordFormAvailable = !app.passwordLoginDisabled || app.ldapLoginEnabled
 
   const loadCaptcha = async () => {
@@ -63,11 +69,15 @@ export function AuthPage() {
   useEffect(() => {
     if (app.setupRequired) {
       setOIDCProviders([])
+      setWeComProviders([])
       return
     }
     void apiRequest<{ providers: OIDCProvider[] }>('/api/auth/oidc/providers')
       .then((payload) => setOIDCProviders(payload.providers || []))
       .catch(() => setOIDCProviders([]))
+    void apiRequest<{ providers: WeComProvider[] }>('/api/auth/wecom/providers')
+      .then((payload) => setWeComProviders(payload.providers || []))
+      .catch(() => setWeComProviders([]))
   }, [app.setupRequired])
 
   const finishSignIn = async () => {
@@ -83,6 +93,12 @@ export function AuthPage() {
     const next = new URLSearchParams(window.location.search).get('next') || '/app'
     const params = new URLSearchParams({ provider: provider.id, next })
     window.location.assign(`/api/auth/oidc/start?${params.toString()}`)
+  }
+
+  const startWeComLogin = (provider: WeComProvider) => {
+    const next = new URLSearchParams(window.location.search).get('next') || '/app'
+    const params = new URLSearchParams({ provider: provider.id, next })
+    window.location.assign(`/api/auth/wecom/start?${params.toString()}`)
   }
 
   const onSubmit = async (event: FormEvent<HTMLFormElement>) => {
@@ -237,7 +253,7 @@ export function AuthPage() {
           {mfaChallenge ? 'Verify MFA' : app.setupRequired ? t('auth.setupSubmit') : passwordFormAvailable ? t('auth.loginSubmit') : t('auth.passwordLoginDisabledSubmit')}
         </Button>
       </form>
-      {!app.setupRequired && !mfaChallenge && oidcProviders.length ? (
+      {!app.setupRequired && !mfaChallenge && (oidcProviders.length || wecomProviders.length) ? (
         <div className='grid gap-2'>
           <div className='flex items-center gap-3 text-xs text-muted-foreground'>
             <span className='h-px flex-1 bg-border' />
@@ -246,6 +262,11 @@ export function AuthPage() {
           </div>
           {oidcProviders.map((provider) => (
             <Button key={provider.id} type='button' variant='outline' className='w-full' onClick={() => startOIDCLogin(provider)}>
+              {provider.name}
+            </Button>
+          ))}
+          {wecomProviders.map((provider) => (
+            <Button key={`wecom-${provider.id}`} type='button' variant='outline' className='w-full' onClick={() => startWeComLogin(provider)}>
               {provider.name}
             </Button>
           ))}

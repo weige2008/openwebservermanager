@@ -54,6 +54,7 @@ const initialForm: PlatformFormState = {
 
 type ResourceOperation =
   | { type: 'asset-import' }
+  | { type: 'agent-token'; item: PlatformItem }
   | { type: 'certificate-create' }
   | { type: 'storage-files'; item: PlatformItem }
   | { type: 'task-logs'; item: PlatformItem }
@@ -106,6 +107,17 @@ export function PlatformTablePage({ config }: { config: PlatformPageConfig }) {
         cell: ({ row }) => <Badge tone={statusTone(row.original.status)}>{row.original.status || '-'}</Badge>,
       },
       { header: app.t('address'), cell: ({ row }) => row.original.host ? <span className='font-mono text-xs'>{row.original.host}{row.original.port ? `:${row.original.port}` : ''}</span> : '-' },
+      ...(config.collection === 'agent_gateways' ? [
+        { header: '延迟', cell: ({ row }) => <span className='font-mono text-xs'>{formatNumberValue(row.original.metadata?.latency_ms)} ms</span> },
+        {
+          header: '资源',
+          cell: ({ row }) => (
+            <span className='font-mono text-xs'>
+              CPU {formatPercentValueFromWhole(row.original.metadata?.cpu_percent)} / MEM {formatPercentValueFromWhole(row.original.metadata?.memory_percent)}
+            </span>
+          ),
+        },
+      ] satisfies ColumnDef<PlatformItem>[] : []),
       { header: app.t('group'), accessorFn: (row) => row.group || row.owner_id || row.target_id || '-' },
       { header: app.t('createdAt'), cell: ({ row }) => formatDate(row.original.created_at) },
       {
@@ -382,6 +394,15 @@ function ResourceRowActions({ config, item, onOperation }: { config: PlatformPag
     )
   }
 
+  if (config.collection === 'agent_gateways') {
+    return (
+      <Button size='sm' variant='outline' onClick={() => onOperation({ type: 'agent-token', item })}>
+        <Copy className='size-3.5' />
+        令牌
+      </Button>
+    )
+  }
+
   if (config.collection === 'scheduled_tasks') {
     return (
       <>
@@ -428,6 +449,7 @@ function ResourceRowActions({ config, item, onOperation }: { config: PlatformPag
 function ResourceOperationDialog({ operation, onOpenChange }: { operation: ResourceOperation | null; onOpenChange: (operation: ResourceOperation | null) => void }) {
   if (!operation) return null
   if (operation.type === 'asset-import') return <AssetImportDialog onClose={() => onOpenChange(null)} />
+  if (operation.type === 'agent-token') return <AgentGatewayTokenDialog item={operation.item} onClose={() => onOpenChange(null)} />
   if (operation.type === 'certificate-create') return <CertificateCreateDialog onClose={() => onOpenChange(null)} />
   if (operation.type === 'storage-files') return <StorageFilesDialog item={operation.item} onClose={() => onOpenChange(null)} />
   if (operation.type === 'task-logs') return <TaskLogsDialog item={operation.item} onClose={() => onOpenChange(null)} />
@@ -465,6 +487,93 @@ function AssetImportDialog({ onClose }: { onClose: () => void }) {
             <Upload className='size-4' />
             {saving ? '导入中' : '导入'}
           </Button>
+        </div>
+      </div>
+    </DialogShell>
+  )
+}
+
+function AgentGatewayTokenDialog({ item, onClose }: { item: PlatformItem; onClose: () => void }) {
+  const app = useApp()
+  const [loading, setLoading] = useState(true)
+  const [token, setToken] = useState('')
+  const [error, setError] = useState('')
+
+  useEffect(() => {
+    let alive = true
+    const issue = async () => {
+      setLoading(true)
+      setError('')
+      try {
+        const data = await apiRequest<{ registration_token: string; gateway_id: string }>(`/api/admin/agent-gateways/${item.id}/token`, {
+          method: 'POST',
+          body: '{}',
+        })
+        if (!alive) return
+        setToken(data.registration_token || '')
+        await app.refresh(true)
+      } catch (requestError) {
+        if (!alive) return
+        const message = requestError instanceof Error ? requestError.message : '生成令牌失败'
+        setError(message)
+      } finally {
+        if (alive) setLoading(false)
+      }
+    }
+    void issue()
+    return () => {
+      alive = false
+    }
+  }, [app, item.id])
+
+  const server = window.location.origin
+  const registerPayload = JSON.stringify({ registration_token: token, hostname: 'gateway-01', version: '1.0.0' }, null, 2)
+  const heartbeatPayload = JSON.stringify({ registration_token: token, latency_ms: 12, cpu_percent: 8.5, memory_used_bytes: 268435456, memory_total_bytes: 1073741824 }, null, 2)
+
+  const copy = async (value: string, message = '已复制') => {
+    await navigator.clipboard.writeText(value)
+    app.showToast(message)
+  }
+
+  return (
+    <DialogShell open onOpenChange={(open) => !open && onClose()} title='Agent 注册令牌' description='令牌只显示一次；重新生成会让旧令牌失效。'>
+      <div className='grid gap-4'>
+        {loading ? (
+          <div className='rounded-lg border border-border bg-muted/50 p-4 text-sm text-muted-foreground'>正在生成令牌...</div>
+        ) : error ? (
+          <div className='rounded-lg border border-destructive/30 bg-destructive/10 p-4 text-sm text-destructive'>{error}</div>
+        ) : (
+          <>
+            <Field label='Gateway ID'><Input readOnly value={item.id} /></Field>
+            <Field label='Registration Token'>
+              <div className='grid gap-2 sm:grid-cols-[minmax(0,1fr)_auto]'>
+                <Input readOnly className='font-mono text-xs' value={token} />
+                <Button variant='outline' onClick={() => void copy(token)}>
+                  <Copy className='size-4' />
+                  复制
+                </Button>
+              </div>
+            </Field>
+            <div className='grid gap-3'>
+              <div className='rounded-lg border border-border bg-background/70 p-3'>
+                <div className='mb-2 text-xs font-medium text-muted-foreground'>注册请求</div>
+                <pre className='overflow-auto rounded-md bg-muted p-3 text-xs'>{`curl -X POST ${server}/api/agent/gateways/register \\\n  -H "Content-Type: application/json" \\\n  -d '${registerPayload}'`}</pre>
+              </div>
+              <div className='rounded-lg border border-border bg-background/70 p-3'>
+                <div className='mb-2 text-xs font-medium text-muted-foreground'>心跳请求</div>
+                <pre className='overflow-auto rounded-md bg-muted p-3 text-xs'>{`curl -X POST ${server}/api/agent/gateways/heartbeat \\\n  -H "Content-Type: application/json" \\\n  -d '${heartbeatPayload}'`}</pre>
+              </div>
+            </div>
+          </>
+        )}
+        <div className='flex justify-end gap-2'>
+          <Button variant='outline' onClick={onClose}>关闭</Button>
+          {token ? (
+            <Button variant='primary' onClick={() => void copy(token, '注册令牌已复制')}>
+              <Copy className='size-4' />
+              复制令牌
+            </Button>
+          ) : null}
         </div>
       </div>
     </DialogShell>
@@ -1374,6 +1483,10 @@ function formatBytesValue(value: unknown) {
 
 function formatPercentValue(value: unknown) {
   return `${(numberValue(value) * 100).toFixed(1)}%`
+}
+
+function formatPercentValueFromWhole(value: unknown) {
+  return `${numberValue(value).toFixed(1)}%`
 }
 
 function itemHasRecording(item: PlatformItem) {

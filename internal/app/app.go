@@ -119,6 +119,9 @@ func (s *Server) serveAPI(w http.ResponseWriter, r *http.Request) {
 	case strings.HasPrefix(r.URL.Path, "/api/oidc/"):
 		s.handleOIDCAPI(w, r)
 		return
+	case strings.HasPrefix(r.URL.Path, "/api/agent/"):
+		s.handleAgentAPI(w, r)
+		return
 	}
 
 	if !s.requireAuth(w, r) {

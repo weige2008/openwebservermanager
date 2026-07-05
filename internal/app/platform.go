@@ -114,6 +114,9 @@ func (s *Server) handlePlatformAPI(w http.ResponseWriter, r *http.Request) bool 
 func (s *Server) handleCollection(w http.ResponseWriter, r *http.Request, collection, id string) {
 	switch {
 	case id == "" && r.Method == http.MethodGet:
+		if collection == "agent_gateways" {
+			s.refreshAgentGatewayStatuses()
+		}
 		items, err := s.cfg.Store.ListPlatformItems(collection)
 		if err != nil {
 			writeError(w, http.StatusInternalServerError, err.Error())
@@ -383,6 +386,7 @@ func joinProxyPath(basePath, proxyPath string) string {
 }
 
 func (s *Server) handleSystemMonitoring(w http.ResponseWriter, _ *http.Request) {
+	s.refreshAgentGatewayStatuses()
 	servers, credentials, sessions, auditLogs := s.cfg.Store.Bootstrap()
 	platform, err := s.cfg.Store.PlatformBootstrap()
 	if err != nil {
@@ -393,12 +397,21 @@ func (s *Server) handleSystemMonitoring(w http.ResponseWriter, _ *http.Request) 
 	runtime.ReadMemStats(&mem)
 	active := 0
 	recordings := 0
+	onlineAgentGateways := 0
+	offlineAgentGateways := 0
 	for _, session := range sessions {
 		if session.Status == model.SessionActive || session.Status == model.SessionPending {
 			active++
 		}
 		if session.RecordingPath != "" {
 			recordings++
+		}
+	}
+	for _, gateway := range platform["agent_gateways"] {
+		if strings.EqualFold(gateway.Status, "online") {
+			onlineAgentGateways++
+		} else {
+			offlineAgentGateways++
 		}
 	}
 	writeJSON(w, http.StatusOK, map[string]any{
@@ -417,7 +430,12 @@ func (s *Server) handleSystemMonitoring(w http.ResponseWriter, _ *http.Request) 
 		"web_assets":      len(platform["web_assets"]),
 		"database_assets": len(platform["database_assets"]),
 		"gateways":        len(platform["agent_gateways"]) + len(platform["ssh_gateways"]),
-		"checked_at":      time.Now().UTC(),
+		"agent_gateways": map[string]any{
+			"total":   len(platform["agent_gateways"]),
+			"online":  onlineAgentGateways,
+			"offline": offlineAgentGateways,
+		},
+		"checked_at": time.Now().UTC(),
 	})
 }
 

@@ -826,6 +826,120 @@ func TestToolsAndMonitoringEndpoints(t *testing.T) {
 	assertStatus(t, handler, http.MethodPost, "/api/tools/ping", map[string]any{"target": "", "count": 1}, cookie, http.StatusBadRequest)
 }
 
+func TestAgentGatewayRegistrationHeartbeatAndTimeout(t *testing.T) {
+	handler, adminCookie := newTestHandler(t)
+
+	gatewayRec := assertStatus(t, handler, http.MethodPost, "/api/admin/agent-gateways", map[string]any{
+		"name":     "edge-gateway",
+		"type":     "agent",
+		"status":   "offline",
+		"metadata": map[string]any{"heartbeat_timeout_seconds": 30},
+	}, adminCookie, http.StatusCreated)
+	var gateway model.PlatformItem
+	decodeResponse(t, gatewayRec, &gateway)
+
+	assertStatus(t, handler, http.MethodPost, "/api/agent/gateways/register", map[string]any{
+		"gateway_id": gateway.ID,
+		"token":      "missing",
+		"hostname":   "edge-01",
+	}, nil, http.StatusUnauthorized)
+
+	tokenRec := assertStatus(t, handler, http.MethodPost, "/api/admin/agent-gateways/"+gateway.ID+"/token", nil, adminCookie, http.StatusOK)
+	if strings.Contains(tokenRec.Body.String(), "agent_token_hash") {
+		t.Fatal("agent token hash leaked in token response")
+	}
+	var tokenPayload map[string]any
+	decodeResponse(t, tokenRec, &tokenPayload)
+	registrationToken, _ := tokenPayload["registration_token"].(string)
+	if registrationToken == "" || !strings.HasPrefix(registrationToken, gateway.ID+".") {
+		t.Fatalf("registration token = %q, want gateway scoped token", registrationToken)
+	}
+
+	assertStatus(t, handler, http.MethodPost, "/api/agent/gateways/register", map[string]any{
+		"registration_token": gateway.ID + ".wrong-token",
+		"hostname":           "edge-01",
+	}, nil, http.StatusUnauthorized)
+
+	registerRec := assertStatus(t, handler, http.MethodPost, "/api/agent/gateways/register", map[string]any{
+		"registration_token": registrationToken,
+		"hostname":           "edge-01",
+		"version":            "1.2.3",
+		"os":                 "linux",
+		"arch":               "amd64",
+		"public_address":     "10.0.0.10",
+		"ip_addresses":       []string{"10.0.0.10", "fd00::10"},
+		"labels":             []string{"prod", "edge"},
+		"capabilities":       []string{"ssh", "rdp", "database"},
+	}, nil, http.StatusOK)
+	if !strings.Contains(registerRec.Body.String(), `"status":"online"`) || !strings.Contains(registerRec.Body.String(), "edge-01") {
+		t.Fatal("agent registration did not mark gateway online with identity metadata")
+	}
+	if strings.Contains(registerRec.Body.String(), "agent_token_hash") {
+		t.Fatal("agent token hash leaked in register response")
+	}
+
+	heartbeatRec := assertStatusWithHeaders(t, handler, http.MethodPost, "/api/agent/gateways/heartbeat", map[string]any{
+		"latency_ms":         18,
+		"cpu_percent":        12.5,
+		"memory_used_bytes":  512,
+		"memory_total_bytes": 1024,
+		"disk_used_bytes":    2048,
+		"disk_total_bytes":   4096,
+		"network_rx_bytes":   1000,
+		"network_tx_bytes":   2000,
+		"active_sessions":    3,
+		"metrics":            map[string]any{"queue_depth": 2},
+	}, nil, map[string]string{
+		"Authorization": "Bearer " + registrationToken,
+	}, http.StatusOK)
+	for _, want := range []string{`"latency_ms":18`, `"cpu_percent":12.5`, `"memory_percent":50`, `"active_sessions":3`, "queue_depth"} {
+		if !strings.Contains(heartbeatRec.Body.String(), want) {
+			t.Fatalf("heartbeat response did not include %q", want)
+		}
+	}
+
+	listRec := assertStatus(t, handler, http.MethodGet, "/api/admin/agent-gateways", nil, adminCookie, http.StatusOK)
+	if !strings.Contains(listRec.Body.String(), `"status":"online"`) || !strings.Contains(listRec.Body.String(), `"latency_ms":18`) {
+		t.Fatal("agent gateway list did not include online heartbeat metrics")
+	}
+	if strings.Contains(listRec.Body.String(), "agent_token_hash") || strings.Contains(listRec.Body.String(), registrationToken) {
+		t.Fatal("agent gateway list leaked token material")
+	}
+	statusRec := assertStatus(t, handler, http.MethodGet, "/api/admin/agent-gateways/status", nil, adminCookie, http.StatusOK)
+	if !strings.Contains(statusRec.Body.String(), `"online":1`) {
+		t.Fatal("agent gateway status summary did not count online gateway")
+	}
+
+	oldHeartbeat := time.Now().Add(-2 * time.Minute).UTC().Format(time.RFC3339Nano)
+	assertStatus(t, handler, http.MethodPatch, "/api/admin/agent-gateways/"+gateway.ID, map[string]any{
+		"name":   "edge-gateway",
+		"status": "online",
+		"metadata": map[string]any{
+			"last_heartbeat_at":         oldHeartbeat,
+			"heartbeat_timeout_seconds": 30,
+			"latency_ms":                18,
+		},
+	}, adminCookie, http.StatusOK)
+	offlineRec := assertStatus(t, handler, http.MethodGet, "/api/admin/agent-gateways", nil, adminCookie, http.StatusOK)
+	if !strings.Contains(offlineRec.Body.String(), `"status":"offline"`) || !strings.Contains(offlineRec.Body.String(), "heartbeat timeout") {
+		t.Fatal("stale heartbeat did not mark agent gateway offline")
+	}
+
+	assertStatus(t, handler, http.MethodPost, "/api/agent/gateways/heartbeat", map[string]any{
+		"registration_token": registrationToken,
+		"latency_ms":         9,
+	}, nil, http.StatusOK)
+	recoveredRec := assertStatus(t, handler, http.MethodGet, "/api/admin/agent-gateways", nil, adminCookie, http.StatusOK)
+	if !strings.Contains(recoveredRec.Body.String(), `"status":"online"`) || !strings.Contains(recoveredRec.Body.String(), `"latency_ms":9`) {
+		t.Fatal("valid heartbeat did not recover offline gateway")
+	}
+
+	logsRec := assertStatus(t, handler, http.MethodGet, "/api/admin/audit/operation-logs", nil, adminCookie, http.StatusOK)
+	if !strings.Contains(logsRec.Body.String(), "agent.gateway.register") || !strings.Contains(logsRec.Body.String(), "agent_gateway.token") {
+		t.Fatal("agent gateway token/register operations were not audited")
+	}
+}
+
 func TestResourceOperationEndpoints(t *testing.T) {
 	handler, cookie := newTestHandler(t)
 

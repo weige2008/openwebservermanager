@@ -92,6 +92,13 @@ func (s *Server) handleResourceOperation(w http.ResponseWriter, r *http.Request,
 		id := pathSegmentFromTrimmed(path, 2)
 		s.handleScheduledTaskLogs(w, r, id)
 		return true
+	case path == "admin/agent-gateways/status":
+		s.handleAgentGatewayStatus(w, r)
+		return true
+	case strings.HasPrefix(path, "admin/agent-gateways/") && strings.HasSuffix(path, "/token"):
+		id := pathSegmentFromTrimmed(path, 2)
+		s.handleAgentGatewayToken(w, r, id)
+		return true
 	case strings.HasPrefix(path, "admin/sql-work-orders/") && strings.HasSuffix(path, "/execute"):
 		id := pathSegmentFromTrimmed(path, 2)
 		s.handleSQLWorkOrderExecute(w, r, id)

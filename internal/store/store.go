@@ -685,6 +685,7 @@ func (s *Store) UpdatePlatformItem(collection, id string, req model.PlatformItem
 	}
 	existingPasswordHash, _ := item.Metadata["password_hash"].(string)
 	existingClientSecretHash, _ := item.Metadata["client_secret_hash"].(string)
+	existingAgentTokenHash, _ := item.Metadata["agent_token_hash"].(string)
 	if req.Metadata != nil {
 		item.Metadata = req.Metadata
 		if collection == "users" && existingPasswordHash != "" {
@@ -694,6 +695,12 @@ func (s *Store) UpdatePlatformItem(collection, id string, req model.PlatformItem
 			delete(item.Metadata, "client_secret_hash")
 			if existingClientSecretHash != "" {
 				item.Metadata["client_secret_hash"] = existingClientSecretHash
+			}
+		}
+		if collection == "agent_gateways" {
+			delete(item.Metadata, "agent_token_hash")
+			if existingAgentTokenHash != "" {
+				item.Metadata["agent_token_hash"] = existingAgentTokenHash
 			}
 		}
 	}
@@ -759,6 +766,8 @@ func applyPlatformSecrets(collection string, req model.PlatformItemRequest, item
 		return applyUserPlatformSecret(req, item, creating)
 	case "oidc_clients":
 		return applyOIDCClientPlatformSecret(req, item, creating)
+	case "agent_gateways":
+		return applyAgentGatewayPlatformSecret(item, creating)
 	default:
 		return nil
 	}
@@ -825,6 +834,22 @@ func applyOIDCClientPlatformSecret(req model.PlatformItemRequest, item *model.Pl
 	return nil
 }
 
+func applyAgentGatewayPlatformSecret(item *model.PlatformItem, creating bool) error {
+	if item.Metadata == nil {
+		item.Metadata = map[string]any{}
+	}
+	if item.Type == "" {
+		item.Type = "agent"
+	}
+	for _, key := range []string{"registration_token", "agent_token", "gateway_token", "token"} {
+		delete(item.Metadata, key)
+	}
+	if creating {
+		delete(item.Metadata, "agent_token_hash")
+	}
+	return nil
+}
+
 func sanitizePlatformItem(item *model.PlatformItem) {
 	if item.Metadata == nil {
 		return
@@ -837,6 +862,11 @@ func sanitizePlatformItem(item *model.PlatformItem) {
 	delete(item.Metadata, "clientSecret")
 	delete(item.Metadata, "client_secret_hash")
 	delete(item.Metadata, "secret")
+	delete(item.Metadata, "agent_token_hash")
+	delete(item.Metadata, "registration_token")
+	delete(item.Metadata, "agent_token")
+	delete(item.Metadata, "gateway_token")
+	delete(item.Metadata, "token")
 }
 
 func (s *Store) Bootstrap() ([]model.Server, []model.CredentialPublic, []model.ConnectionSession, []model.AuditLog) {

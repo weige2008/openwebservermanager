@@ -90,21 +90,32 @@ func (c Credential) Public() CredentialPublic {
 }
 
 type ConnectionSession struct {
-	ID             string        `json:"id"`
-	Protocol       Protocol      `json:"protocol"`
-	ServerID       string        `json:"server_id"`
-	CredentialID   string        `json:"credential_id"`
-	UserID         string        `json:"user_id"`
-	Status         SessionStatus `json:"status"`
-	ClientIP       string        `json:"client_ip"`
-	Error          string        `json:"error,omitempty"`
-	RecordingPath  string        `json:"recording_path,omitempty"`
-	RecordingSize  int64         `json:"recording_size,omitempty"`
-	Width          int           `json:"width,omitempty"`
-	Height         int           `json:"height,omitempty"`
-	StartedAt      time.Time     `json:"started_at"`
-	EndedAt        *time.Time    `json:"ended_at,omitempty"`
-	LastActivityAt time.Time     `json:"last_activity_at"`
+	ID                  string        `json:"id"`
+	Protocol            Protocol      `json:"protocol"`
+	ServerID            string        `json:"server_id"`
+	CredentialID        string        `json:"credential_id"`
+	UserID              string        `json:"user_id"`
+	Status              SessionStatus `json:"status"`
+	ClientIP            string        `json:"client_ip"`
+	Error               string        `json:"error,omitempty"`
+	RecordingPath       string        `json:"recording_path,omitempty"`
+	RecordingSize       int64         `json:"recording_size,omitempty"`
+	Width               int           `json:"width,omitempty"`
+	Height              int           `json:"height,omitempty"`
+	DPI                 int           `json:"dpi,omitempty"`
+	ColorDepth          int           `json:"color_depth,omitempty"`
+	ResizeMethod        string        `json:"resize_method,omitempty"`
+	ClipboardEnabled    *bool         `json:"clipboard_enabled,omitempty"`
+	FileTransferEnabled *bool         `json:"file_transfer_enabled,omitempty"`
+	IgnoreCert          *bool         `json:"ignore_cert,omitempty"`
+	ReadOnly            *bool         `json:"read_only,omitempty"`
+	WatermarkEnabled    *bool         `json:"watermark_enabled,omitempty"`
+	WatermarkText       string        `json:"watermark_text,omitempty"`
+	WatermarkColor      string        `json:"watermark_color,omitempty"`
+	WatermarkFontSize   int           `json:"watermark_font_size,omitempty"`
+	StartedAt           time.Time     `json:"started_at"`
+	EndedAt             *time.Time    `json:"ended_at,omitempty"`
+	LastActivityAt      time.Time     `json:"last_activity_at"`
 }
 
 type AuditLog struct {

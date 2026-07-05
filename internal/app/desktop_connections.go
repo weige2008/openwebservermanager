@@ -99,20 +99,24 @@ func (s *Server) desktopTunnelConfig(w http.ResponseWriter, r *http.Request, ses
 			if port == 0 {
 				port = 3389
 			}
+			policy := s.desktopAccessPolicy(model.ProtocolRDP)
 			return guac.DesktopConfig{
-				Protocol:    model.ProtocolRDP,
-				Session:     session,
-				Host:        server.Host,
-				Port:        port,
-				Username:    credential.Username,
-				Password:    secret.Password,
-				Domain:      credential.Domain,
-				Width:       session.Width,
-				Height:      session.Height,
-				DPI:         96,
-				ColorDepth:  24,
-				IgnoreCert:  true,
-				EnableDrive: true,
+				Protocol:         model.ProtocolRDP,
+				Session:          session,
+				Host:             server.Host,
+				Port:             port,
+				Username:         credential.Username,
+				Password:         secret.Password,
+				Domain:           credential.Domain,
+				Width:            session.Width,
+				Height:           session.Height,
+				DPI:              clampInt(session.DPI, 72, 240, policy.DPI),
+				ColorDepth:       clampInt(session.ColorDepth, 8, 32, policy.ColorDepth),
+				IgnoreCert:       boolPtrValue(session.IgnoreCert, policy.IgnoreCert),
+				EnableDrive:      boolPtrValue(session.FileTransferEnabled, policy.FileTransferEnabled),
+				ClipboardEnabled: boolPtrValue(session.ClipboardEnabled, policy.ClipboardEnabled),
+				ReadOnly:         boolPtrValue(session.ReadOnly, policy.ReadOnly),
+				ResizeMethod:     valueOrDefault(session.ResizeMethod, policy.ResizeMethod),
 			}, true
 		}
 	}
@@ -187,23 +191,35 @@ func (s *Server) createPlatformDesktopSession(w http.ResponseWriter, r *http.Req
 		writeError(w, http.StatusBadRequest, "credential secret is missing")
 		return
 	}
-	req.Width = clampInt(req.Width, 640, 7680, 1440)
-	req.Height = clampInt(req.Height, 480, 4320, 900)
-	req.DPI = clampInt(req.DPI, 72, 240, 96)
+	policy := s.desktopAccessPolicy(protocol)
+	req.Width = clampInt(req.Width, 640, 7680, policy.Width)
+	req.Height = clampInt(req.Height, 480, 4320, policy.Height)
+	req.DPI = clampInt(req.DPI, 72, 240, policy.DPI)
 	session, err := s.cfg.Store.CreateSession(model.ConnectionSession{
-		Protocol:     protocol,
-		ServerID:     asset.ID,
-		CredentialID: credential.ID,
-		UserID:       s.currentUserID(r),
-		ClientIP:     s.clientIP(r),
-		Width:        req.Width,
-		Height:       req.Height,
+		Protocol:            protocol,
+		ServerID:            asset.ID,
+		CredentialID:        credential.ID,
+		UserID:              s.currentUserID(r),
+		ClientIP:            s.clientIP(r),
+		Width:               req.Width,
+		Height:              req.Height,
+		DPI:                 req.DPI,
+		ColorDepth:          policy.ColorDepth,
+		ResizeMethod:        policy.ResizeMethod,
+		ClipboardEnabled:    boolPtr(policy.ClipboardEnabled),
+		FileTransferEnabled: boolPtr(policy.FileTransferEnabled),
+		IgnoreCert:          boolPtr(policy.IgnoreCert),
+		ReadOnly:            boolPtr(policy.ReadOnly),
+		WatermarkEnabled:    boolPtr(policy.WatermarkEnabled),
+		WatermarkText:       policy.WatermarkText,
+		WatermarkColor:      policy.WatermarkColor,
+		WatermarkFontSize:   policy.WatermarkFontSize,
 	})
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
-	if req.RecordingEnabled {
+	if req.RecordingEnabled || policy.RecordingEnabled {
 		recordingPath := filepath.Join(s.cfg.DataDir, "recordings", session.ID)
 		if err := os.MkdirAll(recordingPath, 0o770); err != nil {
 			writeError(w, http.StatusInternalServerError, err.Error())
@@ -305,24 +321,30 @@ func platformDesktopConfig(session model.ConnectionSession, asset, credential mo
 			port = 3389
 		}
 	}
-	colorDepth := 24
+	colorDepth := session.ColorDepth
+	if colorDepth == 0 {
+		colorDepth = 24
+	}
 	if configured, ok := metadataInt(asset.Metadata["color_depth"]); ok {
 		colorDepth = clampInt(configured, 8, 32, 24)
 	}
 	return guac.DesktopConfig{
-		Protocol:    protocol,
-		Session:     session,
-		Host:        asset.Host,
-		Port:        port,
-		Username:    credential.Username,
-		Password:    secret.Password,
-		Domain:      firstMetadataString(credential.Metadata, "domain", "workgroup"),
-		Width:       session.Width,
-		Height:      session.Height,
-		DPI:         96,
-		ColorDepth:  colorDepth,
-		IgnoreCert:  true,
-		EnableDrive: protocol == model.ProtocolRDP,
+		Protocol:         protocol,
+		Session:          session,
+		Host:             asset.Host,
+		Port:             port,
+		Username:         credential.Username,
+		Password:         secret.Password,
+		Domain:           firstMetadataString(credential.Metadata, "domain", "workgroup"),
+		Width:            session.Width,
+		Height:           session.Height,
+		DPI:              clampInt(session.DPI, 72, 240, 96),
+		ColorDepth:       colorDepth,
+		IgnoreCert:       boolPtrValue(session.IgnoreCert, true),
+		EnableDrive:      boolPtrValue(session.FileTransferEnabled, protocol == model.ProtocolRDP),
+		ClipboardEnabled: boolPtrValue(session.ClipboardEnabled, true),
+		ReadOnly:         boolPtrValue(session.ReadOnly, false),
+		ResizeMethod:     session.ResizeMethod,
 	}
 }
 

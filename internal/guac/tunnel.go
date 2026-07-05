@@ -38,19 +38,22 @@ type RDPConfig struct {
 }
 
 type DesktopConfig struct {
-	Protocol    model.Protocol
-	Session     model.ConnectionSession
-	Host        string
-	Port        int
-	Username    string
-	Password    string
-	Domain      string
-	Width       int
-	Height      int
-	DPI         int
-	ColorDepth  int
-	IgnoreCert  bool
-	EnableDrive bool
+	Protocol         model.Protocol
+	Session          model.ConnectionSession
+	Host             string
+	Port             int
+	Username         string
+	Password         string
+	Domain           string
+	Width            int
+	Height           int
+	DPI              int
+	ColorDepth       int
+	IgnoreCert       bool
+	EnableDrive      bool
+	ClipboardEnabled bool
+	ReadOnly         bool
+	ResizeMethod     string
 }
 
 func (t Tunnel) Run(ctx context.Context, browser *ws.Conn, cfg RDPConfig) {
@@ -59,19 +62,21 @@ func (t Tunnel) Run(ctx context.Context, browser *ws.Conn, cfg RDPConfig) {
 		port = 3389
 	}
 	t.RunDesktop(ctx, browser, DesktopConfig{
-		Protocol:    model.ProtocolRDP,
-		Session:     cfg.Session,
-		Host:        cfg.Server.Host,
-		Port:        port,
-		Username:    cfg.Credential.Username,
-		Password:    cfg.Secret.Password,
-		Domain:      cfg.Credential.Domain,
-		Width:       cfg.Width,
-		Height:      cfg.Height,
-		DPI:         cfg.DPI,
-		ColorDepth:  24,
-		IgnoreCert:  true,
-		EnableDrive: true,
+		Protocol:         model.ProtocolRDP,
+		Session:          cfg.Session,
+		Host:             cfg.Server.Host,
+		Port:             port,
+		Username:         cfg.Credential.Username,
+		Password:         cfg.Secret.Password,
+		Domain:           cfg.Credential.Domain,
+		Width:            cfg.Width,
+		Height:           cfg.Height,
+		DPI:              cfg.DPI,
+		ColorDepth:       24,
+		IgnoreCert:       true,
+		EnableDrive:      true,
+		ClipboardEnabled: true,
+		ResizeMethod:     "display-update",
 	})
 }
 
@@ -86,6 +91,9 @@ func (t Tunnel) RunDesktop(ctx context.Context, browser *ws.Conn, cfg DesktopCon
 	}
 	if cfg.DPI <= 0 {
 		cfg.DPI = 96
+	}
+	if cfg.ResizeMethod == "" {
+		cfg.ResizeMethod = "display-update"
 	}
 	trace := t.newTrace(cfg.Session.ID)
 
@@ -311,6 +319,9 @@ func (t Tunnel) argValue(name string, cfg DesktopConfig) string {
 	if cfg.ColorDepth == 0 {
 		cfg.ColorDepth = 24
 	}
+	if cfg.ResizeMethod == "" {
+		cfg.ResizeMethod = "display-update"
+	}
 	// guacd often runs as a different OS user than openwebservermanager.
 	// Session-scoped transfer/recording directories must be writable by that process.
 	if recordingEnabled {
@@ -335,7 +346,7 @@ func (t Tunnel) argValue(name string, cfg DesktopConfig) string {
 		"disable-offscreen-caching": "true",
 		"disable-glyph-caching":     "true",
 		"initial-program":           "explorer.exe",
-		"resize-method":             "display-update",
+		"resize-method":             cfg.ResizeMethod,
 		"enable-drive":              boolString(cfg.EnableDrive),
 		"drive-name":                "openwebservermanager",
 		"drive-path":                drivePath,
@@ -352,7 +363,9 @@ func (t Tunnel) argValue(name string, cfg DesktopConfig) string {
 		"height":                    strconv.Itoa(cfg.Height),
 		"dpi":                       strconv.Itoa(cfg.DPI),
 		"cursor":                    "remote",
-		"read-only":                 "false",
+		"read-only":                 boolString(cfg.ReadOnly),
+		"disable-copy":              boolString(!cfg.ClipboardEnabled),
+		"disable-paste":             boolString(!cfg.ClipboardEnabled),
 		"swap-red-blue":             "false",
 	}
 	return values[name]

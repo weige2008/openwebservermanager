@@ -266,6 +266,120 @@ func TestVNCPlatformAccessCreatesDesktopSession(t *testing.T) {
 	}
 }
 
+func TestDesktopAccessSettingsApplyToRDPAndVNC(t *testing.T) {
+	handler, adminCookie := newTestHandler(t)
+
+	assertStatus(t, handler, http.MethodPost, "/api/admin/system-settings", map[string]any{
+		"name":   "desktop access policy",
+		"type":   "access",
+		"status": "enabled",
+		"metadata": map[string]any{
+			"desktop_width":             1600,
+			"desktop_height":            1000,
+			"desktop_dpi":               120,
+			"desktop_color_depth":       16,
+			"desktop_resize_method":     "reconnect",
+			"desktop_recording_enabled": true,
+			"desktop_clipboard_enabled": false,
+			"desktop_ignore_cert":       false,
+			"desktop_read_only":         true,
+			"rdp_file_transfer_enabled": false,
+			"watermark_enabled":         true,
+			"watermark_text":            "AUDIT",
+			"watermark_color":           "rgba(255,0,0,0.2)",
+			"watermark_font_size":       36,
+		},
+	}, adminCookie, http.StatusCreated)
+
+	windowsRec := assertStatus(t, handler, http.MethodPost, "/api/servers", map[string]any{
+		"name":     "windows-policy",
+		"host":     "127.0.0.1",
+		"os":       "windows",
+		"rdp_port": 3389,
+	}, adminCookie, http.StatusCreated)
+	var windows model.Server
+	decodeResponse(t, windowsRec, &windows)
+	rdpCredRec := assertStatus(t, handler, http.MethodPost, "/api/credentials", map[string]any{
+		"name":      "rdp-policy",
+		"server_id": windows.ID,
+		"type":      "rdp_password",
+		"username":  "Administrator",
+		"password":  "secret",
+	}, adminCookie, http.StatusCreated)
+	var rdpCred model.CredentialPublic
+	decodeResponse(t, rdpCredRec, &rdpCred)
+	rdpRec := assertStatus(t, handler, http.MethodPost, "/api/connections/rdp", map[string]any{
+		"server_id":     windows.ID,
+		"credential_id": rdpCred.ID,
+	}, adminCookie, http.StatusCreated)
+	var rdpSession model.ConnectionSession
+	decodeResponse(t, rdpRec, &rdpSession)
+	assertDesktopPolicySession(t, rdpSession, 1600, 1000, 120, 16, false, false, false, true)
+
+	onlineRec := assertStatus(t, handler, http.MethodGet, "/api/admin/audit/online-sessions", nil, adminCookie, http.StatusOK)
+	body := onlineRec.Body.String()
+	for _, expected := range []string{`"workspace_dpi":120`, `"color_depth":16`, `"clipboard_enabled":false`, `"file_transfer_enabled":false`, `"watermark_text":"AUDIT"`} {
+		if !strings.Contains(body, expected) {
+			t.Fatalf("online session metadata missing %s in %s", expected, body)
+		}
+	}
+
+	assetRec := assertStatus(t, handler, http.MethodPost, "/api/admin/assets", map[string]any{
+		"name":     "vnc-policy",
+		"protocol": "vnc",
+		"host":     "127.0.0.1",
+		"port":     5900,
+		"status":   "enabled",
+	}, adminCookie, http.StatusCreated)
+	var asset model.PlatformItem
+	decodeResponse(t, assetRec, &asset)
+	vncCredRec := assertStatus(t, handler, http.MethodPost, "/api/admin/credentials", map[string]any{
+		"name":      "vnc-policy",
+		"type":      "vnc_password",
+		"status":    "encrypted",
+		"username":  "vnc",
+		"password":  "secret",
+		"target_id": asset.ID,
+	}, adminCookie, http.StatusCreated)
+	var vncCred model.PlatformItem
+	decodeResponse(t, vncCredRec, &vncCred)
+	vncRec := assertStatus(t, handler, http.MethodPost, "/api/connections/vnc", map[string]any{
+		"asset_id":      asset.ID,
+		"credential_id": vncCred.ID,
+	}, adminCookie, http.StatusCreated)
+	var vncSession model.ConnectionSession
+	decodeResponse(t, vncRec, &vncSession)
+	assertDesktopPolicySession(t, vncSession, 1600, 1000, 120, 16, false, false, false, true)
+}
+
+func assertDesktopPolicySession(t *testing.T, session model.ConnectionSession, width, height, dpi, colorDepth int, clipboard, fileTransfer, ignoreCert, readOnly bool) {
+	t.Helper()
+	if session.Width != width || session.Height != height || session.DPI != dpi || session.ColorDepth != colorDepth {
+		t.Fatalf("desktop policy dimensions = %dx%d dpi=%d color=%d", session.Width, session.Height, session.DPI, session.ColorDepth)
+	}
+	if session.RecordingPath == "" {
+		t.Fatal("default desktop recording path was not created")
+	}
+	if session.ResizeMethod != "reconnect" {
+		t.Fatalf("resize method = %q, want reconnect", session.ResizeMethod)
+	}
+	if boolPtrValue(session.ClipboardEnabled, !clipboard) != clipboard {
+		t.Fatalf("clipboard_enabled = %v, want %v", session.ClipboardEnabled, clipboard)
+	}
+	if boolPtrValue(session.FileTransferEnabled, !fileTransfer) != fileTransfer {
+		t.Fatalf("file_transfer_enabled = %v, want %v", session.FileTransferEnabled, fileTransfer)
+	}
+	if boolPtrValue(session.IgnoreCert, !ignoreCert) != ignoreCert {
+		t.Fatalf("ignore_cert = %v, want %v", session.IgnoreCert, ignoreCert)
+	}
+	if boolPtrValue(session.ReadOnly, !readOnly) != readOnly {
+		t.Fatalf("read_only = %v, want %v", session.ReadOnly, readOnly)
+	}
+	if boolPtrValue(session.WatermarkEnabled, false) != true || session.WatermarkText != "AUDIT" || session.WatermarkFontSize != 36 {
+		t.Fatalf("watermark policy not applied: %#v", session)
+	}
+}
+
 func TestConnectionAPIsRequireAssetAuthorization(t *testing.T) {
 	handler, adminCookie := newTestHandler(t)
 

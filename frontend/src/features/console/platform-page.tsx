@@ -112,6 +112,23 @@ interface SMTPIntegrationForm {
   llmApiKeySet: boolean
 }
 
+interface DesktopAccessForm {
+  width: string
+  height: string
+  dpi: string
+  colorDepth: string
+  resizeMethod: string
+  recordingEnabled: boolean
+  clipboardEnabled: boolean
+  fileTransferEnabled: boolean
+  ignoreCert: boolean
+  readOnly: boolean
+  watermarkEnabled: boolean
+  watermarkText: string
+  watermarkColor: string
+  watermarkFontSize: string
+}
+
 export function PlatformPage({ config }: { config: PlatformPageConfig }) {
   if (config.kind === 'tools') return <ToolsPage config={config} />
   if (config.kind === 'monitor') return <MonitoringPage config={config} />
@@ -1617,22 +1634,66 @@ function platformRequestFromForm(form: PlatformFormState) {
   }
 }
 
+function CheckboxRow({ checked, onChange, label }: { checked: boolean; onChange: (checked: boolean) => void; label: string }) {
+  return (
+    <label className='flex min-h-9 items-center gap-2 rounded-lg border border-border bg-muted/20 px-3 py-2 text-sm'>
+      <input
+        type='checkbox'
+        className='size-4 accent-primary'
+        checked={checked}
+        onChange={(event) => onChange(event.currentTarget.checked)}
+      />
+      <span>{label}</span>
+    </label>
+  )
+}
+
 export function PlatformSettingsPage({ config }: { config: PlatformPageConfig }) {
   const app = useApp()
   const items = app.data.platform?.[config.collection] || []
   const label = platformLabel(config, app.locale)
   const description = platformDescription(config, app.locale)
   const Icon = config.icon
+  const accessSetting = useMemo(() => items.find((item) => (item.type || '').toLowerCase() === 'access'), [items])
   const integration = useMemo(() => items.find((item) => (item.type || '').toLowerCase() === 'integration'), [items])
+  const [accessForm, setAccessForm] = useState<DesktopAccessForm>(() => desktopAccessFormFromItem(accessSetting))
   const [form, setForm] = useState<SMTPIntegrationForm>(() => smtpIntegrationFormFromItem(integration))
+  const [savingAccess, setSavingAccess] = useState(false)
   const [saving, setSaving] = useState(false)
   const [testing, setTesting] = useState(false)
+
+  useEffect(() => {
+    setAccessForm(desktopAccessFormFromItem(accessSetting))
+  }, [accessSetting?.id, accessSetting?.updated_at])
 
   useEffect(() => {
     setForm(smtpIntegrationFormFromItem(integration))
   }, [integration?.id, integration?.updated_at])
 
+  const patchAccessForm = (next: Partial<DesktopAccessForm>) => setAccessForm((current) => ({ ...current, ...next }))
   const patchForm = (next: Partial<SMTPIntegrationForm>) => setForm((current) => ({ ...current, ...next }))
+
+  const saveAccessSettings = async () => {
+    setSavingAccess(true)
+    try {
+      await apiRequest<PlatformItem>(accessSetting?.id ? `/api/admin/system-settings/${accessSetting.id}` : '/api/admin/system-settings', {
+        method: accessSetting?.id ? 'PATCH' : 'POST',
+        body: JSON.stringify({
+          name: accessSetting?.name || 'Asset access settings',
+          type: 'access',
+          status: 'enabled',
+          metadata: desktopAccessMetadataFromForm(accessForm, accessSetting?.metadata),
+          description: 'Desktop access defaults for RDP/VNC sessions, recording, clipboard, file transfer, and watermark.',
+        }),
+      })
+      await app.refresh(true)
+      app.showToast(app.t('saved', 'Saved'))
+    } catch (error) {
+      app.handleApiError(error)
+    } finally {
+      setSavingAccess(false)
+    }
+  }
 
   const saveIntegration = async (silent = false) => {
     setSaving(true)
@@ -1701,6 +1762,66 @@ export function PlatformSettingsPage({ config }: { config: PlatformPageConfig })
             <Button variant='outline' onClick={() => void app.refresh()}><RefreshCw className='size-4' />{app.t('refresh', '刷新')}</Button>
           </CardHeader>
           <CardContent className='grid gap-5'>
+            <section className='grid gap-4 rounded-xl border border-border bg-background/60 p-4'>
+              <div className='flex flex-wrap items-start justify-between gap-3'>
+                <div>
+                  <h3 className='text-sm font-semibold'>{app.t('desktopAccessSettings', 'RDP/VNC access')}</h3>
+                  <p className='mt-1 text-xs leading-5 text-muted-foreground'>
+                    {app.t('desktopAccessSettingsDescription', 'Set default desktop resolution, clipboard, file transfer, recording, read-only mode, and workspace watermark for new RDP/VNC sessions.')}
+                  </p>
+                </div>
+                <Badge tone={accessSetting ? 'success' : 'neutral'}>{accessSetting ? app.t('configured', 'Configured') : app.t('notConfigured', 'Not configured')}</Badge>
+              </div>
+              <div className='grid gap-3 md:grid-cols-2 xl:grid-cols-4'>
+                <Field label={app.t('desktopWidth', 'Width')}>
+                  <Input type='number' min={640} max={7680} value={accessForm.width} onChange={(event) => patchAccessForm({ width: event.currentTarget.value })} />
+                </Field>
+                <Field label={app.t('desktopHeight', 'Height')}>
+                  <Input type='number' min={480} max={4320} value={accessForm.height} onChange={(event) => patchAccessForm({ height: event.currentTarget.value })} />
+                </Field>
+                <Field label='DPI'>
+                  <Input type='number' min={72} max={240} value={accessForm.dpi} onChange={(event) => patchAccessForm({ dpi: event.currentTarget.value })} />
+                </Field>
+                <Field label={app.t('colorDepth', 'Color depth')}>
+                  <Select value={accessForm.colorDepth} onChange={(event) => patchAccessForm({ colorDepth: event.currentTarget.value })}>
+                    <option value='16'>16 bit</option>
+                    <option value='24'>24 bit</option>
+                    <option value='32'>32 bit</option>
+                  </Select>
+                </Field>
+                <Field label={app.t('resizeMethod', 'Resize method')}>
+                  <Select value={accessForm.resizeMethod} onChange={(event) => patchAccessForm({ resizeMethod: event.currentTarget.value })}>
+                    <option value='display-update'>display-update</option>
+                    <option value='reconnect'>reconnect</option>
+                    <option value='none'>{app.t('none', 'None')}</option>
+                  </Select>
+                </Field>
+                <Field label={app.t('watermarkText', 'Watermark text')}>
+                  <Input value={accessForm.watermarkText} onChange={(event) => patchAccessForm({ watermarkText: event.currentTarget.value })} placeholder='{{user}} / {{asset}}' />
+                </Field>
+                <Field label={app.t('watermarkColor', 'Watermark color')}>
+                  <Input value={accessForm.watermarkColor} onChange={(event) => patchAccessForm({ watermarkColor: event.currentTarget.value })} placeholder='rgba(255,255,255,0.18)' />
+                </Field>
+                <Field label={app.t('watermarkFontSize', 'Watermark size')}>
+                  <Input type='number' min={10} max={96} value={accessForm.watermarkFontSize} onChange={(event) => patchAccessForm({ watermarkFontSize: event.currentTarget.value })} />
+                </Field>
+              </div>
+              <div className='grid gap-2 sm:grid-cols-2 xl:grid-cols-4'>
+                <CheckboxRow checked={accessForm.recordingEnabled} onChange={(recordingEnabled) => patchAccessForm({ recordingEnabled })} label={app.t('defaultRecording', 'Record desktop sessions by default')} />
+                <CheckboxRow checked={accessForm.clipboardEnabled} onChange={(clipboardEnabled) => patchAccessForm({ clipboardEnabled })} label={app.t('clipboardEnabled', 'Enable clipboard')} />
+                <CheckboxRow checked={accessForm.fileTransferEnabled} onChange={(fileTransferEnabled) => patchAccessForm({ fileTransferEnabled })} label={app.t('fileTransferEnabled', 'Enable file transfer')} />
+                <CheckboxRow checked={accessForm.ignoreCert} onChange={(ignoreCert) => patchAccessForm({ ignoreCert })} label={app.t('ignoreCertificate', 'Ignore server certificate')} />
+                <CheckboxRow checked={accessForm.readOnly} onChange={(readOnly) => patchAccessForm({ readOnly })} label={app.t('readOnlyDesktop', 'Read-only desktop')} />
+                <CheckboxRow checked={accessForm.watermarkEnabled} onChange={(watermarkEnabled) => patchAccessForm({ watermarkEnabled })} label={app.t('workspaceWatermark', 'Workspace watermark')} />
+              </div>
+              <div className='flex justify-end'>
+                <Button variant='outline' onClick={() => void saveAccessSettings()} disabled={savingAccess}>
+                  <Save className='size-4' />
+                  {savingAccess ? app.t('saving', 'Saving') : app.t('save', 'Save')}
+                </Button>
+              </div>
+            </section>
+
             <section className='grid gap-4 rounded-xl border border-border bg-background/60 p-4'>
               <div className='flex flex-wrap items-start justify-between gap-3'>
                 <div>
@@ -1843,6 +1964,47 @@ function smtpIntegrationFormFromItem(item?: PlatformItem): SMTPIntegrationForm {
     llmApiKey: '',
     llmApiKeySet: metadataBool(metadata.llm_api_key_set),
   }
+}
+
+function desktopAccessFormFromItem(item?: PlatformItem): DesktopAccessForm {
+  const metadata = item?.metadata || {}
+  return {
+    width: metadataText(metadata.desktop_width) || '1440',
+    height: metadataText(metadata.desktop_height) || '900',
+    dpi: metadataText(metadata.desktop_dpi) || '96',
+    colorDepth: metadataText(metadata.desktop_color_depth) || '24',
+    resizeMethod: metadataText(metadata.desktop_resize_method) || 'display-update',
+    recordingEnabled: metadataBool(metadata.desktop_recording_enabled),
+    clipboardEnabled: metadata.desktop_clipboard_enabled === undefined ? true : metadataBool(metadata.desktop_clipboard_enabled),
+    fileTransferEnabled: metadata.rdp_file_transfer_enabled === undefined && metadata.desktop_file_transfer_enabled === undefined
+      ? true
+      : metadataBool(metadata.rdp_file_transfer_enabled ?? metadata.desktop_file_transfer_enabled),
+    ignoreCert: metadata.desktop_ignore_cert === undefined ? true : metadataBool(metadata.desktop_ignore_cert),
+    readOnly: metadataBool(metadata.desktop_read_only),
+    watermarkEnabled: metadataBool(metadata.watermark_enabled),
+    watermarkText: metadataText(metadata.watermark_text),
+    watermarkColor: metadataText(metadata.watermark_color) || 'rgba(255,255,255,0.18)',
+    watermarkFontSize: metadataText(metadata.watermark_font_size) || '28',
+  }
+}
+
+function desktopAccessMetadataFromForm(form: DesktopAccessForm, existing?: Record<string, unknown>) {
+  const metadata: Record<string, unknown> = { ...(existing || {}) }
+  metadata.desktop_width = Number(form.width) || 1440
+  metadata.desktop_height = Number(form.height) || 900
+  metadata.desktop_dpi = Number(form.dpi) || 96
+  metadata.desktop_color_depth = Number(form.colorDepth) || 24
+  metadata.desktop_resize_method = form.resizeMethod || 'display-update'
+  metadata.desktop_recording_enabled = form.recordingEnabled
+  metadata.desktop_clipboard_enabled = form.clipboardEnabled
+  metadata.rdp_file_transfer_enabled = form.fileTransferEnabled
+  metadata.desktop_ignore_cert = form.ignoreCert
+  metadata.desktop_read_only = form.readOnly
+  metadata.watermark_enabled = form.watermarkEnabled
+  metadata.watermark_text = form.watermarkText.trim()
+  metadata.watermark_color = form.watermarkColor.trim() || 'rgba(255,255,255,0.18)'
+  metadata.watermark_font_size = Number(form.watermarkFontSize) || 28
+  return metadata
 }
 
 function integrationMetadataFromForm(form: SMTPIntegrationForm, existing?: Record<string, unknown>) {

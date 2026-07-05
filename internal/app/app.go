@@ -432,33 +432,45 @@ func (s *Server) handleCreateRDP(w http.ResponseWriter, r *http.Request) {
 	if !s.requireAssetAuthorization(w, r, model.ProtocolRDP, server.ID) {
 		return
 	}
-	req.Width = clampInt(req.Width, 640, 7680, 1440)
-	req.Height = clampInt(req.Height, 480, 4320, 900)
-	req.DPI = clampInt(req.DPI, 72, 240, 96)
+	policy := s.desktopAccessPolicy(model.ProtocolRDP)
+	req.Width = clampInt(req.Width, 640, 7680, policy.Width)
+	req.Height = clampInt(req.Height, 480, 4320, policy.Height)
+	req.DPI = clampInt(req.DPI, 72, 240, policy.DPI)
 
 	session, err := s.cfg.Store.CreateSession(model.ConnectionSession{
-		Protocol:     model.ProtocolRDP,
-		ServerID:     server.ID,
-		CredentialID: credential.ID,
-		UserID:       s.currentUserID(r),
-		ClientIP:     s.clientIP(r),
-		Width:        req.Width,
-		Height:       req.Height,
+		Protocol:            model.ProtocolRDP,
+		ServerID:            server.ID,
+		CredentialID:        credential.ID,
+		UserID:              s.currentUserID(r),
+		ClientIP:            s.clientIP(r),
+		Width:               req.Width,
+		Height:              req.Height,
+		DPI:                 req.DPI,
+		ColorDepth:          policy.ColorDepth,
+		ResizeMethod:        policy.ResizeMethod,
+		ClipboardEnabled:    boolPtr(policy.ClipboardEnabled),
+		FileTransferEnabled: boolPtr(policy.FileTransferEnabled),
+		IgnoreCert:          boolPtr(policy.IgnoreCert),
+		ReadOnly:            boolPtr(policy.ReadOnly),
+		WatermarkEnabled:    boolPtr(policy.WatermarkEnabled),
+		WatermarkText:       policy.WatermarkText,
+		WatermarkColor:      policy.WatermarkColor,
+		WatermarkFontSize:   policy.WatermarkFontSize,
 	})
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
-	if req.RecordingEnabled {
+	if req.RecordingEnabled || policy.RecordingEnabled {
 		recordingPath := filepath.Join(s.cfg.DataDir, "recordings", session.ID)
-		_, _ = s.cfg.Store.UpdateSession(session.ID, func(item *model.ConnectionSession) {
-			item.RecordingPath = recordingPath
-		})
 		if err := os.MkdirAll(recordingPath, 0o770); err != nil {
 			writeError(w, http.StatusInternalServerError, err.Error())
 			return
 		}
 		_ = os.Chmod(recordingPath, 0o770)
+		_, _ = s.cfg.Store.UpdateSession(session.ID, func(item *model.ConnectionSession) {
+			item.RecordingPath = recordingPath
+		})
 		session.RecordingPath = recordingPath
 	}
 	_ = s.audit(r, "connection.rdp.create", session.ID, model.ProtocolRDP, "created rdp session")

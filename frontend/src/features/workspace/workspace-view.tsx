@@ -45,6 +45,10 @@ export function WorkspaceView() {
   const commandSnippets = app.data.platform?.command_snippets || []
   const selectedSnippet = commandSnippets.find((item) => item.id === selectedSnippetID) || commandSnippets[0]
   const isDesktopWorkspace = workspace.type === 'rdp' || workspace.type === 'vnc'
+  const clipboardEnabled = isDesktopWorkspace && workspace.session.clipboard_enabled !== false
+  const fileTransferEnabled = workspace.type === 'rdp'
+    ? workspace.session.file_transfer_enabled !== false
+    : workspace.type === 'vnc' && workspace.session.file_transfer_enabled === true
 
   const leave = async () => {
     app.setWorkspace(null)
@@ -98,8 +102,10 @@ export function WorkspaceView() {
           ) : null}
           {isDesktopWorkspace ? (
             <>
-              <Button variant='outline' onClick={() => window.dispatchEvent(new Event('openwebservermanager:desktop-clipboard'))}><Clipboard className='size-4' />{t('workspace.clipboard')}</Button>
-              {workspace.type === 'rdp' ? (
+              {clipboardEnabled ? (
+                <Button variant='outline' onClick={() => window.dispatchEvent(new Event('openwebservermanager:desktop-clipboard'))}><Clipboard className='size-4' />{t('workspace.clipboard')}</Button>
+              ) : null}
+              {fileTransferEnabled ? (
                 <Button variant='outline' onClick={() => window.dispatchEvent(new Event('openwebservermanager:desktop-upload'))}><Upload className='size-4' />{t('workspace.uploadFile')}</Button>
               ) : null}
             </>
@@ -120,6 +126,8 @@ export function WorkspaceView() {
           setStatus={setStatus}
           showToast={app.showToast}
           messages={rdpMessages}
+          clipboardEnabled={clipboardEnabled}
+          fileTransferEnabled={fileTransferEnabled}
         />
       )}
     </div>
@@ -238,10 +246,14 @@ function RDPWorkspace({
   setStatus,
   showToast,
   messages,
+  clipboardEnabled,
+  fileTransferEnabled,
 }: {
   session: ConnectionSession
   setStatus: (status: string) => void
   showToast: (message: string) => void
+  clipboardEnabled: boolean
+  fileTransferEnabled: boolean
   messages: {
     missingGuacamole: string
     rdpFailed: string
@@ -268,7 +280,8 @@ function RDPWorkspace({
     const proto = window.location.protocol === 'https:' ? 'wss' : 'ws'
     const width = Math.max(1024, window.innerWidth)
     const height = Math.max(680, window.innerHeight - 52)
-    const tunnel = new Guacamole.WebSocketTunnel(`${proto}://${window.location.host}/api/connections/${session.protocol}/${session.id}/tunnel?width=${width}&height=${height}&dpi=96`)
+    const dpi = session.dpi || 96
+    const tunnel = new Guacamole.WebSocketTunnel(`${proto}://${window.location.host}/api/connections/${session.protocol}/${session.id}/tunnel?width=${width}&height=${height}&dpi=${dpi}`)
     const client = new Guacamole.Client(tunnel)
     clientRef.current = client
     const display = client.getDisplay().getElement()
@@ -378,8 +391,8 @@ function RDPWorkspace({
     display.addEventListener('contextmenu', preventBrowserPointerAction, true)
     display.addEventListener('dragstart', preventBrowserPointerAction, true)
     document.addEventListener('pointerdown', onDocumentPointerDown, true)
-    window.addEventListener('openwebservermanager:desktop-clipboard', onClipboard)
-    window.addEventListener('openwebservermanager:desktop-upload', onUpload)
+    if (clipboardEnabled) window.addEventListener('openwebservermanager:desktop-clipboard', onClipboard)
+    if (fileTransferEnabled) window.addEventListener('openwebservermanager:desktop-upload', onUpload)
     window.addEventListener('resize', onResize)
     window.addEventListener('keyup', onWindowKeyUp)
     window.addEventListener('blur', releaseInputState)
@@ -395,8 +408,8 @@ function RDPWorkspace({
       display.removeEventListener('contextmenu', preventBrowserPointerAction, true)
       display.removeEventListener('dragstart', preventBrowserPointerAction, true)
       document.removeEventListener('pointerdown', onDocumentPointerDown, true)
-      window.removeEventListener('openwebservermanager:desktop-clipboard', onClipboard)
-      window.removeEventListener('openwebservermanager:desktop-upload', onUpload)
+      if (clipboardEnabled) window.removeEventListener('openwebservermanager:desktop-clipboard', onClipboard)
+      if (fileTransferEnabled) window.removeEventListener('openwebservermanager:desktop-upload', onUpload)
       window.removeEventListener('resize', onResize)
       window.removeEventListener('keyup', onWindowKeyUp)
       window.removeEventListener('blur', releaseInputState)
@@ -407,7 +420,24 @@ function RDPWorkspace({
       clientRef.current = null
       container.innerHTML = ''
     }
-  }, [messages, session.id, session.protocol, setStatus, showToast])
+  }, [clipboardEnabled, fileTransferEnabled, messages, session.dpi, session.id, session.protocol, setStatus, showToast])
 
-  return <div ref={containerRef} className='h-[calc(100vh-52px)] overflow-hidden bg-black max-md:h-[calc(100vh-120px)]' />
+  const watermarkText = session.watermark_enabled ? session.watermark_text?.trim() : ''
+
+  return (
+    <div className='relative h-[calc(100vh-52px)] overflow-hidden bg-black max-md:h-[calc(100vh-120px)]'>
+      <div ref={containerRef} className='size-full' />
+      {watermarkText ? (
+        <div
+          className='pointer-events-none absolute inset-0 z-10 grid place-items-center text-center font-semibold uppercase tracking-wider'
+          style={{
+            color: session.watermark_color || 'rgba(255,255,255,0.18)',
+            fontSize: `${session.watermark_font_size || 28}px`,
+          }}
+        >
+          {watermarkText}
+        </div>
+      ) : null}
+    </div>
+  )
 }

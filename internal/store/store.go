@@ -556,13 +556,26 @@ func (s *Store) appendLegacyPlatformData(result map[string][]model.PlatformItem)
 			TargetID:    session.ServerID,
 			Description: session.Error,
 			Metadata: map[string]any{
-				"source":         "legacy_session",
-				"credential_id":  session.CredentialID,
-				"client_ip":      session.ClientIP,
-				"recording_path": session.RecordingPath,
-				"recording_size": session.RecordingSize,
-				"started_at":     session.StartedAt,
-				"ended_at":       session.EndedAt,
+				"source":                "legacy_session",
+				"credential_id":         session.CredentialID,
+				"client_ip":             session.ClientIP,
+				"recording_path":        session.RecordingPath,
+				"recording_size":        session.RecordingSize,
+				"workspace_width":       session.Width,
+				"workspace_height":      session.Height,
+				"workspace_dpi":         session.DPI,
+				"color_depth":           session.ColorDepth,
+				"resize_method":         session.ResizeMethod,
+				"clipboard_enabled":     optionalBoolValue(session.ClipboardEnabled),
+				"file_transfer_enabled": optionalBoolValue(session.FileTransferEnabled),
+				"ignore_cert":           optionalBoolValue(session.IgnoreCert),
+				"read_only":             optionalBoolValue(session.ReadOnly),
+				"watermark_enabled":     optionalBoolValue(session.WatermarkEnabled),
+				"watermark_text":        session.WatermarkText,
+				"watermark_color":       session.WatermarkColor,
+				"watermark_font_size":   session.WatermarkFontSize,
+				"started_at":            session.StartedAt,
+				"ended_at":              session.EndedAt,
 			},
 			CreatedAt: session.StartedAt,
 			UpdatedAt: session.LastActivityAt,
@@ -1702,7 +1715,18 @@ func (s *Store) UpdateSession(id string, update func(*model.ConnectionSession)) 
 	update(&session)
 	session.LastActivityAt = time.Now().UTC()
 	s.state.Sessions[id] = session
-	return session, s.saveLocked()
+	if err := s.saveLocked(); err != nil {
+		return model.ConnectionSession{}, err
+	}
+	collection := "offline_sessions"
+	if session.Status == model.SessionActive || session.Status == model.SessionPending {
+		collection = "online_sessions"
+	}
+	_, _ = s.createPlatformItem(collection, sessionPlatformItem(collection, session))
+	if collection == "offline_sessions" {
+		_ = s.DeletePlatformItem("online_sessions", session.ID)
+	}
+	return session, nil
 }
 
 func (s *Store) CloseSession(id, reason string) (model.ConnectionSession, error) {
@@ -1762,18 +1786,36 @@ func sessionPlatformItem(collection string, session model.ConnectionSession) mod
 		TargetID:    session.ServerID,
 		Description: session.Error,
 		Metadata: map[string]any{
-			"credential_id":    session.CredentialID,
-			"client_ip":        session.ClientIP,
-			"recording_path":   session.RecordingPath,
-			"recording_size":   session.RecordingSize,
-			"workspace_width":  session.Width,
-			"workspace_height": session.Height,
-			"started_at":       session.StartedAt,
-			"ended_at":         session.EndedAt,
+			"credential_id":         session.CredentialID,
+			"client_ip":             session.ClientIP,
+			"recording_path":        session.RecordingPath,
+			"recording_size":        session.RecordingSize,
+			"workspace_width":       session.Width,
+			"workspace_height":      session.Height,
+			"workspace_dpi":         session.DPI,
+			"color_depth":           session.ColorDepth,
+			"resize_method":         session.ResizeMethod,
+			"clipboard_enabled":     optionalBoolValue(session.ClipboardEnabled),
+			"file_transfer_enabled": optionalBoolValue(session.FileTransferEnabled),
+			"ignore_cert":           optionalBoolValue(session.IgnoreCert),
+			"read_only":             optionalBoolValue(session.ReadOnly),
+			"watermark_enabled":     optionalBoolValue(session.WatermarkEnabled),
+			"watermark_text":        session.WatermarkText,
+			"watermark_color":       session.WatermarkColor,
+			"watermark_font_size":   session.WatermarkFontSize,
+			"started_at":            session.StartedAt,
+			"ended_at":              session.EndedAt,
 		},
 		CreatedAt: session.StartedAt,
 		UpdatedAt: session.LastActivityAt,
 	}
+}
+
+func optionalBoolValue(value *bool) any {
+	if value == nil {
+		return nil
+	}
+	return *value
 }
 
 func (s *Store) saveLocked() error {

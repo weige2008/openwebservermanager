@@ -70,6 +70,17 @@ export interface ConnectionSession {
   recording_size?: number
   width?: number
   height?: number
+  dpi?: number
+  color_depth?: number
+  resize_method?: string
+  clipboard_enabled?: boolean
+  file_transfer_enabled?: boolean
+  ignore_cert?: boolean
+  read_only?: boolean
+  watermark_enabled?: boolean
+  watermark_text?: string
+  watermark_color?: string
+  watermark_font_size?: number
   started_at: string
   ended_at?: string
   last_activity_at: string

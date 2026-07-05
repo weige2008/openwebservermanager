@@ -190,6 +190,25 @@ export function PlatformTablePage({ config }: { config: PlatformPageConfig }) {
         header: app.t('status'),
         cell: ({ row }) => <Badge tone={statusTone(row.original.status)}>{row.original.status || '-'}</Badge>,
       },
+      ...(config.collection === 'scheduled_tasks' ? [
+        {
+          header: app.t('schedule', 'Schedule'),
+          cell: ({ row }) => <span className='font-mono text-xs'>{scheduledTaskScheduleText(row.original)}</span>,
+        },
+        {
+          header: app.t('lastRun', 'Last run'),
+          cell: ({ row }) => (
+            <div className='grid gap-0.5 text-xs'>
+              <span>{formatDate(metadataText(row.original.metadata?.last_run_at))}</span>
+              <span className='text-muted-foreground'>{metadataText(row.original.metadata?.last_run_status) || '-'}</span>
+            </div>
+          ),
+        },
+        {
+          header: app.t('nextRun', 'Next run'),
+          cell: ({ row }) => <span className='text-xs'>{formatDate(metadataText(row.original.metadata?.next_run_at))}</span>,
+        },
+      ] satisfies ColumnDef<PlatformItem>[] : []),
       ...(config.collection === 'users' ? [
         {
           header: app.t('onlineStatus', '在线状态'),
@@ -1487,6 +1506,7 @@ function PlatformItemDialog({
   const isCommandSnippet = collection === 'command_snippets'
   const isAuthorizationStrategy = collection === 'authorization_strategies'
   const isDatabaseAsset = collection === 'database_assets'
+  const isScheduledTask = collection === 'scheduled_tasks'
   const roleItems = app.data.platform?.roles || []
   const assetGroupItems = (app.data.platform?.asset_groups || items).filter((item) => item.id !== editingId)
   const storageItems = app.data.platform?.storages || []
@@ -1693,6 +1713,104 @@ function PlatformItemDialog({
               <Field label={app.t('group')}><Input value={form.group} onChange={(event) => onChange({ group: event.currentTarget.value })} /></Field>
               <Field label={app.t('tags', '标签')}><Input placeholder='mysql,prod' value={form.tags} onChange={(event) => onChange({ tags: event.currentTarget.value })} /></Field>
             </>
+          ) : isScheduledTask ? (
+            <>
+              <Field label={app.t('name')}><Input value={form.name} onChange={(event) => onChange({ name: event.currentTarget.value })} /></Field>
+              <Field label={app.t('status')}>
+                <Select value={form.status || 'enabled'} onChange={(event) => onChange({ status: event.currentTarget.value })}>
+                  <option value='enabled'>{app.t('enabled', 'Enabled')}</option>
+                  <option value='disabled'>{app.t('disabled', 'Disabled')}</option>
+                </Select>
+              </Field>
+              <Field label={app.t('type', 'Type')}>
+                <Select value={form.type || 'asset-status'} onChange={(event) => onChange({ type: event.currentTarget.value })}>
+                  <option value='asset-status'>Asset status check</option>
+                  <option value='log-cleanup'>Log cleanup</option>
+                  <option value='certificate-renewal'>Certificate renewal</option>
+                  <option value='backup'>Backup</option>
+                  <option value='custom'>Custom / record only</option>
+                </Select>
+              </Field>
+              <Field label={app.t('intervalSeconds', 'Interval seconds')}>
+                <Input
+                  type='number'
+                  min={1}
+                  placeholder='600'
+                  value={metadataFormText(form.metadata, 'interval_seconds')}
+                  onChange={(event) => onChange({ metadata: metadataWithValue(form.metadata, 'interval_seconds', event.currentTarget.value ? Number(event.currentTarget.value) : '') })}
+                />
+              </Field>
+              <Field label={app.t('cronExpression', 'Cron expression')}>
+                <Input
+                  placeholder='0 0/10 * * * ?'
+                  value={metadataFormText(form.metadata, 'cron')}
+                  onChange={(event) => onChange({ metadata: metadataWithValue(form.metadata, 'cron', event.currentTarget.value) })}
+                />
+              </Field>
+              <Field label={app.t('nextRun', 'Next run')}>
+                <Input
+                  placeholder='2026-07-06T12:00:00Z'
+                  value={metadataFormText(form.metadata, 'next_run_at')}
+                  onChange={(event) => onChange({ metadata: metadataWithValue(form.metadata, 'next_run_at', event.currentTarget.value) })}
+                />
+              </Field>
+              <label className='flex items-center gap-2 rounded-lg border border-border bg-muted/20 px-3 py-2 text-sm sm:col-span-2'>
+                <input
+                  type='checkbox'
+                  className='size-4 accent-primary'
+                  checked={metadataBoolFromForm(form.metadata, 'run_on_start')}
+                  onChange={(event) => onChange({ metadata: metadataWithValue(form.metadata, 'run_on_start', event.currentTarget.checked) })}
+                />
+                <span>{app.t('runOnStart', 'Run once on scheduler start')}</span>
+              </label>
+              {form.type === 'asset-status' ? (
+                <Field label={app.t('timeoutMs', 'Timeout ms')}>
+                  <Input
+                    type='number'
+                    min={100}
+                    max={30000}
+                    placeholder='2000'
+                    value={metadataFormText(form.metadata, 'timeout_ms')}
+                    onChange={(event) => onChange({ metadata: metadataWithValue(form.metadata, 'timeout_ms', event.currentTarget.value ? Number(event.currentTarget.value) : '') })}
+                  />
+                </Field>
+              ) : null}
+              {form.type === 'log-cleanup' ? (
+                <Field label={app.t('retentionDays', 'Retention days')}>
+                  <Input
+                    type='number'
+                    min={0}
+                    placeholder='90'
+                    value={metadataFormText(form.metadata, 'retention_days')}
+                    onChange={(event) => onChange({ metadata: metadataWithValue(form.metadata, 'retention_days', event.currentTarget.value ? Number(event.currentTarget.value) : '') })}
+                  />
+                </Field>
+              ) : null}
+              {form.type === 'certificate-renewal' ? (
+                <>
+                  <Field label={app.t('renewBeforeDays', 'Renew before days')}>
+                    <Input
+                      type='number'
+                      min={0}
+                      placeholder='30'
+                      value={metadataFormText(form.metadata, 'renew_before_days')}
+                      onChange={(event) => onChange({ metadata: metadataWithValue(form.metadata, 'renew_before_days', event.currentTarget.value ? Number(event.currentTarget.value) : '') })}
+                    />
+                  </Field>
+                  <Field label={app.t('validityDays', 'Validity days')}>
+                    <Input
+                      type='number'
+                      min={1}
+                      placeholder='365'
+                      value={metadataFormText(form.metadata, 'validity_days')}
+                      onChange={(event) => onChange({ metadata: metadataWithValue(form.metadata, 'validity_days', event.currentTarget.value ? Number(event.currentTarget.value) : '') })}
+                    />
+                  </Field>
+                </>
+              ) : null}
+              <Field label={app.t('group')}><Input value={form.group} onChange={(event) => onChange({ group: event.currentTarget.value })} /></Field>
+              <Field label={app.t('tags', 'Tags')}><Input placeholder='ops,backup' value={form.tags} onChange={(event) => onChange({ tags: event.currentTarget.value })} /></Field>
+            </>
           ) : isCommandSnippet ? (
             <>
               <Field label={app.t('name')}><Input value={form.name} onChange={(event) => onChange({ name: event.currentTarget.value })} /></Field>
@@ -1863,6 +1981,7 @@ function defaultPlatformType(collection: string) {
   if (collection === 'command_snippets') return 'public'
   if (collection === 'authorization_strategies') return 'file'
   if (collection === 'database_assets') return 'sqlite'
+  if (collection === 'scheduled_tasks') return 'asset-status'
   return ''
 }
 
@@ -1877,6 +1996,7 @@ function defaultPlatformMetadata(collection: string) {
   if (collection === 'command_snippets') return JSON.stringify({ command: '', append_newline: false }, null, 2)
   if (collection === 'authorization_strategies') return JSON.stringify({ path_prefix: '' }, null, 2)
   if (collection === 'database_assets') return JSON.stringify({ sqlite_path: '', row_limit: 100 }, null, 2)
+  if (collection === 'scheduled_tasks') return JSON.stringify({ interval_seconds: 600, timeout_ms: 2000 }, null, 2)
   return ''
 }
 
@@ -2854,6 +2974,21 @@ function metadataBool(value: unknown) {
 
 function userOnline(item: PlatformItem) {
   return metadataBool(item.metadata?.online)
+}
+
+function scheduledTaskScheduleText(item: PlatformItem) {
+  const intervalMs = metadataText(item.metadata?.interval_ms)
+  if (intervalMs) return `every ${intervalMs} ms`
+  const intervalSeconds = metadataText(item.metadata?.interval_seconds)
+  if (intervalSeconds) return `every ${intervalSeconds} s`
+  const intervalMinutes = metadataText(item.metadata?.interval_minutes)
+  if (intervalMinutes) return `every ${intervalMinutes} min`
+  const interval = metadataText(item.metadata?.interval) || metadataText(item.metadata?.run_every)
+  if (interval) return `every ${interval}`
+  const cron = metadataText(item.metadata?.cron) || metadataText(item.metadata?.cron_expression)
+  if (cron) return `cron ${cron}`
+  if (metadataBool(item.metadata?.run_on_start)) return 'run on start'
+  return '-'
 }
 
 function stringArrayValue(value: unknown) {

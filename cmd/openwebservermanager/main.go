@@ -10,6 +10,7 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"syscall"
 	"time"
@@ -86,9 +87,16 @@ func run() error {
 		slog.Info("ssh gateway ready", "addr", sshGateway.Address())
 	}
 
+	appServer := app.NewServer(app.Config{Store: st, Guacd: guacd, StaticFS: staticFS, DataDir: dataDir, Public: publicConfig(), TrustProxyHeaders: envBool("OPENWEBSERVERMANAGER_TRUST_PROXY_HEADERS")})
+	scheduler := appServer.StartScheduler(rootCtx, app.SchedulerConfig{
+		PollInterval: schedulerPollInterval(),
+		Logger:       slog.Default(),
+	})
+	defer scheduler.Stop()
+
 	srv := &http.Server{
 		Addr:              addr,
-		Handler:           app.New(app.Config{Store: st, Guacd: guacd, StaticFS: staticFS, DataDir: dataDir, Public: publicConfig(), TrustProxyHeaders: envBool("OPENWEBSERVERMANAGER_TRUST_PROXY_HEADERS")}),
+		Handler:           appServer,
 		ReadHeaderTimeout: 10 * time.Second,
 	}
 
@@ -131,6 +139,21 @@ func env(name, fallback string) string {
 func envBool(name string) bool {
 	value := strings.ToLower(strings.TrimSpace(env(name, "")))
 	return value == "1" || value == "true" || value == "yes" || value == "on"
+}
+
+func schedulerPollInterval() time.Duration {
+	raw := strings.TrimSpace(env("OPENWEBSERVERMANAGER_SCHEDULER_INTERVAL", "30s"))
+	if raw == "" {
+		return 30 * time.Second
+	}
+	if duration, err := time.ParseDuration(raw); err == nil && duration > 0 {
+		return duration
+	}
+	if seconds, err := strconv.Atoi(raw); err == nil && seconds > 0 {
+		return time.Duration(seconds) * time.Second
+	}
+	slog.Warn("invalid scheduler interval, using default", "value", raw)
+	return 30 * time.Second
 }
 
 func legacyEnvName(name string) string {

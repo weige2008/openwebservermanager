@@ -1338,22 +1338,7 @@ func (s *Server) handleScheduledTaskRun(w http.ResponseWriter, r *http.Request, 
 		writeError(w, http.StatusNotFound, "task not found")
 		return
 	}
-	result, metadata, err := s.runScheduledTask(r, task)
-	if err != nil {
-		writeError(w, http.StatusInternalServerError, err.Error())
-		return
-	}
-	metadata["task_type"] = task.Type
-	metadata["ran_at"] = time.Now().UTC()
-	logItem, err := s.cfg.Store.CreatePlatformItem("operation_logs", model.PlatformItemRequest{
-		Name:        task.Name,
-		Type:        "scheduled_task",
-		Status:      "success",
-		TargetID:    id,
-		OwnerID:     s.currentUserID(r),
-		Description: result,
-		Metadata:    metadata,
-	})
+	logItem, err := s.executeScheduledTask(r, task, "manual")
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, err.Error())
 		return

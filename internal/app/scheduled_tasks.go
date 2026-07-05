@@ -36,6 +36,80 @@ func (s *Server) runScheduledTask(_ *http.Request, task model.PlatformItem) (str
 	}
 }
 
+func (s *Server) executeScheduledTask(r *http.Request, task model.PlatformItem, trigger string) (model.PlatformItem, error) {
+	if trigger == "" {
+		trigger = "manual"
+	}
+	started := time.Now().UTC()
+	result, metadata, runErr := s.runScheduledTask(r, task)
+	if metadata == nil {
+		metadata = map[string]any{}
+	}
+	completed := time.Now().UTC()
+	status := "success"
+	if runErr != nil {
+		status = "failed"
+		metadata["error"] = runErr.Error()
+		if result == "" {
+			result = runErr.Error()
+		}
+	}
+	metadata["task_type"] = task.Type
+	metadata["trigger"] = trigger
+	metadata["ran_at"] = started
+	metadata["completed_at"] = completed
+	metadata["duration_ms"] = completed.Sub(started).Milliseconds()
+	if trigger == "scheduled" {
+		metadata["owner_id"] = "system"
+	}
+	ownerID := "system"
+	if r != nil {
+		ownerID = s.currentUserID(r)
+	}
+	logItem, logErr := s.cfg.Store.CreatePlatformItem("operation_logs", model.PlatformItemRequest{
+		Name:        task.Name,
+		Type:        "scheduled_task",
+		Status:      status,
+		TargetID:    task.ID,
+		OwnerID:     ownerID,
+		Description: result,
+		Metadata:    metadata,
+	})
+	if logErr != nil {
+		if runErr != nil {
+			return model.PlatformItem{}, fmt.Errorf("%w; additionally failed to write scheduled task log: %v", runErr, logErr)
+		}
+		return model.PlatformItem{}, logErr
+	}
+	nextMetadata := cloneMetadata(task.Metadata)
+	nextMetadata["last_run_at"] = completed.Format(time.RFC3339Nano)
+	nextMetadata["last_run_status"] = status
+	nextMetadata["last_run_message"] = result
+	nextMetadata["last_run_log_id"] = logItem.ID
+	nextMetadata["last_duration_ms"] = completed.Sub(started).Milliseconds()
+	nextMetadata["last_trigger"] = trigger
+	if runErr != nil {
+		nextMetadata["last_run_error"] = runErr.Error()
+	} else {
+		delete(nextMetadata, "last_run_error")
+	}
+	if nextRun, ok := nextScheduledTaskRunAfter(task, completed); ok {
+		nextMetadata["next_run_at"] = nextRun.Format(time.RFC3339Nano)
+	} else {
+		delete(nextMetadata, "next_run_at")
+	}
+	if _, updateErr := s.cfg.Store.UpdatePlatformItem("scheduled_tasks", task.ID, model.PlatformItemRequest{Metadata: nextMetadata}); updateErr != nil {
+		if runErr != nil {
+			return logItem, fmt.Errorf("%w; additionally failed to update scheduled task metadata: %v", runErr, updateErr)
+		}
+		return logItem, updateErr
+	}
+	if runErr != nil {
+		return logItem, runErr
+	}
+	return logItem, nil
+}
+
 func normalizeScheduledTaskType(value string) string {
 	value = strings.ToLower(strings.TrimSpace(value))
 	value = strings.ReplaceAll(value, "_", "-")

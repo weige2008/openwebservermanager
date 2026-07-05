@@ -57,6 +57,10 @@ type Server struct {
 }
 
 func New(cfg Config) http.Handler {
+	return NewServer(cfg)
+}
+
+func NewServer(cfg Config) *Server {
 	sub, err := fs.Sub(cfg.StaticFS, "static")
 	if err != nil {
 		panic(err)

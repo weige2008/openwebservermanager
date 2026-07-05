@@ -15,6 +15,7 @@ import (
 	"encoding/json"
 	"errors"
 	"io"
+	"log/slog"
 	"mime/multipart"
 	"net"
 	"net/http"
@@ -2803,6 +2804,107 @@ func TestScheduledTaskRunners(t *testing.T) {
 	}
 }
 
+func TestScheduledTaskScheduleParsing(t *testing.T) {
+	now := time.Date(2026, 7, 6, 12, 4, 30, 0, time.UTC)
+	next, ok := nextCronRun("0 0/10 * * * ?", now)
+	if !ok {
+		t.Fatal("expected every-ten-minutes cron to parse")
+	}
+	want := time.Date(2026, 7, 6, 12, 10, 0, 0, time.UTC)
+	if !next.Equal(want) {
+		t.Fatalf("next cron run = %s, want %s", next, want)
+	}
+
+	next, ok = nextCronRun("0 0 2 * * ?", time.Date(2026, 7, 6, 2, 0, 1, 0, time.UTC))
+	if !ok {
+		t.Fatal("expected daily cron to parse")
+	}
+	want = time.Date(2026, 7, 7, 2, 0, 0, 0, time.UTC)
+	if !next.Equal(want) {
+		t.Fatalf("daily cron run = %s, want %s", next, want)
+	}
+
+	intervalNext, ok := nextScheduledTaskRunAfter(model.PlatformItem{Metadata: map[string]any{"interval_seconds": 30}}, now)
+	if !ok {
+		t.Fatal("expected interval schedule to parse")
+	}
+	if want := now.Add(30 * time.Second); !intervalNext.Equal(want) {
+		t.Fatalf("interval next run = %s, want %s", intervalNext, want)
+	}
+}
+
+func TestScheduledTaskSchedulerRunsEnabledTasks(t *testing.T) {
+	handler, cookie := newTestHandler(t)
+	srv := handler.(*Server)
+	due := time.Now().Add(-time.Second).UTC().Format(time.RFC3339Nano)
+
+	taskRec := assertStatus(t, handler, http.MethodPost, "/api/admin/scheduled-tasks", map[string]any{
+		"name":   "Scheduled backup",
+		"type":   "backup",
+		"status": "enabled",
+		"metadata": map[string]any{
+			"interval_ms": 5000,
+			"next_run_at": due,
+		},
+	}, cookie, http.StatusCreated)
+	var task model.PlatformItem
+	decodeResponse(t, taskRec, &task)
+
+	disabledRec := assertStatus(t, handler, http.MethodPost, "/api/admin/scheduled-tasks", map[string]any{
+		"name":   "Disabled scheduled backup",
+		"type":   "backup",
+		"status": "disabled",
+		"metadata": map[string]any{
+			"interval_ms": 10,
+			"next_run_at": due,
+		},
+	}, cookie, http.StatusCreated)
+	var disabled model.PlatformItem
+	decodeResponse(t, disabledRec, &disabled)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	scheduler := srv.StartScheduler(ctx, SchedulerConfig{
+		PollInterval: 10 * time.Millisecond,
+		Logger:       slog.New(slog.NewTextHandler(io.Discard, nil)),
+	})
+	defer scheduler.Stop()
+
+	waitForCondition(t, 2*time.Second, func() bool {
+		return len(scheduledTaskLogsForTest(t, srv, task.ID)) > 0
+	})
+	logs := scheduledTaskLogsForTest(t, srv, task.ID)
+	if len(logs) == 0 {
+		t.Fatal("scheduler did not write operation log")
+	}
+	log := logs[0]
+	if log.OwnerID != "system" || log.Status != "success" || firstMetadataString(log.Metadata, "trigger") != "scheduled" {
+		t.Fatalf("unexpected scheduled task log: %#v", log)
+	}
+	backupPath := firstMetadataString(log.Metadata, "backup_path")
+	if backupPath == "" {
+		t.Fatalf("scheduled backup log missing backup path: %#v", log.Metadata)
+	}
+	if info, err := os.Stat(filepath.FromSlash(backupPath)); err != nil || info.Size() == 0 {
+		t.Fatalf("scheduled backup file missing or empty: %v", err)
+	}
+	savedTask, ok, err := srv.cfg.Store.GetPlatformItem("scheduled_tasks", task.ID)
+	if err != nil || !ok {
+		t.Fatalf("load scheduled task: ok=%v err=%v", ok, err)
+	}
+	if firstMetadataString(savedTask.Metadata, "last_run_status") != "success" || firstMetadataString(savedTask.Metadata, "last_trigger") != "scheduled" {
+		t.Fatalf("scheduled task metadata was not updated: %#v", savedTask.Metadata)
+	}
+	if _, ok := metadataTime(savedTask.Metadata["next_run_at"]); !ok {
+		t.Fatalf("scheduled task next_run_at was not updated: %#v", savedTask.Metadata)
+	}
+
+	time.Sleep(80 * time.Millisecond)
+	if logs := scheduledTaskLogsForTest(t, srv, disabled.ID); len(logs) != 0 {
+		t.Fatalf("disabled scheduled task should not run, got logs: %#v", logs)
+	}
+}
+
 func TestStorageAuthorizationStrategyPermissions(t *testing.T) {
 	handler, adminCookie := newTestHandler(t)
 
@@ -3293,6 +3395,36 @@ func newTestHandler(t *testing.T) (http.Handler, *http.Cookie) {
 		t.Fatal("setup did not set auth cookie")
 	}
 	return handler, cookies[0]
+}
+
+func waitForCondition(t *testing.T, timeout time.Duration, condition func() bool) {
+	t.Helper()
+	deadline := time.Now().Add(timeout)
+	for time.Now().Before(deadline) {
+		if condition() {
+			return
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	if condition() {
+		return
+	}
+	t.Fatalf("condition was not met within %s", timeout)
+}
+
+func scheduledTaskLogsForTest(t *testing.T, srv *Server, taskID string) []model.PlatformItem {
+	t.Helper()
+	items, err := srv.cfg.Store.ListPlatformItems("operation_logs")
+	if err != nil {
+		t.Fatalf("list operation logs: %v", err)
+	}
+	result := []model.PlatformItem{}
+	for _, item := range items {
+		if item.Type == "scheduled_task" && item.TargetID == taskID {
+			result = append(result, item)
+		}
+	}
+	return result
 }
 
 type fakeLDAPUser struct {

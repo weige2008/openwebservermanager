@@ -956,17 +956,22 @@ export function AccessPortalPage() {
       </section>
       <AccessSection title='文本协议' items={textAssets} />
       <AccessSection title='图形协议' items={desktopAssets} />
-      <AccessSection title='Web资产' items={webAssets} />
-      <AccessSection title='数据库资产' items={databaseAssets} />
+      <AccessSection title='Web资产' items={webAssets} protocol='http' />
+      <AccessSection title='数据库资产' items={databaseAssets} protocol='database' />
     </div>
   )
 }
 
-function AccessSection({ title, items }: { title: string; items: PlatformItem[] }) {
+function AccessSection({ title, items, protocol }: { title: string; items: PlatformItem[]; protocol?: string }) {
   const app = useApp()
   const connect = async (item: PlatformItem) => {
+    const accessProtocol = protocol || item.protocol || 'ssh'
+    if (accessProtocol === 'http') {
+      window.open(`/api/access/http/${item.id}/proxy/`, '_blank', 'noopener,noreferrer')
+      return
+    }
     try {
-      await apiRequest(`/api/access/${item.protocol || 'ssh'}/${item.id}`, { method: 'POST', body: '{}' })
+      await apiRequest(`/api/access/${accessProtocol}/${item.id}`, { method: 'POST', body: '{}' })
       await app.refresh(true)
       app.showToast('已创建接入会话')
     } catch (error) {

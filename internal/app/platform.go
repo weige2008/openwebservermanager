@@ -4,6 +4,8 @@ import (
 	"errors"
 	"net"
 	"net/http"
+	"net/http/httputil"
+	"net/url"
 	"os"
 	"runtime"
 	"strconv"
@@ -188,6 +190,9 @@ func (s *Server) handleAccessAction(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	protocol := model.Protocol(parts[0])
+	if strings.EqualFold(parts[0], "web") {
+		protocol = model.ProtocolHTTP
+	}
 	assetID := parts[1]
 	platform, err := s.cfg.Store.PlatformBootstrap()
 	if err != nil {
@@ -202,6 +207,14 @@ func (s *Server) handleAccessAction(w http.ResponseWriter, r *http.Request) {
 	}
 	if !isAccessAuthorized(platform, protocol, assetID, userID, isAdmin) {
 		writeError(w, http.StatusForbidden, "asset access denied")
+		return
+	}
+	if len(parts) >= 3 && parts[2] == "proxy" {
+		if protocol != model.ProtocolHTTP {
+			writeError(w, http.StatusBadRequest, "proxy access is only supported for web assets")
+			return
+		}
+		s.handleWebAssetProxy(w, r, asset, userID, strings.Join(parts[3:], "/"))
 		return
 	}
 	item, err := s.cfg.Store.CreatePlatformItem("online_sessions", model.PlatformItemRequest{
@@ -224,6 +237,132 @@ func (s *Server) handleAccessAction(w http.ResponseWriter, r *http.Request) {
 	}
 	_ = s.audit(r, "access."+string(protocol)+".create", item.ID, protocol, "created access portal session")
 	writeJSON(w, http.StatusAccepted, item)
+}
+
+func (s *Server) handleWebAssetProxy(w http.ResponseWriter, r *http.Request, asset model.PlatformItem, userID, proxyPath string) {
+	started := time.Now()
+	target, err := webAssetTargetURL(asset)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	targetQuery := target.RawQuery
+	proxy := httputil.NewSingleHostReverseProxy(target)
+	proxy.ErrorHandler = func(rw http.ResponseWriter, req *http.Request, proxyErr error) {
+		writeError(rw, http.StatusBadGateway, proxyErr.Error())
+	}
+	proxy.Director = func(req *http.Request) {
+		requestQuery := req.URL.RawQuery
+		req.URL.Scheme = target.Scheme
+		req.URL.Host = target.Host
+		req.Host = target.Host
+		req.URL.Path = joinProxyPath(target.Path, proxyPath)
+		req.URL.RawPath = ""
+		switch {
+		case targetQuery == "":
+			req.URL.RawQuery = requestQuery
+		case req.URL.RawQuery == "":
+			req.URL.RawQuery = targetQuery
+		default:
+			req.URL.RawQuery = targetQuery + "&" + requestQuery
+		}
+		req.Header.Set("X-OpenWebServerManager-User", userID)
+		req.Header.Set("X-OpenWebServerManager-Asset", asset.ID)
+	}
+	recorder := &statusCaptureWriter{ResponseWriter: w, status: http.StatusOK}
+	proxy.ServeHTTP(recorder, r)
+	duration := time.Since(started)
+	_, _ = s.cfg.Store.CreatePlatformItem("access_logs", model.PlatformItemRequest{
+		Name:        r.Method + " " + r.URL.RequestURI(),
+		Type:        r.Method,
+		Status:      strconv.Itoa(recorder.status),
+		Protocol:    model.ProtocolHTTP,
+		OwnerID:     userID,
+		TargetID:    asset.ID,
+		Description: "proxied web asset request",
+		Metadata: map[string]any{
+			"asset_name":    asset.Name,
+			"client_ip":     s.clientIP(r),
+			"method":        r.Method,
+			"uri":           r.URL.RequestURI(),
+			"status_code":   recorder.status,
+			"response_size": recorder.bytes,
+			"duration_ms":   duration.Milliseconds(),
+			"user_agent":    r.UserAgent(),
+			"upstream":      target.String(),
+		},
+	})
+	_ = s.audit(r, "access.web.proxy", asset.ID, model.ProtocolHTTP, "proxied web asset request")
+}
+
+type statusCaptureWriter struct {
+	http.ResponseWriter
+	status int
+	bytes  int64
+}
+
+func (w *statusCaptureWriter) WriteHeader(status int) {
+	w.status = status
+	w.ResponseWriter.WriteHeader(status)
+}
+
+func (w *statusCaptureWriter) Write(payload []byte) (int, error) {
+	if w.status == 0 {
+		w.status = http.StatusOK
+	}
+	n, err := w.ResponseWriter.Write(payload)
+	w.bytes += int64(n)
+	return n, err
+}
+
+func webAssetTargetURL(asset model.PlatformItem) (*url.URL, error) {
+	raw := ""
+	for _, key := range []string{"target_url", "upstream", "url", "target", "address"} {
+		values := metadataStrings(asset.Metadata[key])
+		if len(values) > 0 && strings.TrimSpace(values[0]) != "" {
+			raw = strings.TrimSpace(values[0])
+			break
+		}
+	}
+	if raw == "" {
+		raw = strings.TrimSpace(asset.Host)
+	}
+	if raw == "" {
+		return nil, errors.New("web asset upstream is required")
+	}
+	if !strings.Contains(raw, "://") {
+		scheme := "http"
+		if strings.EqualFold(asset.Type, "https") || asset.Port == 443 {
+			scheme = "https"
+		}
+		if asset.Port > 0 && !strings.Contains(raw, ":") {
+			raw = net.JoinHostPort(raw, strconv.Itoa(asset.Port))
+		}
+		raw = scheme + "://" + raw
+	}
+	target, err := url.Parse(raw)
+	if err != nil || target.Host == "" {
+		return nil, errors.New("web asset upstream is invalid")
+	}
+	if target.Scheme != "http" && target.Scheme != "https" {
+		return nil, errors.New("web asset upstream must use http or https")
+	}
+	return target, nil
+}
+
+func joinProxyPath(basePath, proxyPath string) string {
+	basePath = strings.TrimRight(basePath, "/")
+	proxyPath = strings.TrimLeft(proxyPath, "/")
+	if proxyPath == "" {
+		if basePath == "" {
+			return "/"
+		}
+		return basePath
+	}
+	if basePath == "" {
+		return "/" + proxyPath
+	}
+	return basePath + "/" + proxyPath
 }
 
 func (s *Server) handleSystemMonitoring(w http.ResponseWriter, _ *http.Request) {

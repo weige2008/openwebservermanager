@@ -403,6 +403,61 @@ func TestCommandSnippetBootstrapVisibility(t *testing.T) {
 	}
 }
 
+func TestWebAssetProxyRequiresAuthorizationAndLogs(t *testing.T) {
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/root/hello" {
+			t.Fatalf("upstream path = %q, want /root/hello", r.URL.Path)
+		}
+		if r.URL.Query().Get("from") != "asset" || r.URL.Query().Get("x") != "1" {
+			t.Fatalf("upstream query = %q, want from=asset&x=1", r.URL.RawQuery)
+		}
+		if r.Header.Get("X-OpenWebServerManager-User") == "" || r.Header.Get("X-OpenWebServerManager-Asset") == "" {
+			t.Fatal("upstream did not receive proxy identity headers")
+		}
+		w.Header().Set("X-Upstream", "ok")
+		_, _ = w.Write([]byte("proxied ok"))
+	}))
+	defer upstream.Close()
+
+	handler, adminCookie := newTestHandler(t)
+	userRec := assertStatus(t, handler, http.MethodPost, "/api/admin/users", map[string]any{
+		"name":     "web-user",
+		"type":     "local",
+		"status":   "enabled",
+		"password": "password123",
+		"metadata": map[string]any{"role": "user"},
+	}, adminCookie, http.StatusCreated)
+	var user model.PlatformItem
+	decodeResponse(t, userRec, &user)
+	webRec := assertStatus(t, handler, http.MethodPost, "/api/admin/websites", map[string]any{
+		"name":     "internal app",
+		"type":     "http",
+		"status":   "enabled",
+		"metadata": map[string]any{"target_url": upstream.URL + "/root?from=asset"},
+	}, adminCookie, http.StatusCreated)
+	var webAsset model.PlatformItem
+	decodeResponse(t, webRec, &webAsset)
+	loginRec := assertStatus(t, handler, http.MethodPost, "/api/auth/login", map[string]any{"username": "web-user", "password": "password123"}, nil, http.StatusOK)
+	userCookie := loginRec.Result().Cookies()[0]
+
+	assertStatus(t, handler, http.MethodGet, "/api/access/http/"+webAsset.ID+"/proxy/hello?x=1", nil, userCookie, http.StatusForbidden)
+	assertStatus(t, handler, http.MethodPost, "/api/admin/authorizations/websites", map[string]any{
+		"name":      "web-user internal app",
+		"owner_id":  user.ID,
+		"target_id": webAsset.ID,
+		"status":    "enabled",
+	}, adminCookie, http.StatusCreated)
+	proxyRec := assertStatus(t, handler, http.MethodGet, "/api/access/http/"+webAsset.ID+"/proxy/hello?x=1", nil, userCookie, http.StatusOK)
+	if proxyRec.Body.String() != "proxied ok" || proxyRec.Header().Get("X-Upstream") != "ok" {
+		t.Fatalf("proxy response body/header = %q/%q", proxyRec.Body.String(), proxyRec.Header().Get("X-Upstream"))
+	}
+	logsRec := assertStatus(t, handler, http.MethodGet, "/api/admin/audit/access-logs", nil, adminCookie, http.StatusOK)
+	logsBody := logsRec.Body.String()
+	if !strings.Contains(logsBody, webAsset.ID) || !strings.Contains(logsBody, "200") || !strings.Contains(logsBody, "/proxy/hello") {
+		t.Fatal("access logs did not include proxied request details")
+	}
+}
+
 func TestRoleBasedAccessControl(t *testing.T) {
 	handler, adminCookie := newTestHandler(t)
 

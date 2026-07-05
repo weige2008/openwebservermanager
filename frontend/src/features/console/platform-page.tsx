@@ -70,6 +70,7 @@ interface StorageEntry {
 export function PlatformPage({ config }: { config: PlatformPageConfig }) {
   if (config.kind === 'tools') return <ToolsPage config={config} />
   if (config.kind === 'monitor') return <MonitoringPage config={config} />
+  if (config.collection === 'access_stats') return <AccessStatsPage config={config} />
   return <PlatformTablePage config={config} />
 }
 
@@ -1225,6 +1226,110 @@ function MonitoringPage({ config }: { config: PlatformPageConfig }) {
   )
 }
 
+function AccessStatsPage({ config }: { config: PlatformPageConfig }) {
+  const app = useApp()
+  const label = platformLabel(config, app.locale)
+  const description = platformDescription(config, app.locale)
+  const Icon = config.icon
+  const [items, setItems] = useState<PlatformItem[]>([])
+  const [loading, setLoading] = useState(false)
+
+  const load = async () => {
+    setLoading(true)
+    try {
+      const data = await apiRequest<{ items: PlatformItem[] }>(config.apiPath || '/api/admin/audit/access-stats')
+      setItems(data.items || [])
+    } catch (error) {
+      app.handleApiError(error)
+    } finally {
+      setLoading(false)
+    }
+  }
+
+  useEffect(() => {
+    void load()
+  }, [config.apiPath])
+
+  const summary = items.find((item) => item.type === 'summary')
+  const summaryMetadata = summary?.metadata || {}
+  const metrics = [
+    { label: 'PV', value: formatNumberValue(summaryMetadata.pv) },
+    { label: 'UV', value: formatNumberValue(summaryMetadata.uv) },
+    { label: '独立 IP', value: formatNumberValue(summaryMetadata.unique_ips) },
+    { label: '请求数', value: formatNumberValue(summaryMetadata.request_count) },
+    { label: '流量', value: formatBytesValue(summaryMetadata.traffic_bytes) },
+    { label: '平均耗时', value: `${formatNumberValue(summaryMetadata.average_duration_ms)} ms` },
+    { label: '错误率', value: formatPercentValue(summaryMetadata.error_rate) },
+    { label: '错误数', value: formatNumberValue(summaryMetadata.error_count) },
+  ]
+  const sections = [
+    { type: 'top_pages', title: '热门页面' },
+    { type: 'referrers', title: '来源统计' },
+    { type: 'assets', title: '资产排行' },
+    { type: 'status_codes', title: '状态码' },
+    { type: 'methods', title: '请求方法' },
+  ]
+
+  return (
+    <CardStaggerContainer>
+      <CardStaggerItem>
+        <Card>
+          <CardHeader className='gap-3 max-sm:grid-cols-1'>
+            <div>
+              <CardTitle className='flex items-center gap-2'>
+                <Icon className='size-5 text-primary' />
+                {label}
+              </CardTitle>
+              <CardDescription>{description}</CardDescription>
+            </div>
+            <Button variant='outline' onClick={() => void load()} disabled={loading}>
+              <RefreshCw className={cn('size-4', loading && 'animate-spin')} />
+              刷新
+            </Button>
+          </CardHeader>
+          <CardContent className='grid gap-5'>
+            <div className='grid gap-3 sm:grid-cols-2 xl:grid-cols-4'>
+              {metrics.map((metric) => (
+                <div key={metric.label} className='rounded-xl border border-border bg-background/60 p-4'>
+                  <div className='text-xs font-medium text-muted-foreground'>{metric.label}</div>
+                  <div className='mt-2 truncate font-mono text-xl font-semibold'>{metric.value}</div>
+                </div>
+              ))}
+            </div>
+            <div className='grid gap-3 lg:grid-cols-2'>
+              {sections.map((section) => (
+                <AccessStatsRank key={section.type} title={section.title} item={items.find((entry) => entry.type === section.type)} />
+              ))}
+            </div>
+          </CardContent>
+        </Card>
+      </CardStaggerItem>
+    </CardStaggerContainer>
+  )
+}
+
+function AccessStatsRank({ title, item }: { title: string; item?: PlatformItem }) {
+  const entries = objectArrayValue(item?.metadata?.entries)
+  return (
+    <section className='rounded-xl border border-border bg-background/60 p-4'>
+      <div className='flex items-center justify-between gap-3'>
+        <h3 className='text-sm font-semibold'>{title}</h3>
+        <Badge tone='neutral'>{entries.length}</Badge>
+      </div>
+      <div className='mt-3 grid gap-2'>
+        {entries.length ? entries.map((entry, index) => (
+          <div key={`${String(entry.key)}-${index}`} className='grid grid-cols-[minmax(0,1fr)_auto] items-center gap-3 rounded-lg bg-muted/60 px-3 py-2 text-sm'>
+            <span className='truncate font-mono text-xs'>{String(entry.key || '-')}</span>
+            <strong className='font-mono text-xs'>{formatNumberValue(entry.value)}</strong>
+          </div>
+        )) : (
+          <div className='rounded-lg border border-dashed border-border p-4 text-sm text-muted-foreground'>暂无统计数据。</div>
+        )}
+      </div>
+    </section>
+  )
+}
+
 function splitCSV(value: string) {
   return value.split(',').map((item) => item.trim()).filter(Boolean)
 }
@@ -1239,6 +1344,36 @@ function stringArrayValue(value: unknown) {
 
 function objectArrayValue(value: unknown) {
   return Array.isArray(value) ? value.filter((item): item is Record<string, unknown> => Boolean(item) && typeof item === 'object' && !Array.isArray(item)) : []
+}
+
+function numberValue(value: unknown) {
+  if (typeof value === 'number' && Number.isFinite(value)) return value
+  if (typeof value === 'string') {
+    const parsed = Number(value)
+    return Number.isFinite(parsed) ? parsed : 0
+  }
+  return 0
+}
+
+function formatNumberValue(value: unknown) {
+  return new Intl.NumberFormat().format(numberValue(value))
+}
+
+function formatBytesValue(value: unknown) {
+  const bytes = numberValue(value)
+  if (bytes < 1024) return `${bytes} B`
+  const units = ['KB', 'MB', 'GB', 'TB']
+  let current = bytes / 1024
+  let unitIndex = 0
+  while (current >= 1024 && unitIndex < units.length - 1) {
+    current /= 1024
+    unitIndex += 1
+  }
+  return `${current.toFixed(current >= 10 ? 1 : 2)} ${units[unitIndex]}`
+}
+
+function formatPercentValue(value: unknown) {
+  return `${(numberValue(value) * 100).toFixed(1)}%`
 }
 
 function itemHasRecording(item: PlatformItem) {

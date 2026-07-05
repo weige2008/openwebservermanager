@@ -305,6 +305,7 @@ func (s *Server) handleWebAssetProxy(w http.ResponseWriter, r *http.Request, ass
 			"response_size": recorder.bytes,
 			"duration_ms":   duration.Milliseconds(),
 			"user_agent":    r.UserAgent(),
+			"referer":       r.Referer(),
 			"upstream":      target.String(),
 		},
 	})

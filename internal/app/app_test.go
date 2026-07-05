@@ -73,6 +73,10 @@ func TestPlatformCollectionEndpoints(t *testing.T) {
 	for _, path := range paths {
 		t.Run(path, func(t *testing.T) {
 			assertStatus(t, handler, http.MethodGet, path, nil, cookie, http.StatusOK)
+			if path == "/api/admin/audit/access-stats" {
+				assertStatus(t, handler, http.MethodPost, path, map[string]any{"name": "manual stats"}, cookie, http.StatusMethodNotAllowed)
+				return
+			}
 
 			payload := map[string]any{
 				"name":        "test " + filepath.Base(path),
@@ -405,17 +409,27 @@ func TestCommandSnippetBootstrapVisibility(t *testing.T) {
 
 func TestWebAssetProxyRequiresAuthorizationAndLogs(t *testing.T) {
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path != "/root/hello" {
-			t.Fatalf("upstream path = %q, want /root/hello", r.URL.Path)
-		}
-		if r.URL.Query().Get("from") != "asset" || r.URL.Query().Get("x") != "1" {
-			t.Fatalf("upstream query = %q, want from=asset&x=1", r.URL.RawQuery)
-		}
 		if r.Header.Get("X-OpenWebServerManager-User") == "" || r.Header.Get("X-OpenWebServerManager-Asset") == "" {
 			t.Fatal("upstream did not receive proxy identity headers")
 		}
-		w.Header().Set("X-Upstream", "ok")
-		_, _ = w.Write([]byte("proxied ok"))
+		if r.URL.Query().Get("from") != "asset" {
+			t.Fatalf("upstream query missing base query: %q", r.URL.RawQuery)
+		}
+		switch r.URL.Path {
+		case "/root/hello":
+			if r.URL.Query().Get("x") != "1" {
+				t.Fatalf("upstream hello query = %q, want x=1", r.URL.RawQuery)
+			}
+			w.Header().Set("X-Upstream", "ok")
+			_, _ = w.Write([]byte("proxied ok"))
+		case "/root/fail":
+			if r.URL.Query().Get("x") != "2" {
+				t.Fatalf("upstream fail query = %q, want x=2", r.URL.RawQuery)
+			}
+			http.Error(w, "upstream failed", http.StatusInternalServerError)
+		default:
+			t.Fatalf("upstream path = %q, want /root/hello or /root/fail", r.URL.Path)
+		}
 	}))
 	defer upstream.Close()
 
@@ -447,14 +461,28 @@ func TestWebAssetProxyRequiresAuthorizationAndLogs(t *testing.T) {
 		"target_id": webAsset.ID,
 		"status":    "enabled",
 	}, adminCookie, http.StatusCreated)
-	proxyRec := assertStatus(t, handler, http.MethodGet, "/api/access/http/"+webAsset.ID+"/proxy/hello?x=1", nil, userCookie, http.StatusOK)
+	proxyRec := assertStatusWithHeaders(t, handler, http.MethodGet, "/api/access/http/"+webAsset.ID+"/proxy/hello?x=1", nil, userCookie, map[string]string{
+		"Referer":    "https://docs.example.test/start",
+		"User-Agent": "openwebservermanager-test",
+	}, http.StatusOK)
 	if proxyRec.Body.String() != "proxied ok" || proxyRec.Header().Get("X-Upstream") != "ok" {
 		t.Fatalf("proxy response body/header = %q/%q", proxyRec.Body.String(), proxyRec.Header().Get("X-Upstream"))
 	}
+	assertStatusWithHeaders(t, handler, http.MethodGet, "/api/access/http/"+webAsset.ID+"/proxy/fail?x=2", nil, userCookie, map[string]string{
+		"Referer":    "https://docs.example.test/error",
+		"User-Agent": "openwebservermanager-test",
+	}, http.StatusInternalServerError)
 	logsRec := assertStatus(t, handler, http.MethodGet, "/api/admin/audit/access-logs", nil, adminCookie, http.StatusOK)
 	logsBody := logsRec.Body.String()
-	if !strings.Contains(logsBody, webAsset.ID) || !strings.Contains(logsBody, "200") || !strings.Contains(logsBody, "/proxy/hello") {
+	if !strings.Contains(logsBody, webAsset.ID) || !strings.Contains(logsBody, "200") || !strings.Contains(logsBody, "500") || !strings.Contains(logsBody, "/proxy/hello") || !strings.Contains(logsBody, "docs.example.test") {
 		t.Fatal("access logs did not include proxied request details")
+	}
+	statsRec := assertStatus(t, handler, http.MethodGet, "/api/admin/audit/access-stats", nil, adminCookie, http.StatusOK)
+	statsBody := statsRec.Body.String()
+	for _, want := range []string{"access-stat-summary", "request_count", "unique_ips", "traffic_bytes", "error_rate", "docs.example.test", "/api/access/http/" + webAsset.ID + "/proxy/hello", "500"} {
+		if !strings.Contains(statsBody, want) {
+			t.Fatalf("access stats did not include %q", want)
+		}
 	}
 }
 
@@ -994,6 +1022,11 @@ func newTestHandler(t *testing.T) (http.Handler, *http.Cookie) {
 
 func assertStatus(t *testing.T, handler http.Handler, method, path string, payload any, cookie *http.Cookie, want int) *httptest.ResponseRecorder {
 	t.Helper()
+	return assertStatusWithHeaders(t, handler, method, path, payload, cookie, nil, want)
+}
+
+func assertStatusWithHeaders(t *testing.T, handler http.Handler, method, path string, payload any, cookie *http.Cookie, headers map[string]string, want int) *httptest.ResponseRecorder {
+	t.Helper()
 	var body *bytes.Reader
 	if payload == nil {
 		body = bytes.NewReader(nil)
@@ -1007,6 +1040,9 @@ func assertStatus(t *testing.T, handler http.Handler, method, path string, paylo
 	req := httptest.NewRequest(method, path, body)
 	if payload != nil {
 		req.Header.Set("Content-Type", "application/json")
+	}
+	for key, value := range headers {
+		req.Header.Set(key, value)
 	}
 	if cookie != nil {
 		req.AddCookie(cookie)

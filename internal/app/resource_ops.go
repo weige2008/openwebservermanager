@@ -71,6 +71,9 @@ func (s *Server) handleResourceOperation(w http.ResponseWriter, r *http.Request,
 	case path == "admin/certificates/self-signed":
 		s.handleCertificateSelfSigned(w, r)
 		return true
+	case path == "admin/audit/access-stats":
+		s.handleAccessStats(w, r)
+		return true
 	case strings.HasPrefix(path, "admin/certificates/") && strings.HasSuffix(path, "/download"):
 		id := pathSegmentFromTrimmed(path, 2)
 		s.handleCertificateDownload(w, r, id)

@@ -5,6 +5,7 @@ import (
 	"bytes"
 	"encoding/json"
 	"io"
+	"mime/multipart"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -521,13 +522,18 @@ func TestResourceOperationEndpoints(t *testing.T) {
 	assertStatus(t, handler, http.MethodGet, "/api/admin/storages/"+storage.ID+"/files", nil, cookie, http.StatusOK)
 	assertStatus(t, handler, http.MethodPost, "/api/admin/storages/"+storage.ID+"/files-mkdir", map[string]any{"path": "docs"}, cookie, http.StatusCreated)
 	assertStatus(t, handler, http.MethodPost, "/api/admin/storages/"+storage.ID+"/files-write", map[string]any{"path": "docs/readme.txt", "content": "hello"}, cookie, http.StatusCreated)
+	assertMultipartStatus(t, handler, "/api/admin/storages/"+storage.ID+"/files-upload", map[string]string{"path": "docs"}, "upload.bin", []byte{0, 1, 2, 3}, cookie, http.StatusCreated)
 	listRec := assertStatus(t, handler, http.MethodGet, "/api/admin/storages/"+storage.ID+"/files?path=docs", nil, cookie, http.StatusOK)
-	if !strings.Contains(listRec.Body.String(), "readme.txt") {
-		t.Fatal("storage list did not include written file")
+	if !strings.Contains(listRec.Body.String(), "readme.txt") || !strings.Contains(listRec.Body.String(), "upload.bin") {
+		t.Fatal("storage list did not include written and uploaded files")
 	}
 	downloadRec := assertStatus(t, handler, http.MethodGet, "/api/admin/storages/"+storage.ID+"/files-download?path=docs/readme.txt", nil, cookie, http.StatusOK)
 	if strings.TrimSpace(downloadRec.Body.String()) != "hello" {
 		t.Fatalf("download body = %q, want hello", downloadRec.Body.String())
+	}
+	uploadDownloadRec := assertStatus(t, handler, http.MethodGet, "/api/admin/storages/"+storage.ID+"/files-download?path=docs/upload.bin", nil, cookie, http.StatusOK)
+	if !bytes.Equal(uploadDownloadRec.Body.Bytes(), []byte{0, 1, 2, 3}) {
+		t.Fatalf("uploaded file body = %v, want binary payload", uploadDownloadRec.Body.Bytes())
 	}
 	assertStatus(t, handler, http.MethodDelete, "/api/admin/storages/"+storage.ID+"/files?path=docs/readme.txt", nil, cookie, http.StatusOK)
 	assertStatus(t, handler, http.MethodDelete, "/api/admin/storages/"+storage.ID+"/files", nil, cookie, http.StatusBadRequest)
@@ -608,6 +614,7 @@ func TestStorageAuthorizationStrategyPermissions(t *testing.T) {
 	assertStatus(t, handler, http.MethodGet, "/api/admin/storages/"+storage.ID+"/files", nil, userCookie, http.StatusOK)
 	assertStatus(t, handler, http.MethodPost, "/api/admin/storages/"+storage.ID+"/files-mkdir", map[string]any{"path": "docs"}, userCookie, http.StatusCreated)
 	assertStatus(t, handler, http.MethodPost, "/api/admin/storages/"+storage.ID+"/files-write", map[string]any{"path": "docs/a.txt", "content": "alpha"}, userCookie, http.StatusCreated)
+	assertMultipartStatus(t, handler, "/api/admin/storages/"+storage.ID+"/files-upload", map[string]string{"path": "docs"}, "uploaded.txt", []byte("uploaded"), userCookie, http.StatusCreated)
 	assertStatus(t, handler, http.MethodPost, "/api/admin/storages/"+storage.ID+"/files-copy", map[string]any{"path": "docs/a.txt", "destination": "docs/b.txt"}, userCookie, http.StatusCreated)
 	assertStatus(t, handler, http.MethodPost, "/api/admin/storages/"+storage.ID+"/files-rename", map[string]any{"path": "docs/b.txt", "destination": "docs/c.txt"}, userCookie, http.StatusOK)
 	downloadRec := assertStatus(t, handler, http.MethodGet, "/api/admin/storages/"+storage.ID+"/files-download?path=docs/c.txt", nil, userCookie, http.StatusOK)
@@ -630,6 +637,15 @@ func TestStorageAuthorizationStrategyPermissions(t *testing.T) {
 		"permissions": map[string]bool{"delete": true},
 	}, adminCookie, http.StatusCreated)
 	assertStatus(t, handler, http.MethodDelete, "/api/admin/storages/"+storage.ID+"/files?path=docs/c.txt", nil, userCookie, http.StatusOK)
+
+	assertStatus(t, handler, http.MethodPost, "/api/admin/strategies", map[string]any{
+		"name":        "deny strategy-drive upload",
+		"type":        "file",
+		"status":      "enabled",
+		"target_id":   storage.ID,
+		"permissions": map[string]bool{"upload": false},
+	}, adminCookie, http.StatusCreated)
+	assertMultipartStatus(t, handler, "/api/admin/storages/"+storage.ID+"/files-upload", map[string]string{"path": "docs"}, "blocked.txt", []byte("blocked"), userCookie, http.StatusForbidden)
 }
 
 func TestAuditSessionOperations(t *testing.T) {
@@ -771,6 +787,38 @@ func assertStatus(t *testing.T, handler http.Handler, method, path string, paylo
 	handler.ServeHTTP(rec, req)
 	if rec.Code != want {
 		t.Fatalf("%s %s status = %d, want %d, body: %s", method, path, rec.Code, want, rec.Body.String())
+	}
+	return rec
+}
+
+func assertMultipartStatus(t *testing.T, handler http.Handler, path string, fields map[string]string, fileName string, fileContent []byte, cookie *http.Cookie, want int) *httptest.ResponseRecorder {
+	t.Helper()
+	var body bytes.Buffer
+	writer := multipart.NewWriter(&body)
+	for key, value := range fields {
+		if err := writer.WriteField(key, value); err != nil {
+			t.Fatalf("write multipart field: %v", err)
+		}
+	}
+	part, err := writer.CreateFormFile("file", fileName)
+	if err != nil {
+		t.Fatalf("create multipart file: %v", err)
+	}
+	if _, err := part.Write(fileContent); err != nil {
+		t.Fatalf("write multipart file: %v", err)
+	}
+	if err := writer.Close(); err != nil {
+		t.Fatalf("close multipart writer: %v", err)
+	}
+	req := httptest.NewRequest(http.MethodPost, path, &body)
+	req.Header.Set("Content-Type", writer.FormDataContentType())
+	if cookie != nil {
+		req.AddCookie(cookie)
+	}
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+	if rec.Code != want {
+		t.Fatalf("POST %s multipart status = %d, want %d, body: %s", path, rec.Code, want, rec.Body.String())
 	}
 	return rec
 }

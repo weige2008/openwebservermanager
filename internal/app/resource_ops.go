@@ -188,6 +188,12 @@ func (s *Server) handleStorageFiles(w http.ResponseWriter, r *http.Request, stor
 			return
 		}
 		s.handleStorageDownload(w, r, root, storageID)
+	case "files-upload":
+		if r.Method != http.MethodPost {
+			writeError(w, http.StatusMethodNotAllowed, "method not allowed")
+			return
+		}
+		s.handleStorageUpload(w, r, root, storageID)
 	case "files-rename":
 		if r.Method != http.MethodPost {
 			writeError(w, http.StatusMethodNotAllowed, "method not allowed")
@@ -269,6 +275,73 @@ func (s *Server) handleStorageWrite(w http.ResponseWriter, r *http.Request, root
 	_, _ = s.cfg.Store.CreatePlatformItem("file_logs", model.PlatformItemRequest{Name: rel, Type: "write", Status: "success", TargetID: storageID, OwnerID: s.currentUserID(r), Description: "wrote file"})
 	_ = s.audit(r, "storage.files.write", storageID, "", "wrote "+rel)
 	writeJSON(w, http.StatusCreated, map[string]any{"path": filepath.ToSlash(rel), "size": len(content)})
+}
+
+func (s *Server) handleStorageUpload(w http.ResponseWriter, r *http.Request, root, storageID string) {
+	r.Body = http.MaxBytesReader(w, r.Body, 512<<20)
+	if err := r.ParseMultipartForm(32 << 20); err != nil {
+		writeError(w, http.StatusBadRequest, "invalid multipart upload: "+err.Error())
+		return
+	}
+	file, header, err := r.FormFile("file")
+	if err != nil {
+		writeError(w, http.StatusBadRequest, "file is required")
+		return
+	}
+	defer file.Close()
+	fileName := strings.TrimSpace(r.FormValue("filename"))
+	if fileName == "" && header != nil {
+		fileName = header.Filename
+	}
+	fileName = filepath.Base(filepath.Clean(filepath.FromSlash(fileName)))
+	if fileName == "." || fileName == ".." || fileName == string(filepath.Separator) || fileName == "" {
+		writeError(w, http.StatusBadRequest, "filename is required")
+		return
+	}
+	targetPath := filepath.ToSlash(filepath.Join(r.FormValue("path"), fileName))
+	target, rel, ok := s.storagePath(w, r, root, targetPath)
+	if !ok {
+		return
+	}
+	permission := "upload"
+	if _, err := os.Stat(target); err == nil {
+		permission = "edit"
+	}
+	if !s.requireStoragePermission(w, r, storageID, permission, rel) {
+		return
+	}
+	if err := os.MkdirAll(filepath.Dir(target), 0o770); err != nil {
+		writeError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	output, err := os.OpenFile(target, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0o660)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	written, copyErr := io.Copy(output, file)
+	closeErr := output.Close()
+	if copyErr != nil {
+		_ = os.Remove(target)
+		writeError(w, http.StatusInternalServerError, copyErr.Error())
+		return
+	}
+	if closeErr != nil {
+		_ = os.Remove(target)
+		writeError(w, http.StatusInternalServerError, closeErr.Error())
+		return
+	}
+	_, _ = s.cfg.Store.CreatePlatformItem("file_logs", model.PlatformItemRequest{
+		Name:        rel,
+		Type:        "upload",
+		Status:      "success",
+		TargetID:    storageID,
+		OwnerID:     s.currentUserID(r),
+		Description: "uploaded file",
+		Metadata:    map[string]any{"size": written, "permission": permission},
+	})
+	_ = s.audit(r, "storage.files.upload", storageID, "", "uploaded "+rel)
+	writeJSON(w, http.StatusCreated, map[string]any{"path": filepath.ToSlash(rel), "size": written, "name": fileName})
 }
 
 func (s *Server) handleStorageMkdir(w http.ResponseWriter, r *http.Request, root, storageID string) {

@@ -11,7 +11,7 @@ import { Button } from '@/components/ui/button'
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card'
 import { DialogShell } from '@/components/ui/dialog'
 import { Field, Input, Select, Textarea } from '@/components/ui/field'
-import { apiRequest } from '@/lib/api'
+import { ApiError, apiRequest } from '@/lib/api'
 import { platformDescription, platformLabel, type PlatformPageConfig } from '@/lib/platform'
 import { cn, formatDate } from '@/lib/utils'
 import type { PlatformItem } from '@/types'
@@ -499,6 +499,8 @@ function StorageFilesDialog({ item, onClose }: { item: PlatformItem; onClose: ()
   const [copyDestination, setCopyDestination] = useState('')
   const [renameSource, setRenameSource] = useState('')
   const [renameDestination, setRenameDestination] = useState('')
+  const [uploadFileItem, setUploadFileItem] = useState<File | null>(null)
+  const [uploadInputKey, setUploadInputKey] = useState(0)
 
   const load = async (target = path) => {
     setLoading(true)
@@ -543,6 +545,31 @@ function StorageFilesDialog({ item, onClose }: { item: PlatformItem; onClose: ()
       await load()
       await app.refresh(true)
       app.showToast('文件已写入')
+    } catch (error) {
+      app.handleApiError(error)
+    }
+  }
+
+  const uploadSelectedFile = async () => {
+    if (!uploadFileItem) return
+    try {
+      const form = new FormData()
+      form.set('path', path === '.' ? '' : path)
+      form.set('file', uploadFileItem)
+      const response = await fetch(`/api/admin/storages/${item.id}/files-upload`, {
+        method: 'POST',
+        credentials: 'same-origin',
+        body: form,
+      })
+      const payload = (await response.json().catch(() => ({}))) as { error?: string; setup_required?: boolean }
+      if (!response.ok) {
+        throw new ApiError(payload.error || response.statusText, response.status, Boolean(payload.setup_required))
+      }
+      setUploadFileItem(null)
+      setUploadInputKey((value) => value + 1)
+      await load()
+      await app.refresh(true)
+      app.showToast('文件已上传')
     } catch (error) {
       app.handleApiError(error)
     }
@@ -631,6 +658,13 @@ function StorageFilesDialog({ item, onClose }: { item: PlatformItem; onClose: ()
         <div className='grid gap-3 sm:grid-cols-[minmax(0,1fr)_auto]'>
           <Input placeholder='新目录名' value={folderName} onChange={(event) => setFolderName(event.currentTarget.value)} />
           <Button variant='outline' onClick={() => void createFolder()} disabled={!folderName.trim()}><FolderPlus className='size-4' />创建目录</Button>
+        </div>
+        <div className='grid gap-3 rounded-xl border border-border bg-background/60 p-3 sm:grid-cols-[minmax(0,1fr)_auto]'>
+          <Input key={uploadInputKey} type='file' onChange={(event) => setUploadFileItem(event.currentTarget.files?.[0] || null)} />
+          <Button variant='outline' onClick={() => void uploadSelectedFile()} disabled={!uploadFileItem}>
+            <Upload className='size-4' />
+            上传
+          </Button>
         </div>
         <div className='grid gap-3 rounded-xl border border-border bg-background/60 p-3'>
           <div className='grid gap-3 sm:grid-cols-[minmax(0,1fr)_minmax(0,1fr)_auto]'>

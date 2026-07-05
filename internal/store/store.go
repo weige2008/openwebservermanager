@@ -684,10 +684,17 @@ func (s *Store) UpdatePlatformItem(collection, id string, req model.PlatformItem
 		item.Description = strings.TrimSpace(req.Description)
 	}
 	existingPasswordHash, _ := item.Metadata["password_hash"].(string)
+	existingClientSecretHash, _ := item.Metadata["client_secret_hash"].(string)
 	if req.Metadata != nil {
 		item.Metadata = req.Metadata
 		if collection == "users" && existingPasswordHash != "" {
 			item.Metadata["password_hash"] = existingPasswordHash
+		}
+		if collection == "oidc_clients" {
+			delete(item.Metadata, "client_secret_hash")
+			if existingClientSecretHash != "" {
+				item.Metadata["client_secret_hash"] = existingClientSecretHash
+			}
 		}
 	}
 	if err := applyPlatformSecrets(collection, req, &item, false); err != nil {
@@ -747,9 +754,17 @@ func collectionPrefix(collection string) string {
 }
 
 func applyPlatformSecrets(collection string, req model.PlatformItemRequest, item *model.PlatformItem, creating bool) error {
-	if collection != "users" {
+	switch collection {
+	case "users":
+		return applyUserPlatformSecret(req, item, creating)
+	case "oidc_clients":
+		return applyOIDCClientPlatformSecret(req, item, creating)
+	default:
 		return nil
 	}
+}
+
+func applyUserPlatformSecret(req model.PlatformItemRequest, item *model.PlatformItem, creating bool) error {
 	if item.Metadata == nil {
 		item.Metadata = map[string]any{}
 	}
@@ -776,6 +791,40 @@ func applyPlatformSecrets(collection string, req model.PlatformItemRequest, item
 	return nil
 }
 
+func applyOIDCClientPlatformSecret(req model.PlatformItemRequest, item *model.PlatformItem, creating bool) error {
+	if item.Metadata == nil {
+		item.Metadata = map[string]any{}
+	}
+	if item.Type == "" {
+		item.Type = "confidential"
+	}
+	secret := strings.TrimSpace(req.Password)
+	for _, key := range []string{"client_secret", "clientSecret", "secret"} {
+		if secret == "" {
+			if text, ok := item.Metadata[key].(string); ok {
+				secret = strings.TrimSpace(text)
+			}
+		}
+		delete(item.Metadata, key)
+	}
+	if secret == "" {
+		if creating {
+			delete(item.Metadata, "client_secret_hash")
+		}
+		return nil
+	}
+	delete(item.Metadata, "client_secret_hash")
+	if len(secret) > 4096 {
+		return errors.New("client secret is too large")
+	}
+	hash, err := bcrypt.GenerateFromPassword([]byte(secret), bcrypt.DefaultCost)
+	if err != nil {
+		return err
+	}
+	item.Metadata["client_secret_hash"] = string(hash)
+	return nil
+}
+
 func sanitizePlatformItem(item *model.PlatformItem) {
 	if item.Metadata == nil {
 		return
@@ -784,6 +833,10 @@ func sanitizePlatformItem(item *model.PlatformItem) {
 	delete(item.Metadata, "password_hash")
 	delete(item.Metadata, "private_key")
 	delete(item.Metadata, "passphrase")
+	delete(item.Metadata, "client_secret")
+	delete(item.Metadata, "clientSecret")
+	delete(item.Metadata, "client_secret_hash")
+	delete(item.Metadata, "secret")
 }
 
 func (s *Store) Bootstrap() ([]model.Server, []model.CredentialPublic, []model.ConnectionSession, []model.AuditLog) {

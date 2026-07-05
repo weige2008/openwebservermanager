@@ -50,6 +50,7 @@ type Server struct {
 	static   http.Handler
 	staticFS fs.FS
 	auth     *authManager
+	oidc     *oidcManager
 }
 
 func New(cfg Config) http.Handler {
@@ -62,11 +63,16 @@ func New(cfg Config) http.Handler {
 		static:   http.FileServer(http.FS(sub)),
 		staticFS: sub,
 		auth:     newAuthManager(),
+		oidc:     newOIDCManager(),
 	}
 }
 
 func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	writeBaseSecurityHeaders(w)
+	if r.Method == http.MethodGet && r.URL.Path == "/.well-known/openid-configuration" {
+		s.handleOIDCDiscovery(w, r)
+		return
+	}
 	if strings.HasPrefix(r.URL.Path, "/api/") {
 		s.serveAPI(w, r)
 		return
@@ -109,6 +115,9 @@ func (s *Server) serveAPI(w http.ResponseWriter, r *http.Request) {
 		return
 	case r.Method == http.MethodGet && r.URL.Path == "/api/auth/me":
 		s.handleMe(w, r)
+		return
+	case strings.HasPrefix(r.URL.Path, "/api/oidc/"):
+		s.handleOIDCAPI(w, r)
 		return
 	}
 

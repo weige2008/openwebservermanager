@@ -16,6 +16,15 @@ export function AuthPage() {
   const navigate = useNavigate()
   const [submitting, setSubmitting] = useState(false)
 
+  const finishSignIn = async () => {
+    const next = new URLSearchParams(window.location.search).get('next')
+    if (next && next.startsWith('/') && !next.startsWith('//')) {
+      window.location.assign(next)
+      return
+    }
+    await navigate({ to: '/app' })
+  }
+
   const onSubmit = async (event: FormEvent<HTMLFormElement>) => {
     event.preventDefault()
     setSubmitting(true)
@@ -40,7 +49,7 @@ export function AuthPage() {
         app.setAuthenticatedUser(result.user)
         await app.refresh(true)
         app.showToast(t('auth.adminCreated'))
-        await navigate({ to: '/app' })
+        await finishSignIn()
       } else {
         const result = await apiRequest<{ user: AuthUser }>('/api/auth/login', {
           method: 'POST',
@@ -52,7 +61,7 @@ export function AuthPage() {
         app.setAuthenticatedUser(result.user)
         await app.refresh(true)
         app.showToast(t('auth.signedIn'))
-        await navigate({ to: '/app' })
+        await finishSignIn()
       }
     } catch (error) {
       app.handleApiError(error)

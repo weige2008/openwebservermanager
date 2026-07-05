@@ -3,11 +3,14 @@ package app
 import (
 	"archive/zip"
 	"bytes"
+	"crypto/sha256"
+	"encoding/base64"
 	"encoding/json"
 	"io"
 	"mime/multipart"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"os"
 	"path/filepath"
 	"strings"
@@ -721,6 +724,101 @@ func TestLoginSecurityPoliciesAndLocks(t *testing.T) {
 	}
 }
 
+func TestOIDCProviderAuthorizationCodeFlow(t *testing.T) {
+	handler, adminCookie := newTestHandler(t)
+
+	clientRec := assertStatus(t, handler, http.MethodPost, "/api/admin/oidc-clients", map[string]any{
+		"name":     "openweb-test",
+		"type":     "confidential",
+		"status":   "enabled",
+		"password": "client-secret",
+		"metadata": map[string]any{
+			"client_id":     "openweb-test",
+			"redirect_uris": []string{"https://client.example/callback"},
+			"scopes":        []string{"openid", "profile", "email"},
+		},
+	}, adminCookie, http.StatusCreated)
+	if strings.Contains(clientRec.Body.String(), "client_secret") || strings.Contains(clientRec.Body.String(), "client_secret_hash") {
+		t.Fatal("oidc client secret leaked in create response")
+	}
+
+	discoveryRec := assertStatus(t, handler, http.MethodGet, "/.well-known/openid-configuration", nil, nil, http.StatusOK)
+	for _, want := range []string{"authorization_endpoint", "token_endpoint", "jwks_uri", "RS256"} {
+		if !strings.Contains(discoveryRec.Body.String(), want) {
+			t.Fatalf("discovery did not include %q", want)
+		}
+	}
+	jwksRec := assertStatus(t, handler, http.MethodGet, "/api/oidc/jwks", nil, nil, http.StatusOK)
+	if !strings.Contains(jwksRec.Body.String(), `"kty":"RSA"`) || !strings.Contains(jwksRec.Body.String(), `"kid"`) {
+		t.Fatal("jwks did not include rsa signing key")
+	}
+
+	codeVerifier := "verifier-1234567890"
+	challengeRaw := sha256.Sum256([]byte(codeVerifier))
+	codeChallenge := base64.RawURLEncoding.EncodeToString(challengeRaw[:])
+	redirectURI := "https://client.example/callback"
+	authorizePath := "/api/oidc/authorize?" + url.Values{
+		"response_type":         {"code"},
+		"client_id":             {"openweb-test"},
+		"redirect_uri":          {redirectURI},
+		"scope":                 {"openid profile"},
+		"state":                 {"state-1"},
+		"nonce":                 {"nonce-1"},
+		"code_challenge":        {codeChallenge},
+		"code_challenge_method": {"S256"},
+	}.Encode()
+
+	loginRedirect := assertStatus(t, handler, http.MethodGet, authorizePath, nil, nil, http.StatusFound)
+	if location := loginRedirect.Header().Get("Location"); !strings.HasPrefix(location, "/login?next=") {
+		t.Fatalf("unauthenticated authorize redirect = %q, want login next", location)
+	}
+	assertStatus(t, handler, http.MethodGet, "/api/oidc/authorize?response_type=code&client_id=openweb-test&redirect_uri="+url.QueryEscape("https://evil.example/callback")+"&scope=openid", nil, adminCookie, http.StatusBadRequest)
+
+	authorizeRec := assertStatus(t, handler, http.MethodGet, authorizePath, nil, adminCookie, http.StatusFound)
+	location, err := url.Parse(authorizeRec.Header().Get("Location"))
+	if err != nil {
+		t.Fatalf("parse authorize redirect: %v", err)
+	}
+	if location.Scheme != "https" || location.Host != "client.example" || location.Query().Get("state") != "state-1" {
+		t.Fatalf("authorize redirect = %q", location.String())
+	}
+	code := location.Query().Get("code")
+	if code == "" {
+		t.Fatal("authorize redirect did not include code")
+	}
+
+	tokenForm := url.Values{
+		"grant_type":    {"authorization_code"},
+		"code":          {code},
+		"redirect_uri":  {redirectURI},
+		"code_verifier": {codeVerifier},
+	}
+	tokenRec := assertFormStatus(t, handler, "/api/oidc/token", tokenForm, nil, map[string]string{
+		"Authorization": "Basic " + base64.StdEncoding.EncodeToString([]byte("openweb-test:client-secret")),
+	}, http.StatusOK)
+	var tokenResponse map[string]any
+	decodeResponse(t, tokenRec, &tokenResponse)
+	accessToken, _ := tokenResponse["access_token"].(string)
+	idToken, _ := tokenResponse["id_token"].(string)
+	if accessToken == "" || len(strings.Split(idToken, ".")) != 3 || tokenResponse["token_type"] != "Bearer" {
+		t.Fatalf("token response missing access/id token: %v", tokenResponse)
+	}
+
+	assertFormStatus(t, handler, "/api/oidc/token", tokenForm, nil, map[string]string{
+		"Authorization": "Basic " + base64.StdEncoding.EncodeToString([]byte("openweb-test:client-secret")),
+	}, http.StatusBadRequest)
+
+	userInfoRec := assertStatusWithHeaders(t, handler, http.MethodGet, "/api/oidc/userinfo", nil, nil, map[string]string{
+		"Authorization": "Bearer " + accessToken,
+	}, http.StatusOK)
+	if !strings.Contains(userInfoRec.Body.String(), `"preferred_username":"admin"`) || !strings.Contains(userInfoRec.Body.String(), `"sub"`) {
+		t.Fatal("userinfo did not include signed-in user claims")
+	}
+	assertStatusWithHeaders(t, handler, http.MethodGet, "/api/oidc/userinfo", nil, nil, map[string]string{
+		"Authorization": "Bearer invalid",
+	}, http.StatusUnauthorized)
+}
+
 func TestToolsAndMonitoringEndpoints(t *testing.T) {
 	handler, cookie := newTestHandler(t)
 	assertStatus(t, handler, http.MethodGet, "/api/system/monitoring", nil, cookie, http.StatusOK)
@@ -1165,6 +1263,24 @@ func assertStatusWithHeaders(t *testing.T, handler http.Handler, method, path st
 	handler.ServeHTTP(rec, req)
 	if rec.Code != want {
 		t.Fatalf("%s %s status = %d, want %d, body: %s", method, path, rec.Code, want, rec.Body.String())
+	}
+	return rec
+}
+
+func assertFormStatus(t *testing.T, handler http.Handler, path string, form url.Values, cookie *http.Cookie, headers map[string]string, want int) *httptest.ResponseRecorder {
+	t.Helper()
+	req := httptest.NewRequest(http.MethodPost, path, strings.NewReader(form.Encode()))
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	for key, value := range headers {
+		req.Header.Set(key, value)
+	}
+	if cookie != nil {
+		req.AddCookie(cookie)
+	}
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+	if rec.Code != want {
+		t.Fatalf("POST %s form status = %d, want %d, body: %s", path, rec.Code, want, rec.Body.String())
 	}
 	return rec
 }

@@ -74,7 +74,14 @@ function RoleGate({ children, adminOnly, page }: { children: ReactNode; adminOnl
 function LoginGate() {
   const app = useApp()
   if (!app.booted) return <LoadingScreen />
-  if (app.auth) return <Navigate to='/app' replace />
+  if (app.auth) {
+    const next = new URLSearchParams(window.location.search).get('next')
+    if (next && next.startsWith('/') && !next.startsWith('//')) {
+      window.location.assign(next)
+      return <LoadingScreen />
+    }
+    return <Navigate to='/app' replace />
+  }
   return <AuthPage />
 }
 

@@ -343,6 +343,66 @@ func TestAccessAuthorizationSupportsDepartmentsGroupsAndExpiry(t *testing.T) {
 	assertStatus(t, handler, http.MethodPost, "/api/access/ssh/"+expiredAsset.ID, nil, userCookie, http.StatusForbidden)
 }
 
+func TestCommandSnippetBootstrapVisibility(t *testing.T) {
+	handler, adminCookie := newTestHandler(t)
+
+	userRec := assertStatus(t, handler, http.MethodPost, "/api/admin/users", map[string]any{
+		"name":     "snippet-user",
+		"type":     "local",
+		"status":   "enabled",
+		"password": "password123",
+		"metadata": map[string]any{"role": "user"},
+	}, adminCookie, http.StatusCreated)
+	var user model.PlatformItem
+	decodeResponse(t, userRec, &user)
+
+	publicRec := assertStatus(t, handler, http.MethodPost, "/api/admin/command-snippets", map[string]any{
+		"name":     "public uptime",
+		"type":     "public",
+		"status":   "enabled",
+		"metadata": map[string]any{"command": "uptime"},
+	}, adminCookie, http.StatusCreated)
+	var publicSnippet model.PlatformItem
+	decodeResponse(t, publicRec, &publicSnippet)
+	ownedRec := assertStatus(t, handler, http.MethodPost, "/api/admin/command-snippets", map[string]any{
+		"name":     "owned disk",
+		"type":     "private",
+		"status":   "enabled",
+		"owner_id": user.ID,
+		"metadata": map[string]any{"command": "df -h"},
+	}, adminCookie, http.StatusCreated)
+	var ownedSnippet model.PlatformItem
+	decodeResponse(t, ownedRec, &ownedSnippet)
+	privateRec := assertStatus(t, handler, http.MethodPost, "/api/admin/command-snippets", map[string]any{
+		"name":     "other private",
+		"type":     "private",
+		"status":   "enabled",
+		"owner_id": "other-user",
+		"metadata": map[string]any{"command": "whoami"},
+	}, adminCookie, http.StatusCreated)
+	var otherSnippet model.PlatformItem
+	decodeResponse(t, privateRec, &otherSnippet)
+	disabledRec := assertStatus(t, handler, http.MethodPost, "/api/admin/command-snippets", map[string]any{
+		"name":     "disabled public",
+		"type":     "public",
+		"status":   "disabled",
+		"metadata": map[string]any{"command": "id"},
+	}, adminCookie, http.StatusCreated)
+	var disabledSnippet model.PlatformItem
+	decodeResponse(t, disabledRec, &disabledSnippet)
+
+	loginRec := assertStatus(t, handler, http.MethodPost, "/api/auth/login", map[string]any{"username": "snippet-user", "password": "password123"}, nil, http.StatusOK)
+	userCookie := loginRec.Result().Cookies()[0]
+	bootstrapRec := assertStatus(t, handler, http.MethodGet, "/api/bootstrap", nil, userCookie, http.StatusOK)
+	body := bootstrapRec.Body.String()
+	if !strings.Contains(body, publicSnippet.ID) || !strings.Contains(body, ownedSnippet.ID) {
+		t.Fatal("user bootstrap did not include public and owned command snippets")
+	}
+	if strings.Contains(body, otherSnippet.ID) || strings.Contains(body, disabledSnippet.ID) {
+		t.Fatal("user bootstrap leaked private or disabled command snippets")
+	}
+}
+
 func TestRoleBasedAccessControl(t *testing.T) {
 	handler, adminCookie := newTestHandler(t)
 

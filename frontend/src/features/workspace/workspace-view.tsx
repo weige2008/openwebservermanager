@@ -1,22 +1,24 @@
 import { FitAddon } from '@xterm/addon-fit'
 import { Terminal } from '@xterm/xterm'
-import { Clipboard, Power, Upload } from 'lucide-react'
+import { Clipboard, Code2, Power, Upload } from 'lucide-react'
 import { useEffect, useMemo, useRef, useState } from 'react'
 import { useTranslation } from 'react-i18next'
 
 import { useApp } from '@/app/app-provider'
 import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
+import { Select } from '@/components/ui/field'
 import { apiRequest } from '@/lib/api'
 import { base64ToText, textToBase64 } from '@/lib/codec'
 import { statusLabel } from '@/lib/utils'
-import type { ConnectionSession } from '@/types'
+import type { ConnectionSession, PlatformItem } from '@/types'
 
 export function WorkspaceView() {
   const app = useApp()
   const { t } = useTranslation()
   const workspace = app.workspace
   const [status, setStatus] = useState(workspace?.status || 'connecting')
+  const [selectedSnippetID, setSelectedSnippetID] = useState('')
   const sshMessages = useMemo(
     () => ({
       connecting: t('workspace.connecting'),
@@ -39,6 +41,8 @@ export function WorkspaceView() {
   if (!workspace) return null
 
   const server = app.data.servers.find((item) => item.id === workspace.session.server_id)
+  const commandSnippets = app.data.platform?.command_snippets || []
+  const selectedSnippet = commandSnippets.find((item) => item.id === selectedSnippetID) || commandSnippets[0]
 
   const leave = async () => {
     app.setWorkspace(null)
@@ -51,6 +55,13 @@ export function WorkspaceView() {
     await app.refresh(true)
   }
 
+  const insertCommandSnippet = () => {
+    const command = snippetCommand(selectedSnippet)
+    if (!command) return
+    window.dispatchEvent(new CustomEvent('openwebservermanager:ssh-snippet', { detail: { command } }))
+    app.showToast(t('workspace.commandSnippetInserted', { defaultValue: 'Command inserted.' }))
+  }
+
   return (
     <div className='grid min-h-svh grid-rows-[52px_minmax(0,1fr)] bg-background text-foreground'>
       <div className='flex min-w-0 items-center justify-between gap-3 border-b border-border bg-background/95 px-3 backdrop-blur-xl max-md:h-auto max-md:flex-col max-md:items-start max-md:py-3'>
@@ -61,6 +72,27 @@ export function WorkspaceView() {
           {workspace.session.recording_path ? <Badge tone='danger'>{t('workspace.recordingOn')}</Badge> : null}
         </div>
         <div className='flex flex-wrap gap-2'>
+          {workspace.type === 'ssh' ? (
+            <div className='flex min-w-0 gap-2'>
+              <Select
+                className='w-48 max-w-[52vw]'
+                value={selectedSnippet?.id || ''}
+                onChange={(event) => setSelectedSnippetID(event.currentTarget.value)}
+                disabled={!commandSnippets.length}
+                aria-label={t('workspace.commandSnippet', { defaultValue: 'Command snippet' })}
+              >
+                {commandSnippets.length ? commandSnippets.map((snippet) => (
+                  <option key={snippet.id} value={snippet.id}>{snippet.name}</option>
+                )) : (
+                  <option value=''>{t('workspace.noCommandSnippets', { defaultValue: 'No snippets' })}</option>
+                )}
+              </Select>
+              <Button variant='outline' onClick={insertCommandSnippet} disabled={status !== 'connected' || !snippetCommand(selectedSnippet)}>
+                <Code2 className='size-4' />
+                {t('workspace.insertSnippet', { defaultValue: 'Insert' })}
+              </Button>
+            </div>
+          ) : null}
           {workspace.type === 'rdp' ? (
             <>
               <Button variant='outline' onClick={() => window.dispatchEvent(new Event('openwebservermanager:rdp-clipboard'))}><Clipboard className='size-4' />{t('workspace.clipboard')}</Button>
@@ -122,6 +154,11 @@ function SSHWorkspace({
 
     const proto = window.location.protocol === 'https:' ? 'wss' : 'ws'
     const socket = new WebSocket(`${proto}://${window.location.host}/api/connections/ssh/${session.id}/ws?cols=${term.cols}&rows=${term.rows}&term=xterm-256color`)
+    const sendStdin = (data: string) => {
+      if (socket.readyState === WebSocket.OPEN) {
+        socket.send(JSON.stringify({ type: 'stdin', data: textToBase64(data) }))
+      }
+    }
     const sendResize = () => {
       fit.fit()
       if (socket.readyState === WebSocket.OPEN) {
@@ -132,10 +169,15 @@ function SSHWorkspace({
     resizeObserver.observe(containerRef.current)
 
     term.onData((data) => {
-      if (socket.readyState === WebSocket.OPEN) {
-        socket.send(JSON.stringify({ type: 'stdin', data: textToBase64(data) }))
-      }
+      sendStdin(data)
     })
+    const onSnippet = (event: Event) => {
+      const command = (event as CustomEvent<{ command?: string }>).detail?.command
+      if (!command) return
+      sendStdin(command)
+      term.focus()
+    }
+    window.addEventListener('openwebservermanager:ssh-snippet', onSnippet)
 
     socket.onopen = () => sendResize()
     socket.onmessage = (event) => {
@@ -154,12 +196,22 @@ function SSHWorkspace({
 
     return () => {
       resizeObserver.disconnect()
+      window.removeEventListener('openwebservermanager:ssh-snippet', onSnippet)
       socket.close()
       term.dispose()
     }
   }, [messages.connected, messages.connecting, messages.disconnected, session.id, setStatus])
 
   return <div ref={containerRef} className='h-[calc(100vh-52px)] bg-background p-3 max-md:h-[calc(100vh-120px)]' />
+}
+
+function snippetCommand(snippet: PlatformItem | undefined): string {
+  if (!snippet) return ''
+  for (const key of ['command', 'content', 'value', 'text']) {
+    const value = snippet.metadata?.[key]
+    if (typeof value === 'string' && value.trim()) return value
+  }
+  return snippet.description || ''
 }
 
 function RDPWorkspace({

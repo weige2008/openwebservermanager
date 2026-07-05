@@ -552,6 +552,7 @@ func accessBootstrapPlatform(platform map[string][]model.PlatformItem, userID st
 	result["web_assets"] = filterAuthorizedItems(platform, platform["web_assets"], platform["authorized_web_assets"], userID, false)
 	result["database_assets"] = filterAuthorizedItems(platform, platform["database_assets"], platform["authorized_database_assets"], userID, false)
 	result["asset_groups"] = platform["asset_groups"]
+	result["command_snippets"] = filterCommandSnippetsForUser(platform["command_snippets"], userID, false)
 	result["authorized_assets"] = filterAuthorizationsForUser(platform, platform["authorized_assets"], userID)
 	result["authorized_web_assets"] = filterAuthorizationsForUser(platform, platform["authorized_web_assets"], userID)
 	result["authorized_database_assets"] = filterAuthorizationsForUser(platform, platform["authorized_database_assets"], userID)
@@ -628,6 +629,36 @@ func filterItemsByOwner(items []model.PlatformItem, userID string) []model.Platf
 		}
 	}
 	return result
+}
+
+func filterCommandSnippetsForUser(items []model.PlatformItem, userID string, isAdmin bool) []model.PlatformItem {
+	result := []model.PlatformItem{}
+	for _, item := range items {
+		if !platformItemEnabled(item) {
+			continue
+		}
+		if isAdmin || commandSnippetPublic(item) || item.OwnerID == userID || item.Username == userID {
+			result = append(result, item)
+		}
+	}
+	return result
+}
+
+func commandSnippetPublic(item model.PlatformItem) bool {
+	if strings.EqualFold(strings.TrimSpace(item.Type), "public") {
+		return true
+	}
+	if item.Permissions["public"] {
+		return true
+	}
+	switch value := item.Metadata["public"].(type) {
+	case bool:
+		return value
+	case string:
+		return strings.EqualFold(strings.TrimSpace(value), "true") || strings.EqualFold(strings.TrimSpace(value), "yes")
+	default:
+		return false
+	}
 }
 
 func findAccessAsset(platform map[string][]model.PlatformItem, protocol model.Protocol, assetID string) (model.PlatformItem, bool) {

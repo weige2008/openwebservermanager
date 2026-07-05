@@ -108,6 +108,10 @@ func (s *Store) Close() error {
 	return s.db.Close()
 }
 
+func (s *Store) Path() string {
+	return s.path
+}
+
 func (s *Store) AdminConfigured() bool {
 	s.mu.RLock()
 	defer s.mu.RUnlock()

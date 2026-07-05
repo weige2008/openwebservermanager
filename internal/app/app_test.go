@@ -833,6 +833,120 @@ func TestResourceOperationEndpoints(t *testing.T) {
 	}
 }
 
+func TestScheduledTaskRunners(t *testing.T) {
+	handler, cookie := newTestHandler(t)
+
+	backupTaskRec := assertStatus(t, handler, http.MethodPost, "/api/admin/scheduled-tasks", map[string]any{
+		"name":   "Backup now",
+		"type":   "backup",
+		"status": "enabled",
+	}, cookie, http.StatusCreated)
+	var backupTask model.PlatformItem
+	decodeResponse(t, backupTaskRec, &backupTask)
+	backupRunRec := assertStatus(t, handler, http.MethodPost, "/api/admin/scheduled-tasks/"+backupTask.ID+"/run", nil, cookie, http.StatusAccepted)
+	var backupLog model.PlatformItem
+	decodeResponse(t, backupRunRec, &backupLog)
+	backupPath, _ := backupLog.Metadata["backup_path"].(string)
+	if backupPath == "" {
+		t.Fatal("backup task did not return backup path")
+	}
+	if info, err := os.Stat(filepath.FromSlash(backupPath)); err != nil || info.Size() == 0 {
+		t.Fatalf("backup file missing or empty: %v", err)
+	}
+
+	oldAccessRec := assertStatus(t, handler, http.MethodPost, "/api/admin/audit/access-logs", map[string]any{
+		"name":     "old access",
+		"type":     "GET",
+		"status":   "200",
+		"metadata": map[string]any{"uri": "/old"},
+	}, cookie, http.StatusCreated)
+	var oldAccess model.PlatformItem
+	decodeResponse(t, oldAccessRec, &oldAccess)
+	oldSQLRec := assertStatus(t, handler, http.MethodPost, "/api/admin/audit/sql-logs", map[string]any{
+		"name":     "old sql",
+		"type":     "query",
+		"status":   "success",
+		"metadata": map[string]any{"sql": "SELECT 1"},
+	}, cookie, http.StatusCreated)
+	var oldSQL model.PlatformItem
+	decodeResponse(t, oldSQLRec, &oldSQL)
+	cleanupTaskRec := assertStatus(t, handler, http.MethodPost, "/api/admin/scheduled-tasks", map[string]any{
+		"name":     "Cleanup logs",
+		"type":     "log-cleanup",
+		"status":   "enabled",
+		"metadata": map[string]any{"retention_days": 0},
+	}, cookie, http.StatusCreated)
+	var cleanupTask model.PlatformItem
+	decodeResponse(t, cleanupTaskRec, &cleanupTask)
+	cleanupRunRec := assertStatus(t, handler, http.MethodPost, "/api/admin/scheduled-tasks/"+cleanupTask.ID+"/run", nil, cookie, http.StatusAccepted)
+	if !strings.Contains(cleanupRunRec.Body.String(), "deleted_count") {
+		t.Fatal("cleanup task did not report deleted count")
+	}
+	accessLogsRec := assertStatus(t, handler, http.MethodGet, "/api/admin/audit/access-logs", nil, cookie, http.StatusOK)
+	if strings.Contains(accessLogsRec.Body.String(), oldAccess.ID) {
+		t.Fatal("log cleanup did not delete old access log")
+	}
+	sqlLogsRec := assertStatus(t, handler, http.MethodGet, "/api/admin/audit/sql-logs", nil, cookie, http.StatusOK)
+	if strings.Contains(sqlLogsRec.Body.String(), oldSQL.ID) {
+		t.Fatal("log cleanup did not delete old sql log")
+	}
+
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = w.Write([]byte("ok"))
+	}))
+	defer upstream.Close()
+	webRec := assertStatus(t, handler, http.MethodPost, "/api/admin/websites", map[string]any{
+		"name":     "status web",
+		"type":     "http",
+		"status":   "enabled",
+		"metadata": map[string]any{"target_url": upstream.URL},
+	}, cookie, http.StatusCreated)
+	var webAsset model.PlatformItem
+	decodeResponse(t, webRec, &webAsset)
+	statusTaskRec := assertStatus(t, handler, http.MethodPost, "/api/admin/scheduled-tasks", map[string]any{
+		"name":     "Asset status",
+		"type":     "asset-status",
+		"status":   "enabled",
+		"metadata": map[string]any{"timeout_ms": 1000},
+	}, cookie, http.StatusCreated)
+	var statusTask model.PlatformItem
+	decodeResponse(t, statusTaskRec, &statusTask)
+	statusRunRec := assertStatus(t, handler, http.MethodPost, "/api/admin/scheduled-tasks/"+statusTask.ID+"/run", nil, cookie, http.StatusAccepted)
+	if !strings.Contains(statusRunRec.Body.String(), "checked") || !strings.Contains(statusRunRec.Body.String(), "active") {
+		t.Fatal("asset status task did not report check result")
+	}
+	webListRec := assertStatus(t, handler, http.MethodGet, "/api/admin/websites", nil, cookie, http.StatusOK)
+	if !strings.Contains(webListRec.Body.String(), webAsset.ID) || !strings.Contains(webListRec.Body.String(), "last_check_status") {
+		t.Fatal("asset status task did not update web asset check metadata")
+	}
+
+	certRec := assertStatus(t, handler, http.MethodPost, "/api/admin/certificates/self-signed", map[string]any{
+		"name":   "renew-cert",
+		"domain": "renew.example.test",
+		"days":   1,
+	}, cookie, http.StatusCreated)
+	var cert model.PlatformItem
+	decodeResponse(t, certRec, &cert)
+	cert.Metadata["expires_at"] = time.Now().Add(-time.Hour).UTC().Format(time.RFC3339)
+	assertStatus(t, handler, http.MethodPatch, "/api/admin/certificates/"+cert.ID, map[string]any{
+		"name":     cert.Name,
+		"status":   cert.Status,
+		"metadata": cert.Metadata,
+	}, cookie, http.StatusOK)
+	renewTaskRec := assertStatus(t, handler, http.MethodPost, "/api/admin/scheduled-tasks", map[string]any{
+		"name":     "Renew certs",
+		"type":     "certificate-renewal",
+		"status":   "enabled",
+		"metadata": map[string]any{"renew_before_days": 30, "validity_days": 90},
+	}, cookie, http.StatusCreated)
+	var renewTask model.PlatformItem
+	decodeResponse(t, renewTaskRec, &renewTask)
+	renewRunRec := assertStatus(t, handler, http.MethodPost, "/api/admin/scheduled-tasks/"+renewTask.ID+"/run", nil, cookie, http.StatusAccepted)
+	if !strings.Contains(renewRunRec.Body.String(), "renewed_count") || !strings.Contains(renewRunRec.Body.String(), cert.ID) {
+		t.Fatal("certificate renewal task did not renew due certificate")
+	}
+}
+
 func TestStorageAuthorizationStrategyPermissions(t *testing.T) {
 	handler, adminCookie := newTestHandler(t)
 

@@ -9,7 +9,6 @@ import (
 	"database/sql"
 	"encoding/base64"
 	"encoding/pem"
-	"errors"
 	"io"
 	"math/big"
 	"net"
@@ -759,13 +758,13 @@ func (s *Server) handleScheduledTaskRun(w http.ResponseWriter, r *http.Request, 
 		writeError(w, http.StatusNotFound, "task not found")
 		return
 	}
-	result := "completed"
-	if task.Type == "backup" {
-		if _, err := s.createBackupSnapshot(); err != nil {
-			writeError(w, http.StatusInternalServerError, err.Error())
-			return
-		}
+	result, metadata, err := s.runScheduledTask(r, task)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err.Error())
+		return
 	}
+	metadata["task_type"] = task.Type
+	metadata["ran_at"] = time.Now().UTC()
 	logItem, err := s.cfg.Store.CreatePlatformItem("operation_logs", model.PlatformItemRequest{
 		Name:        task.Name,
 		Type:        "scheduled_task",
@@ -773,7 +772,7 @@ func (s *Server) handleScheduledTaskRun(w http.ResponseWriter, r *http.Request, 
 		TargetID:    id,
 		OwnerID:     s.currentUserID(r),
 		Description: result,
-		Metadata:    map[string]any{"task_type": task.Type, "ran_at": time.Now().UTC()},
+		Metadata:    metadata,
 	})
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, err.Error())
@@ -781,31 +780,6 @@ func (s *Server) handleScheduledTaskRun(w http.ResponseWriter, r *http.Request, 
 	}
 	_ = s.audit(r, "scheduled_task.run", id, "", "ran scheduled task "+task.Name)
 	writeJSON(w, http.StatusAccepted, logItem)
-}
-
-func (s *Server) createBackupSnapshot() (string, error) {
-	backupDir := filepath.Join(s.cfg.DataDir, "backups")
-	if err := os.MkdirAll(backupDir, 0o770); err != nil {
-		return "", err
-	}
-	name := "backup-" + time.Now().UTC().Format("20060102-150405") + ".json"
-	target := filepath.Join(backupDir, name)
-	source := filepath.Join(s.cfg.DataDir, "openwebservermanager.json")
-	input, err := os.Open(source)
-	if err != nil {
-		if errors.Is(err, os.ErrNotExist) {
-			return target, os.WriteFile(target, []byte("{}"), 0o660)
-		}
-		return "", err
-	}
-	defer input.Close()
-	output, err := os.OpenFile(target, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0o660)
-	if err != nil {
-		return "", err
-	}
-	defer output.Close()
-	_, err = io.Copy(output, input)
-	return target, err
 }
 
 func (s *Server) handleScheduledTaskLogs(w http.ResponseWriter, r *http.Request, id string) {

@@ -209,7 +209,7 @@ func (s *Store) VerifyPlatformUser(username, password string) (AdminPublic, bool
 		if err := json.Unmarshal([]byte(payload), &item); err != nil {
 			return AdminPublic{}, false, err
 		}
-		if item.Name != username || item.Status == "disabled" {
+		if item.Name != username || strings.EqualFold(strings.TrimSpace(item.Status), "disabled") {
 			continue
 		}
 		hash, _ := item.Metadata["password_hash"].(string)
@@ -235,6 +235,45 @@ func (s *Store) VerifyPlatformUser(username, password string) (AdminPublic, bool
 		return AdminPublic{}, false, err
 	}
 	return AdminPublic{}, false, nil
+}
+
+func (s *Store) RecordUserLogin(userID, clientIP, userAgent string) error {
+	item, ok, err := s.GetPlatformItem("users", userID)
+	if err != nil || !ok {
+		return err
+	}
+	if item.Metadata == nil {
+		item.Metadata = map[string]any{}
+	}
+	now := time.Now().UTC()
+	item.Metadata["online"] = true
+	item.Metadata["last_login_at"] = now.Format(time.RFC3339Nano)
+	item.Metadata["last_seen_at"] = now.Format(time.RFC3339Nano)
+	item.Metadata["login_count"] = metadataIntValue(item.Metadata["login_count"]) + 1
+	if strings.TrimSpace(clientIP) != "" {
+		item.Metadata["last_login_ip"] = strings.TrimSpace(clientIP)
+	}
+	if strings.TrimSpace(userAgent) != "" {
+		item.Metadata["last_user_agent"] = trimMetadataText(userAgent, 512)
+	}
+	_, err = s.SavePlatformItem("users", item)
+	return err
+}
+
+func (s *Store) RecordUserLogout(userID string) error {
+	item, ok, err := s.GetPlatformItem("users", userID)
+	if err != nil || !ok {
+		return err
+	}
+	if item.Metadata == nil {
+		item.Metadata = map[string]any{}
+	}
+	now := time.Now().UTC()
+	item.Metadata["online"] = false
+	item.Metadata["last_logout_at"] = now.Format(time.RFC3339Nano)
+	item.Metadata["last_seen_at"] = now.Format(time.RFC3339Nano)
+	_, err = s.SavePlatformItem("users", item)
+	return err
 }
 
 func (a AdminAuth) Public() AdminPublic {
@@ -713,11 +752,23 @@ func (s *Store) UpdatePlatformItem(collection, id string, req model.PlatformItem
 	existingUserMFA["mfa_enabled_at"] = metadataStringValue(item.Metadata["mfa_enabled_at"])
 	existingUserMFA["mfa_recovery_count"] = metadataStringValue(item.Metadata["mfa_recovery_count"])
 	existingUserMFA["mfa_recovery_hashes"] = metadataStringValue(item.Metadata["mfa_recovery_hashes"])
+	existingUserPresence := copyMetadataValues(item.Metadata,
+		"online",
+		"last_login_at",
+		"last_logout_at",
+		"last_seen_at",
+		"last_login_ip",
+		"last_user_agent",
+		"login_count",
+	)
 	if req.Metadata != nil {
 		item.Metadata = req.Metadata
-		if collection == "users" && existingPasswordHash != "" {
-			item.Metadata["password_hash"] = existingPasswordHash
+		if collection == "users" {
+			if existingPasswordHash != "" {
+				item.Metadata["password_hash"] = existingPasswordHash
+			}
 			restoreMetadataValues(item.Metadata, existingUserMFA)
+			restoreMetadataAnyValues(item.Metadata, existingUserPresence)
 		}
 		if collection == "oidc_clients" {
 			delete(item.Metadata, "client_secret_hash")
@@ -1203,6 +1254,16 @@ func copyMetadataSecrets(metadata map[string]any, keys ...string) map[string]str
 	return result
 }
 
+func copyMetadataValues(metadata map[string]any, keys ...string) map[string]any {
+	result := map[string]any{}
+	for _, key := range keys {
+		if value, ok := metadata[key]; ok {
+			result[key] = value
+		}
+	}
+	return result
+}
+
 func restoreMetadataValues(metadata map[string]any, values map[string]string) {
 	for key, value := range values {
 		delete(metadata, key)
@@ -1210,6 +1271,23 @@ func restoreMetadataValues(metadata map[string]any, values map[string]string) {
 			metadata[key] = value
 		}
 	}
+}
+
+func restoreMetadataAnyValues(metadata map[string]any, values map[string]any) {
+	for key, value := range values {
+		delete(metadata, key)
+		if value != nil {
+			metadata[key] = value
+		}
+	}
+}
+
+func trimMetadataText(value string, limit int) string {
+	value = strings.TrimSpace(value)
+	if limit <= 0 || len(value) <= limit {
+		return value
+	}
+	return value[:limit]
 }
 
 func metadataStringValue(value any) string {

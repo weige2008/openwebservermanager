@@ -119,6 +119,25 @@ export function PlatformTablePage({ config }: { config: PlatformPageConfig }) {
         header: app.t('status'),
         cell: ({ row }) => <Badge tone={statusTone(row.original.status)}>{row.original.status || '-'}</Badge>,
       },
+      ...(config.collection === 'users' ? [
+        {
+          header: app.t('onlineStatus', '在线状态'),
+          cell: ({ row }) => (
+            <Badge tone={userOnline(row.original) ? 'success' : 'neutral'}>
+              {userOnline(row.original) ? app.t('online', '在线') : app.t('offline', '离线')}
+            </Badge>
+          ),
+        },
+        {
+          header: app.t('lastLogin', '最后登录'),
+          cell: ({ row }) => (
+            <div className='grid gap-0.5 text-xs'>
+              <span>{formatDate(metadataText(row.original.metadata?.last_login_at))}</span>
+              <span className='text-muted-foreground'>{metadataText(row.original.metadata?.last_login_ip) || '-'}</span>
+            </div>
+          ),
+        },
+      ] satisfies ColumnDef<PlatformItem>[] : []),
       { header: app.t('address'), cell: ({ row }) => row.original.host ? <span className='font-mono text-xs'>{row.original.host}{row.original.port ? `:${row.original.port}` : ''}</span> : '-' },
       ...(config.collection === 'agent_gateways' ? [
         { header: '延迟', cell: ({ row }) => <span className='font-mono text-xs'>{formatNumberValue(row.original.metadata?.latency_ms)} ms</span> },
@@ -176,7 +195,7 @@ export function PlatformTablePage({ config }: { config: PlatformPageConfig }) {
 
   const startCreate = () => {
     setEditing(null)
-    setForm({ ...initialForm, type: config.collection === 'credentials' ? 'ssh_password' : '' })
+    setForm({ ...initialForm, type: config.collection === 'credentials' ? 'ssh_password' : config.collection === 'users' ? 'local' : '' })
     setFormOpen(true)
   }
 
@@ -228,7 +247,7 @@ export function PlatformTablePage({ config }: { config: PlatformPageConfig }) {
               emptyTitle={app.t('empty', '暂无数据')}
               emptyBody={description}
               searchPlaceholder={app.t('filter', '关键词搜索')}
-              getSearchText={(item) => [item.name, item.type, item.status, item.protocol, item.host, item.group, item.username, item.description, item.tags?.join(' ')].filter(Boolean).join(' ')}
+              getSearchText={(item) => [item.name, item.type, item.status, item.protocol, item.host, item.group, item.username, item.description, metadataText(item.metadata?.last_login_at), metadataText(item.metadata?.last_login_ip), item.tags?.join(' ')].filter(Boolean).join(' ')}
             />
           </CardContent>
         </Card>
@@ -1060,7 +1079,16 @@ function PlatformItemDialog({
               <Input value={form.type} onChange={(event) => onChange({ type: event.currentTarget.value })} />
             )}
           </Field>
-          <Field label={app.t('status')}><Input value={form.status} onChange={(event) => onChange({ status: event.currentTarget.value })} /></Field>
+          <Field label={app.t('status')}>
+            {isUser ? (
+              <Select value={form.status || 'enabled'} onChange={(event) => onChange({ status: event.currentTarget.value })}>
+                <option value='enabled'>{app.t('enabled', '启用')}</option>
+                <option value='disabled'>{app.t('disabled', '禁用')}</option>
+              </Select>
+            ) : (
+              <Input value={form.status} onChange={(event) => onChange({ status: event.currentTarget.value })} />
+            )}
+          </Field>
           <Field label={app.t('protocol')}><Select value={form.protocol} onChange={(event) => onChange({ protocol: event.currentTarget.value })}>
             <option value=''>{app.t('none', '无')}</option>
             <option value='ssh'>SSH</option>
@@ -1657,6 +1685,24 @@ function splitCSV(value: string) {
 
 function stringValue(value: unknown) {
   return typeof value === 'string' ? value : ''
+}
+
+function metadataText(value: unknown) {
+  if (typeof value === 'string') return value
+  if (typeof value === 'number' && Number.isFinite(value)) return String(value)
+  if (typeof value === 'boolean') return value ? 'true' : 'false'
+  return ''
+}
+
+function metadataBool(value: unknown) {
+  if (typeof value === 'boolean') return value
+  if (typeof value === 'number') return value !== 0
+  if (typeof value === 'string') return ['true', '1', 'yes', 'enabled', 'online'].includes(value.trim().toLowerCase())
+  return false
+}
+
+function userOnline(item: PlatformItem) {
+  return metadataBool(item.metadata?.online)
 }
 
 function stringArrayValue(value: unknown) {

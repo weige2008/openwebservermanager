@@ -794,6 +794,73 @@ func TestRoleBasedAccessControl(t *testing.T) {
 	assertStatus(t, handler, http.MethodPost, "/api/admin/assets", map[string]any{"name": "blocked"}, readerCookie, http.StatusForbidden)
 }
 
+func TestPlatformUserLoginPresenceAndDisable(t *testing.T) {
+	handler, adminCookie := newTestHandler(t)
+
+	userRec := assertStatus(t, handler, http.MethodPost, "/api/admin/users", map[string]any{
+		"name":     "presence-user",
+		"type":     "local",
+		"status":   "enabled",
+		"password": "password123",
+		"metadata": map[string]any{"role": "user"},
+	}, adminCookie, http.StatusCreated)
+	var created model.PlatformItem
+	decodeResponse(t, userRec, &created)
+
+	loginRec := assertStatusWithHeaders(t, handler, http.MethodPost, "/api/auth/login", map[string]any{
+		"username": "presence-user",
+		"password": "password123",
+	}, nil, map[string]string{"User-Agent": "presence-test-browser"}, http.StatusOK)
+	userCookie := loginRec.Result().Cookies()[0]
+
+	loggedIn := platformUserFromList(t, handler, adminCookie, created.ID)
+	if loggedIn.Metadata["online"] != true {
+		t.Fatalf("user online metadata = %v, want true", loggedIn.Metadata["online"])
+	}
+	if strings.TrimSpace(stringValueFromAny(loggedIn.Metadata["last_login_at"])) == "" {
+		t.Fatal("last_login_at was not recorded")
+	}
+	if strings.TrimSpace(stringValueFromAny(loggedIn.Metadata["last_login_ip"])) == "" {
+		t.Fatal("last_login_ip was not recorded")
+	}
+	if stringValueFromAny(loggedIn.Metadata["last_user_agent"]) != "presence-test-browser" {
+		t.Fatalf("last_user_agent = %v", loggedIn.Metadata["last_user_agent"])
+	}
+	if loginCountFromAny(loggedIn.Metadata["login_count"]) != 1 {
+		t.Fatalf("login_count = %v, want 1", loggedIn.Metadata["login_count"])
+	}
+
+	secondLoginRec := assertStatus(t, handler, http.MethodPost, "/api/auth/login", map[string]any{
+		"username": "presence-user",
+		"password": "password123",
+	}, nil, http.StatusOK)
+	secondUserCookie := secondLoginRec.Result().Cookies()[0]
+
+	assertStatus(t, handler, http.MethodPost, "/api/auth/logout", nil, userCookie, http.StatusOK)
+	stillOnline := platformUserFromList(t, handler, adminCookie, created.ID)
+	if stillOnline.Metadata["online"] != true {
+		t.Fatalf("user online metadata after closing one of two sessions = %v, want true", stillOnline.Metadata["online"])
+	}
+
+	assertStatus(t, handler, http.MethodPost, "/api/auth/logout", nil, secondUserCookie, http.StatusOK)
+	loggedOut := platformUserFromList(t, handler, adminCookie, created.ID)
+	if loggedOut.Metadata["online"] != false {
+		t.Fatalf("user online metadata after logout = %v, want false", loggedOut.Metadata["online"])
+	}
+	if strings.TrimSpace(stringValueFromAny(loggedOut.Metadata["last_logout_at"])) == "" {
+		t.Fatal("last_logout_at was not recorded")
+	}
+
+	assertStatus(t, handler, http.MethodPatch, "/api/admin/users/"+created.ID, map[string]any{
+		"name":   "presence-user",
+		"status": "Disabled",
+	}, adminCookie, http.StatusOK)
+	assertStatus(t, handler, http.MethodPost, "/api/auth/login", map[string]any{
+		"username": "presence-user",
+		"password": "password123",
+	}, nil, http.StatusUnauthorized)
+}
+
 func TestLoginSecurityPoliciesAndLocks(t *testing.T) {
 	handler, adminCookie := newTestHandler(t)
 
@@ -1890,6 +1957,36 @@ func captchaAnswerFromQuestion(question string) string {
 func stringValueFromAny(value any) string {
 	text, _ := value.(string)
 	return text
+}
+
+func platformUserFromList(t *testing.T, handler http.Handler, adminCookie *http.Cookie, userID string) model.PlatformItem {
+	t.Helper()
+	rec := assertStatus(t, handler, http.MethodGet, "/api/admin/users", nil, adminCookie, http.StatusOK)
+	var response struct {
+		Items []model.PlatformItem `json:"items"`
+	}
+	decodeResponse(t, rec, &response)
+	for _, item := range response.Items {
+		if item.ID == userID {
+			return item
+		}
+	}
+	t.Fatalf("user %s not found in user list", userID)
+	return model.PlatformItem{}
+}
+
+func loginCountFromAny(value any) int {
+	switch typed := value.(type) {
+	case int:
+		return typed
+	case float64:
+		return int(typed)
+	case string:
+		parsed, _ := strconv.Atoi(strings.TrimSpace(typed))
+		return parsed
+	default:
+		return 0
+	}
 }
 
 func zipHasEntry(reader *zip.Reader, filename string) bool {

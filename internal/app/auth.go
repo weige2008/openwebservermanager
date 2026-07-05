@@ -102,6 +102,22 @@ func (m *authManager) delete(token string) {
 	delete(m.sessions, token)
 }
 
+func (m *authManager) hasUserSession(userID string) bool {
+	now := time.Now().UTC()
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	for token, session := range m.sessions {
+		if now.After(session.ExpiresAt) {
+			delete(m.sessions, token)
+			continue
+		}
+		if session.UserID == userID {
+			return true
+		}
+	}
+	return false
+}
+
 func (m *authManager) session(r *http.Request) (string, authSession, bool) {
 	cookie, err := r.Cookie(authCookieName)
 	if err != nil || cookie.Value == "" {
@@ -262,6 +278,7 @@ func (s *Server) handleSetup(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	http.SetCookie(w, s.authCookie(r, token, int(authSessionTTL.Seconds())))
+	_ = s.cfg.Store.RecordUserLogin(session.UserID, s.clientIP(r), r.UserAgent())
 	_ = s.audit(r, "auth.setup", session.UserID, "", "admin initialized")
 	_, _ = s.cfg.Store.CreatePlatformItem("login_logs", model.PlatformItemRequest{
 		Name:        username,
@@ -376,6 +393,7 @@ func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
 	}
 
 	http.SetCookie(w, s.authCookie(r, token, int(authSessionTTL.Seconds())))
+	_ = s.cfg.Store.RecordUserLogin(session.UserID, clientIP, r.UserAgent())
 	_ = s.audit(r, "auth.login", session.UserID, "", "admin signed in")
 	_, _ = s.cfg.Store.CreatePlatformItem("login_logs", model.PlatformItemRequest{
 		Name:        username,
@@ -391,6 +409,9 @@ func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
 func (s *Server) handleLogout(w http.ResponseWriter, r *http.Request) {
 	if token, session, ok := s.auth.session(r); ok {
 		s.auth.delete(token)
+		if !s.auth.hasUserSession(session.UserID) {
+			_ = s.cfg.Store.RecordUserLogout(session.UserID)
+		}
 		_ = s.audit(r, "auth.logout", session.UserID, "", "admin signed out")
 	}
 	http.SetCookie(w, s.authCookie(r, "", -1))

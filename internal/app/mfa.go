@@ -131,6 +131,7 @@ func (s *Server) handleMFACompleteLogin(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 	http.SetCookie(w, s.authCookie(r, authToken, int(authSessionTTL.Seconds())))
+	_ = s.cfg.Store.RecordUserLogin(session.UserID, challenge.ClientIP, r.UserAgent())
 	_ = s.audit(r, "auth.login", session.UserID, "", "signed in with MFA")
 	_, _ = s.cfg.Store.CreatePlatformItem("login_logs", model.PlatformItemRequest{
 		Name:        challenge.Username,

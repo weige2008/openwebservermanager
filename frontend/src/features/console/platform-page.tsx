@@ -318,6 +318,27 @@ function ResourceRowActions({ config, item, onOperation }: { config: PlatformPag
     }
   }
 
+  const approveSQLWorkOrder = async () => {
+    try {
+      await apiRequest(`/api/admin/sql-work-orders/${item.id}/approve`, { method: 'POST', body: '{}' })
+      await app.refresh(true)
+      app.showToast('SQL 工单已批准')
+    } catch (error) {
+      app.handleApiError(error)
+    }
+  }
+
+  const rejectSQLWorkOrder = async () => {
+    if (!window.confirm(`拒绝 ${item.name || item.id}?`)) return
+    try {
+      await apiRequest(`/api/admin/sql-work-orders/${item.id}/reject`, { method: 'POST', body: '{}' })
+      await app.refresh(true)
+      app.showToast('SQL 工单已拒绝')
+    } catch (error) {
+      app.handleApiError(error)
+    }
+  }
+
   if (config.collection === 'online_sessions') {
     return (
       <Button size='sm' variant='destructive' onClick={() => void disconnectSession()}>
@@ -376,6 +397,22 @@ function ResourceRowActions({ config, item, onOperation }: { config: PlatformPag
   }
 
   if (config.collection === 'sql_work_orders') {
+    const status = (item.status || '').toLowerCase()
+    if (status === 'pending' || status === 'submitted' || status === 'requested') {
+      return (
+        <>
+          <Button size='sm' variant='outline' onClick={() => void approveSQLWorkOrder()}>
+            <Save className='size-3.5' />
+            批准
+          </Button>
+          <Button size='sm' variant='destructive' onClick={() => void rejectSQLWorkOrder()}>
+            <Trash2 className='size-3.5' />
+            拒绝
+          </Button>
+        </>
+      )
+    }
+    if (status !== 'approved') return null
     return (
       <Button size='sm' variant='outline' onClick={() => onOperation({ type: 'sql-execute', item })}>
         <Play className='size-3.5' />
@@ -741,21 +778,27 @@ function SQLExecuteDialog({
   item,
   onClose,
   endpoint,
+  workOrderEndpoint,
   initialSQL,
   successMessage,
+  workOrderMessage,
   description,
 }: {
   item: PlatformItem
   onClose: () => void
   endpoint?: string
+  workOrderEndpoint?: string
   initialSQL?: string
   successMessage?: string
+  workOrderMessage?: string
   description?: string
 }) {
   const app = useApp()
   const [sql, setSQL] = useState(initialSQL ?? stringValue(item.metadata?.sql))
+  const [reason, setReason] = useState('')
   const [result, setResult] = useState<PlatformItem | null>(null)
   const [running, setRunning] = useState(false)
+  const [submittingWorkOrder, setSubmittingWorkOrder] = useState(false)
 
   const execute = async () => {
     setRunning(true)
@@ -774,13 +817,41 @@ function SQLExecuteDialog({
     }
   }
 
+  const submitWorkOrder = async () => {
+    if (!workOrderEndpoint) return
+    setSubmittingWorkOrder(true)
+    try {
+      const data = await apiRequest<PlatformItem>(workOrderEndpoint, {
+        method: 'POST',
+        body: JSON.stringify({ sql, reason }),
+      })
+      setResult(data)
+      setReason('')
+      await app.refresh(true)
+      app.showToast(workOrderMessage || 'SQL 工单已提交')
+    } catch (error) {
+      app.handleApiError(error)
+    } finally {
+      setSubmittingWorkOrder(false)
+    }
+  }
+
   return (
     <DialogShell open onOpenChange={(open) => !open && onClose()} title={`${item.name} 执行`} description={description || '执行结果会写入 SQL 日志；SELECT 查询最多展示前 100 行。'}>
       <div className='grid gap-4'>
         <Field label='SQL'><Textarea className='min-h-44 font-mono text-xs' value={sql} onChange={(event) => setSQL(event.currentTarget.value)} /></Field>
+        {workOrderEndpoint ? (
+          <Field label='申请原因'><Input value={reason} onChange={(event) => setReason(event.currentTarget.value)} placeholder='说明变更目的、窗口或审批理由' /></Field>
+        ) : null}
         {result ? <SQLResultPanel result={result} /> : null}
         <div className='flex justify-end gap-2'>
           <Button variant='outline' onClick={onClose}>关闭</Button>
+          {workOrderEndpoint ? (
+            <Button variant='outline' onClick={() => void submitWorkOrder()} disabled={submittingWorkOrder || !sql.trim()}>
+              <Plus className='size-4' />
+              {submittingWorkOrder ? '提交中' : '提交工单'}
+            </Button>
+          ) : null}
           <Button variant='primary' onClick={() => void execute()} disabled={running || !sql.trim()}>
             <Play className='size-4' />
             {running ? '执行中' : '执行'}
@@ -1001,8 +1072,10 @@ export function AccessPortalPage() {
         <SQLExecuteDialog
           item={databaseQueryItem}
           endpoint={`/api/access/database/${databaseQueryItem.id}/query`}
+          workOrderEndpoint={`/api/access/database/${databaseQueryItem.id}/work-orders`}
           initialSQL={stringValue(databaseQueryItem.metadata?.sql) || 'SELECT name FROM sqlite_master WHERE type = "table";'}
           successMessage='SQL 已执行'
+          workOrderMessage='SQL 工单已提交'
           description='在授权数据库资产上执行 SQL，结果会写入 SQL 日志；SELECT 查询按资产配置的 row_limit 返回。'
           onClose={() => setDatabaseQueryItem(null)}
         />

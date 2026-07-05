@@ -225,6 +225,14 @@ func (s *Server) handleAccessAction(w http.ResponseWriter, r *http.Request) {
 		s.handleDatabaseAssetQuery(w, r, asset, userID)
 		return
 	}
+	if len(parts) >= 3 && parts[2] == "work-orders" {
+		if protocol != model.ProtocolDatabase {
+			writeError(w, http.StatusBadRequest, "sql work orders are only supported for database assets")
+			return
+		}
+		s.handleDatabaseWorkOrderCreate(w, r, asset, userID)
+		return
+	}
 	item, err := s.cfg.Store.CreatePlatformItem("online_sessions", model.PlatformItemRequest{
 		Name:        protocolSessionName(protocol, asset.Name),
 		Type:        string(protocol),

@@ -517,9 +517,42 @@ func TestDatabaseAssetQueryRequiresAuthorizationAndLogs(t *testing.T) {
 		"sql": "SELECT * FROM missing_table",
 	}, userCookie, http.StatusBadRequest)
 
+	workOrderRec := assertStatus(t, handler, http.MethodPost, "/api/access/database/"+databaseAsset.ID+"/work-orders", map[string]any{
+		"sql":    "CREATE TABLE work_order_hosts(name TEXT)",
+		"reason": "create host review table",
+	}, userCookie, http.StatusCreated)
+	var workOrder model.PlatformItem
+	decodeResponse(t, workOrderRec, &workOrder)
+	if workOrder.Status != "pending" || workOrder.TargetID != databaseAsset.ID || workOrder.OwnerID != user.ID {
+		t.Fatalf("work order = status %q target %q owner %q", workOrder.Status, workOrder.TargetID, workOrder.OwnerID)
+	}
+	assertStatus(t, handler, http.MethodPost, "/api/admin/sql-work-orders/"+workOrder.ID+"/execute", map[string]any{}, adminCookie, http.StatusConflict)
+	assertStatus(t, handler, http.MethodPost, "/api/admin/sql-work-orders/"+workOrder.ID+"/approve", map[string]any{"note": "approved for test"}, adminCookie, http.StatusOK)
+	assertStatus(t, handler, http.MethodPost, "/api/admin/sql-work-orders/"+workOrder.ID+"/execute", map[string]any{
+		"sql": "DROP TABLE servers",
+	}, adminCookie, http.StatusBadRequest)
+	assertStatus(t, handler, http.MethodPost, "/api/admin/sql-work-orders/"+workOrder.ID+"/execute", map[string]any{}, adminCookie, http.StatusOK)
+	assertStatus(t, handler, http.MethodPost, "/api/admin/sql-work-orders/"+workOrder.ID+"/execute", map[string]any{}, adminCookie, http.StatusConflict)
+
+	workOrderQueryRec := assertStatus(t, handler, http.MethodPost, "/api/access/database/"+databaseAsset.ID+"/query", map[string]any{
+		"sql": "SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'work_order_hosts'",
+	}, userCookie, http.StatusOK)
+	if !strings.Contains(workOrderQueryRec.Body.String(), "work_order_hosts") {
+		t.Fatal("approved work order execution did not create the expected table")
+	}
+
+	rejectedRec := assertStatus(t, handler, http.MethodPost, "/api/access/database/"+databaseAsset.ID+"/work-orders", map[string]any{
+		"sql":    "CREATE TABLE rejected_table(name TEXT)",
+		"reason": "should be rejected",
+	}, userCookie, http.StatusCreated)
+	var rejectedOrder model.PlatformItem
+	decodeResponse(t, rejectedRec, &rejectedOrder)
+	assertStatus(t, handler, http.MethodPost, "/api/admin/sql-work-orders/"+rejectedOrder.ID+"/reject", map[string]any{"note": "not allowed"}, adminCookie, http.StatusOK)
+	assertStatus(t, handler, http.MethodPost, "/api/admin/sql-work-orders/"+rejectedOrder.ID+"/execute", map[string]any{}, adminCookie, http.StatusConflict)
+
 	logsRec := assertStatus(t, handler, http.MethodGet, "/api/admin/audit/sql-logs", nil, adminCookie, http.StatusOK)
 	logsBody := logsRec.Body.String()
-	for _, want := range []string{databaseAsset.ID, "database_access", "alpha", "missing_table", "failed"} {
+	for _, want := range []string{databaseAsset.ID, "database_access", "alpha", "missing_table", "failed", "work_order", workOrder.ID, "work_order_hosts"} {
 		if !strings.Contains(logsBody, want) {
 			t.Fatalf("sql logs did not include %q", want)
 		}
@@ -746,11 +779,23 @@ func TestResourceOperationEndpoints(t *testing.T) {
 		t.Fatal("scheduled task logs did not include run")
 	}
 
+	databaseRec := assertStatus(t, handler, http.MethodPost, "/api/admin/database-assets", map[string]any{
+		"name":     "resource-ops-db",
+		"type":     "sqlite",
+		"status":   "enabled",
+		"protocol": "database",
+		"metadata": map[string]any{"sqlite_path": "resource-ops.db"},
+	}, cookie, http.StatusCreated)
+	var databaseAsset model.PlatformItem
+	decodeResponse(t, databaseRec, &databaseAsset)
+
 	sqlRec := assertStatus(t, handler, http.MethodPost, "/api/admin/sql-work-orders", map[string]any{
-		"name":     "select-one",
-		"type":     "query",
-		"status":   "approved",
-		"metadata": map[string]any{"sql": "SELECT 1 AS answer"},
+		"name":      "select-one",
+		"type":      "query",
+		"status":    "approved",
+		"protocol":  "database",
+		"target_id": databaseAsset.ID,
+		"metadata":  map[string]any{"sql": "SELECT 1 AS answer"},
 	}, cookie, http.StatusCreated)
 	var order model.PlatformItem
 	decodeResponse(t, sqlRec, &order)

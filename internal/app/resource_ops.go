@@ -56,6 +56,10 @@ type sqlExecuteRequest struct {
 	SQL string `json:"sql"`
 }
 
+type workOrderDecisionRequest struct {
+	Note string `json:"note"`
+}
+
 func (s *Server) handleResourceOperation(w http.ResponseWriter, r *http.Request, path string) bool {
 	switch {
 	case path == "admin/assets/export":
@@ -89,6 +93,14 @@ func (s *Server) handleResourceOperation(w http.ResponseWriter, r *http.Request,
 	case strings.HasPrefix(path, "admin/sql-work-orders/") && strings.HasSuffix(path, "/execute"):
 		id := pathSegmentFromTrimmed(path, 2)
 		s.handleSQLWorkOrderExecute(w, r, id)
+		return true
+	case strings.HasPrefix(path, "admin/sql-work-orders/") && strings.HasSuffix(path, "/approve"):
+		id := pathSegmentFromTrimmed(path, 2)
+		s.handleSQLWorkOrderDecision(w, r, id, "approved")
+		return true
+	case strings.HasPrefix(path, "admin/sql-work-orders/") && strings.HasSuffix(path, "/reject"):
+		id := pathSegmentFromTrimmed(path, 2)
+		s.handleSQLWorkOrderDecision(w, r, id, "rejected")
 		return true
 	case strings.HasPrefix(path, "admin/audit/online-sessions/") && strings.HasSuffix(path, "/disconnect"):
 		id := pathSegmentFromTrimmed(path, 3)
@@ -826,94 +838,148 @@ func (s *Server) handleSQLWorkOrderExecute(w http.ResponseWriter, r *http.Reques
 		writeError(w, http.StatusNotFound, "sql work order not found")
 		return
 	}
+	if !strings.EqualFold(order.Status, "approved") {
+		writeError(w, http.StatusConflict, "sql work order must be approved before execution")
+		return
+	}
 	var req sqlExecuteRequest
 	if !decodeJSON(w, r, &req) {
 		return
 	}
+	approvedSQL := strings.TrimSpace(firstMetadataString(order.Metadata, "sql"))
 	sqlText := strings.TrimSpace(req.SQL)
 	if sqlText == "" {
-		if value, _ := order.Metadata["sql"].(string); value != "" {
-			sqlText = value
-		}
+		sqlText = approvedSQL
 	}
-	if sqlText == "" {
+	if approvedSQL == "" {
 		writeError(w, http.StatusBadRequest, "sql is required")
 		return
 	}
-	dbPath := filepath.Join(s.cfg.DataDir, "database-proxy", "work-orders.db")
-	if err := os.MkdirAll(filepath.Dir(dbPath), 0o770); err != nil {
-		writeError(w, http.StatusInternalServerError, err.Error())
+	if sqlText != approvedSQL {
+		writeError(w, http.StatusBadRequest, "sql does not match approved work order")
 		return
 	}
-	db, err := sql.Open("sqlite", dbPath)
-	if err != nil {
-		writeError(w, http.StatusInternalServerError, err.Error())
+
+	asset, userID, ok := s.sqlWorkOrderDatabaseAsset(w, r, order)
+	if !ok {
 		return
 	}
-	defer db.Close()
-	start := time.Now()
-	status := "success"
-	detail := "executed"
-	var rowsAffected int64
-	metadata := map[string]any{
-		"sql": sqlText,
-	}
-	if isSQLQuery(sqlText) {
-		queryRows, err := db.Query(sqlText)
-		if err != nil {
-			status = "failed"
-			detail = err.Error()
-		} else {
-			rows, columns, truncated, err := scanSQLRows(queryRows, 100)
-			if err != nil {
-				status = "failed"
-				detail = err.Error()
-			} else {
-				detail = "queried"
-				rowsAffected = int64(len(rows))
-				metadata["columns"] = columns
-				metadata["rows"] = rows
-				metadata["truncated"] = truncated
-			}
-		}
-	} else {
-		result, err := db.Exec(sqlText)
-		if err != nil {
-			status = "failed"
-			detail = err.Error()
-		} else if result != nil {
-			rowsAffected, _ = result.RowsAffected()
-		}
-	}
-	metadata["rows_affected"] = rowsAffected
-	metadata["duration_ms"] = time.Since(start).Milliseconds()
-	logItem, logErr := s.cfg.Store.CreatePlatformItem("sql_logs", model.PlatformItemRequest{
-		Name:        order.Name,
-		Type:        "work_order",
-		Status:      status,
-		TargetID:    id,
-		OwnerID:     s.currentUserID(r),
-		Description: detail,
-		Metadata:    metadata,
+	logItem, statusCode, err := s.executeDatabaseAssetSQL(r, asset, userID, sqlText, databaseSQLExecutionOptions{
+		Source:      "sql_work_order",
+		LogType:     "work_order",
+		LogName:     order.Name,
+		TargetID:    asset.ID,
+		WorkOrderID: id,
+		Reason:      firstMetadataString(order.Metadata, "reason", "description"),
+		ExtraMetadata: map[string]any{
+			"requested_by": firstMetadataString(order.Metadata, "requested_by", "requester", "requester_id"),
+			"approved_by":  firstMetadataString(order.Metadata, "approved_by"),
+		},
 	})
-	if logErr != nil {
-		writeError(w, http.StatusInternalServerError, logErr.Error())
+	if err != nil {
+		writeError(w, statusCode, err.Error())
 		return
 	}
-	if status == "failed" {
-		writeJSON(w, http.StatusBadRequest, logItem)
+	if statusCode != http.StatusOK {
+		writeJSON(w, statusCode, logItem)
 		return
 	}
 	nextMetadata := map[string]any{}
 	for key, value := range order.Metadata {
 		nextMetadata[key] = value
 	}
-	nextMetadata["sql"] = sqlText
-	nextMetadata["rows_affected"] = rowsAffected
+	nextMetadata["asset_id"] = asset.ID
+	nextMetadata["asset_name"] = asset.Name
+	nextMetadata["sql"] = approvedSQL
+	nextMetadata["sql_log_id"] = logItem.ID
+	nextMetadata["rows_affected"] = logItem.Metadata["rows_affected"]
 	nextMetadata["executed_at"] = time.Now().UTC()
-	_, _ = s.cfg.Store.UpdatePlatformItem("sql_work_orders", id, model.PlatformItemRequest{Status: "executed", Metadata: nextMetadata})
-	_ = s.audit(r, "sql_work_order.execute", id, "", "executed sql work order")
+	nextMetadata["executed_by"] = userID
+	_, _ = s.cfg.Store.UpdatePlatformItem("sql_work_orders", id, model.PlatformItemRequest{Status: "executed", Protocol: model.ProtocolDatabase, Metadata: nextMetadata})
+	_ = s.audit(r, "sql_work_order.execute", id, model.ProtocolDatabase, "executed sql work order")
 	writeJSON(w, http.StatusOK, logItem)
+}
+
+func (s *Server) handleSQLWorkOrderDecision(w http.ResponseWriter, r *http.Request, id, nextStatus string) {
+	if r.Method != http.MethodPost {
+		writeError(w, http.StatusMethodNotAllowed, "method not allowed")
+		return
+	}
+	order, ok, err := s.cfg.Store.GetPlatformItem("sql_work_orders", id)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	if !ok {
+		writeError(w, http.StatusNotFound, "sql work order not found")
+		return
+	}
+	if strings.EqualFold(order.Status, "executed") {
+		writeError(w, http.StatusConflict, "executed sql work orders cannot be changed")
+		return
+	}
+	var req workOrderDecisionRequest
+	if !decodeJSON(w, r, &req) {
+		return
+	}
+	asset, userID, ok := s.sqlWorkOrderDatabaseAsset(w, r, order)
+	if !ok {
+		return
+	}
+	nextMetadata := map[string]any{}
+	for key, value := range order.Metadata {
+		nextMetadata[key] = value
+	}
+	now := time.Now().UTC()
+	if nextStatus == "approved" {
+		nextMetadata["approved_by"] = userID
+		nextMetadata["approved_at"] = now
+		nextMetadata["approval_note"] = strings.TrimSpace(req.Note)
+	} else {
+		nextMetadata["rejected_by"] = userID
+		nextMetadata["rejected_at"] = now
+		nextMetadata["rejection_note"] = strings.TrimSpace(req.Note)
+	}
+	nextMetadata["asset_id"] = asset.ID
+	nextMetadata["asset_name"] = asset.Name
+	item, err := s.cfg.Store.UpdatePlatformItem("sql_work_orders", id, model.PlatformItemRequest{
+		Status:   nextStatus,
+		Protocol: model.ProtocolDatabase,
+		Metadata: nextMetadata,
+	})
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	_ = s.audit(r, "sql_work_order."+nextStatus, id, model.ProtocolDatabase, "set sql work order "+nextStatus)
+	writeJSON(w, http.StatusOK, item)
+}
+
+func (s *Server) sqlWorkOrderDatabaseAsset(w http.ResponseWriter, r *http.Request, order model.PlatformItem) (model.PlatformItem, string, bool) {
+	assetID := strings.TrimSpace(order.TargetID)
+	if assetID == "" {
+		assetID = firstMetadataString(order.Metadata, "asset_id", "database_asset_id", "target_id")
+	}
+	if assetID == "" {
+		writeError(w, http.StatusBadRequest, "sql work order must target a database asset")
+		return model.PlatformItem{}, "", false
+	}
+	platform, err := s.cfg.Store.PlatformBootstrap()
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err.Error())
+		return model.PlatformItem{}, "", false
+	}
+	asset, ok := findAccessAsset(platform, model.ProtocolDatabase, assetID)
+	if !ok {
+		writeError(w, http.StatusNotFound, "database asset not found")
+		return model.PlatformItem{}, "", false
+	}
+	userID, isAdmin := s.accessUser(r)
+	if !isAccessAuthorized(platform, model.ProtocolDatabase, asset.ID, userID, isAdmin) {
+		writeError(w, http.StatusForbidden, "database asset access denied")
+		return model.PlatformItem{}, "", false
+	}
+	return asset, userID, true
 }
 
 func (s *Server) handleAuditSessionDisconnect(w http.ResponseWriter, r *http.Request, id string) {

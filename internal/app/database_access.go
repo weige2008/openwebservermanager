@@ -3,6 +3,7 @@ package app
 import (
 	"database/sql"
 	"errors"
+	"fmt"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -12,6 +13,21 @@ import (
 
 	"openwebservermanager/internal/model"
 )
+
+type databaseSQLExecutionOptions struct {
+	Source        string
+	LogType       string
+	LogName       string
+	TargetID      string
+	WorkOrderID   string
+	Reason        string
+	ExtraMetadata map[string]any
+}
+
+type sqlWorkOrderRequest struct {
+	SQL    string `json:"sql"`
+	Reason string `json:"reason"`
+}
 
 func (s *Server) handleDatabaseAssetQuery(w http.ResponseWriter, r *http.Request, asset model.PlatformItem, userID string) {
 	if r.Method != http.MethodPost {
@@ -27,15 +43,70 @@ func (s *Server) handleDatabaseAssetQuery(w http.ResponseWriter, r *http.Request
 		writeError(w, http.StatusBadRequest, "sql is required")
 		return
 	}
-	driver, dsn, err := databaseAssetDriverAndDSN(s.cfg.DataDir, asset)
+	logItem, statusCode, err := s.executeDatabaseAssetSQL(r, asset, userID, sqlText, databaseSQLExecutionOptions{
+		Source:  "access_portal",
+		LogType: "database_access",
+	})
 	if err != nil {
-		writeError(w, http.StatusBadRequest, err.Error())
+		writeError(w, statusCode, err.Error())
 		return
 	}
-	db, err := sql.Open(driver, dsn)
+	_ = s.audit(r, "access.database.query", asset.ID, model.ProtocolDatabase, logItem.Description)
+	writeJSON(w, statusCode, logItem)
+}
+
+func (s *Server) handleDatabaseWorkOrderCreate(w http.ResponseWriter, r *http.Request, asset model.PlatformItem, userID string) {
+	if r.Method != http.MethodPost {
+		writeError(w, http.StatusMethodNotAllowed, "method not allowed")
+		return
+	}
+	var req sqlWorkOrderRequest
+	if !decodeJSON(w, r, &req) {
+		return
+	}
+	sqlText := strings.TrimSpace(req.SQL)
+	if sqlText == "" {
+		writeError(w, http.StatusBadRequest, "sql is required")
+		return
+	}
+	reason := strings.TrimSpace(req.Reason)
+	if reason == "" {
+		reason = "requested from access portal"
+	}
+	item, err := s.cfg.Store.CreatePlatformItem("sql_work_orders", model.PlatformItemRequest{
+		Name:        fmt.Sprintf("%s SQL request", asset.Name),
+		Type:        "database_access",
+		Status:      "pending",
+		Protocol:    model.ProtocolDatabase,
+		TargetID:    asset.ID,
+		OwnerID:     userID,
+		Description: reason,
+		Metadata: map[string]any{
+			"sql":          sqlText,
+			"reason":       reason,
+			"asset_id":     asset.ID,
+			"asset_name":   asset.Name,
+			"client_ip":    s.clientIP(r),
+			"source":       "access_portal",
+			"requested_at": time.Now().UTC(),
+		},
+	})
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, err.Error())
 		return
+	}
+	_ = s.audit(r, "sql_work_order.request", item.ID, model.ProtocolDatabase, "created sql work order")
+	writeJSON(w, http.StatusCreated, item)
+}
+
+func (s *Server) executeDatabaseAssetSQL(r *http.Request, asset model.PlatformItem, userID, sqlText string, opts databaseSQLExecutionOptions) (model.PlatformItem, int, error) {
+	driver, dsn, err := databaseAssetDriverAndDSN(s.cfg.DataDir, asset)
+	if err != nil {
+		return model.PlatformItem{}, http.StatusBadRequest, err
+	}
+	db, err := sql.Open(driver, dsn)
+	if err != nil {
+		return model.PlatformItem{}, http.StatusInternalServerError, err
 	}
 	defer db.Close()
 
@@ -53,10 +124,19 @@ func (s *Server) handleDatabaseAssetQuery(w http.ResponseWriter, r *http.Request
 		"asset_id":    asset.ID,
 		"asset_name":  asset.Name,
 		"client_ip":   s.clientIP(r),
-		"source":      "access_portal",
+		"source":      valueOrDefault(opts.Source, "access_portal"),
 		"driver":      driver,
 		"db_username": asset.Username,
 		"row_limit":   rowLimit,
+	}
+	if opts.WorkOrderID != "" {
+		metadata["work_order_id"] = opts.WorkOrderID
+	}
+	if opts.Reason != "" {
+		metadata["reason"] = opts.Reason
+	}
+	for key, value := range opts.ExtraMetadata {
+		metadata[key] = value
 	}
 	if isSQLQuery(sqlText) {
 		queryRows, err := db.Query(sqlText)
@@ -87,26 +167,35 @@ func (s *Server) handleDatabaseAssetQuery(w http.ResponseWriter, r *http.Request
 	}
 	metadata["rows_affected"] = rowsAffected
 	metadata["duration_ms"] = time.Since(start).Milliseconds()
+	logTargetID := opts.TargetID
+	if logTargetID == "" {
+		logTargetID = asset.ID
+	}
+	logName := strings.TrimSpace(opts.LogName)
+	if logName == "" {
+		logName = asset.Name
+	}
+	logType := strings.TrimSpace(opts.LogType)
+	if logType == "" {
+		logType = "database_access"
+	}
 	logItem, logErr := s.cfg.Store.CreatePlatformItem("sql_logs", model.PlatformItemRequest{
-		Name:        asset.Name,
-		Type:        "database_access",
+		Name:        logName,
+		Type:        logType,
 		Status:      status,
 		Protocol:    model.ProtocolDatabase,
-		TargetID:    asset.ID,
+		TargetID:    logTargetID,
 		OwnerID:     userID,
 		Description: detail,
 		Metadata:    metadata,
 	})
 	if logErr != nil {
-		writeError(w, http.StatusInternalServerError, logErr.Error())
-		return
+		return model.PlatformItem{}, http.StatusInternalServerError, logErr
 	}
-	_ = s.audit(r, "access.database.query", asset.ID, model.ProtocolDatabase, detail)
 	if status == "failed" {
-		writeJSON(w, http.StatusBadRequest, logItem)
-		return
+		return logItem, http.StatusBadRequest, nil
 	}
-	writeJSON(w, http.StatusOK, logItem)
+	return logItem, http.StatusOK, nil
 }
 
 func databaseAssetDriverAndDSN(dataDir string, asset model.PlatformItem) (string, string, error) {
@@ -196,4 +285,12 @@ func metadataInt(value any) (int, bool) {
 	default:
 		return 0, false
 	}
+}
+
+func valueOrDefault(value, fallback string) string {
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return fallback
+	}
+	return value
 }

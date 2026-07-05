@@ -17,6 +17,7 @@ import (
 	"openwebservermanager/internal/app"
 	"openwebservermanager/internal/guac"
 	"openwebservermanager/internal/security"
+	sshrunner "openwebservermanager/internal/ssh"
 	"openwebservermanager/internal/store"
 )
 
@@ -74,6 +75,17 @@ func run() error {
 	}
 	defer guacd.Stop()
 
+	rootCtx, rootCancel := context.WithCancel(context.Background())
+	defer rootCancel()
+	sshGateway, err := sshrunner.StartGateway(rootCtx, sshrunner.GatewayConfigFromStore(st, dataDir, env("OPENWEBSERVERMANAGER_SSH_GATEWAY_ADDR", "")))
+	if err != nil {
+		slog.Warn("ssh gateway unavailable", "error", err)
+	}
+	if sshGateway != nil {
+		defer sshGateway.Close()
+		slog.Info("ssh gateway ready", "addr", sshGateway.Address())
+	}
+
 	srv := &http.Server{
 		Addr:              addr,
 		Handler:           app.New(app.Config{Store: st, Guacd: guacd, StaticFS: staticFS, DataDir: dataDir, Public: publicConfig(), TrustProxyHeaders: envBool("OPENWEBSERVERMANAGER_TRUST_PROXY_HEADERS")}),
@@ -100,6 +112,7 @@ func run() error {
 
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
+	rootCancel()
 	return srv.Shutdown(ctx)
 }
 

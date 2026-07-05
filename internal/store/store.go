@@ -599,7 +599,7 @@ func (s *Store) CreatePlatformItem(collection string, req model.PlatformItemRequ
 		Description: strings.TrimSpace(req.Description),
 		Metadata:    req.Metadata,
 	}
-	if err := applyPlatformSecrets(collection, req, &item, true); err != nil {
+	if err := s.applyPlatformSecrets(collection, req, &item, true); err != nil {
 		return model.PlatformItem{}, err
 	}
 	if item.Name == "" {
@@ -700,6 +700,7 @@ func (s *Store) UpdatePlatformItem(collection, id string, req model.PlatformItem
 	existingPasswordHash, _ := item.Metadata["password_hash"].(string)
 	existingClientSecretHash, _ := item.Metadata["client_secret_hash"].(string)
 	existingAgentTokenHash, _ := item.Metadata["agent_token_hash"].(string)
+	existingCredentialSecrets := copyMetadataSecrets(item.Metadata, "encrypted_password", "encrypted_private_key", "encrypted_passphrase")
 	if req.Metadata != nil {
 		item.Metadata = req.Metadata
 		if collection == "users" && existingPasswordHash != "" {
@@ -717,8 +718,16 @@ func (s *Store) UpdatePlatformItem(collection, id string, req model.PlatformItem
 				item.Metadata["agent_token_hash"] = existingAgentTokenHash
 			}
 		}
+		if collection == "credentials" {
+			for key, value := range existingCredentialSecrets {
+				delete(item.Metadata, key)
+				if value != "" {
+					item.Metadata[key] = value
+				}
+			}
+		}
 	}
-	if err := applyPlatformSecrets(collection, req, &item, false); err != nil {
+	if err := s.applyPlatformSecrets(collection, req, &item, false); err != nil {
 		return model.PlatformItem{}, err
 	}
 	item.UpdatedAt = time.Now().UTC()
@@ -889,7 +898,7 @@ func collectionPrefix(collection string) string {
 	return prefix
 }
 
-func applyPlatformSecrets(collection string, req model.PlatformItemRequest, item *model.PlatformItem, creating bool) error {
+func (s *Store) applyPlatformSecrets(collection string, req model.PlatformItemRequest, item *model.PlatformItem, creating bool) error {
 	switch collection {
 	case "users":
 		return applyUserPlatformSecret(req, item, creating)
@@ -897,6 +906,8 @@ func applyPlatformSecrets(collection string, req model.PlatformItemRequest, item
 		return applyOIDCClientPlatformSecret(req, item, creating)
 	case "agent_gateways":
 		return applyAgentGatewayPlatformSecret(item, creating)
+	case "credentials":
+		return s.applyCredentialPlatformSecret(req, item, creating)
 	default:
 		return nil
 	}
@@ -979,6 +990,112 @@ func applyAgentGatewayPlatformSecret(item *model.PlatformItem, creating bool) er
 	return nil
 }
 
+func (s *Store) applyCredentialPlatformSecret(req model.PlatformItemRequest, item *model.PlatformItem, creating bool) error {
+	if item.Metadata == nil {
+		item.Metadata = map[string]any{}
+	}
+	for _, key := range []string{"password", "private_key", "privateKey", "passphrase"} {
+		delete(item.Metadata, key)
+	}
+	if item.Type == "" {
+		item.Type = string(model.CredentialSSHPassword)
+	}
+	password := strings.TrimSpace(req.Password)
+	privateKey := strings.TrimSpace(req.PrivateKey)
+	passphrase := strings.TrimSpace(req.Passphrase)
+	if password == "" {
+		password = firstMetadataString(item.Metadata, "plain_password")
+		delete(item.Metadata, "plain_password")
+	}
+	if privateKey == "" {
+		privateKey = firstMetadataString(item.Metadata, "plain_private_key")
+		delete(item.Metadata, "plain_private_key")
+	}
+	if passphrase == "" {
+		passphrase = firstMetadataString(item.Metadata, "plain_passphrase")
+		delete(item.Metadata, "plain_passphrase")
+	}
+	if password == "" && privateKey == "" && passphrase == "" {
+		if creating {
+			delete(item.Metadata, "encrypted_password")
+			delete(item.Metadata, "encrypted_private_key")
+			delete(item.Metadata, "encrypted_passphrase")
+		}
+		return nil
+	}
+	if len(password) > 32*1024 || len(privateKey) > 128*1024 || len(passphrase) > 32*1024 {
+		return errors.New("credential secret is too large")
+	}
+	if password != "" {
+		encrypted, err := s.cipher.EncryptString(password)
+		if err != nil {
+			return err
+		}
+		item.Metadata["encrypted_password"] = encrypted
+	}
+	if privateKey != "" {
+		encrypted, err := s.cipher.EncryptString(privateKey)
+		if err != nil {
+			return err
+		}
+		item.Metadata["encrypted_private_key"] = encrypted
+	}
+	if passphrase != "" {
+		encrypted, err := s.cipher.EncryptString(passphrase)
+		if err != nil {
+			return err
+		}
+		item.Metadata["encrypted_passphrase"] = encrypted
+	}
+	return nil
+}
+
+func (s *Store) GetPlatformCredentialSecret(id string) (model.PlatformItem, CredentialSecret, bool, error) {
+	item, ok, err := s.GetPlatformItem("credentials", id)
+	if err != nil || !ok {
+		return model.PlatformItem{}, CredentialSecret{}, ok, err
+	}
+	secret := CredentialSecret{}
+	if encrypted, _ := item.Metadata["encrypted_password"].(string); encrypted != "" {
+		secret.Password, err = s.cipher.DecryptString(encrypted)
+		if err != nil {
+			return model.PlatformItem{}, CredentialSecret{}, true, err
+		}
+	}
+	if encrypted, _ := item.Metadata["encrypted_private_key"].(string); encrypted != "" {
+		secret.PrivateKey, err = s.cipher.DecryptString(encrypted)
+		if err != nil {
+			return model.PlatformItem{}, CredentialSecret{}, true, err
+		}
+	}
+	if encrypted, _ := item.Metadata["encrypted_passphrase"].(string); encrypted != "" {
+		secret.Passphrase, err = s.cipher.DecryptString(encrypted)
+		if err != nil {
+			return model.PlatformItem{}, CredentialSecret{}, true, err
+		}
+	}
+	return item, secret, true, nil
+}
+
+func copyMetadataSecrets(metadata map[string]any, keys ...string) map[string]string {
+	result := map[string]string{}
+	for _, key := range keys {
+		value, _ := metadata[key].(string)
+		result[key] = value
+	}
+	return result
+}
+
+func firstMetadataString(metadata map[string]any, keys ...string) string {
+	for _, key := range keys {
+		value, _ := metadata[key].(string)
+		if strings.TrimSpace(value) != "" {
+			return strings.TrimSpace(value)
+		}
+	}
+	return ""
+}
+
 func sanitizePlatformItem(item *model.PlatformItem) {
 	if item.Metadata == nil {
 		return
@@ -996,6 +1113,12 @@ func sanitizePlatformItem(item *model.PlatformItem) {
 	delete(item.Metadata, "agent_token")
 	delete(item.Metadata, "gateway_token")
 	delete(item.Metadata, "token")
+	delete(item.Metadata, "encrypted_password")
+	delete(item.Metadata, "encrypted_private_key")
+	delete(item.Metadata, "encrypted_passphrase")
+	delete(item.Metadata, "plain_password")
+	delete(item.Metadata, "plain_private_key")
+	delete(item.Metadata, "plain_passphrase")
 }
 
 func (s *Store) Bootstrap() ([]model.Server, []model.CredentialPublic, []model.ConnectionSession, []model.AuditLog) {

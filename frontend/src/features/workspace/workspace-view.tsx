@@ -41,8 +41,10 @@ export function WorkspaceView() {
   if (!workspace) return null
 
   const server = app.data.servers.find((item) => item.id === workspace.session.server_id)
+  const platformAsset = app.data.platform?.assets?.find((item) => item.id === workspace.session.server_id)
   const commandSnippets = app.data.platform?.command_snippets || []
   const selectedSnippet = commandSnippets.find((item) => item.id === selectedSnippetID) || commandSnippets[0]
+  const isDesktopWorkspace = workspace.type === 'rdp' || workspace.type === 'vnc'
 
   const leave = async () => {
     app.setWorkspace(null)
@@ -67,7 +69,7 @@ export function WorkspaceView() {
       <div className='flex min-w-0 items-center justify-between gap-3 border-b border-border bg-background/95 px-3 backdrop-blur-xl max-md:h-auto max-md:flex-col max-md:items-start max-md:py-3'>
         <div className='flex min-w-0 items-center gap-2'>
           <strong>{workspace.session.protocol.toUpperCase()}</strong>
-          <span className='truncate text-muted-foreground'>{server?.name || workspace.session.server_id}</span>
+          <span className='truncate text-muted-foreground'>{server?.name || platformAsset?.name || workspace.session.server_id}</span>
           <Badge tone={status === 'connected' ? 'success' : 'neutral'}>{statusLabel(status)}</Badge>
           {workspace.session.recording_path ? <Badge tone='danger'>{t('workspace.recordingOn')}</Badge> : null}
         </div>
@@ -93,10 +95,12 @@ export function WorkspaceView() {
               </Button>
             </div>
           ) : null}
-          {workspace.type === 'rdp' ? (
+          {isDesktopWorkspace ? (
             <>
-              <Button variant='outline' onClick={() => window.dispatchEvent(new Event('openwebservermanager:rdp-clipboard'))}><Clipboard className='size-4' />{t('workspace.clipboard')}</Button>
-              <Button variant='outline' onClick={() => window.dispatchEvent(new Event('openwebservermanager:rdp-upload'))}><Upload className='size-4' />{t('workspace.uploadFile')}</Button>
+              <Button variant='outline' onClick={() => window.dispatchEvent(new Event('openwebservermanager:desktop-clipboard'))}><Clipboard className='size-4' />{t('workspace.clipboard')}</Button>
+              {workspace.type === 'rdp' ? (
+                <Button variant='outline' onClick={() => window.dispatchEvent(new Event('openwebservermanager:desktop-upload'))}><Upload className='size-4' />{t('workspace.uploadFile')}</Button>
+              ) : null}
             </>
           ) : null}
           <Button variant='outline' onClick={() => void leave()}>{t('workspace.returnConsole')}</Button>
@@ -249,7 +253,7 @@ function RDPWorkspace({
     const proto = window.location.protocol === 'https:' ? 'wss' : 'ws'
     const width = Math.max(1024, window.innerWidth)
     const height = Math.max(680, window.innerHeight - 52)
-    const tunnel = new Guacamole.WebSocketTunnel(`${proto}://${window.location.host}/api/connections/rdp/${session.id}/tunnel?width=${width}&height=${height}&dpi=96`)
+    const tunnel = new Guacamole.WebSocketTunnel(`${proto}://${window.location.host}/api/connections/${session.protocol}/${session.id}/tunnel?width=${width}&height=${height}&dpi=96`)
     const client = new Guacamole.Client(tunnel)
     clientRef.current = client
     const display = client.getDisplay().getElement()
@@ -359,8 +363,8 @@ function RDPWorkspace({
     display.addEventListener('contextmenu', preventBrowserPointerAction, true)
     display.addEventListener('dragstart', preventBrowserPointerAction, true)
     document.addEventListener('pointerdown', onDocumentPointerDown, true)
-    window.addEventListener('openwebservermanager:rdp-clipboard', onClipboard)
-    window.addEventListener('openwebservermanager:rdp-upload', onUpload)
+    window.addEventListener('openwebservermanager:desktop-clipboard', onClipboard)
+    window.addEventListener('openwebservermanager:desktop-upload', onUpload)
     window.addEventListener('resize', onResize)
     window.addEventListener('keyup', onWindowKeyUp)
     window.addEventListener('blur', releaseInputState)
@@ -376,8 +380,8 @@ function RDPWorkspace({
       display.removeEventListener('contextmenu', preventBrowserPointerAction, true)
       display.removeEventListener('dragstart', preventBrowserPointerAction, true)
       document.removeEventListener('pointerdown', onDocumentPointerDown, true)
-      window.removeEventListener('openwebservermanager:rdp-clipboard', onClipboard)
-      window.removeEventListener('openwebservermanager:rdp-upload', onUpload)
+      window.removeEventListener('openwebservermanager:desktop-clipboard', onClipboard)
+      window.removeEventListener('openwebservermanager:desktop-upload', onUpload)
       window.removeEventListener('resize', onResize)
       window.removeEventListener('keyup', onWindowKeyUp)
       window.removeEventListener('blur', releaseInputState)
@@ -388,7 +392,7 @@ function RDPWorkspace({
       clientRef.current = null
       container.innerHTML = ''
     }
-  }, [messages, session.id, setStatus, showToast])
+  }, [messages, session.id, session.protocol, setStatus, showToast])
 
   return <div ref={containerRef} className='h-[calc(100vh-52px)] overflow-hidden bg-black max-md:h-[calc(100vh-120px)]' />
 }

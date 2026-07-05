@@ -15,6 +15,8 @@ const (
 	CredentialSSHPassword CredentialType = "ssh_password"
 	CredentialSSHKey      CredentialType = "ssh_key"
 	CredentialRDPPassword CredentialType = "rdp_password"
+	CredentialVNCPassword CredentialType = "vnc_password"
+	CredentialDatabase    CredentialType = "database_password"
 )
 
 type Protocol string
@@ -126,6 +128,15 @@ type SSHCreateRequest struct {
 
 type RDPCreateRequest struct {
 	ServerID         string `json:"server_id"`
+	CredentialID     string `json:"credential_id"`
+	Width            int    `json:"width"`
+	Height           int    `json:"height"`
+	DPI              int    `json:"dpi"`
+	RecordingEnabled bool   `json:"recording_enabled"`
+}
+
+type VNCCreateRequest struct {
+	AssetID          string `json:"asset_id"`
 	CredentialID     string `json:"credential_id"`
 	Width            int    `json:"width"`
 	Height           int    `json:"height"`

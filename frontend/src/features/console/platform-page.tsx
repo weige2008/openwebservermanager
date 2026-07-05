@@ -14,7 +14,7 @@ import { Field, Input, Select, Textarea } from '@/components/ui/field'
 import { ApiError, apiRequest } from '@/lib/api'
 import { platformDescription, platformLabel, type PlatformPageConfig } from '@/lib/platform'
 import { cn, formatDate } from '@/lib/utils'
-import type { PlatformItem } from '@/types'
+import type { ConnectionSession, PlatformItem, Protocol } from '@/types'
 
 interface PlatformFormState {
   name: string
@@ -25,6 +25,8 @@ interface PlatformFormState {
   port: string
   username: string
   password: string
+  private_key: string
+  passphrase: string
   group: string
   owner_id: string
   parent_id: string
@@ -43,6 +45,8 @@ const initialForm: PlatformFormState = {
   port: '',
   username: '',
   password: '',
+  private_key: '',
+  passphrase: '',
   group: '',
   owner_id: '',
   parent_id: '',
@@ -172,7 +176,7 @@ export function PlatformTablePage({ config }: { config: PlatformPageConfig }) {
 
   const startCreate = () => {
     setEditing(null)
-    setForm(initialForm)
+    setForm({ ...initialForm, type: config.collection === 'credentials' ? 'ssh_password' : '' })
     setFormOpen(true)
   }
 
@@ -232,6 +236,7 @@ export function PlatformTablePage({ config }: { config: PlatformPageConfig }) {
       <PlatformItemDialog
         title={`${editing ? app.t('edit', '编辑') : app.t('new', '新建')} ${label}`}
         description={description}
+        collection={config.collection}
         open={formOpen}
         saving={saving}
         form={form}
@@ -1016,6 +1021,7 @@ function SQLResultPanel({ result }: { result: PlatformItem }) {
 function PlatformItemDialog({
   title,
   description,
+  collection,
   open,
   saving,
   form,
@@ -1025,6 +1031,7 @@ function PlatformItemDialog({
 }: {
   title: string
   description: string
+  collection: string
   open: boolean
   saving: boolean
   form: PlatformFormState
@@ -1033,12 +1040,26 @@ function PlatformItemDialog({
   onSave: () => void
 }) {
   const app = useApp()
+  const isCredential = collection === 'credentials'
+  const isUser = collection === 'users'
   return (
     <DialogShell open={open} onOpenChange={onOpenChange} title={title} description={description}>
       <div className='grid gap-4'>
         <div className='grid gap-3 sm:grid-cols-2'>
           <Field label={app.t('name')}><Input value={form.name} onChange={(event) => onChange({ name: event.currentTarget.value })} /></Field>
-          <Field label={app.t('type', '类型')}><Input value={form.type} onChange={(event) => onChange({ type: event.currentTarget.value })} /></Field>
+          <Field label={app.t('type', '类型')}>
+            {isCredential ? (
+              <Select value={form.type} onChange={(event) => onChange({ type: event.currentTarget.value })}>
+                <option value='ssh_password'>SSH password</option>
+                <option value='ssh_key'>SSH private key</option>
+                <option value='rdp_password'>RDP password</option>
+                <option value='vnc_password'>VNC password</option>
+                <option value='database_password'>Database password</option>
+              </Select>
+            ) : (
+              <Input value={form.type} onChange={(event) => onChange({ type: event.currentTarget.value })} />
+            )}
+          </Field>
           <Field label={app.t('status')}><Input value={form.status} onChange={(event) => onChange({ status: event.currentTarget.value })} /></Field>
           <Field label={app.t('protocol')}><Select value={form.protocol} onChange={(event) => onChange({ protocol: event.currentTarget.value })}>
             <option value=''>{app.t('none', '无')}</option>
@@ -1051,8 +1072,14 @@ function PlatformItemDialog({
           <Field label={app.t('address')}><Input value={form.host} onChange={(event) => onChange({ host: event.currentTarget.value })} /></Field>
           <Field label={app.t('ports')}><Input type='number' value={form.port} onChange={(event) => onChange({ port: event.currentTarget.value })} /></Field>
           <Field label={app.t('username', '用户')}><Input value={form.username} onChange={(event) => onChange({ username: event.currentTarget.value })} /></Field>
-          {title.includes('用户') || title.includes('Users') ? (
+          {isUser || (isCredential && form.type !== 'ssh_key') ? (
             <Field label={app.t('password', '密码')}><Input type='password' value={form.password} onChange={(event) => onChange({ password: event.currentTarget.value })} /></Field>
+          ) : null}
+          {isCredential && form.type === 'ssh_key' ? (
+            <>
+              <Field label='Private key'><Textarea value={form.private_key} onChange={(event) => onChange({ private_key: event.currentTarget.value })} /></Field>
+              <Field label='Passphrase'><Input type='password' value={form.passphrase} onChange={(event) => onChange({ passphrase: event.currentTarget.value })} /></Field>
+            </>
           ) : null}
           <Field label={app.t('group')}><Input value={form.group} onChange={(event) => onChange({ group: event.currentTarget.value })} /></Field>
           <Field label={app.t('owner', '归属用户/部门')}><Input value={form.owner_id} onChange={(event) => onChange({ owner_id: event.currentTarget.value })} /></Field>
@@ -1084,6 +1111,8 @@ function formFromPlatformItem(item: PlatformItem): PlatformFormState {
     port: item.port ? String(item.port) : '',
     username: item.username || '',
     password: '',
+    private_key: '',
+    passphrase: '',
     group: item.group || '',
     owner_id: item.owner_id || '',
     parent_id: item.parent_id || '',
@@ -1108,6 +1137,8 @@ function platformRequestFromForm(form: PlatformFormState) {
     port: form.port ? Number(form.port) : 0,
     username: form.username,
     password: form.password || undefined,
+    private_key: form.private_key || undefined,
+    passphrase: form.passphrase || undefined,
     group: form.group,
     owner_id: form.owner_id,
     parent_id: form.parent_id,
@@ -1216,7 +1247,7 @@ function AccessSection({
 }) {
   const app = useApp()
   const connect = async (item: PlatformItem) => {
-    const accessProtocol = protocol || item.protocol || 'ssh'
+    const accessProtocol = (protocol || item.protocol || 'ssh') as Protocol
     if (accessProtocol === 'http') {
       window.open(`/api/access/http/${item.id}/proxy/`, '_blank', 'noopener,noreferrer')
       return
@@ -1226,9 +1257,21 @@ function AccessSection({
       return
     }
     try {
-      await apiRequest(`/api/access/${accessProtocol}/${item.id}`, { method: 'POST', body: '{}' })
-      await app.refresh(true)
-      app.showToast('已创建接入会话')
+      const body = accessProtocol === 'rdp' || accessProtocol === 'vnc'
+        ? JSON.stringify({
+          width: Math.max(1024, window.innerWidth),
+          height: Math.max(680, window.innerHeight - 52),
+          dpi: 96,
+          recording_enabled: true,
+        })
+        : '{}'
+      const session = await apiRequest<ConnectionSession>(`/api/access/${accessProtocol}/${item.id}`, { method: 'POST', body })
+      if (accessProtocol === 'rdp' || accessProtocol === 'vnc') {
+        app.setWorkspace({ type: accessProtocol, session, status: 'connecting' })
+      } else {
+        await app.refresh(true)
+        app.showToast('已创建接入会话')
+      }
     } catch (error) {
       app.handleApiError(error)
     }

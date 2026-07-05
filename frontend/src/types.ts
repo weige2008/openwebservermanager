@@ -149,6 +149,7 @@ export type ModalState =
 export type WorkspaceState =
   | { type: 'ssh'; session: ConnectionSession; status: string }
   | { type: 'rdp'; session: ConnectionSession; status: string }
+  | { type: 'vnc'; session: ConnectionSession; status: string }
   | null
 
 export interface ApiErrorPayload {

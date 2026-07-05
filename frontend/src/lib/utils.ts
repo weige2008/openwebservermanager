@@ -38,7 +38,10 @@ export function credentialLabel(value: CredentialType): string {
 }
 
 export function credentialProtocol(value: CredentialType): Protocol {
-  return value === 'rdp_password' ? 'rdp' : 'ssh'
+  if (value === 'rdp_password') return 'rdp'
+  if (value === 'vnc_password') return 'vnc'
+  if (value === 'database_password') return 'database'
+  return 'ssh'
 }
 
 export function statusLabel(value: SessionStatus): string {

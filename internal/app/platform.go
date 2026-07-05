@@ -236,6 +236,19 @@ func (s *Server) handleAccessAction(w http.ResponseWriter, r *http.Request) {
 		s.handleDatabaseWorkOrderCreate(w, r, asset, userID)
 		return
 	}
+	if protocol == model.ProtocolRDP || protocol == model.ProtocolVNC {
+		if r.Method != http.MethodPost {
+			writeError(w, http.StatusMethodNotAllowed, "method not allowed")
+			return
+		}
+		req, ok := decodeOptionalDesktopCreateRequest(w, r)
+		if !ok {
+			return
+		}
+		req.AssetID = assetID
+		s.createPlatformDesktopSession(w, r, protocol, req, http.StatusAccepted)
+		return
+	}
 	item, err := s.cfg.Store.CreatePlatformItem("online_sessions", model.PlatformItemRequest{
 		Name:        protocolSessionName(protocol, asset.Name),
 		Type:        string(protocol),

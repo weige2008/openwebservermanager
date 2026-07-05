@@ -37,7 +37,45 @@ type RDPConfig struct {
 	DPI        int
 }
 
+type DesktopConfig struct {
+	Protocol    model.Protocol
+	Session     model.ConnectionSession
+	Host        string
+	Port        int
+	Username    string
+	Password    string
+	Domain      string
+	Width       int
+	Height      int
+	DPI         int
+	ColorDepth  int
+	IgnoreCert  bool
+	EnableDrive bool
+}
+
 func (t Tunnel) Run(ctx context.Context, browser *ws.Conn, cfg RDPConfig) {
+	port := cfg.Server.RDPPort
+	if port == 0 {
+		port = 3389
+	}
+	t.RunDesktop(ctx, browser, DesktopConfig{
+		Protocol:    model.ProtocolRDP,
+		Session:     cfg.Session,
+		Host:        cfg.Server.Host,
+		Port:        port,
+		Username:    cfg.Credential.Username,
+		Password:    cfg.Secret.Password,
+		Domain:      cfg.Credential.Domain,
+		Width:       cfg.Width,
+		Height:      cfg.Height,
+		DPI:         cfg.DPI,
+		ColorDepth:  24,
+		IgnoreCert:  true,
+		EnableDrive: true,
+	})
+}
+
+func (t Tunnel) RunDesktop(ctx context.Context, browser *ws.Conn, cfg DesktopConfig) {
 	defer browser.Close()
 
 	if cfg.Width <= 0 {
@@ -217,8 +255,12 @@ func trimTraceArgs(args []string, limit int) []string {
 	return out
 }
 
-func (t Tunnel) handshake(conn net.Conn, reader *bufio.Reader, cfg RDPConfig) error {
-	if _, err := conn.Write(Encode("select", "rdp")); err != nil {
+func (t Tunnel) handshake(conn net.Conn, reader *bufio.Reader, cfg DesktopConfig) error {
+	protocol := strings.ToLower(string(cfg.Protocol))
+	if protocol == "" {
+		protocol = "rdp"
+	}
+	if _, err := conn.Write(Encode("select", protocol)); err != nil {
 		return fmt.Errorf("send select: %w", err)
 	}
 
@@ -256,29 +298,37 @@ func (t Tunnel) handshake(conn net.Conn, reader *bufio.Reader, cfg RDPConfig) er
 	return nil
 }
 
-func (t Tunnel) argValue(name string, cfg RDPConfig) string {
+func (t Tunnel) argValue(name string, cfg DesktopConfig) string {
 	if strings.HasPrefix(name, "VERSION_") {
 		return name
 	}
 	recordingPath := cfg.Session.RecordingPath
 	drivePath := filepath.Join(t.DataDir, "drives", cfg.Session.ID)
 	recordingEnabled := recordingPath != ""
+	if cfg.Port == 0 {
+		cfg.Port = defaultDesktopPort(cfg.Protocol)
+	}
+	if cfg.ColorDepth == 0 {
+		cfg.ColorDepth = 24
+	}
 	// guacd often runs as a different OS user than openwebservermanager.
 	// Session-scoped transfer/recording directories must be writable by that process.
 	if recordingEnabled {
 		_ = ensureGuacdWritableDir(recordingPath)
 	}
-	_ = ensureGuacdWritableDir(drivePath)
+	if cfg.EnableDrive {
+		_ = ensureGuacdWritableDir(drivePath)
+	}
 
 	values := map[string]string{
-		"hostname":                  cfg.Server.Host,
-		"port":                      strconv.Itoa(cfg.Server.RDPPort),
-		"username":                  cfg.Credential.Username,
-		"password":                  cfg.Secret.Password,
-		"domain":                    cfg.Credential.Domain,
+		"hostname":                  cfg.Host,
+		"port":                      strconv.Itoa(cfg.Port),
+		"username":                  cfg.Username,
+		"password":                  cfg.Password,
+		"domain":                    cfg.Domain,
 		"security":                  "any",
-		"ignore-cert":               "true",
-		"color-depth":               "24",
+		"ignore-cert":               boolString(cfg.IgnoreCert),
+		"color-depth":               strconv.Itoa(cfg.ColorDepth),
 		"enable-wallpaper":          "false",
 		"enable-theming":            "false",
 		"disable-bitmap-caching":    "true",
@@ -286,10 +336,10 @@ func (t Tunnel) argValue(name string, cfg RDPConfig) string {
 		"disable-glyph-caching":     "true",
 		"initial-program":           "explorer.exe",
 		"resize-method":             "display-update",
-		"enable-drive":              "true",
+		"enable-drive":              boolString(cfg.EnableDrive),
 		"drive-name":                "openwebservermanager",
 		"drive-path":                drivePath,
-		"create-drive-path":         "true",
+		"create-drive-path":         boolString(cfg.EnableDrive),
 		"enable-recording":          boolString(recordingEnabled),
 		"recording-path":            recordingPath,
 		"create-recording-path":     boolString(recordingEnabled),
@@ -301,8 +351,18 @@ func (t Tunnel) argValue(name string, cfg RDPConfig) string {
 		"width":                     strconv.Itoa(cfg.Width),
 		"height":                    strconv.Itoa(cfg.Height),
 		"dpi":                       strconv.Itoa(cfg.DPI),
+		"cursor":                    "remote",
+		"read-only":                 "false",
+		"swap-red-blue":             "false",
 	}
 	return values[name]
+}
+
+func defaultDesktopPort(protocol model.Protocol) int {
+	if protocol == model.ProtocolVNC {
+		return 5900
+	}
+	return 3389
 }
 
 func ensureGuacdWritableDir(path string) error {
@@ -350,7 +410,7 @@ func boolString(value bool) string {
 
 func (t Tunnel) fail(sessionID string, err error) {
 	if t.Logger != nil {
-		t.Logger.Warn("rdp session failed", "session", sessionID, "error", err)
+		t.Logger.Warn("desktop session failed", "session", sessionID, "error", err)
 	}
 	now := time.Now().UTC()
 	_, _ = t.Store.UpdateSession(sessionID, func(item *model.ConnectionSession) {

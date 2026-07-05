@@ -147,6 +147,10 @@ func (s *Server) serveAPI(w http.ResponseWriter, r *http.Request) {
 		s.handleCreateRDP(w, r)
 	case r.Method == http.MethodGet && strings.HasPrefix(r.URL.Path, "/api/connections/rdp/") && strings.HasSuffix(r.URL.Path, "/tunnel"):
 		s.handleRDPTunnel(w, r)
+	case r.Method == http.MethodPost && r.URL.Path == "/api/connections/vnc":
+		s.handleCreateVNC(w, r)
+	case r.Method == http.MethodGet && strings.HasPrefix(r.URL.Path, "/api/connections/vnc/") && strings.HasSuffix(r.URL.Path, "/tunnel"):
+		s.handleVNCTunnel(w, r)
 	case r.Method == http.MethodGet && strings.HasPrefix(r.URL.Path, "/api/connections/") && strings.HasSuffix(r.URL.Path, "/recording.zip"):
 		s.handleRecordingDownload(w, r)
 	case r.Method == http.MethodPost && strings.HasPrefix(r.URL.Path, "/api/connections/") && strings.HasSuffix(r.URL.Path, "/close"):
@@ -446,33 +450,7 @@ func (s *Server) handleCreateRDP(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleRDPTunnel(w http.ResponseWriter, r *http.Request) {
-	if !s.sameOriginRequest(r) {
-		writeError(w, http.StatusForbidden, "cross-origin websocket rejected")
-		return
-	}
-	id := pathSegment(r.URL.Path, 3)
-	session, server, credential, secret, ok := s.connectionParts(w, r, id, model.ProtocolRDP)
-	if !ok {
-		return
-	}
-	conn, err := ws.Upgrade(w, r)
-	if err != nil {
-		writeError(w, http.StatusBadRequest, err.Error())
-		return
-	}
-	width, _ := strconv.Atoi(r.URL.Query().Get("width"))
-	height, _ := strconv.Atoi(r.URL.Query().Get("height"))
-	dpi, _ := strconv.Atoi(r.URL.Query().Get("dpi"))
-	_ = s.audit(r, "connection.rdp.open", session.ID, model.ProtocolRDP, "opened rdp tunnel")
-	guac.Tunnel{Manager: s.cfg.Guacd, Store: s.cfg.Store, Logger: slog.Default(), DataDir: s.cfg.DataDir}.Run(r.Context(), conn, guac.RDPConfig{
-		Session:    session,
-		Server:     server,
-		Credential: credential,
-		Secret:     secret,
-		Width:      width,
-		Height:     height,
-		DPI:        dpi,
-	})
+	s.handleDesktopTunnel(w, r, model.ProtocolRDP)
 }
 
 func (s *Server) handleRecordingDownload(w http.ResponseWriter, r *http.Request) {
@@ -482,7 +460,7 @@ func (s *Server) handleRecordingDownload(w http.ResponseWriter, r *http.Request)
 		writeError(w, http.StatusNotFound, "session not found")
 		return
 	}
-	if session.Protocol != model.ProtocolRDP || session.RecordingPath == "" {
+	if (session.Protocol != model.ProtocolRDP && session.Protocol != model.ProtocolVNC) || session.RecordingPath == "" {
 		writeError(w, http.StatusNotFound, "recording not found")
 		return
 	}

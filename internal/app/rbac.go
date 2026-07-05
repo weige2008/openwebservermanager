@@ -53,6 +53,13 @@ func isAlwaysAllowedAuthenticatedAPI(r *http.Request) bool {
 	if strings.HasPrefix(path, "/api/access/") {
 		return true
 	}
+	if strings.HasPrefix(path, "/api/connections/") &&
+		(strings.HasSuffix(path, "/ws") ||
+			strings.HasSuffix(path, "/tunnel") ||
+			strings.HasSuffix(path, "/close") ||
+			strings.HasSuffix(path, "/recording.zip")) {
+		return true
+	}
 	return false
 }
 

@@ -132,6 +132,8 @@ const en = {
     ssh_password: 'SSH password',
     ssh_key: 'SSH private key',
     rdp_password: 'RDP password',
+    vnc_password: 'VNC password',
+    database_password: 'Database password',
   },
   statusLabels: {
     pending: 'Pending',
@@ -520,6 +522,8 @@ const zh = {
     ssh_password: 'SSH 密码',
     ssh_key: 'SSH 私钥',
     rdp_password: 'RDP 密码',
+    vnc_password: 'VNC 密码',
+    database_password: '数据库密码',
   },
   statusLabels: {
     pending: '等待中',
@@ -818,6 +822,8 @@ const zhTW = {
     ssh_password: 'SSH 密碼',
     ssh_key: 'SSH 私鑰',
     rdp_password: 'RDP 密碼',
+    vnc_password: 'VNC 密碼',
+    database_password: '資料庫密碼',
   },
   statusLabels: {
     pending: '等待中',
@@ -1002,6 +1008,8 @@ const fr = {
     ssh_password: 'Mot de passe SSH',
     ssh_key: 'Clé privée SSH',
     rdp_password: 'Mot de passe RDP',
+    vnc_password: 'Mot de passe VNC',
+    database_password: 'Mot de passe base de données',
   },
   statusLabels: {
     pending: 'En attente',
@@ -1194,6 +1202,8 @@ const ru = {
     ssh_password: 'SSH пароль',
     ssh_key: 'SSH закрытый ключ',
     rdp_password: 'RDP пароль',
+    vnc_password: 'VNC password',
+    database_password: 'Database password',
   },
   statusLabels: {
     pending: 'Ожидание',
@@ -1379,6 +1389,8 @@ const ja = {
     ssh_password: 'SSH パスワード',
     ssh_key: 'SSH 秘密鍵',
     rdp_password: 'RDP パスワード',
+    vnc_password: 'VNC password',
+    database_password: 'Database password',
   },
   statusLabels: {
     pending: '待機中',
@@ -1564,6 +1576,8 @@ const vi = {
     ssh_password: 'Mật khẩu SSH',
     ssh_key: 'Khóa riêng SSH',
     rdp_password: 'Mật khẩu RDP',
+    vnc_password: 'VNC password',
+    database_password: 'Database password',
   },
   statusLabels: {
     pending: 'Đang chờ',

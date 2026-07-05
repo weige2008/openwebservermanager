@@ -154,6 +154,115 @@ func TestPlatformUserLoginAndAccessAuthorization(t *testing.T) {
 	assertStatus(t, handler, http.MethodPost, "/api/access/ssh/"+asset.ID, nil, userCookie, http.StatusAccepted)
 }
 
+func TestVNCPlatformAccessCreatesDesktopSession(t *testing.T) {
+	handler, adminCookie := newTestHandler(t)
+
+	userRec := assertStatus(t, handler, http.MethodPost, "/api/admin/users", map[string]any{
+		"name":     "vnc-user",
+		"type":     "local",
+		"status":   "enabled",
+		"password": "password123",
+		"metadata": map[string]any{"role": "user"},
+	}, adminCookie, http.StatusCreated)
+	var user model.PlatformItem
+	decodeResponse(t, userRec, &user)
+
+	assetRec := assertStatus(t, handler, http.MethodPost, "/api/admin/assets", map[string]any{
+		"name":     "vnc-desktop",
+		"type":     "linux-desktop",
+		"status":   "active",
+		"protocol": "vnc",
+		"host":     "127.0.0.1",
+		"port":     5901,
+	}, adminCookie, http.StatusCreated)
+	var asset model.PlatformItem
+	decodeResponse(t, assetRec, &asset)
+
+	credentialRec := assertStatus(t, handler, http.MethodPost, "/api/admin/credentials", map[string]any{
+		"name":      "vnc-password",
+		"type":      "vnc_password",
+		"status":    "encrypted",
+		"username":  "operator",
+		"password":  "secret-vnc",
+		"target_id": asset.ID,
+	}, adminCookie, http.StatusCreated)
+	var credential model.PlatformItem
+	decodeResponse(t, credentialRec, &credential)
+	for _, leaked := range []string{"password", "plain_password", "encrypted_password"} {
+		if _, ok := credential.Metadata[leaked]; ok {
+			t.Fatalf("platform credential response leaked %s", leaked)
+		}
+	}
+
+	badCredentialRec := assertStatus(t, handler, http.MethodPost, "/api/admin/credentials", map[string]any{
+		"name":      "rdp-password",
+		"type":      "rdp_password",
+		"status":    "encrypted",
+		"username":  "administrator",
+		"password":  "secret-rdp",
+		"target_id": asset.ID,
+	}, adminCookie, http.StatusCreated)
+	var badCredential model.PlatformItem
+	decodeResponse(t, badCredentialRec, &badCredential)
+	assertStatus(t, handler, http.MethodPost, "/api/connections/vnc", map[string]any{
+		"asset_id":      asset.ID,
+		"credential_id": badCredential.ID,
+	}, adminCookie, http.StatusBadRequest)
+
+	loginRec := assertStatus(t, handler, http.MethodPost, "/api/auth/login", map[string]any{"username": "vnc-user", "password": "password123"}, nil, http.StatusOK)
+	userCookie := loginRec.Result().Cookies()[0]
+
+	assertStatus(t, handler, http.MethodPost, "/api/access/vnc/"+asset.ID, map[string]any{
+		"recording_enabled": true,
+	}, userCookie, http.StatusForbidden)
+
+	assertStatus(t, handler, http.MethodPost, "/api/admin/authorizations/assets", map[string]any{
+		"name":      "vnc-user desktop",
+		"owner_id":  user.ID,
+		"target_id": asset.ID,
+		"status":    "enabled",
+	}, adminCookie, http.StatusCreated)
+
+	accessRec := assertStatus(t, handler, http.MethodPost, "/api/access/vnc/"+asset.ID, map[string]any{
+		"width":             1280,
+		"height":            720,
+		"recording_enabled": true,
+	}, userCookie, http.StatusAccepted)
+	var session model.ConnectionSession
+	decodeResponse(t, accessRec, &session)
+	if session.Protocol != model.ProtocolVNC || session.ServerID != asset.ID || session.CredentialID != credential.ID {
+		t.Fatalf("unexpected vnc session: %#v", session)
+	}
+	if session.Width != 1280 || session.Height != 720 {
+		t.Fatalf("session dimensions = %dx%d, want 1280x720", session.Width, session.Height)
+	}
+	if session.RecordingPath == "" {
+		t.Fatal("vnc recording path was not created")
+	}
+	if info, err := os.Stat(session.RecordingPath); err != nil || !info.IsDir() {
+		t.Fatalf("vnc recording directory missing: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(session.RecordingPath, "recording.guac"), []byte("vnc frames"), 0o660); err != nil {
+		t.Fatalf("write fake vnc recording: %v", err)
+	}
+	downloadRec := assertStatus(t, handler, http.MethodGet, "/api/connections/"+session.ID+"/recording.zip", nil, userCookie, http.StatusOK)
+	assertZipContains(t, downloadRec.Body.Bytes(), "recording.guac", "vnc frames")
+	assertStatus(t, handler, http.MethodPost, "/api/connections/"+session.ID+"/close", nil, userCookie, http.StatusOK)
+
+	directRec := assertStatus(t, handler, http.MethodPost, "/api/connections/vnc", map[string]any{
+		"asset_id":          asset.ID,
+		"credential_id":     credential.ID,
+		"recording_enabled": true,
+		"width":             1024,
+		"height":            768,
+	}, adminCookie, http.StatusCreated)
+	var directSession model.ConnectionSession
+	decodeResponse(t, directRec, &directSession)
+	if directSession.Protocol != model.ProtocolVNC || directSession.CredentialID != credential.ID {
+		t.Fatalf("unexpected direct vnc session: %#v", directSession)
+	}
+}
+
 func TestConnectionAPIsRequireAssetAuthorization(t *testing.T) {
 	handler, adminCookie := newTestHandler(t)
 

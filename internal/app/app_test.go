@@ -145,6 +145,102 @@ func TestPlatformUserLoginAndAccessAuthorization(t *testing.T) {
 	assertStatus(t, handler, http.MethodPost, "/api/access/ssh/"+asset.ID, nil, userCookie, http.StatusAccepted)
 }
 
+func TestConnectionAPIsRequireAssetAuthorization(t *testing.T) {
+	handler, adminCookie := newTestHandler(t)
+
+	linuxRec := assertStatus(t, handler, http.MethodPost, "/api/servers", map[string]any{
+		"name":     "ssh-target",
+		"host":     "127.0.0.1",
+		"os":       "linux",
+		"ssh_port": 22,
+	}, adminCookie, http.StatusCreated)
+	var linuxServer model.Server
+	decodeResponse(t, linuxRec, &linuxServer)
+
+	sshCredRec := assertStatus(t, handler, http.MethodPost, "/api/credentials", map[string]any{
+		"name":      "ssh-root",
+		"server_id": linuxServer.ID,
+		"type":      "ssh_password",
+		"username":  "root",
+		"password":  "password123",
+	}, adminCookie, http.StatusCreated)
+	var sshCredential model.CredentialPublic
+	decodeResponse(t, sshCredRec, &sshCredential)
+
+	windowsRec := assertStatus(t, handler, http.MethodPost, "/api/servers", map[string]any{
+		"name":     "rdp-target",
+		"host":     "127.0.0.1",
+		"os":       "windows",
+		"rdp_port": 3389,
+	}, adminCookie, http.StatusCreated)
+	var windowsServer model.Server
+	decodeResponse(t, windowsRec, &windowsServer)
+
+	rdpCredRec := assertStatus(t, handler, http.MethodPost, "/api/credentials", map[string]any{
+		"name":      "rdp-admin",
+		"server_id": windowsServer.ID,
+		"type":      "rdp_password",
+		"username":  "administrator",
+		"password":  "password123",
+	}, adminCookie, http.StatusCreated)
+	var rdpCredential model.CredentialPublic
+	decodeResponse(t, rdpCredRec, &rdpCredential)
+
+	assertStatus(t, handler, http.MethodPost, "/api/admin/roles", map[string]any{
+		"name":   "connection-operator",
+		"type":   "custom",
+		"status": "enabled",
+		"metadata": map[string]any{
+			"api_permissions": []string{
+				"POST /api/connections/ssh",
+				"POST /api/connections/rdp",
+			},
+		},
+	}, adminCookie, http.StatusCreated)
+	userRec := assertStatus(t, handler, http.MethodPost, "/api/admin/users", map[string]any{
+		"name":     "connection-user",
+		"type":     "local",
+		"status":   "enabled",
+		"password": "password123",
+		"metadata": map[string]any{"role": "connection-operator"},
+	}, adminCookie, http.StatusCreated)
+	var user model.PlatformItem
+	decodeResponse(t, userRec, &user)
+	loginRec := assertStatus(t, handler, http.MethodPost, "/api/auth/login", map[string]any{"username": "connection-user", "password": "password123"}, nil, http.StatusOK)
+	userCookie := loginRec.Result().Cookies()[0]
+
+	assertStatus(t, handler, http.MethodPost, "/api/connections/ssh", map[string]any{
+		"server_id":     linuxServer.ID,
+		"credential_id": sshCredential.ID,
+	}, userCookie, http.StatusForbidden)
+	assertStatus(t, handler, http.MethodPost, "/api/connections/rdp", map[string]any{
+		"server_id":     windowsServer.ID,
+		"credential_id": rdpCredential.ID,
+	}, userCookie, http.StatusForbidden)
+
+	assertStatus(t, handler, http.MethodPost, "/api/admin/authorizations/assets", map[string]any{
+		"name":      "connection-user ssh-target",
+		"owner_id":  user.ID,
+		"target_id": linuxServer.ID,
+		"status":    "enabled",
+	}, adminCookie, http.StatusCreated)
+	assertStatus(t, handler, http.MethodPost, "/api/connections/ssh", map[string]any{
+		"server_id":     linuxServer.ID,
+		"credential_id": sshCredential.ID,
+	}, userCookie, http.StatusCreated)
+
+	assertStatus(t, handler, http.MethodPost, "/api/admin/authorizations/assets", map[string]any{
+		"name":      "connection-user rdp-target",
+		"owner_id":  user.ID,
+		"target_id": windowsServer.ID,
+		"status":    "enabled",
+	}, adminCookie, http.StatusCreated)
+	assertStatus(t, handler, http.MethodPost, "/api/connections/rdp", map[string]any{
+		"server_id":     windowsServer.ID,
+		"credential_id": rdpCredential.ID,
+	}, userCookie, http.StatusCreated)
+}
+
 func TestRoleBasedAccessControl(t *testing.T) {
 	handler, adminCookie := newTestHandler(t)
 

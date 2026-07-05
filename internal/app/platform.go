@@ -366,7 +366,8 @@ func (s *Server) accessUser(r *http.Request) (string, bool) {
 	if !ok {
 		return "", false
 	}
-	return session.UserID, session.Role == "admin" || session.Role == "super_admin"
+	kind := s.roleDecision(session.Role).Kind
+	return session.UserID, kind == roleSuperAdmin || kind == roleAdmin
 }
 
 func filterAuthorizedItems(items, authorizations []model.PlatformItem, userID string, isAdmin bool) []model.PlatformItem {

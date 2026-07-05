@@ -321,6 +321,9 @@ func (s *Server) handleCreateSSH(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "ssh is only supported for linux servers")
 		return
 	}
+	if !s.requireAssetAuthorization(w, r, model.ProtocolSSH, server.ID) {
+		return
+	}
 	req.Cols = clampInt(req.Cols, 40, 300, 120)
 	req.Rows = clampInt(req.Rows, 10, 120, 32)
 
@@ -392,6 +395,9 @@ func (s *Server) handleCreateRDP(w http.ResponseWriter, r *http.Request) {
 	}
 	if server.OS != model.ServerOSWindows {
 		writeError(w, http.StatusBadRequest, "rdp is only supported for windows servers")
+		return
+	}
+	if !s.requireAssetAuthorization(w, r, model.ProtocolRDP, server.ID) {
 		return
 	}
 	req.Width = clampInt(req.Width, 640, 7680, 1440)
@@ -559,6 +565,21 @@ func (s *Server) connectionParts(w http.ResponseWriter, r *http.Request, session
 		return model.ConnectionSession{}, model.Server{}, model.Credential{}, store.CredentialSecret{}, false
 	}
 	return session, server, credential, secret, true
+}
+
+func (s *Server) requireAssetAuthorization(w http.ResponseWriter, r *http.Request, protocol model.Protocol, assetID string) bool {
+	platform, err := s.cfg.Store.PlatformBootstrap()
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err.Error())
+		return false
+	}
+	userID, isAdmin := s.accessUser(r)
+	if isAccessAuthorized(platform, protocol, assetID, userID, isAdmin) {
+		return true
+	}
+	_ = s.audit(r, "connection."+string(protocol)+".denied", assetID, protocol, "asset access denied")
+	writeError(w, http.StatusForbidden, "asset access denied")
+	return false
 }
 
 func (s *Server) audit(r *http.Request, action, targetID string, protocol model.Protocol, detail string) error {

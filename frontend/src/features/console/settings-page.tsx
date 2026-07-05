@@ -1,4 +1,4 @@
-import { Monitor, Moon, RotateCcw, ShieldCheck, Sun, UserCircle } from 'lucide-react'
+import { KeyRound, Monitor, Moon, RotateCcw, ShieldCheck, Sun, UserCircle } from 'lucide-react'
 import { useEffect, useState } from 'react'
 import { useTranslation } from 'react-i18next'
 
@@ -11,7 +11,7 @@ import { AboutContent } from '@/features/about/about-page'
 import { INTERFACE_LANGUAGE_OPTIONS } from '@/i18n/languages'
 import { apiRequest } from '@/lib/api'
 import { formatDate } from '@/lib/utils'
-import type { Locale, Theme, ThemeContentLayout, ThemeFont, ThemePreset, ThemeRadius, ThemeScale, ThemeSidebarStyle } from '@/types'
+import type { Locale, PlatformItem, Theme, ThemeContentLayout, ThemeFont, ThemePreset, ThemeRadius, ThemeScale, ThemeSidebarStyle } from '@/types'
 
 const presetOptions: Array<{ value: ThemePreset; label: string }> = [
   { value: 'default', label: 'Default' },
@@ -59,6 +59,17 @@ interface MFASetup {
   otpauth_url: string
 }
 
+interface LoginSecurityState {
+  captchaEnabled: boolean
+  passwordLoginDisabled: boolean
+  setting?: PlatformItem
+}
+
+const loginSecurityTypes = ['security', 'identity', 'login', 'password', 'captcha']
+const captchaKeys = ['captcha_enabled', 'login_captcha', 'enable_captcha', 'captcha', 'require_captcha']
+const disablePasswordKeys = ['disable_password_login', 'password_login_disabled', 'disablePasswordLogin', 'passwordLoginDisabled', 'no_password_login']
+const passwordLoginKeys = ['password_login', 'enable_password_login', 'password_auth', 'local_password_login']
+
 export function SettingsPage() {
   const app = useApp()
   const { t } = useTranslation()
@@ -70,14 +81,33 @@ export function SettingsPage() {
   const [mfaCode, setMFACode] = useState('')
   const [mfaPassword, setMFAPassword] = useState('')
   const [mfaBusy, setMFABusy] = useState(false)
+  const [loginSecurity, setLoginSecurity] = useState<LoginSecurityState>({
+    captchaEnabled: app.captchaRequired,
+    passwordLoginDisabled: app.passwordLoginDisabled,
+  })
+  const [loginSecurityBusy, setLoginSecurityBusy] = useState(false)
 
   const loadMFAStatus = async () => {
     setMFAStatus(await apiRequest<MFAStatus>('/api/auth/mfa/status'))
   }
 
+  const loadLoginSecurity = async () => {
+    const result = await apiRequest<{ items: PlatformItem[] }>('/api/admin/system-settings')
+    setLoginSecurity(loginSecurityFromSettings(result.items, app.captchaRequired, app.passwordLoginDisabled))
+  }
+
   useEffect(() => {
     void loadMFAStatus().catch(() => undefined)
+    void loadLoginSecurity().catch(() => undefined)
   }, [])
+
+  useEffect(() => {
+    setLoginSecurity((current) => ({
+      ...current,
+      captchaEnabled: app.captchaRequired,
+      passwordLoginDisabled: app.passwordLoginDisabled,
+    }))
+  }, [app.captchaRequired, app.passwordLoginDisabled])
 
   const startMFASetup = async () => {
     setMFABusy(true)
@@ -127,6 +157,46 @@ export function SettingsPage() {
       app.handleApiError(error)
     } finally {
       setMFABusy(false)
+    }
+  }
+
+  const updateLoginSecurity = async (next: Partial<LoginSecurityState>) => {
+    setLoginSecurityBusy(true)
+    try {
+      const merged = { ...loginSecurity, ...next }
+      const result = await apiRequest<{ items: PlatformItem[] }>('/api/admin/system-settings')
+      const current = loginSecurityFromSettings(result.items, app.captchaRequired, app.passwordLoginDisabled)
+      const target = current.setting
+      const metadata = {
+        ...(target?.metadata ?? {}),
+        captcha_enabled: merged.captchaEnabled,
+        disable_password_login: merged.passwordLoginDisabled,
+        password_login: !merged.passwordLoginDisabled,
+      }
+      const payload = {
+        name: target?.name || 'Login security',
+        type: target?.type && target.type !== 'captcha' ? target.type : 'security',
+        status: 'enabled',
+        metadata,
+      }
+      if (target?.id) {
+        await apiRequest<PlatformItem>(`/api/admin/system-settings/${target.id}`, {
+          method: 'PATCH',
+          body: JSON.stringify(payload),
+        })
+      } else {
+        await apiRequest<PlatformItem>('/api/admin/system-settings', {
+          method: 'POST',
+          body: JSON.stringify(payload),
+        })
+      }
+      await app.refresh(true)
+      await loadLoginSecurity()
+      app.showToast(t('saved'))
+    } catch (error) {
+      app.handleApiError(error)
+    } finally {
+      setLoginSecurityBusy(false)
     }
   }
 
@@ -235,6 +305,57 @@ export function SettingsPage() {
               <Button variant='primary' onClick={() => void startMFASetup()} disabled={mfaBusy}>Set up MFA</Button>
             </div>
           )}
+        </div>
+      </CardStaggerItem>
+
+      <CardStaggerItem className='grid gap-4 rounded-xl border border-border bg-card p-5 shadow-sm lg:grid-cols-[0.85fr_1.15fr]'>
+        <div className='flex min-w-0 items-start gap-3'>
+          <span className='grid size-12 shrink-0 place-items-center rounded-full bg-primary text-primary-foreground'>
+            <KeyRound className='size-5' />
+          </span>
+          <div className='min-w-0'>
+            <div className='flex flex-wrap items-center gap-2'>
+              <h2 className='truncate text-base font-semibold'>{t('settingsPage.loginSecurityTitle')}</h2>
+              <Badge tone={loginSecurity.captchaEnabled ? 'success' : 'warning'}>
+                {loginSecurity.captchaEnabled ? t('settingsPage.captchaEnabled') : t('settingsPage.captchaDisabled')}
+              </Badge>
+              <Badge tone={loginSecurity.passwordLoginDisabled ? 'danger' : 'success'}>
+                {loginSecurity.passwordLoginDisabled ? t('settingsPage.passwordLoginDisabled') : t('settingsPage.passwordLoginEnabled')}
+              </Badge>
+            </div>
+            <p className='mt-1 max-w-lg text-sm leading-6 text-muted-foreground'>{t('settingsPage.loginSecurityDescription')}</p>
+            {loginSecurity.passwordLoginDisabled ? (
+              <p className='mt-2 text-xs leading-5 text-amber-600 dark:text-amber-300'>{t('settingsPage.passwordLoginDisabledWarning')}</p>
+            ) : null}
+          </div>
+        </div>
+        <div className='grid gap-3'>
+          <div className='flex flex-wrap items-center justify-between gap-3 rounded-lg border border-border bg-background/70 p-3'>
+            <div className='min-w-0'>
+              <div className='text-sm font-medium'>{t('settingsPage.loginCaptchaTitle')}</div>
+              <p className='mt-1 text-xs leading-5 text-muted-foreground'>{t('settingsPage.loginCaptchaDescription')}</p>
+            </div>
+            <Button
+              variant={loginSecurity.captchaEnabled ? 'outline' : 'primary'}
+              onClick={() => void updateLoginSecurity({ captchaEnabled: !loginSecurity.captchaEnabled })}
+              disabled={loginSecurityBusy}
+            >
+              {loginSecurity.captchaEnabled ? t('settingsPage.disableCaptcha') : t('settingsPage.enableCaptcha')}
+            </Button>
+          </div>
+          <div className='flex flex-wrap items-center justify-between gap-3 rounded-lg border border-border bg-background/70 p-3'>
+            <div className='min-w-0'>
+              <div className='text-sm font-medium'>{t('settingsPage.passwordLoginTitle')}</div>
+              <p className='mt-1 text-xs leading-5 text-muted-foreground'>{t('settingsPage.passwordLoginDescription')}</p>
+            </div>
+            <Button
+              variant={loginSecurity.passwordLoginDisabled ? 'primary' : 'destructive'}
+              onClick={() => void updateLoginSecurity({ passwordLoginDisabled: !loginSecurity.passwordLoginDisabled })}
+              disabled={loginSecurityBusy}
+            >
+              {loginSecurity.passwordLoginDisabled ? t('settingsPage.enablePasswordLogin') : t('settingsPage.disablePasswordLogin')}
+            </Button>
+          </div>
         </div>
       </CardStaggerItem>
 
@@ -363,4 +484,54 @@ function InfoTile({ label, value }: { label: string; value: string }) {
       <div className='mt-1 truncate font-mono text-sm'>{value}</div>
     </div>
   )
+}
+
+function loginSecurityFromSettings(items: PlatformItem[], fallbackCaptcha: boolean, fallbackPasswordDisabled: boolean): LoginSecurityState {
+  let captchaEnabled = fallbackCaptcha
+  let passwordLoginDisabled = fallbackPasswordDisabled
+  const candidates = items.filter((item) => platformItemEnabled(item) && loginSecurityTypes.includes((item.type || '').trim().toLowerCase()))
+  for (const item of candidates) {
+    const metadata = item.metadata ?? {}
+    if (captchaKeys.some((key) => metadataTruthy(metadata[key]))) {
+      captchaEnabled = true
+    }
+    if (disablePasswordKeys.some((key) => metadataTruthy(metadata[key]))) {
+      passwordLoginDisabled = true
+    }
+    for (const key of passwordLoginKeys) {
+      const parsed = metadataBoolValue(metadata[key])
+      if (parsed !== null && !parsed) {
+        passwordLoginDisabled = true
+      }
+    }
+  }
+  const setting =
+    candidates.find((item) => item.name === 'Login security') ||
+    candidates.find((item) => hasLoginSecurityMetadata(item)) ||
+    candidates[0]
+  return { captchaEnabled, passwordLoginDisabled, setting }
+}
+
+function hasLoginSecurityMetadata(item: PlatformItem) {
+  const metadata = item.metadata ?? {}
+  return [...captchaKeys, ...disablePasswordKeys, ...passwordLoginKeys].some((key) => Object.prototype.hasOwnProperty.call(metadata, key))
+}
+
+function platformItemEnabled(item: PlatformItem) {
+  const status = (item.status || '').trim().toLowerCase()
+  return status === '' || status === 'enabled' || status === 'active' || status === 'locked'
+}
+
+function metadataTruthy(value: unknown) {
+  return metadataBoolValue(value) === true
+}
+
+function metadataBoolValue(value: unknown): boolean | null {
+  if (typeof value === 'boolean') return value
+  if (typeof value === 'number') return value !== 0
+  if (typeof value !== 'string') return null
+  const normalized = value.trim().toLowerCase()
+  if (['true', '1', 'yes', 'enabled', 'required', 'on'].includes(normalized)) return true
+  if (['false', '0', 'no', 'disabled', 'off'].includes(normalized)) return false
+  return null
 }

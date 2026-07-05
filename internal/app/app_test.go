@@ -894,6 +894,52 @@ func TestLoginCaptchaRequirement(t *testing.T) {
 	}
 }
 
+func TestDisablePasswordLoginSetting(t *testing.T) {
+	handler, adminCookie := newTestHandler(t)
+
+	createRec := assertStatus(t, handler, http.MethodPost, "/api/admin/system-settings", map[string]any{
+		"name":   "Disable password login",
+		"type":   "security",
+		"status": "enabled",
+		"metadata": map[string]any{
+			"disable_password_login": true,
+		},
+	}, adminCookie, http.StatusCreated)
+	var setting model.PlatformItem
+	decodeResponse(t, createRec, &setting)
+
+	statusRec := assertStatus(t, handler, http.MethodGet, "/api/auth/status", nil, nil, http.StatusOK)
+	if !strings.Contains(statusRec.Body.String(), `"password_login_disabled":true`) {
+		t.Fatal("auth status did not report disabled password login")
+	}
+	assertStatus(t, handler, http.MethodPost, "/api/auth/login", map[string]any{
+		"username": "admin",
+		"password": "password123",
+	}, nil, http.StatusForbidden)
+	logsRec := assertStatus(t, handler, http.MethodGet, "/api/admin/audit/login-logs", nil, adminCookie, http.StatusOK)
+	if !strings.Contains(logsRec.Body.String(), "password login is disabled") {
+		t.Fatal("disabled password login was not written to login logs")
+	}
+	auditRec := assertStatus(t, handler, http.MethodGet, "/api/admin/audit/operation-logs", nil, adminCookie, http.StatusOK)
+	if !strings.Contains(auditRec.Body.String(), "auth.login.password_denied") {
+		t.Fatal("disabled password login was not written to audit logs")
+	}
+
+	assertStatus(t, handler, http.MethodPatch, "/api/admin/system-settings/"+setting.ID, map[string]any{
+		"name":   "Disable password login",
+		"type":   "security",
+		"status": "enabled",
+		"metadata": map[string]any{
+			"disable_password_login": false,
+			"password_login":         true,
+		},
+	}, adminCookie, http.StatusOK)
+	assertStatus(t, handler, http.MethodPost, "/api/auth/login", map[string]any{
+		"username": "admin",
+		"password": "password123",
+	}, nil, http.StatusOK)
+}
+
 func TestTOTPLoginMFASetupChallengeRecoveryAndDisable(t *testing.T) {
 	handler, adminCookie := newTestHandler(t)
 

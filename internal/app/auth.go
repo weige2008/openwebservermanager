@@ -51,8 +51,9 @@ type mfaChallenge struct {
 }
 
 type authStatus struct {
-	Configured      bool `json:"configured"`
-	CaptchaRequired bool `json:"captcha_required"`
+	Configured            bool `json:"configured"`
+	CaptchaRequired       bool `json:"captcha_required"`
+	PasswordLoginDisabled bool `json:"password_login_disabled"`
 }
 
 type setupRequest struct {
@@ -224,7 +225,11 @@ func (s *Server) currentUserID(r *http.Request) string {
 }
 
 func (s *Server) handleAuthStatus(w http.ResponseWriter, _ *http.Request) {
-	writeJSON(w, http.StatusOK, authStatus{Configured: s.cfg.Store.AdminConfigured(), CaptchaRequired: s.captchaRequired()})
+	writeJSON(w, http.StatusOK, authStatus{
+		Configured:            s.cfg.Store.AdminConfigured(),
+		CaptchaRequired:       s.captchaRequired(),
+		PasswordLoginDisabled: s.passwordLoginDisabled(),
+	})
 }
 
 func (s *Server) handleSetup(w http.ResponseWriter, r *http.Request) {
@@ -283,6 +288,18 @@ func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
 	}
 	username := strings.TrimSpace(req.Username)
 	clientIP := s.clientIP(r)
+	if s.passwordLoginDisabled() {
+		_, _ = s.cfg.Store.CreatePlatformItem("login_logs", model.PlatformItemRequest{
+			Name:        username,
+			Type:        "password",
+			Status:      "denied",
+			Description: "password login is disabled",
+			Metadata:    map[string]any{"client_ip": clientIP, "account": username},
+		})
+		_ = s.audit(r, "auth.login.password_denied", "", "", "password login is disabled")
+		writeError(w, http.StatusForbidden, "password login is disabled")
+		return
+	}
 	if s.captchaRequired() && !s.verifyCaptcha(req.CaptchaID, req.CaptchaAnswer) {
 		_, _ = s.cfg.Store.CreatePlatformItem("login_logs", model.PlatformItemRequest{
 			Name:        username,

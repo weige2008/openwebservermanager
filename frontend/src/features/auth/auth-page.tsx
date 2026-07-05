@@ -174,6 +174,11 @@ export function AuthPage() {
           </>
         ) : (
           <>
+            {!app.setupRequired && app.passwordLoginDisabled ? (
+              <div className='rounded-lg border border-amber-500/30 bg-amber-500/10 p-3 text-sm leading-6 text-amber-700 dark:text-amber-200'>
+                {t('auth.passwordLoginDisabledNotice')}
+              </div>
+            ) : null}
             <Field label={t('auth.username')}>
               <Input name='username' autoComplete='username' placeholder='admin' defaultValue={app.setupRequired ? 'admin' : ''} required />
             </Field>
@@ -206,7 +211,7 @@ export function AuthPage() {
         )}
         <Button type='submit' variant='primary' className='w-full' disabled={submitting}>
           {submitting ? <Loader2 className='size-4 animate-spin' /> : null}
-          {mfaChallenge ? 'Verify MFA' : app.setupRequired ? t('auth.setupSubmit') : t('auth.loginSubmit')}
+          {mfaChallenge ? 'Verify MFA' : app.setupRequired ? t('auth.setupSubmit') : app.passwordLoginDisabled ? t('auth.passwordLoginDisabledSubmit') : t('auth.loginSubmit')}
         </Button>
       </form>
       <p className='text-center text-xs text-muted-foreground'>

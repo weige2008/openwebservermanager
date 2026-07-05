@@ -85,6 +85,33 @@ func (s *Server) createLoginLock(username, clientIP string, failure loginFailure
 	})
 }
 
+func (s *Server) passwordLoginDisabled() bool {
+	items, err := s.cfg.Store.ListPlatformItems("system_settings")
+	if err != nil {
+		return false
+	}
+	for _, item := range items {
+		if !platformItemEnabled(item) {
+			continue
+		}
+		itemType := strings.ToLower(strings.TrimSpace(item.Type))
+		if itemType != "security" && itemType != "identity" && itemType != "login" && itemType != "password" {
+			continue
+		}
+		for _, key := range []string{"disable_password_login", "password_login_disabled", "disablePasswordLogin", "passwordLoginDisabled", "no_password_login"} {
+			if metadataBoolForMFA(item.Metadata[key]) {
+				return true
+			}
+		}
+		for _, key := range []string{"password_login", "enable_password_login", "password_auth", "local_password_login"} {
+			if enabled, ok := metadataBoolValue(item.Metadata[key]); ok && !enabled {
+				return true
+			}
+		}
+	}
+	return false
+}
+
 func platformItemEnabled(item model.PlatformItem) bool {
 	status := strings.ToLower(strings.TrimSpace(item.Status))
 	return status == "" || status == "enabled" || status == "active" || status == "locked"
@@ -181,6 +208,31 @@ func metadataStrings(value any) []string {
 		return result
 	default:
 		return nil
+	}
+}
+
+func metadataBoolValue(value any) (bool, bool) {
+	switch typed := value.(type) {
+	case bool:
+		return typed, true
+	case string:
+		text := strings.ToLower(strings.TrimSpace(typed))
+		switch text {
+		case "true", "1", "yes", "enabled", "required", "on":
+			return true, true
+		case "false", "0", "no", "disabled", "off":
+			return false, true
+		default:
+			return false, false
+		}
+	case float64:
+		return typed != 0, true
+	case int:
+		return typed != 0, true
+	case int64:
+		return typed != 0, true
+	default:
+		return false, false
 	}
 }
 

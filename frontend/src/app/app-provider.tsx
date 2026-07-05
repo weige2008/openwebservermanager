@@ -14,6 +14,7 @@ interface AppContextValue {
   configured: boolean
   setupRequired: boolean
   captchaRequired: boolean
+  passwordLoginDisabled: boolean
   publicConfig: PublicConfig
   data: BootstrapData
   modal: ModalState
@@ -95,7 +96,7 @@ export function AppProvider({ children }: { children: ReactNode }) {
 
   const authStatus = useQuery({
     queryKey: ['auth-status'],
-    queryFn: () => apiRequest<{ configured: boolean; captcha_required?: boolean }>('/api/auth/status'),
+    queryFn: () => apiRequest<{ configured: boolean; captcha_required?: boolean; password_login_disabled?: boolean }>('/api/auth/status'),
     retry: false,
   })
 
@@ -185,7 +186,10 @@ export function AppProvider({ children }: { children: ReactNode }) {
 
   const setAuthenticatedUser = useCallback(
     (user: AuthUser) => {
-      queryClient.setQueryData(['auth-status'], { configured: true })
+      queryClient.setQueryData(['auth-status'], (current: { configured?: boolean; captcha_required?: boolean; password_login_disabled?: boolean } | undefined) => ({
+        ...current,
+        configured: true,
+      }))
       queryClient.setQueryData(['auth-me'], { user })
     },
     [queryClient]
@@ -193,6 +197,7 @@ export function AppProvider({ children }: { children: ReactNode }) {
 
   const refresh = useCallback(
     async (silent = false) => {
+      await queryClient.invalidateQueries({ queryKey: ['auth-status'] })
       await queryClient.invalidateQueries({ queryKey: ['bootstrap'] })
       if (!silent) toast.success(t('dataRefreshed'))
     },
@@ -243,6 +248,7 @@ export function AppProvider({ children }: { children: ReactNode }) {
       configured,
       setupRequired: authStatus.isFetched ? !configured : false,
       captchaRequired: Boolean(authStatus.data?.captcha_required),
+      passwordLoginDisabled: Boolean(authStatus.data?.password_login_disabled),
       publicConfig,
       data,
       modal,
@@ -268,6 +274,7 @@ export function AppProvider({ children }: { children: ReactNode }) {
       auth,
       authStatus.isFetched,
       authStatus.data?.captcha_required,
+      authStatus.data?.password_login_disabled,
       appearance,
       booted,
       configured,

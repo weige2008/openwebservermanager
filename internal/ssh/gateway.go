@@ -42,10 +42,11 @@ type Gateway struct {
 }
 
 type gatewayUser struct {
-	UserID   string
-	Username string
-	Role     string
-	IsAdmin  bool
+	UserID      string
+	Username    string
+	Role        string
+	IsAdmin     bool
+	DirectAsset string
 }
 
 type gatewayPTY struct {
@@ -68,6 +69,13 @@ type windowChangeRequest struct {
 	Rows   uint32
 	Width  uint32
 	Height uint32
+}
+
+type directTCPIPRequest struct {
+	Host       string
+	Port       uint32
+	OriginHost string
+	OriginPort uint32
 }
 
 func GatewayConfigFromStore(st *store.Store, dataDir, overrideAddress string) GatewayConfig {
@@ -177,7 +185,7 @@ func (g *Gateway) serve(ctx context.Context, signer ssh.Signer) {
 }
 
 func (g *Gateway) passwordCallback(meta ssh.ConnMetadata, password []byte) (*ssh.Permissions, error) {
-	username := strings.TrimSpace(meta.User())
+	username, directAsset := splitGatewayUsername(strings.TrimSpace(meta.User()))
 	admin, ok, err := g.cfg.Store.VerifyAdmin(username, string(password))
 	if err != nil {
 		return nil, err
@@ -200,12 +208,13 @@ func (g *Gateway) passwordCallback(meta ssh.ConnMetadata, password []byte) (*ssh
 	_ = g.cfg.Store.RecordUserLogin(user.UserID, remoteIP(meta.RemoteAddr()), "ssh-gateway")
 	_ = g.cfg.Store.Audit(model.AuditLog{UserID: user.UserID, Action: "ssh_gateway.login", TargetID: "ssh_gateway", Protocol: model.ProtocolSSH, Detail: "native ssh gateway login", ClientIP: remoteIP(meta.RemoteAddr())})
 	return &ssh.Permissions{Extensions: map[string]string{
-		"user_id":    user.UserID,
-		"username":   user.Username,
-		"role":       user.Role,
-		"is_admin":   strconv.FormatBool(user.IsAdmin),
-		"client_ip":  remoteIP(meta.RemoteAddr()),
-		"login_time": time.Now().UTC().Format(time.RFC3339Nano),
+		"user_id":      user.UserID,
+		"username":     user.Username,
+		"role":         user.Role,
+		"is_admin":     strconv.FormatBool(user.IsAdmin),
+		"client_ip":    remoteIP(meta.RemoteAddr()),
+		"login_time":   time.Now().UTC().Format(time.RFC3339Nano),
+		"direct_asset": directAsset,
 	}}, nil
 }
 
@@ -218,15 +227,19 @@ func (g *Gateway) handleConn(conn net.Conn, serverConfig *ssh.ServerConfig) {
 	defer sshConn.Close()
 	go ssh.DiscardRequests(reqs)
 	for newChannel := range chans {
-		if newChannel.ChannelType() != "session" {
-			_ = newChannel.Reject(ssh.UnknownChannelType, "only session channels are supported")
+		switch newChannel.ChannelType() {
+		case "session":
+			channel, requests, err := newChannel.Accept()
+			if err != nil {
+				continue
+			}
+			go g.handleSessionChannel(sshConn, channel, requests)
+		case "direct-tcpip":
+			go g.handleDirectTCPIP(sshConn, newChannel)
+		default:
+			_ = newChannel.Reject(ssh.UnknownChannelType, "only session and direct-tcpip channels are supported")
 			continue
 		}
-		channel, requests, err := newChannel.Accept()
-		if err != nil {
-			continue
-		}
-		go g.handleSessionChannel(sshConn, channel, requests)
 	}
 }
 
@@ -296,22 +309,33 @@ func (g *Gateway) runGatewayShell(conn *ssh.ServerConn, channel ssh.Channel, pty
 		_, _ = fmt.Fprint(channel, "No authorized SSH assets.\r\n")
 		return nil
 	}
-	for index, asset := range assets {
-		port := asset.Port
-		if port == 0 {
-			port = 22
+	var asset model.PlatformItem
+	if user.DirectAsset != "" {
+		var ok bool
+		asset, ok = selectGatewayAsset(assets, user.DirectAsset)
+		if !ok {
+			_, _ = fmt.Fprintf(channel, "Direct asset %q is not authorized or does not exist.\r\n", user.DirectAsset)
+			return nil
 		}
-		_, _ = fmt.Fprintf(channel, "%d) %s  %s:%d\r\n", index+1, asset.Name, asset.Host, port)
-	}
-	_, _ = fmt.Fprint(channel, "Select asset number or id: ")
-	choice, err := readGatewayLine(channel, 128)
-	if err != nil {
-		return nil
-	}
-	asset, ok := selectGatewayAsset(assets, choice)
-	if !ok {
-		_, _ = fmt.Fprint(channel, "\r\nInvalid asset selection.\r\n")
-		return nil
+	} else {
+		for index, item := range assets {
+			port := item.Port
+			if port == 0 {
+				port = 22
+			}
+			_, _ = fmt.Fprintf(channel, "%d) %s  %s:%d\r\n", index+1, item.Name, item.Host, port)
+		}
+		_, _ = fmt.Fprint(channel, "Select asset number or id: ")
+		choice, err := readGatewayLine(channel, 128)
+		if err != nil {
+			return nil
+		}
+		var ok bool
+		asset, ok = selectGatewayAsset(assets, choice)
+		if !ok {
+			_, _ = fmt.Fprint(channel, "\r\nInvalid asset selection.\r\n")
+			return nil
+		}
 	}
 	credential, secret, ok, err := g.resolveSSHCredential(asset)
 	if err != nil {
@@ -349,6 +373,231 @@ func (g *Gateway) runGatewayShell(conn *ssh.ServerConn, channel ssh.Channel, pty
 		return nil
 	}
 	return targetSession
+}
+
+func (g *Gateway) handleDirectTCPIP(conn *ssh.ServerConn, newChannel ssh.NewChannel) {
+	user := userFromPermissions(conn.Permissions)
+	var req directTCPIPRequest
+	if err := ssh.Unmarshal(newChannel.ExtraData(), &req); err != nil {
+		_ = newChannel.Reject(ssh.ConnectionFailed, "invalid direct-tcpip request")
+		return
+	}
+	host := strings.TrimSpace(req.Host)
+	port := int(req.Port)
+	if host == "" || port <= 0 || port > 65535 {
+		_ = newChannel.Reject(ssh.Prohibited, "invalid target")
+		return
+	}
+	dialHost, dialPort, allowed, reason := g.forwardAllowed(user, host, port)
+	if !allowed {
+		g.auditForward(conn, user, host, port, "denied", reason)
+		_ = newChannel.Reject(ssh.Prohibited, reason)
+		return
+	}
+	upstream, err := net.DialTimeout("tcp", net.JoinHostPort(dialHost, strconv.Itoa(dialPort)), 15*time.Second)
+	if err != nil {
+		g.auditForward(conn, user, host, port, "failed", err.Error())
+		_ = newChannel.Reject(ssh.ConnectionFailed, err.Error())
+		return
+	}
+	channel, requests, err := newChannel.Accept()
+	if err != nil {
+		_ = upstream.Close()
+		return
+	}
+	go ssh.DiscardRequests(requests)
+	g.auditForward(conn, user, host, port, "started", "direct-tcpip")
+	go proxyTCPChannel(channel, upstream, func() {
+		g.auditForward(conn, user, host, port, "closed", "direct-tcpip")
+	})
+}
+
+func (g *Gateway) forwardAllowed(user gatewayUser, host string, port int) (string, int, bool, string) {
+	normalizedHost := normalizeForwardHost(host)
+	if normalizedHost == "" || port <= 0 || port > 65535 {
+		return "", 0, false, "invalid target"
+	}
+	assets, err := g.authorizedSSHAssets(user)
+	if err != nil {
+		return "", 0, false, err.Error()
+	}
+	for _, asset := range assets {
+		assetPort := asset.Port
+		if assetPort == 0 {
+			assetPort = 22
+		}
+		if assetPort != port {
+			continue
+		}
+		if forwardHostMatchesAsset(normalizedHost, asset) {
+			if strings.TrimSpace(asset.Host) == "" {
+				return "", 0, false, "asset target has no host"
+			}
+			return strings.TrimSpace(asset.Host), assetPort, true, "authorized asset"
+		}
+	}
+	for _, rule := range g.forwardAllowlistRules() {
+		if forwardRuleMatches(rule, normalizedHost, port) {
+			return normalizedHost, port, true, "allowlist"
+		}
+	}
+	return "", 0, false, "target is not authorized by asset grants or forwarding allowlist"
+}
+
+func (g *Gateway) forwardAllowlistRules() []string {
+	if g == nil || g.cfg.Store == nil {
+		return nil
+	}
+	rules := []string{}
+	for _, collection := range []string{"ssh_gateways", "system_settings"} {
+		items, err := g.cfg.Store.ListPlatformItems(collection)
+		if err != nil {
+			continue
+		}
+		for _, item := range items {
+			if !platformItemEnabled(item) {
+				continue
+			}
+			if collection == "system_settings" && !strings.EqualFold(strings.TrimSpace(item.Type), "proxy") {
+				continue
+			}
+			rules = append(rules, forwardAllowlistFromItem(item)...)
+		}
+	}
+	return rules
+}
+
+func forwardAllowlistFromItem(item model.PlatformItem) []string {
+	keys := []string{
+		"forward_whitelist",
+		"forward_allowlist",
+		"port_forward_whitelist",
+		"port_forward_allowlist",
+		"forward_targets",
+		"allowed_forwards",
+		"ssh_forward_whitelist",
+		"ssh_forward_allowlist",
+		"tcp_forward_whitelist",
+		"tcp_forward_allowlist",
+	}
+	rules := []string{}
+	for _, key := range keys {
+		for _, value := range metadataStrings(item.Metadata[key]) {
+			for _, part := range splitCriteria(value) {
+				if part = strings.TrimSpace(part); part != "" {
+					rules = append(rules, part)
+				}
+			}
+		}
+	}
+	return rules
+}
+
+func forwardHostMatchesAsset(host string, asset model.PlatformItem) bool {
+	host = normalizeForwardHost(host)
+	if host == "" {
+		return false
+	}
+	candidates := []string{asset.Host, asset.ID, asset.Name, asset.Username, asset.TargetID}
+	candidates = append(candidates, metadataStrings(asset.Metadata["alias"])...)
+	candidates = append(candidates, metadataStrings(asset.Metadata["aliases"])...)
+	for _, candidate := range candidates {
+		for _, part := range splitCriteria(candidate) {
+			if strings.EqualFold(host, normalizeForwardHost(part)) {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+func forwardRuleMatches(rule, host string, port int) bool {
+	ruleHost, rulePort := parseForwardRule(rule)
+	if ruleHost == "" && rulePort == "" {
+		return false
+	}
+	if ruleHost == "" {
+		ruleHost = "*"
+	}
+	if rulePort == "" {
+		rulePort = "*"
+	}
+	hostMatches := ruleHost == "*" || strings.EqualFold(normalizeForwardHost(ruleHost), normalizeForwardHost(host))
+	portMatches := rulePort == "*" || rulePort == strconv.Itoa(port)
+	return hostMatches && portMatches
+}
+
+func parseForwardRule(rule string) (string, string) {
+	rule = strings.TrimSpace(rule)
+	if rule == "" {
+		return "", ""
+	}
+	if rule == "*" || rule == "*:*" {
+		return "*", "*"
+	}
+	if host, port, err := net.SplitHostPort(rule); err == nil {
+		return strings.TrimSpace(host), strings.TrimSpace(port)
+	}
+	if strings.HasPrefix(rule, "*:") {
+		return "*", strings.TrimSpace(strings.TrimPrefix(rule, "*:"))
+	}
+	if index := strings.LastIndex(rule, ":"); index > 0 && !strings.Contains(rule[:index], ":") {
+		return strings.TrimSpace(rule[:index]), strings.TrimSpace(rule[index+1:])
+	}
+	return rule, "*"
+}
+
+func normalizeForwardHost(host string) string {
+	host = strings.TrimSpace(host)
+	host = strings.TrimPrefix(host, "[")
+	host = strings.TrimSuffix(host, "]")
+	return host
+}
+
+func (g *Gateway) auditForward(conn *ssh.ServerConn, user gatewayUser, host string, port int, status, detail string) {
+	if g == nil || g.cfg.Store == nil {
+		return
+	}
+	target := net.JoinHostPort(host, strconv.Itoa(port))
+	if strings.TrimSpace(detail) != "" {
+		detail = target + " " + detail
+	} else {
+		detail = target
+	}
+	_ = g.cfg.Store.Audit(model.AuditLog{
+		UserID:   user.UserID,
+		Action:   "ssh_gateway.forward." + strings.TrimSpace(status),
+		TargetID: target,
+		Protocol: model.ProtocolSSH,
+		Detail:   detail,
+		ClientIP: remoteIP(conn.RemoteAddr()),
+	})
+}
+
+func proxyTCPChannel(channel ssh.Channel, upstream net.Conn, onClose func()) {
+	var once sync.Once
+	closeBoth := func() {
+		once.Do(func() {
+			_ = channel.Close()
+			_ = upstream.Close()
+			if onClose != nil {
+				onClose()
+			}
+		})
+	}
+	var wg sync.WaitGroup
+	wg.Add(2)
+	go func() {
+		defer wg.Done()
+		_, _ = io.Copy(upstream, channel)
+		closeBoth()
+	}()
+	go func() {
+		defer wg.Done()
+		_, _ = io.Copy(channel, upstream)
+		closeBoth()
+	}()
+	wg.Wait()
 }
 
 func (g *Gateway) proxySSHSession(channel ssh.Channel, session model.ConnectionSession, asset, credential model.PlatformItem, secret store.CredentialSecret, pty gatewayPTY) (*ssh.Session, error) {
@@ -688,11 +937,39 @@ func userFromPermissions(permissions *ssh.Permissions) gatewayUser {
 	}
 	isAdmin, _ := strconv.ParseBool(permissions.Extensions["is_admin"])
 	return gatewayUser{
-		UserID:   permissions.Extensions["user_id"],
-		Username: permissions.Extensions["username"],
-		Role:     permissions.Extensions["role"],
-		IsAdmin:  isAdmin,
+		UserID:      permissions.Extensions["user_id"],
+		Username:    permissions.Extensions["username"],
+		Role:        permissions.Extensions["role"],
+		IsAdmin:     isAdmin,
+		DirectAsset: strings.TrimSpace(permissions.Extensions["direct_asset"]),
 	}
+}
+
+func splitGatewayUsername(raw string) (string, string) {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return "", ""
+	}
+	if username, asset, ok := splitGatewayUsernameAt(raw, "#"); ok {
+		return username, asset
+	}
+	if username, asset, ok := splitGatewayUsernameAt(raw, ":"); ok {
+		return username, asset
+	}
+	return raw, ""
+}
+
+func splitGatewayUsernameAt(raw, separator string) (string, string, bool) {
+	index := strings.LastIndex(raw, separator)
+	if index <= 0 || index >= len(raw)-len(separator) {
+		return "", "", false
+	}
+	username := strings.TrimSpace(raw[:index])
+	asset := strings.TrimSpace(raw[index+len(separator):])
+	if username == "" || asset == "" {
+		return "", "", false
+	}
+	return username, asset, true
 }
 
 func gatewayRoleIsAdmin(role string) bool {

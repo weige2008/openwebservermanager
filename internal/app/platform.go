@@ -156,17 +156,21 @@ func (s *Server) handleCollection(w http.ResponseWriter, r *http.Request, collec
 	}
 }
 
-func (s *Server) handleAccessAssets(w http.ResponseWriter, _ *http.Request) {
+func (s *Server) handleAccessAssets(w http.ResponseWriter, r *http.Request) {
 	platform, err := s.cfg.Store.PlatformBootstrap()
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
+	userID, isAdmin := s.accessUser(r)
+	assets := filterAuthorizedItems(platform["assets"], platform["authorized_assets"], userID, isAdmin)
+	webAssets := filterAuthorizedItems(platform["web_assets"], platform["authorized_web_assets"], userID, isAdmin)
+	databaseAssets := filterAuthorizedItems(platform["database_assets"], platform["authorized_database_assets"], userID, isAdmin)
 	writeJSON(w, http.StatusOK, map[string]any{
-		"text":      filterPlatformByProtocol(platform["assets"], model.ProtocolSSH),
-		"desktop":   filterDesktopAssets(platform["assets"]),
-		"web":       platform["web_assets"],
-		"database":  platform["database_assets"],
+		"text":      filterPlatformByProtocol(assets, model.ProtocolSSH),
+		"desktop":   filterDesktopAssets(assets),
+		"web":       webAssets,
+		"database":  databaseAssets,
 		"authorized": platform["authorized_assets"],
 	})
 }
@@ -179,17 +183,33 @@ func (s *Server) handleAccessAction(w http.ResponseWriter, r *http.Request) {
 	}
 	protocol := model.Protocol(parts[0])
 	assetID := parts[1]
+	platform, err := s.cfg.Store.PlatformBootstrap()
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	userID, isAdmin := s.accessUser(r)
+	asset, ok := findAccessAsset(platform, protocol, assetID)
+	if !ok {
+		writeError(w, http.StatusNotFound, "asset not found")
+		return
+	}
+	if !isAccessAuthorized(platform, protocol, assetID, userID, isAdmin) {
+		writeError(w, http.StatusForbidden, "asset access denied")
+		return
+	}
 	item, err := s.cfg.Store.CreatePlatformItem("online_sessions", model.PlatformItemRequest{
-		Name:        protocolSessionName(protocol, assetID),
+		Name:        protocolSessionName(protocol, asset.Name),
 		Type:        string(protocol),
 		Status:      "pending",
 		Protocol:    protocol,
 		TargetID:    assetID,
-		OwnerID:     s.currentUserID(r),
-		Description: "接入门户创建的会话框架，具体协议通道按资产类型接管。",
+		OwnerID:     userID,
+		Description: "接入门户创建的授权会话。",
 		Metadata: map[string]any{
 			"client_ip": s.clientIP(r),
 			"source":    "access_portal",
+			"asset_name": asset.Name,
 		},
 	})
 	if err != nil {
@@ -333,6 +353,75 @@ func filterDesktopAssets(items []model.PlatformItem) []model.PlatformItem {
 		}
 	}
 	return result
+}
+
+func (s *Server) accessUser(r *http.Request) (string, bool) {
+	_, session, ok := s.auth.session(r)
+	if !ok {
+		return "", false
+	}
+	return session.UserID, session.Role == "admin" || session.Role == "super_admin"
+}
+
+func filterAuthorizedItems(items, authorizations []model.PlatformItem, userID string, isAdmin bool) []model.PlatformItem {
+	if isAdmin {
+		return items
+	}
+	allowed := map[string]bool{}
+	for _, authorization := range authorizations {
+		if authorization.OwnerID == userID || authorization.Username == userID {
+			allowed[authorization.TargetID] = true
+		}
+	}
+	result := []model.PlatformItem{}
+	for _, item := range items {
+		if allowed[item.ID] {
+			result = append(result, item)
+		}
+	}
+	return result
+}
+
+func findAccessAsset(platform map[string][]model.PlatformItem, protocol model.Protocol, assetID string) (model.PlatformItem, bool) {
+	collection := "assets"
+	switch protocol {
+	case model.ProtocolHTTP:
+		collection = "web_assets"
+	case model.ProtocolDatabase:
+		collection = "database_assets"
+	}
+	for _, item := range platform[collection] {
+		if item.ID != assetID {
+			continue
+		}
+		if collection == "assets" && item.Protocol != protocol {
+			return model.PlatformItem{}, false
+		}
+		return item, true
+	}
+	return model.PlatformItem{}, false
+}
+
+func isAccessAuthorized(platform map[string][]model.PlatformItem, protocol model.Protocol, assetID, userID string, isAdmin bool) bool {
+	if isAdmin {
+		return true
+	}
+	if userID == "" {
+		return false
+	}
+	collection := "authorized_assets"
+	switch protocol {
+	case model.ProtocolHTTP:
+		collection = "authorized_web_assets"
+	case model.ProtocolDatabase:
+		collection = "authorized_database_assets"
+	}
+	for _, item := range platform[collection] {
+		if item.TargetID == assetID && (item.OwnerID == userID || item.Username == userID) {
+			return true
+		}
+	}
+	return false
 }
 
 func protocolSessionName(protocol model.Protocol, assetID string) string {

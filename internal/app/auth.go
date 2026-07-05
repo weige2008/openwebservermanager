@@ -235,16 +235,23 @@ func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if !ok {
-		s.auth.recordLoginFailure(failureKey)
-		_, _ = s.cfg.Store.CreatePlatformItem("login_logs", model.PlatformItemRequest{
-			Name:        username,
-			Type:        "password",
-			Status:      "failed",
-			Description: "invalid username or password",
-			Metadata:    map[string]any{"client_ip": s.clientIP(r), "account": username},
-		})
-		writeError(w, http.StatusUnauthorized, "invalid username or password")
-		return
+		admin, ok, err = s.cfg.Store.VerifyPlatformUser(username, req.Password)
+		if err != nil {
+			writeError(w, http.StatusInternalServerError, err.Error())
+			return
+		}
+		if !ok {
+			s.auth.recordLoginFailure(failureKey)
+			_, _ = s.cfg.Store.CreatePlatformItem("login_logs", model.PlatformItemRequest{
+				Name:        username,
+				Type:        "password",
+				Status:      "failed",
+				Description: "invalid username or password",
+				Metadata:    map[string]any{"client_ip": s.clientIP(r), "account": username},
+			})
+			writeError(w, http.StatusUnauthorized, "invalid username or password")
+			return
+		}
 	}
 	s.auth.resetLoginFailures(failureKey)
 

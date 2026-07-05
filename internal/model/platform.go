@@ -36,9 +36,9 @@ type PlatformItemRequest struct {
 	OwnerID     string         `json:"owner_id"`
 	ParentID    string         `json:"parent_id"`
 	TargetID    string         `json:"target_id"`
+	Password    string         `json:"password,omitempty"`
 	Tags        []string       `json:"tags"`
 	Permissions map[string]bool `json:"permissions"`
 	Description string         `json:"description"`
 	Metadata    map[string]any `json:"metadata"`
 }
-

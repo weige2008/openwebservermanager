@@ -1,6 +1,6 @@
 import type { ColumnDef } from '@tanstack/react-table'
 import { Link } from '@tanstack/react-router'
-import { ArrowUpRight, Play, Plus, RefreshCw, Save } from 'lucide-react'
+import { ArrowUpRight, Pencil, Play, Plus, RefreshCw, Save, Trash2 } from 'lucide-react'
 import { useMemo, useState } from 'react'
 
 import { useApp } from '@/app/app-provider'
@@ -24,7 +24,13 @@ interface PlatformFormState {
   host: string
   port: string
   username: string
+  password: string
   group: string
+  owner_id: string
+  parent_id: string
+  target_id: string
+  tags: string
+  metadata: string
   description: string
 }
 
@@ -36,14 +42,19 @@ const initialForm: PlatformFormState = {
   host: '',
   port: '',
   username: '',
+  password: '',
   group: '',
+  owner_id: '',
+  parent_id: '',
+  target_id: '',
+  tags: '',
+  metadata: '',
   description: '',
 }
 
 export function PlatformPage({ config }: { config: PlatformPageConfig }) {
   if (config.kind === 'tools') return <ToolsPage config={config} />
   if (config.kind === 'monitor') return <MonitoringPage config={config} />
-  if (config.kind === 'settings') return <PlatformSettingsPage config={config} />
   return <PlatformTablePage config={config} />
 }
 
@@ -55,6 +66,7 @@ export function PlatformTablePage({ config }: { config: PlatformPageConfig }) {
   const rows = app.data.platform?.[config.collection] || []
   const [formOpen, setFormOpen] = useState(false)
   const [saving, setSaving] = useState(false)
+  const [editing, setEditing] = useState<PlatformItem | null>(null)
   const [form, setForm] = useState<PlatformFormState>(initialForm)
 
   const columns = useMemo<ColumnDef<PlatformItem>[]>(
@@ -79,22 +91,36 @@ export function PlatformTablePage({ config }: { config: PlatformPageConfig }) {
       { header: app.t('address'), cell: ({ row }) => row.original.host ? <span className='font-mono text-xs'>{row.original.host}{row.original.port ? `:${row.original.port}` : ''}</span> : '-' },
       { header: app.t('group'), accessorFn: (row) => row.group || row.owner_id || row.target_id || '-' },
       { header: app.t('createdAt'), cell: ({ row }) => formatDate(row.original.created_at) },
+      {
+        id: 'actions',
+        header: '',
+        cell: ({ row }) => (
+          <div className='flex justify-end gap-1.5'>
+            <Button size='sm' variant='outline' onClick={() => startEdit(row.original)}>
+              <Pencil className='size-3.5' />
+              {app.t('edit', '编辑')}
+            </Button>
+            <Button size='sm' variant='destructive' onClick={() => void remove(row.original)}>
+              <Trash2 className='size-3.5' />
+              {app.t('delete', '删除')}
+            </Button>
+          </div>
+        ),
+      },
     ],
-    [app]
+    [app, config.apiPath]
   )
 
   const save = async () => {
     setSaving(true)
     try {
-      await apiRequest(config.apiPath || `/api/admin/${config.collection}`, {
-        method: 'POST',
-        body: JSON.stringify({
-          ...form,
-          port: form.port ? Number(form.port) : 0,
-          protocol: form.protocol || undefined,
-        }),
+      const endpoint = editing ? `${config.apiPath || `/api/admin/${config.collection}`}/${editing.id}` : config.apiPath || `/api/admin/${config.collection}`
+      await apiRequest(endpoint, {
+        method: editing ? 'PATCH' : 'POST',
+        body: JSON.stringify(platformRequestFromForm(form)),
       })
       setForm(initialForm)
+      setEditing(null)
       setFormOpen(false)
       await app.refresh(true)
       app.showToast(app.t('saved', '已保存'))
@@ -102,6 +128,29 @@ export function PlatformTablePage({ config }: { config: PlatformPageConfig }) {
       app.handleApiError(error)
     } finally {
       setSaving(false)
+    }
+  }
+
+  const startCreate = () => {
+    setEditing(null)
+    setForm(initialForm)
+    setFormOpen(true)
+  }
+
+  const startEdit = (item: PlatformItem) => {
+    setEditing(item)
+    setForm(formFromPlatformItem(item))
+    setFormOpen(true)
+  }
+
+  const remove = async (item: PlatformItem) => {
+    if (!window.confirm(`${app.t('delete', '删除')} ${item.name}?`)) return
+    try {
+      await apiRequest(`${config.apiPath || `/api/admin/${config.collection}`}/${item.id}`, { method: 'DELETE' })
+      await app.refresh(true)
+      app.showToast(app.t('deleted', '已删除'))
+    } catch (error) {
+      app.handleApiError(error)
     }
   }
 
@@ -122,7 +171,7 @@ export function PlatformTablePage({ config }: { config: PlatformPageConfig }) {
                 <RefreshCw className='size-4' />
                 {app.t('refresh', '刷新')}
               </Button>
-              <Button variant='primary' onClick={() => setFormOpen(true)}>
+              <Button variant='primary' onClick={startCreate}>
                 <Plus className='size-4' />
                 {app.t('new', '新建')}
               </Button>
@@ -141,12 +190,15 @@ export function PlatformTablePage({ config }: { config: PlatformPageConfig }) {
         </Card>
       </CardStaggerItem>
       <PlatformItemDialog
-        title={`${app.t('new', '新建')} ${label}`}
+        title={`${editing ? app.t('edit', '编辑') : app.t('new', '新建')} ${label}`}
         description={description}
         open={formOpen}
         saving={saving}
         form={form}
-        onOpenChange={setFormOpen}
+        onOpenChange={(open) => {
+          setFormOpen(open)
+          if (!open) setEditing(null)
+        }}
         onChange={(next) => setForm((current) => ({ ...current, ...next }))}
         onSave={() => void save()}
       />
@@ -192,9 +244,17 @@ function PlatformItemDialog({
           <Field label={app.t('address')}><Input value={form.host} onChange={(event) => onChange({ host: event.currentTarget.value })} /></Field>
           <Field label={app.t('ports')}><Input type='number' value={form.port} onChange={(event) => onChange({ port: event.currentTarget.value })} /></Field>
           <Field label={app.t('username', '用户')}><Input value={form.username} onChange={(event) => onChange({ username: event.currentTarget.value })} /></Field>
+          {title.includes('用户') || title.includes('Users') ? (
+            <Field label={app.t('password', '密码')}><Input type='password' value={form.password} onChange={(event) => onChange({ password: event.currentTarget.value })} /></Field>
+          ) : null}
           <Field label={app.t('group')}><Input value={form.group} onChange={(event) => onChange({ group: event.currentTarget.value })} /></Field>
+          <Field label={app.t('owner', '归属用户/部门')}><Input value={form.owner_id} onChange={(event) => onChange({ owner_id: event.currentTarget.value })} /></Field>
+          <Field label={app.t('target', '目标资源')}><Input value={form.target_id} onChange={(event) => onChange({ target_id: event.currentTarget.value })} /></Field>
+          <Field label={app.t('parent', '上级/分组')}><Input value={form.parent_id} onChange={(event) => onChange({ parent_id: event.currentTarget.value })} /></Field>
+          <Field label={app.t('tags', '标签')}><Input placeholder='prod,linux,web' value={form.tags} onChange={(event) => onChange({ tags: event.currentTarget.value })} /></Field>
         </div>
         <Field label={app.t('details')}><Textarea value={form.description} onChange={(event) => onChange({ description: event.currentTarget.value })} /></Field>
+        <Field label='Metadata JSON'><Textarea value={form.metadata} onChange={(event) => onChange({ metadata: event.currentTarget.value })} /></Field>
         <div className='flex justify-end gap-2'>
           <Button variant='outline' onClick={() => onOpenChange(false)}>{app.t('cancel', '取消')}</Button>
           <Button variant='primary' onClick={onSave} disabled={saving || !form.name.trim()}>
@@ -205,6 +265,50 @@ function PlatformItemDialog({
       </div>
     </DialogShell>
   )
+}
+
+function formFromPlatformItem(item: PlatformItem): PlatformFormState {
+  return {
+    name: item.name || '',
+    type: item.type || '',
+    status: item.status || 'enabled',
+    protocol: item.protocol || '',
+    host: item.host || '',
+    port: item.port ? String(item.port) : '',
+    username: item.username || '',
+    password: '',
+    group: item.group || '',
+    owner_id: item.owner_id || '',
+    parent_id: item.parent_id || '',
+    target_id: item.target_id || '',
+    tags: item.tags?.join(',') || '',
+    metadata: item.metadata ? JSON.stringify(item.metadata, null, 2) : '',
+    description: item.description || '',
+  }
+}
+
+function platformRequestFromForm(form: PlatformFormState) {
+  let metadata: Record<string, unknown> | undefined
+  if (form.metadata.trim()) {
+    metadata = JSON.parse(form.metadata)
+  }
+  return {
+    name: form.name,
+    type: form.type,
+    status: form.status,
+    protocol: form.protocol || undefined,
+    host: form.host,
+    port: form.port ? Number(form.port) : 0,
+    username: form.username,
+    password: form.password || undefined,
+    group: form.group,
+    owner_id: form.owner_id,
+    parent_id: form.parent_id,
+    target_id: form.target_id,
+    tags: form.tags.split(',').map((tag) => tag.trim()).filter(Boolean),
+    metadata,
+    description: form.description,
+  }
 }
 
 export function PlatformSettingsPage({ config }: { config: PlatformPageConfig }) {

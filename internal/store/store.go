@@ -169,6 +169,49 @@ func (s *Store) VerifyAdmin(username, password string) (AdminPublic, bool, error
 	return admin.Public(), true, nil
 }
 
+func (s *Store) VerifyPlatformUser(username, password string) (AdminPublic, bool, error) {
+	rows, err := s.db.Query(`SELECT payload FROM platform_records WHERE collection = ?`, "users")
+	if err != nil {
+		return AdminPublic{}, false, err
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var payload string
+		if err := rows.Scan(&payload); err != nil {
+			return AdminPublic{}, false, err
+		}
+		var item model.PlatformItem
+		if err := json.Unmarshal([]byte(payload), &item); err != nil {
+			return AdminPublic{}, false, err
+		}
+		if item.Name != username || item.Status == "disabled" {
+			continue
+		}
+		hash, _ := item.Metadata["password_hash"].(string)
+		if hash == "" {
+			continue
+		}
+		if err := bcrypt.CompareHashAndPassword([]byte(hash), []byte(password)); err != nil {
+			return AdminPublic{}, false, nil
+		}
+		role, _ := item.Metadata["role"].(string)
+		if role == "" {
+			role = "user"
+		}
+		return AdminPublic{
+			UserID:    item.ID,
+			Username:  item.Name,
+			Role:      role,
+			CreatedAt: item.CreatedAt,
+			UpdatedAt: item.UpdatedAt,
+		}, true, nil
+	}
+	if err := rows.Err(); err != nil {
+		return AdminPublic{}, false, err
+	}
+	return AdminPublic{}, false, nil
+}
+
 func (a AdminAuth) Public() AdminPublic {
 	return AdminPublic{
 		UserID:    a.UserID,
@@ -375,6 +418,7 @@ func (s *Store) PlatformBootstrap() (map[string][]model.PlatformItem, error) {
 		if err := json.Unmarshal([]byte(payload), &item); err != nil {
 			return nil, fmt.Errorf("decode platform record: %w", err)
 		}
+		sanitizePlatformItem(&item)
 		result[collection] = append(result[collection], item)
 	}
 	if err := rows.Err(); err != nil {
@@ -537,6 +581,9 @@ func (s *Store) CreatePlatformItem(collection string, req model.PlatformItemRequ
 		Description: strings.TrimSpace(req.Description),
 		Metadata:    req.Metadata,
 	}
+	if err := applyPlatformSecrets(collection, req, &item, true); err != nil {
+		return model.PlatformItem{}, err
+	}
 	if item.Name == "" {
 		item.Name = "未命名"
 	}
@@ -578,6 +625,7 @@ func (s *Store) createPlatformItem(collection string, item model.PlatformItem) (
 	if err != nil {
 		return model.PlatformItem{}, fmt.Errorf("create platform record: %w", err)
 	}
+	sanitizePlatformItem(&item)
 	return item, nil
 }
 
@@ -631,8 +679,15 @@ func (s *Store) UpdatePlatformItem(collection, id string, req model.PlatformItem
 	if req.Description != "" {
 		item.Description = strings.TrimSpace(req.Description)
 	}
+	existingPasswordHash, _ := item.Metadata["password_hash"].(string)
 	if req.Metadata != nil {
 		item.Metadata = req.Metadata
+		if collection == "users" && existingPasswordHash != "" {
+			item.Metadata["password_hash"] = existingPasswordHash
+		}
+	}
+	if err := applyPlatformSecrets(collection, req, &item, false); err != nil {
+		return model.PlatformItem{}, err
 	}
 	item.UpdatedAt = time.Now().UTC()
 	return s.createPlatformItem(collection, item)
@@ -676,6 +731,46 @@ func collectionPrefix(collection string) string {
 		prefix = prefix[:10]
 	}
 	return prefix
+}
+
+func applyPlatformSecrets(collection string, req model.PlatformItemRequest, item *model.PlatformItem, creating bool) error {
+	if collection != "users" {
+		return nil
+	}
+	if item.Metadata == nil {
+		item.Metadata = map[string]any{}
+	}
+	if item.Type == "" {
+		item.Type = "local"
+	}
+	if _, ok := item.Metadata["role"]; !ok {
+		item.Metadata["role"] = "user"
+	}
+	if req.Password == "" {
+		if creating {
+			return errors.New("password is required for local users")
+		}
+		return nil
+	}
+	if len(req.Password) < 8 {
+		return errors.New("password must be at least 8 characters")
+	}
+	hash, err := bcrypt.GenerateFromPassword([]byte(req.Password), bcrypt.DefaultCost)
+	if err != nil {
+		return err
+	}
+	item.Metadata["password_hash"] = string(hash)
+	return nil
+}
+
+func sanitizePlatformItem(item *model.PlatformItem) {
+	if item.Metadata == nil {
+		return
+	}
+	delete(item.Metadata, "password")
+	delete(item.Metadata, "password_hash")
+	delete(item.Metadata, "private_key")
+	delete(item.Metadata, "passphrase")
 }
 
 func (s *Store) Bootstrap() ([]model.Server, []model.CredentialPublic, []model.ConnectionSession, []model.AuditLog) {

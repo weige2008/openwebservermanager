@@ -1,6 +1,6 @@
 export type AppRoute = 'home' | 'login' | 'console'
 export type ConsoleView = 'overview' | 'servers' | 'sessions' | 'audit'
-export type Protocol = 'ssh' | 'rdp'
+export type Protocol = 'ssh' | 'rdp' | 'vnc' | 'http' | 'database'
 export type Theme = 'light' | 'dark' | 'system'
 export type ResolvedTheme = 'light' | 'dark'
 export type Locale = 'zh' | 'en' | 'zh-TW' | 'fr' | 'ru' | 'ja' | 'vi'
@@ -21,7 +21,7 @@ export type ThemeScale = 'default' | 'sm' | 'lg' | 'xl'
 export type ThemeContentLayout = 'full' | 'centered'
 export type ThemeSidebarStyle = 'default' | 'inset' | 'floating'
 export type ServerOS = 'linux' | 'windows'
-export type CredentialType = 'ssh_password' | 'ssh_key' | 'rdp_password'
+export type CredentialType = 'ssh_password' | 'ssh_key' | 'rdp_password' | 'vnc_password' | 'database_password'
 export type SessionStatus = 'pending' | 'active' | 'closed' | 'failed' | string
 
 export interface AuthUser {
@@ -84,11 +84,36 @@ export interface AuditLog {
   created_at: string
 }
 
+export interface PlatformItem {
+  id: string
+  module: string
+  name: string
+  type?: string
+  status?: string
+  protocol?: Protocol
+  host?: string
+  port?: number
+  username?: string
+  group?: string
+  owner_id?: string
+  parent_id?: string
+  target_id?: string
+  tags?: string[]
+  permissions?: Record<string, boolean>
+  description?: string
+  metadata?: Record<string, unknown>
+  created_at: string
+  updated_at: string
+}
+
+export type PlatformData = Record<string, PlatformItem[]>
+
 export interface BootstrapData {
   servers: ManagedServer[]
   credentials: Credential[]
   sessions: ConnectionSession[]
   audit_logs: AuditLog[]
+  platform?: PlatformData
   guacd?: { address: string }
 }
 

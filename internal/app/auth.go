@@ -10,6 +10,7 @@ import (
 	"sync"
 	"time"
 
+	"openwebservermanager/internal/model"
 	"openwebservermanager/internal/store"
 )
 
@@ -197,6 +198,14 @@ func (s *Server) handleSetup(w http.ResponseWriter, r *http.Request) {
 	}
 	http.SetCookie(w, s.authCookie(r, token, int(authSessionTTL.Seconds())))
 	_ = s.audit(r, "auth.setup", session.UserID, "", "admin initialized")
+	_, _ = s.cfg.Store.CreatePlatformItem("login_logs", model.PlatformItemRequest{
+		Name:        username,
+		Type:        "setup",
+		Status:      "success",
+		OwnerID:     session.UserID,
+		Description: "administrator initialized",
+		Metadata:    map[string]any{"client_ip": s.clientIP(r), "account": username},
+	})
 	writeJSON(w, http.StatusCreated, map[string]any{"user": session})
 }
 
@@ -227,6 +236,13 @@ func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
 	}
 	if !ok {
 		s.auth.recordLoginFailure(failureKey)
+		_, _ = s.cfg.Store.CreatePlatformItem("login_logs", model.PlatformItemRequest{
+			Name:        username,
+			Type:        "password",
+			Status:      "failed",
+			Description: "invalid username or password",
+			Metadata:    map[string]any{"client_ip": s.clientIP(r), "account": username},
+		})
 		writeError(w, http.StatusUnauthorized, "invalid username or password")
 		return
 	}
@@ -240,6 +256,14 @@ func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
 
 	http.SetCookie(w, s.authCookie(r, token, int(authSessionTTL.Seconds())))
 	_ = s.audit(r, "auth.login", session.UserID, "", "admin signed in")
+	_, _ = s.cfg.Store.CreatePlatformItem("login_logs", model.PlatformItemRequest{
+		Name:        username,
+		Type:        "password",
+		Status:      "success",
+		OwnerID:     session.UserID,
+		Description: "signed in",
+		Metadata:    map[string]any{"client_ip": s.clientIP(r), "account": username},
+	})
 	writeJSON(w, http.StatusOK, map[string]any{"user": session})
 }
 

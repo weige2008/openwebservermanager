@@ -4,6 +4,7 @@ import { AnimatePresence, motion, type Variants } from 'motion/react'
 import { useEffect, useState } from 'react'
 
 import { useApp } from '@/app/app-provider'
+import { platformLabel, platformPageByRoute } from '@/lib/platform'
 import { cn } from '@/lib/utils'
 
 import { Badge } from '../ui/badge'
@@ -24,6 +25,8 @@ const pageTitleKeys: Record<string, string> = {
   '/app/sessions': 'sessions',
   '/app/audit': 'audit',
   '/app/settings': 'settings',
+  '/access': 'accessPortal',
+  '/app/access': 'accessPortal',
 }
 
 const mobileDrawerAnimation = {
@@ -60,7 +63,8 @@ export function AppHeader({ sidebarOpen, onToggleSidebar }: { sidebarOpen: boole
   const app = useApp()
   const navigate = useNavigate()
   const pathname = useRouterState({ select: (state) => state.location.pathname })
-  const title = app.t(pageTitleKeys[pathname] || 'dashboard')
+  const platformPage = platformPageByRoute(pathname)
+  const title = platformPage ? platformLabel(platformPage, app.locale) : app.t(pageTitleKeys[pathname] || 'dashboard')
   const productName = app.t('productNameShort')
   const [mobileOpen, setMobileOpen] = useState(false)
 
@@ -93,11 +97,11 @@ export function AppHeader({ sidebarOpen, onToggleSidebar }: { sidebarOpen: boole
           </div>
           <div className='ms-auto flex min-w-0 items-center gap-1 sm:gap-2'>
             <div className='hidden lg:flex'>
-              <Link to='/app/servers' className={buttonVariants({ variant: 'ghost', size: 'sm' })}>
+              <Link to={'/app/assets' as never} className={buttonVariants({ variant: 'ghost', size: 'sm' })}>
                 {app.t('assets')}
               </Link>
-              <Link to='/app/sessions' className={buttonVariants({ variant: 'ghost', size: 'sm' })}>
-                {app.t('sessions')}
+              <Link to='/access' className={buttonVariants({ variant: 'ghost', size: 'sm' })}>
+                {app.t('accessPortal')}
               </Link>
             </div>
             <CommandSearch />

@@ -119,6 +119,8 @@ func (s *Server) serveAPI(w http.ResponseWriter, r *http.Request) {
 	switch {
 	case r.Method == http.MethodGet && r.URL.Path == "/api/bootstrap":
 		s.handleBootstrap(w, r)
+	case s.handlePlatformAPI(w, r):
+		return
 	case r.Method == http.MethodPost && r.URL.Path == "/api/servers":
 		s.handleCreateServer(w, r)
 	case r.Method == http.MethodPost && r.URL.Path == "/api/credentials":
@@ -168,11 +170,17 @@ func (s *Server) handlePublicConfig(w http.ResponseWriter, _ *http.Request) {
 
 func (s *Server) handleBootstrap(w http.ResponseWriter, _ *http.Request) {
 	servers, credentials, sessions, auditLogs := s.cfg.Store.Bootstrap()
+	platform, err := s.cfg.Store.PlatformBootstrap()
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
 	writeJSON(w, http.StatusOK, map[string]any{
 		"servers":     servers,
 		"credentials": credentials,
 		"sessions":    sessions,
 		"audit_logs":  auditLogs,
+		"platform":    platform,
 		"guacd": map[string]any{
 			"address": s.cfg.Guacd.Address(),
 		},

@@ -20,8 +20,11 @@ const (
 type Protocol string
 
 const (
-	ProtocolSSH Protocol = "ssh"
-	ProtocolRDP Protocol = "rdp"
+	ProtocolSSH      Protocol = "ssh"
+	ProtocolRDP      Protocol = "rdp"
+	ProtocolVNC      Protocol = "vnc"
+	ProtocolHTTP     Protocol = "http"
+	ProtocolDatabase Protocol = "database"
 )
 
 type SessionStatus string

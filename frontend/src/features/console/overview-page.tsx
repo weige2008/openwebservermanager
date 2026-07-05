@@ -14,6 +14,7 @@ import { Button } from '@/components/ui/button'
 import { buttonVariants } from '@/components/ui/button'
 import { Card, CardHeader, CardTitle } from '@/components/ui/card'
 import { serverProtocol } from '@/lib/utils'
+import { platformHomeStats, platformLabel } from '@/lib/platform'
 
 import { SessionsTable } from './sessions-table'
 
@@ -50,6 +51,7 @@ export function OverviewPage() {
   const gatewayOnline = Boolean(app.data.guacd?.address)
   const sshSessions = app.data.sessions.filter((item) => item.protocol === 'ssh').length
   const rdpSessions = app.data.sessions.filter((item) => item.protocol === 'rdp').length
+  const platform = app.data.platform || {}
 
   return (
     <div className='flex flex-col gap-4'>
@@ -70,18 +72,18 @@ export function OverviewPage() {
             </div>
 
             <StaggerContainer className='grid gap-3 md:grid-cols-2 xl:grid-cols-4'>
-              <StaggerItem>
-                <SummaryStatCard icon={Server} title={t('overviewPage.serverCount')} value={app.data.servers.length} desc={t('overviewPage.serverCountDesc')} tone='rose' sparkline={makeSparkline(app.data.servers.length, 3)} />
-              </StaggerItem>
-              <StaggerItem>
-                <SummaryStatCard icon={KeyRound} title={t('overviewPage.credentialCount')} value={app.data.credentials.length} desc={t('overviewPage.credentialCountDesc')} tone='teal' sparkline={makeSparkline(app.data.credentials.length, 5)} />
-              </StaggerItem>
-              <StaggerItem>
-                <SummaryStatCard icon={Activity} title={t('overviewPage.activeSessions')} value={active} desc={t('overviewPage.activeSessionsDesc')} tone='info' sparkline={makeSparkline(active, 7)} />
-              </StaggerItem>
-              <StaggerItem>
-                <SummaryStatCard icon={Database} title={t('overviewPage.recordingIndexes')} value={recordings} desc={t('overviewPage.recordingIndexesDesc')} tone='warning' sparkline={makeSparkline(recordings, 11)} />
-              </StaggerItem>
+              {platformHomeStats.slice(0, 8).map((stat, index) => (
+                <StaggerItem key={stat.key}>
+                  <SummaryStatCard
+                    icon={stat.icon}
+                    title={platformLabel(stat, app.locale)}
+                    value={(platform[stat.key] || []).length}
+                    desc={index < 4 ? t('overviewPage.serverCountDesc') : t('overviewPage.activeSessionsDesc')}
+                    tone={(['rose', 'teal', 'info', 'warning'] as StatTone[])[index % 4]}
+                    sparkline={makeSparkline((platform[stat.key] || []).length, index + 3)}
+                  />
+                </StaggerItem>
+              ))}
             </StaggerContainer>
           </div>
 
@@ -121,7 +123,7 @@ export function OverviewPage() {
             <div>
               <CardTitle>{t('overviewPage.quickAssets')}</CardTitle>
             </div>
-            <Link to='/app/servers' className={buttonVariants({ variant: 'ghost' })}>{t('overviewPage.manage')}</Link>
+                <Link to={'/app/assets' as never} className={buttonVariants({ variant: 'ghost' })}>{t('overviewPage.manage')}</Link>
           </CardHeader>
           {app.data.servers.length ? (
             <div className='grid'>

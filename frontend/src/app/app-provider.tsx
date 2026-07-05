@@ -40,6 +40,7 @@ const emptyBootstrap: BootstrapData = {
   credentials: [],
   sessions: [],
   audit_logs: [],
+  platform: {},
 }
 
 const defaultPublicConfig: PublicConfig = {
@@ -217,6 +218,7 @@ export function AppProvider({ children }: { children: ReactNode }) {
         credentials: bootstrapQuery.data.credentials || [],
         sessions: bootstrapQuery.data.sessions || [],
         audit_logs: bootstrapQuery.data.audit_logs || [],
+        platform: bootstrapQuery.data.platform || {},
         guacd: bootstrapQuery.data.guacd,
       }
     : emptyBootstrap

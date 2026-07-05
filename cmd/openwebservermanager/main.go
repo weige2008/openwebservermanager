@@ -61,6 +61,7 @@ func run() error {
 	if err != nil {
 		return err
 	}
+	defer st.Close()
 
 	guacd := guac.NewManager(guac.ManagerConfig{
 		Host:       env("OPENWEBSERVERMANAGER_GUACD_HOST", ""),

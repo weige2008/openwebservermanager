@@ -21,9 +21,11 @@ import { OverviewPage } from '@/features/console/overview-page'
 import { ServersPage } from '@/features/console/servers-page'
 import { SettingsPage } from '@/features/console/settings-page'
 import { SessionsPage } from '@/features/console/sessions-page'
+import { AccessPortalPage, PlatformPage } from '@/features/console/platform-page'
 import { HomePage } from '@/features/home/home-page'
 import { ModalHost } from '@/features/modals/modal-host'
 import { WorkspaceView } from '@/features/workspace/workspace-view'
+import { platformPages } from '@/lib/platform'
 
 function RootLayout() {
   const app = useApp()
@@ -105,10 +107,16 @@ const serversRoute = createRoute({
   component: () => <ConsoleGate><ServersPage /></ConsoleGate>,
 })
 
-const credentialsRoute = createRoute({
+const accessRoute = createRoute({
   getParentRoute: () => rootRoute,
-  path: '/app/credentials',
-  component: () => <Navigate to='/app/servers' replace />,
+  path: '/access',
+  component: () => <ConsoleGate><AccessPortalPage /></ConsoleGate>,
+})
+
+const appAccessRoute = createRoute({
+  getParentRoute: () => rootRoute,
+  path: '/app/access',
+  component: () => <ConsoleGate><AccessPortalPage /></ConsoleGate>,
 })
 
 const sessionsRoute = createRoute({
@@ -141,19 +149,27 @@ const legacyDashboardRoute = createRoute({
   component: () => <Navigate to='/app' replace />,
 })
 
+const platformRoutes = platformPages.map((page) => createRoute({
+  getParentRoute: () => rootRoute,
+  path: page.route,
+  component: () => <ConsoleGate><PlatformPage config={page} /></ConsoleGate>,
+}))
+
 const routeTree = rootRoute.addChildren([
   indexRoute,
   aboutRoute,
   loginRoute,
   legacySignInRoute,
   appRoute,
+  accessRoute,
+  appAccessRoute,
   serversRoute,
-  credentialsRoute,
   sessionsRoute,
   auditRoute,
   settingsRoute,
   appAboutRoute,
   legacyDashboardRoute,
+  ...platformRoutes,
 ])
 
 export const router = createRouter({ routeTree })

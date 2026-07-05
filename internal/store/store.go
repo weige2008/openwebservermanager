@@ -2,6 +2,7 @@ package store
 
 import (
 	"crypto/rand"
+	"database/sql"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
@@ -9,6 +10,7 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
+	"strings"
 	"sync"
 	"time"
 
@@ -16,11 +18,13 @@ import (
 	"openwebservermanager/internal/security"
 
 	"golang.org/x/crypto/bcrypt"
+	_ "modernc.org/sqlite"
 )
 
 type Store struct {
 	mu     sync.RWMutex
 	path   string
+	db     *sql.DB
 	cipher *security.Cipher
 	state  state
 }
@@ -58,8 +62,13 @@ type AdminPublic struct {
 var ErrAdminAlreadyConfigured = errors.New("admin already configured")
 
 func Open(path string, cipher *security.Cipher) (*Store, error) {
+	db, err := openPlatformDB(path)
+	if err != nil {
+		return nil, err
+	}
 	st := &Store{
 		path:   path,
+		db:     db,
 		cipher: cipher,
 		state: state{
 			Servers:     map[string]model.Server{},
@@ -72,14 +81,31 @@ func Open(path string, cipher *security.Cipher) (*Store, error) {
 	raw, err := os.ReadFile(path)
 	if err == nil && len(raw) > 0 {
 		if err := json.Unmarshal(raw, &st.state); err != nil {
+			_ = db.Close()
 			return nil, fmt.Errorf("load store: %w", err)
 		}
 	}
 	if err != nil && !errors.Is(err, os.ErrNotExist) {
+		_ = db.Close()
 		return nil, fmt.Errorf("read store: %w", err)
 	}
 	st.ensureMaps()
+	if err := st.migratePlatformDB(); err != nil {
+		_ = db.Close()
+		return nil, err
+	}
+	if err := st.seedPlatformData(); err != nil {
+		_ = db.Close()
+		return nil, err
+	}
 	return st, nil
+}
+
+func (s *Store) Close() error {
+	if s.db == nil {
+		return nil
+	}
+	return s.db.Close()
 }
 
 func (s *Store) AdminConfigured() bool {
@@ -110,6 +136,18 @@ func (s *Store) SetupAdmin(username, password string) (AdminPublic, error) {
 	}
 	s.state.Admin = &admin
 	if err := s.saveLocked(); err != nil {
+		return AdminPublic{}, err
+	}
+	if _, err := s.createPlatformItem("users", model.PlatformItem{
+		ID:          admin.UserID,
+		Name:        admin.Username,
+		Type:        "local",
+		Status:      "enabled",
+		Description: "首次初始化创建的管理员用户。",
+		Metadata:    map[string]any{"role": "超级管理员"},
+		CreatedAt:   admin.CreatedAt,
+		UpdatedAt:   admin.UpdatedAt,
+	}); err != nil {
 		return AdminPublic{}, err
 	}
 	return admin.Public(), nil
@@ -154,6 +192,490 @@ func (s *Store) ensureMaps() {
 	if s.state.AuditLogs == nil {
 		s.state.AuditLogs = []model.AuditLog{}
 	}
+}
+
+var platformCollections = []string{
+	"users",
+	"roles",
+	"departments",
+	"login_policies",
+	"login_locks",
+	"oidc_clients",
+	"assets",
+	"asset_groups",
+	"credentials",
+	"command_snippets",
+	"storages",
+	"web_assets",
+	"certificates",
+	"database_assets",
+	"sql_work_orders",
+	"ssh_gateways",
+	"agent_gateways",
+	"gateway_groups",
+	"online_sessions",
+	"offline_sessions",
+	"exec_command_logs",
+	"file_logs",
+	"access_logs",
+	"access_stats",
+	"login_logs",
+	"operation_logs",
+	"sql_logs",
+	"scheduled_tasks",
+	"command_filters",
+	"authorization_strategies",
+	"authorized_assets",
+	"authorized_web_assets",
+	"authorized_database_assets",
+	"system_settings",
+}
+
+func openPlatformDB(jsonPath string) (*sql.DB, error) {
+	dbPath := strings.TrimSuffix(jsonPath, filepath.Ext(jsonPath)) + ".db"
+	if err := os.MkdirAll(filepath.Dir(dbPath), 0o700); err != nil {
+		return nil, err
+	}
+	db, err := sql.Open("sqlite", dbPath)
+	if err != nil {
+		return nil, fmt.Errorf("open sqlite store: %w", err)
+	}
+	db.SetMaxOpenConns(1)
+	if err := db.Ping(); err != nil {
+		_ = db.Close()
+		return nil, fmt.Errorf("ping sqlite store: %w", err)
+	}
+	return db, nil
+}
+
+func (s *Store) migratePlatformDB() error {
+	if s.db == nil {
+		return nil
+	}
+	statements := []string{
+		`CREATE TABLE IF NOT EXISTS schema_migrations (version INTEGER PRIMARY KEY, applied_at TEXT NOT NULL)`,
+		`CREATE TABLE IF NOT EXISTS platform_records (
+			collection TEXT NOT NULL,
+			id TEXT NOT NULL,
+			payload TEXT NOT NULL,
+			created_at TEXT NOT NULL,
+			updated_at TEXT NOT NULL,
+			PRIMARY KEY (collection, id)
+		)`,
+		`CREATE INDEX IF NOT EXISTS idx_platform_records_collection_created ON platform_records(collection, created_at DESC)`,
+		`INSERT OR IGNORE INTO schema_migrations(version, applied_at) VALUES (1, strftime('%Y-%m-%dT%H:%M:%fZ','now'))`,
+	}
+	for _, statement := range statements {
+		if _, err := s.db.Exec(statement); err != nil {
+			return fmt.Errorf("migrate sqlite store: %w", err)
+		}
+	}
+	return nil
+}
+
+func (s *Store) seedPlatformData() error {
+	for collection, items := range defaultPlatformItems() {
+		count, err := s.platformCount(collection)
+		if err != nil {
+			return err
+		}
+		if count > 0 {
+			continue
+		}
+		for _, item := range items {
+			item.Module = collection
+			if _, err := s.createPlatformItem(collection, item); err != nil {
+				return err
+			}
+		}
+	}
+	return nil
+}
+
+func (s *Store) platformCount(collection string) (int, error) {
+	var count int
+	if err := s.db.QueryRow(`SELECT COUNT(*) FROM platform_records WHERE collection = ?`, collection).Scan(&count); err != nil {
+		return 0, fmt.Errorf("count platform records: %w", err)
+	}
+	return count, nil
+}
+
+func defaultPlatformItems() map[string][]model.PlatformItem {
+	return map[string][]model.PlatformItem{
+		"roles": {
+			{Name: "超级管理员", Type: "builtin", Status: "enabled", Description: "拥有全部管理、审计和接入权限。"},
+			{Name: "管理员", Type: "builtin", Status: "enabled", Description: "管理资产、凭据、授权和系统设置。"},
+			{Name: "审计员", Type: "builtin", Status: "enabled", Description: "查看会话、录屏、登录和操作审计。"},
+			{Name: "普通用户", Type: "builtin", Status: "enabled", Description: "通过接入门户访问授权资产。"},
+		},
+		"departments": {
+			{Name: "默认部门", Type: "root", Status: "enabled", Description: "默认用户组织。"},
+		},
+		"asset_groups": {
+			{Name: "文本协议", Type: "ssh", Status: "enabled", Protocol: model.ProtocolSSH, Description: "SSH 等文本协议资产。"},
+			{Name: "图形协议", Type: "desktop", Status: "enabled", Protocol: model.ProtocolRDP, Description: "RDP/VNC 图形协议资产。"},
+			{Name: "Web资产", Type: "web", Status: "enabled", Protocol: model.ProtocolHTTP, Description: "通过反向代理接入的 Web 资产。"},
+			{Name: "数据库资产", Type: "database", Status: "enabled", Protocol: model.ProtocolDatabase, Description: "数据库代理与 SQL 审计资产。"},
+		},
+		"storages": {
+			{Name: "Default", Type: "local", Status: "enabled", Description: "默认本地用户文件盘。", Metadata: map[string]any{"shared": false, "limit": "5 GB", "used": "0 B"}},
+		},
+		"scheduled_tasks": {
+			{Name: "Auto renew Certificate", Type: "certificate-renewal", Status: "enabled", Description: "自动续签证书。", Metadata: map[string]any{"cron": "0 0/10 * * * ?"}},
+			{Name: "Auto Remove History Log", Type: "log-cleanup", Status: "enabled", Description: "按保留策略清理历史日志。", Metadata: map[string]any{"cron": "0 0/10 * * * ?"}},
+			{Name: "Asset Check Status", Type: "asset-status", Status: "enabled", Description: "定时检测资产连通状态。", Metadata: map[string]any{"cron": "0 0/10 * * * ?"}},
+			{Name: "Auto Backup", Type: "backup", Status: "disabled", Description: "定时备份系统数据。", Metadata: map[string]any{"cron": "0 0 2 * * ?"}},
+		},
+		"system_settings": {
+			{Name: "系统设置", Type: "branding", Status: "enabled", Description: "系统图标、名称、备案号、版权、资产 Logo 与关于页。"},
+			{Name: "资产接入设置", Type: "access", Status: "enabled", Description: "接入页面、独立标签页、MFA、水印和录屏策略。"},
+			{Name: "代理服务设置", Type: "proxy", Status: "enabled", Description: "SSH/RDP/数据库代理监听、私钥和转发白名单。"},
+			{Name: "安全设置", Type: "security", Status: "enabled", Description: "验证码、强制 MFA、禁用密码登录、会话和密码策略。"},
+			{Name: "身份认证设置", Type: "identity", Status: "enabled", Description: "Passkey、LDAP、企业微信、OIDC 登录。"},
+			{Name: "身份提供服务", Type: "oidc-server", Status: "enabled", Description: "OIDC Server Discovery、JWKS、Authorize、Token、UserInfo。"},
+			{Name: "通知与集成", Type: "integration", Status: "enabled", Description: "SMTP 邮件和 LLM 集成配置。"},
+			{Name: "日志保留设置", Type: "retention", Status: "enabled", Description: "会话、登录、访问、SQL、任务日志保留天数。"},
+			{Name: "系统维护", Type: "maintenance", Status: "enabled", Description: "备份恢复、授权许可、资产 Logo、关于。"},
+		},
+		"authorization_strategies": {
+			{Name: "默认文件权限", Type: "file", Status: "enabled", Description: "上传、下载、编辑、删除、重命名、复制、粘贴权限矩阵。", Permissions: map[string]bool{"upload": true, "download": true, "edit": true, "delete": false, "rename": true, "copy": true, "paste": true}},
+		},
+		"ssh_gateways": {
+			{Name: "内置 SSH 网关", Type: "builtin", Status: "disabled", Host: "0.0.0.0", Port: 2022, Description: "允许原生 SSH 客户端进入资产选择或直连资产。"},
+		},
+		"agent_gateways": {
+			{Name: "默认安全网关", Type: "agent", Status: "offline", Description: "Agent/安全网关注册、令牌、延迟和资源指标。"},
+		},
+		"gateway_groups": {
+			{Name: "默认网关分组", Type: "manual", Status: "enabled", Description: "手动选择网关成员用于资产接入路由。"},
+		},
+		"command_filters": {
+			{Name: "高危命令拦截", Type: "deny", Status: "disabled", Description: "匹配高危命令并执行拒绝或审批动作。", Metadata: map[string]any{"risk": "high", "pattern": "rm -rf|mkfs|shutdown|reboot"}},
+		},
+	}
+}
+
+func (s *Store) PlatformBootstrap() (map[string][]model.PlatformItem, error) {
+	result := map[string][]model.PlatformItem{}
+	for _, collection := range platformCollections {
+		result[collection] = []model.PlatformItem{}
+	}
+	rows, err := s.db.Query(`SELECT collection, payload FROM platform_records ORDER BY created_at DESC`)
+	if err != nil {
+		return nil, fmt.Errorf("list platform records: %w", err)
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var collection string
+		var payload string
+		if err := rows.Scan(&collection, &payload); err != nil {
+			return nil, err
+		}
+		var item model.PlatformItem
+		if err := json.Unmarshal([]byte(payload), &item); err != nil {
+			return nil, fmt.Errorf("decode platform record: %w", err)
+		}
+		result[collection] = append(result[collection], item)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	s.appendLegacyPlatformData(result)
+	return result, nil
+}
+
+func (s *Store) appendLegacyPlatformData(result map[string][]model.PlatformItem) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	for _, server := range s.state.Servers {
+		item := model.PlatformItem{
+			ID:          server.ID,
+			Module:      "assets",
+			Name:        server.Name,
+			Type:        string(server.OS),
+			Status:      "active",
+			Protocol:    serverProtocol(server),
+			Host:        server.Host,
+			Port:        serverPort(server),
+			Group:       server.Group,
+			Description: server.Description,
+			Metadata: map[string]any{
+				"source":      "legacy_server",
+				"legacy_id":   server.ID,
+				"ssh_port":    server.SSHPort,
+				"rdp_port":    server.RDPPort,
+				"os":          server.OS,
+				"import_note": "从旧服务器资产镜像到平台资产视图",
+			},
+			CreatedAt: server.CreatedAt,
+			UpdatedAt: server.UpdatedAt,
+		}
+		appendPlatformItem(result, "assets", item)
+	}
+	for _, credential := range s.state.Credentials {
+		item := model.PlatformItem{
+			ID:          credential.ID,
+			Module:      "credentials",
+			Name:        credential.Name,
+			Type:        string(credential.Type),
+			Status:      "encrypted",
+			Username:    credential.Username,
+			TargetID:    credential.ServerID,
+			Description: "从旧凭据库镜像，敏感字段仅在服务端解密使用。",
+			Metadata: map[string]any{
+				"source":    "legacy_credential",
+				"legacy_id": credential.ID,
+				"domain":    credential.Domain,
+			},
+			CreatedAt: credential.CreatedAt,
+			UpdatedAt: credential.UpdatedAt,
+		}
+		appendPlatformItem(result, "credentials", item)
+	}
+	for _, session := range s.state.Sessions {
+		collection := "offline_sessions"
+		if session.Status == model.SessionActive || session.Status == model.SessionPending {
+			collection = "online_sessions"
+		}
+		item := model.PlatformItem{
+			ID:          session.ID,
+			Module:      collection,
+			Name:        session.ID,
+			Type:        string(session.Protocol),
+			Status:      string(session.Status),
+			Protocol:    session.Protocol,
+			OwnerID:     session.UserID,
+			TargetID:    session.ServerID,
+			Description: session.Error,
+			Metadata: map[string]any{
+				"source":         "legacy_session",
+				"credential_id":  session.CredentialID,
+				"client_ip":      session.ClientIP,
+				"recording_path": session.RecordingPath,
+				"recording_size": session.RecordingSize,
+				"started_at":     session.StartedAt,
+				"ended_at":       session.EndedAt,
+			},
+			CreatedAt: session.StartedAt,
+			UpdatedAt: session.LastActivityAt,
+		}
+		appendPlatformItem(result, collection, item)
+	}
+	for _, log := range s.state.AuditLogs {
+		item := model.PlatformItem{
+			ID:          log.ID,
+			Module:      "operation_logs",
+			Name:        log.Action,
+			Type:        string(log.Protocol),
+			Status:      "recorded",
+			OwnerID:     log.UserID,
+			TargetID:    log.TargetID,
+			Description: log.Detail,
+			Metadata: map[string]any{
+				"source":    "legacy_audit",
+				"client_ip": log.ClientIP,
+			},
+			CreatedAt: log.CreatedAt,
+			UpdatedAt: log.CreatedAt,
+		}
+		appendPlatformItem(result, "operation_logs", item)
+	}
+}
+
+func appendPlatformItem(result map[string][]model.PlatformItem, collection string, item model.PlatformItem) {
+	for _, existing := range result[collection] {
+		if existing.ID == item.ID {
+			return
+		}
+	}
+	result[collection] = append(result[collection], item)
+}
+
+func serverProtocol(server model.Server) model.Protocol {
+	if server.OS == model.ServerOSWindows {
+		return model.ProtocolRDP
+	}
+	return model.ProtocolSSH
+}
+
+func serverPort(server model.Server) int {
+	if server.OS == model.ServerOSWindows {
+		if server.RDPPort == 0 {
+			return 3389
+		}
+		return server.RDPPort
+	}
+	if server.SSHPort == 0 {
+		return 22
+	}
+	return server.SSHPort
+}
+
+func (s *Store) ListPlatformItems(collection string) ([]model.PlatformItem, error) {
+	items, err := s.PlatformBootstrap()
+	if err != nil {
+		return nil, err
+	}
+	return items[collection], nil
+}
+
+func (s *Store) CreatePlatformItem(collection string, req model.PlatformItemRequest) (model.PlatformItem, error) {
+	item := model.PlatformItem{
+		Name:        strings.TrimSpace(req.Name),
+		Type:        strings.TrimSpace(req.Type),
+		Status:      strings.TrimSpace(req.Status),
+		Protocol:    req.Protocol,
+		Host:        strings.TrimSpace(req.Host),
+		Port:        req.Port,
+		Username:    strings.TrimSpace(req.Username),
+		Group:       strings.TrimSpace(req.Group),
+		OwnerID:     strings.TrimSpace(req.OwnerID),
+		ParentID:    strings.TrimSpace(req.ParentID),
+		TargetID:    strings.TrimSpace(req.TargetID),
+		Tags:        req.Tags,
+		Permissions: req.Permissions,
+		Description: strings.TrimSpace(req.Description),
+		Metadata:    req.Metadata,
+	}
+	if item.Name == "" {
+		item.Name = "未命名"
+	}
+	if item.Status == "" {
+		item.Status = "enabled"
+	}
+	return s.createPlatformItem(collection, item)
+}
+
+func (s *Store) createPlatformItem(collection string, item model.PlatformItem) (model.PlatformItem, error) {
+	now := time.Now().UTC()
+	if item.ID == "" {
+		item.ID = newID(collectionPrefix(collection))
+	}
+	if item.Module == "" {
+		item.Module = collection
+	}
+	if item.CreatedAt.IsZero() {
+		item.CreatedAt = now
+	}
+	if item.UpdatedAt.IsZero() {
+		item.UpdatedAt = item.CreatedAt
+	}
+	if item.Metadata == nil {
+		item.Metadata = map[string]any{}
+	}
+	payload, err := json.Marshal(item)
+	if err != nil {
+		return model.PlatformItem{}, err
+	}
+	_, err = s.db.Exec(
+		`INSERT OR REPLACE INTO platform_records(collection, id, payload, created_at, updated_at) VALUES (?, ?, ?, ?, ?)`,
+		collection,
+		item.ID,
+		string(payload),
+		item.CreatedAt.Format(time.RFC3339Nano),
+		item.UpdatedAt.Format(time.RFC3339Nano),
+	)
+	if err != nil {
+		return model.PlatformItem{}, fmt.Errorf("create platform record: %w", err)
+	}
+	return item, nil
+}
+
+func (s *Store) UpdatePlatformItem(collection, id string, req model.PlatformItemRequest) (model.PlatformItem, error) {
+	item, ok, err := s.GetPlatformItem(collection, id)
+	if err != nil {
+		return model.PlatformItem{}, err
+	}
+	if !ok {
+		return model.PlatformItem{}, os.ErrNotExist
+	}
+	if strings.TrimSpace(req.Name) != "" {
+		item.Name = strings.TrimSpace(req.Name)
+	}
+	if req.Type != "" {
+		item.Type = strings.TrimSpace(req.Type)
+	}
+	if req.Status != "" {
+		item.Status = strings.TrimSpace(req.Status)
+	}
+	if req.Protocol != "" {
+		item.Protocol = req.Protocol
+	}
+	if req.Host != "" {
+		item.Host = strings.TrimSpace(req.Host)
+	}
+	if req.Port != 0 {
+		item.Port = req.Port
+	}
+	if req.Username != "" {
+		item.Username = strings.TrimSpace(req.Username)
+	}
+	if req.Group != "" {
+		item.Group = strings.TrimSpace(req.Group)
+	}
+	if req.OwnerID != "" {
+		item.OwnerID = strings.TrimSpace(req.OwnerID)
+	}
+	if req.ParentID != "" {
+		item.ParentID = strings.TrimSpace(req.ParentID)
+	}
+	if req.TargetID != "" {
+		item.TargetID = strings.TrimSpace(req.TargetID)
+	}
+	if req.Tags != nil {
+		item.Tags = req.Tags
+	}
+	if req.Permissions != nil {
+		item.Permissions = req.Permissions
+	}
+	if req.Description != "" {
+		item.Description = strings.TrimSpace(req.Description)
+	}
+	if req.Metadata != nil {
+		item.Metadata = req.Metadata
+	}
+	item.UpdatedAt = time.Now().UTC()
+	return s.createPlatformItem(collection, item)
+}
+
+func (s *Store) GetPlatformItem(collection, id string) (model.PlatformItem, bool, error) {
+	var payload string
+	err := s.db.QueryRow(`SELECT payload FROM platform_records WHERE collection = ? AND id = ?`, collection, id).Scan(&payload)
+	if errors.Is(err, sql.ErrNoRows) {
+		return model.PlatformItem{}, false, nil
+	}
+	if err != nil {
+		return model.PlatformItem{}, false, fmt.Errorf("get platform record: %w", err)
+	}
+	var item model.PlatformItem
+	if err := json.Unmarshal([]byte(payload), &item); err != nil {
+		return model.PlatformItem{}, false, err
+	}
+	return item, true, nil
+}
+
+func (s *Store) DeletePlatformItem(collection, id string) error {
+	result, err := s.db.Exec(`DELETE FROM platform_records WHERE collection = ? AND id = ?`, collection, id)
+	if err != nil {
+		return fmt.Errorf("delete platform record: %w", err)
+	}
+	affected, err := result.RowsAffected()
+	if err == nil && affected == 0 {
+		return os.ErrNotExist
+	}
+	return nil
+}
+
+func collectionPrefix(collection string) string {
+	parts := strings.Split(collection, "_")
+	prefix := "rec"
+	if len(parts) > 0 && parts[0] != "" {
+		prefix = parts[0]
+	}
+	if len(prefix) > 10 {
+		prefix = prefix[:10]
+	}
+	return prefix
 }
 
 func (s *Store) Bootstrap() ([]model.Server, []model.CredentialPublic, []model.ConnectionSession, []model.AuditLog) {
@@ -204,7 +726,29 @@ func (s *Store) CreateServer(server model.Server) (model.Server, error) {
 		server.RDPPort = 3389
 	}
 	s.state.Servers[server.ID] = server
-	return server, s.saveLocked()
+	if err := s.saveLocked(); err != nil {
+		return model.Server{}, err
+	}
+	_, _ = s.createPlatformItem("assets", model.PlatformItem{
+		ID:          server.ID,
+		Name:        server.Name,
+		Type:        string(server.OS),
+		Status:      "active",
+		Protocol:    serverProtocol(server),
+		Host:        server.Host,
+		Port:        serverPort(server),
+		Group:       server.Group,
+		Description: server.Description,
+		Metadata: map[string]any{
+			"source":   "server_create",
+			"ssh_port": server.SSHPort,
+			"rdp_port": server.RDPPort,
+			"os":       server.OS,
+		},
+		CreatedAt: server.CreatedAt,
+		UpdatedAt: server.UpdatedAt,
+	})
+	return server, nil
 }
 
 func (s *Store) GetServer(id string) (model.Server, bool) {
@@ -237,7 +781,22 @@ func (s *Store) CreateCredential(credential model.Credential, secret CredentialS
 	credential.CreatedAt = now
 	credential.UpdatedAt = now
 	s.state.Credentials[credential.ID] = credential
-	return credential.Public(), s.saveLocked()
+	if err := s.saveLocked(); err != nil {
+		return model.CredentialPublic{}, err
+	}
+	_, _ = s.createPlatformItem("credentials", model.PlatformItem{
+		ID:          credential.ID,
+		Name:        credential.Name,
+		Type:        string(credential.Type),
+		Status:      "encrypted",
+		Username:    credential.Username,
+		TargetID:    credential.ServerID,
+		Description: "服务端加密保存的授权凭证。",
+		Metadata:    map[string]any{"domain": credential.Domain},
+		CreatedAt:   credential.CreatedAt,
+		UpdatedAt:   credential.UpdatedAt,
+	})
+	return credential.Public(), nil
 }
 
 func (s *Store) GetCredential(id string) (model.Credential, CredentialSecret, bool, error) {
@@ -273,7 +832,11 @@ func (s *Store) CreateSession(session model.ConnectionSession) (model.Connection
 	session.StartedAt = now
 	session.LastActivityAt = now
 	s.state.Sessions[session.ID] = session
-	return session, s.saveLocked()
+	if err := s.saveLocked(); err != nil {
+		return model.ConnectionSession{}, err
+	}
+	_, _ = s.createPlatformItem("online_sessions", sessionPlatformItem("online_sessions", session))
+	return session, nil
 }
 
 func (s *Store) GetSession(id string) (model.ConnectionSession, bool) {
@@ -299,13 +862,19 @@ func (s *Store) UpdateSession(id string, update func(*model.ConnectionSession)) 
 
 func (s *Store) CloseSession(id, reason string) (model.ConnectionSession, error) {
 	now := time.Now().UTC()
-	return s.UpdateSession(id, func(session *model.ConnectionSession) {
+	session, err := s.UpdateSession(id, func(session *model.ConnectionSession) {
 		session.Status = model.SessionClosed
 		session.EndedAt = &now
 		if reason != "" {
 			session.Error = reason
 		}
 	})
+	if err != nil {
+		return model.ConnectionSession{}, err
+	}
+	_, _ = s.createPlatformItem("offline_sessions", sessionPlatformItem("offline_sessions", session))
+	_ = s.DeletePlatformItem("online_sessions", session.ID)
+	return session, nil
 }
 
 func (s *Store) Audit(log model.AuditLog) error {
@@ -318,7 +887,48 @@ func (s *Store) Audit(log model.AuditLog) error {
 	if len(s.state.AuditLogs) > 1000 {
 		s.state.AuditLogs = s.state.AuditLogs[len(s.state.AuditLogs)-1000:]
 	}
-	return s.saveLocked()
+	if err := s.saveLocked(); err != nil {
+		return err
+	}
+	_, _ = s.createPlatformItem("operation_logs", model.PlatformItem{
+		ID:          log.ID,
+		Name:        log.Action,
+		Type:        string(log.Protocol),
+		Status:      "recorded",
+		OwnerID:     log.UserID,
+		TargetID:    log.TargetID,
+		Description: log.Detail,
+		Metadata:    map[string]any{"client_ip": log.ClientIP},
+		CreatedAt:   log.CreatedAt,
+		UpdatedAt:   log.CreatedAt,
+	})
+	return nil
+}
+
+func sessionPlatformItem(collection string, session model.ConnectionSession) model.PlatformItem {
+	return model.PlatformItem{
+		ID:          session.ID,
+		Module:      collection,
+		Name:        session.ID,
+		Type:        string(session.Protocol),
+		Status:      string(session.Status),
+		Protocol:    session.Protocol,
+		OwnerID:     session.UserID,
+		TargetID:    session.ServerID,
+		Description: session.Error,
+		Metadata: map[string]any{
+			"credential_id":   session.CredentialID,
+			"client_ip":       session.ClientIP,
+			"recording_path":  session.RecordingPath,
+			"recording_size":  session.RecordingSize,
+			"workspace_width": session.Width,
+			"workspace_height": session.Height,
+			"started_at":      session.StartedAt,
+			"ended_at":        session.EndedAt,
+		},
+		CreatedAt: session.StartedAt,
+		UpdatedAt: session.LastActivityAt,
+	}
 }
 
 func (s *Store) saveLocked() error {

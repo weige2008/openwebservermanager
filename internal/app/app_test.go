@@ -374,6 +374,67 @@ func TestResourceOperationEndpoints(t *testing.T) {
 	}
 }
 
+func TestStorageAuthorizationStrategyPermissions(t *testing.T) {
+	handler, adminCookie := newTestHandler(t)
+
+	storageRec := assertStatus(t, handler, http.MethodPost, "/api/admin/storages", map[string]any{
+		"name":   "strategy-drive",
+		"type":   "local",
+		"status": "enabled",
+	}, adminCookie, http.StatusCreated)
+	var storage model.PlatformItem
+	decodeResponse(t, storageRec, &storage)
+
+	assertStatus(t, handler, http.MethodPost, "/api/admin/roles", map[string]any{
+		"name":   "storage-operator",
+		"type":   "custom",
+		"status": "enabled",
+		"metadata": map[string]any{
+			"api_permissions": []string{
+				"GET /api/admin/storages/*",
+				"POST /api/admin/storages/*",
+				"DELETE /api/admin/storages/*",
+				"GET /api/admin/audit/file-logs",
+			},
+		},
+	}, adminCookie, http.StatusCreated)
+	assertStatus(t, handler, http.MethodPost, "/api/admin/users", map[string]any{
+		"name":     "storage-user",
+		"type":     "local",
+		"status":   "enabled",
+		"password": "password123",
+		"metadata": map[string]any{"role": "storage-operator"},
+	}, adminCookie, http.StatusCreated)
+	loginRec := assertStatus(t, handler, http.MethodPost, "/api/auth/login", map[string]any{"username": "storage-user", "password": "password123"}, nil, http.StatusOK)
+	userCookie := loginRec.Result().Cookies()[0]
+
+	assertStatus(t, handler, http.MethodGet, "/api/admin/storages/"+storage.ID+"/files", nil, userCookie, http.StatusOK)
+	assertStatus(t, handler, http.MethodPost, "/api/admin/storages/"+storage.ID+"/files-mkdir", map[string]any{"path": "docs"}, userCookie, http.StatusCreated)
+	assertStatus(t, handler, http.MethodPost, "/api/admin/storages/"+storage.ID+"/files-write", map[string]any{"path": "docs/a.txt", "content": "alpha"}, userCookie, http.StatusCreated)
+	assertStatus(t, handler, http.MethodPost, "/api/admin/storages/"+storage.ID+"/files-copy", map[string]any{"path": "docs/a.txt", "destination": "docs/b.txt"}, userCookie, http.StatusCreated)
+	assertStatus(t, handler, http.MethodPost, "/api/admin/storages/"+storage.ID+"/files-rename", map[string]any{"path": "docs/b.txt", "destination": "docs/c.txt"}, userCookie, http.StatusOK)
+	downloadRec := assertStatus(t, handler, http.MethodGet, "/api/admin/storages/"+storage.ID+"/files-download?path=docs/c.txt", nil, userCookie, http.StatusOK)
+	if strings.TrimSpace(downloadRec.Body.String()) != "alpha" {
+		t.Fatalf("download body = %q, want alpha", downloadRec.Body.String())
+	}
+	assertStatus(t, handler, http.MethodDelete, "/api/admin/storages/"+storage.ID+"/files?path=docs/c.txt", nil, userCookie, http.StatusForbidden)
+	logsRec := assertStatus(t, handler, http.MethodGet, "/api/admin/audit/file-logs", nil, userCookie, http.StatusOK)
+	for _, want := range []string{"copy", "rename", "denied"} {
+		if !strings.Contains(logsRec.Body.String(), want) {
+			t.Fatalf("file logs did not include %q operation", want)
+		}
+	}
+
+	assertStatus(t, handler, http.MethodPost, "/api/admin/strategies", map[string]any{
+		"name":        "allow strategy-drive delete",
+		"type":        "file",
+		"status":      "enabled",
+		"target_id":   storage.ID,
+		"permissions": map[string]bool{"delete": true},
+	}, adminCookie, http.StatusCreated)
+	assertStatus(t, handler, http.MethodDelete, "/api/admin/storages/"+storage.ID+"/files?path=docs/c.txt", nil, userCookie, http.StatusOK)
+}
+
 func TestAuditSessionOperations(t *testing.T) {
 	handler, adminCookie := newTestHandler(t)
 

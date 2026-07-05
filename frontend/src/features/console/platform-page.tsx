@@ -1,6 +1,6 @@
 import type { ColumnDef } from '@tanstack/react-table'
 import { Link } from '@tanstack/react-router'
-import { ArrowUpRight, Download, FileDown, FileSearch, FolderPlus, Pencil, Play, Plus, RefreshCw, Save, Trash2, Upload } from 'lucide-react'
+import { ArrowUpRight, Copy, Download, FileDown, FileSearch, FolderPlus, MoveRight, Pencil, Play, Plus, RefreshCw, Save, Trash2, Upload } from 'lucide-react'
 import { useEffect, useMemo, useState } from 'react'
 
 import { useApp } from '@/app/app-provider'
@@ -495,6 +495,10 @@ function StorageFilesDialog({ item, onClose }: { item: PlatformItem; onClose: ()
   const [folderName, setFolderName] = useState('')
   const [filePath, setFilePath] = useState('')
   const [fileContent, setFileContent] = useState('')
+  const [copySource, setCopySource] = useState('')
+  const [copyDestination, setCopyDestination] = useState('')
+  const [renameSource, setRenameSource] = useState('')
+  const [renameDestination, setRenameDestination] = useState('')
 
   const load = async (target = path) => {
     setLoading(true)
@@ -565,6 +569,38 @@ function StorageFilesDialog({ item, onClose }: { item: PlatformItem; onClose: ()
     }
   }
 
+  const copyEntry = async () => {
+    try {
+      await apiRequest(`/api/admin/storages/${item.id}/files-copy`, {
+        method: 'POST',
+        body: JSON.stringify({ path: joinStoragePath(path, copySource), destination: joinStoragePath(path, copyDestination) }),
+      })
+      setCopySource('')
+      setCopyDestination('')
+      await load()
+      await app.refresh(true)
+      app.showToast('文件已复制')
+    } catch (error) {
+      app.handleApiError(error)
+    }
+  }
+
+  const renameEntry = async () => {
+    try {
+      await apiRequest(`/api/admin/storages/${item.id}/files-rename`, {
+        method: 'POST',
+        body: JSON.stringify({ path: joinStoragePath(path, renameSource), destination: joinStoragePath(path, renameDestination) }),
+      })
+      setRenameSource('')
+      setRenameDestination('')
+      await load()
+      await app.refresh(true)
+      app.showToast('文件已重命名')
+    } catch (error) {
+      app.handleApiError(error)
+    }
+  }
+
   return (
     <DialogShell open onOpenChange={(open) => !open && onClose()} title={`${item.name} 文件`} description='浏览文件盘，创建目录，写入、下载和删除文件，操作会写入文件日志。'>
       <div className='grid gap-4'>
@@ -595,6 +631,24 @@ function StorageFilesDialog({ item, onClose }: { item: PlatformItem; onClose: ()
         <div className='grid gap-3 sm:grid-cols-[minmax(0,1fr)_auto]'>
           <Input placeholder='新目录名' value={folderName} onChange={(event) => setFolderName(event.currentTarget.value)} />
           <Button variant='outline' onClick={() => void createFolder()} disabled={!folderName.trim()}><FolderPlus className='size-4' />创建目录</Button>
+        </div>
+        <div className='grid gap-3 rounded-xl border border-border bg-background/60 p-3'>
+          <div className='grid gap-3 sm:grid-cols-[minmax(0,1fr)_minmax(0,1fr)_auto]'>
+            <Input placeholder='复制源，例如 docs/a.txt' value={copySource} onChange={(event) => setCopySource(event.currentTarget.value)} />
+            <Input placeholder='复制到，例如 docs/b.txt' value={copyDestination} onChange={(event) => setCopyDestination(event.currentTarget.value)} />
+            <Button variant='outline' onClick={() => void copyEntry()} disabled={!copySource.trim() || !copyDestination.trim()}>
+              <Copy className='size-4' />
+              复制
+            </Button>
+          </div>
+          <div className='grid gap-3 sm:grid-cols-[minmax(0,1fr)_minmax(0,1fr)_auto]'>
+            <Input placeholder='重命名源，例如 docs/b.txt' value={renameSource} onChange={(event) => setRenameSource(event.currentTarget.value)} />
+            <Input placeholder='改为，例如 docs/c.txt' value={renameDestination} onChange={(event) => setRenameDestination(event.currentTarget.value)} />
+            <Button variant='outline' onClick={() => void renameEntry()} disabled={!renameSource.trim() || !renameDestination.trim()}>
+              <MoveRight className='size-4' />
+              重命名
+            </Button>
+          </div>
         </div>
         <div className='grid gap-3'>
           <Input placeholder='文件名，例如 notes/readme.txt' value={filePath} onChange={(event) => setFilePath(event.currentTarget.value)} />

@@ -38,6 +38,12 @@ type filePathRequest struct {
 	Path string `json:"path"`
 }
 
+type fileMoveRequest struct {
+	Path        string `json:"path"`
+	Destination string `json:"destination"`
+	Overwrite   bool   `json:"overwrite"`
+}
+
 type certificateRequest struct {
 	Name   string   `json:"name"`
 	Domain string   `json:"domain"`
@@ -182,6 +188,18 @@ func (s *Server) handleStorageFiles(w http.ResponseWriter, r *http.Request, stor
 			return
 		}
 		s.handleStorageDownload(w, r, root, storageID)
+	case "files-rename":
+		if r.Method != http.MethodPost {
+			writeError(w, http.StatusMethodNotAllowed, "method not allowed")
+			return
+		}
+		s.handleStorageRename(w, r, root, storageID)
+	case "files-copy":
+		if r.Method != http.MethodPost {
+			writeError(w, http.StatusMethodNotAllowed, "method not allowed")
+			return
+		}
+		s.handleStorageCopy(w, r, root, storageID)
 	default:
 		writeError(w, http.StatusNotFound, "file operation not found")
 	}
@@ -224,6 +242,13 @@ func (s *Server) handleStorageWrite(w http.ResponseWriter, r *http.Request, root
 	if !ok {
 		return
 	}
+	permission := "upload"
+	if _, err := os.Stat(target); err == nil {
+		permission = "edit"
+	}
+	if !s.requireStoragePermission(w, r, storageID, permission, rel) {
+		return
+	}
 	content := []byte(req.Content)
 	if strings.EqualFold(req.Encoding, "base64") {
 		decoded, err := base64.StdEncoding.DecodeString(req.Content)
@@ -255,6 +280,9 @@ func (s *Server) handleStorageMkdir(w http.ResponseWriter, r *http.Request, root
 	if !ok {
 		return
 	}
+	if !s.requireStoragePermission(w, r, storageID, "upload", rel) {
+		return
+	}
 	if err := os.MkdirAll(target, 0o770); err != nil {
 		writeError(w, http.StatusInternalServerError, err.Error())
 		return
@@ -271,6 +299,9 @@ func (s *Server) handleStorageDelete(w http.ResponseWriter, r *http.Request, roo
 	}
 	if rel == "." || rel == "" {
 		writeError(w, http.StatusBadRequest, "cannot delete storage root")
+		return
+	}
+	if !s.requireStoragePermission(w, r, storageID, "delete", rel) {
 		return
 	}
 	if err := os.RemoveAll(target); err != nil {
@@ -292,9 +323,106 @@ func (s *Server) handleStorageDownload(w http.ResponseWriter, r *http.Request, r
 		writeError(w, http.StatusNotFound, "file not found")
 		return
 	}
+	if !s.requireStoragePermission(w, r, storageID, "download", rel) {
+		return
+	}
 	_, _ = s.cfg.Store.CreatePlatformItem("file_logs", model.PlatformItemRequest{Name: rel, Type: "download", Status: "success", TargetID: storageID, OwnerID: s.currentUserID(r), Description: "downloaded file"})
 	_ = s.audit(r, "storage.files.download", storageID, "", "downloaded "+rel)
 	http.ServeFile(w, r, target)
+}
+
+func (s *Server) handleStorageRename(w http.ResponseWriter, r *http.Request, root, storageID string) {
+	var req fileMoveRequest
+	if !decodeJSON(w, r, &req) {
+		return
+	}
+	source, sourceRel, ok := s.storagePath(w, r, root, req.Path)
+	if !ok {
+		return
+	}
+	destination, destinationRel, ok := s.storagePath(w, r, root, req.Destination)
+	if !ok {
+		return
+	}
+	if sourceRel == "." || destinationRel == "." || strings.TrimSpace(req.Destination) == "" {
+		writeError(w, http.StatusBadRequest, "source and destination are required")
+		return
+	}
+	if !s.requireStoragePermission(w, r, storageID, "rename", sourceRel) {
+		return
+	}
+	if _, err := os.Stat(source); err != nil {
+		writeError(w, http.StatusNotFound, "source not found")
+		return
+	}
+	if _, err := os.Stat(destination); err == nil && !req.Overwrite {
+		writeError(w, http.StatusConflict, "destination exists")
+		return
+	}
+	if err := os.MkdirAll(filepath.Dir(destination), 0o770); err != nil {
+		writeError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	if req.Overwrite {
+		_ = os.RemoveAll(destination)
+	}
+	if err := os.Rename(source, destination); err != nil {
+		writeError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	_, _ = s.cfg.Store.CreatePlatformItem("file_logs", model.PlatformItemRequest{Name: sourceRel + " -> " + destinationRel, Type: "rename", Status: "success", TargetID: storageID, OwnerID: s.currentUserID(r), Description: "renamed file"})
+	_ = s.audit(r, "storage.files.rename", storageID, "", "renamed "+sourceRel+" to "+destinationRel)
+	writeJSON(w, http.StatusOK, map[string]any{"path": filepath.ToSlash(destinationRel)})
+}
+
+func (s *Server) handleStorageCopy(w http.ResponseWriter, r *http.Request, root, storageID string) {
+	var req fileMoveRequest
+	if !decodeJSON(w, r, &req) {
+		return
+	}
+	source, sourceRel, ok := s.storagePath(w, r, root, req.Path)
+	if !ok {
+		return
+	}
+	destination, destinationRel, ok := s.storagePath(w, r, root, req.Destination)
+	if !ok {
+		return
+	}
+	if sourceRel == "." || destinationRel == "." || strings.TrimSpace(req.Destination) == "" {
+		writeError(w, http.StatusBadRequest, "source and destination are required")
+		return
+	}
+	if !s.requireStoragePermission(w, r, storageID, "copy", sourceRel) || !s.requireStoragePermission(w, r, storageID, "paste", destinationRel) {
+		return
+	}
+	info, err := os.Stat(source)
+	if err != nil {
+		writeError(w, http.StatusNotFound, "source not found")
+		return
+	}
+	if _, err := os.Stat(destination); err == nil && !req.Overwrite {
+		writeError(w, http.StatusConflict, "destination exists")
+		return
+	}
+	if info.IsDir() && sameOrChildPath(source, destination) {
+		writeError(w, http.StatusBadRequest, "cannot copy a directory into itself")
+		return
+	}
+	if req.Overwrite {
+		_ = os.RemoveAll(destination)
+	}
+	if info.IsDir() {
+		if err := copyDirectory(source, destination); err != nil {
+			writeError(w, http.StatusInternalServerError, err.Error())
+			return
+		}
+	} else if err := copyFile(source, destination); err != nil {
+		writeError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	_, _ = s.cfg.Store.CreatePlatformItem("file_logs", model.PlatformItemRequest{Name: sourceRel + " -> " + destinationRel, Type: "copy", Status: "success", TargetID: storageID, OwnerID: s.currentUserID(r), Description: "copied file"})
+	_ = s.audit(r, "storage.files.copy", storageID, "", "copied "+sourceRel+" to "+destinationRel)
+	writeJSON(w, http.StatusCreated, map[string]any{"path": filepath.ToSlash(destinationRel)})
 }
 
 func (s *Server) storagePath(w http.ResponseWriter, _ *http.Request, root, value string) (string, string, bool) {
@@ -320,6 +448,113 @@ func (s *Server) storagePath(w http.ResponseWriter, _ *http.Request, root, value
 		return "", "", false
 	}
 	return target, rel, true
+}
+
+func (s *Server) requireStoragePermission(w http.ResponseWriter, r *http.Request, storageID, action, path string) bool {
+	if s.isAdminRequest(r) {
+		return true
+	}
+	allowed, matched := s.storagePermissionAllowed(storageID, action)
+	if !matched {
+		return true
+	}
+	if allowed {
+		return true
+	}
+	_, _ = s.cfg.Store.CreatePlatformItem("file_logs", model.PlatformItemRequest{
+		Name:        path,
+		Type:        action,
+		Status:      "denied",
+		TargetID:    storageID,
+		OwnerID:     s.currentUserID(r),
+		Description: "blocked by authorization strategy",
+	})
+	_ = s.audit(r, "storage.files."+action+".denied", storageID, "", "blocked "+action+" on "+path)
+	writeError(w, http.StatusForbidden, "file permission denied: "+action)
+	return false
+}
+
+func (s *Server) storagePermissionAllowed(storageID, action string) (bool, bool) {
+	strategies, err := s.cfg.Store.ListPlatformItems("authorization_strategies")
+	if err != nil {
+		return true, false
+	}
+	for _, strategy := range strategies {
+		if !platformItemEnabled(strategy) || !fileStrategyMatches(strategy, storageID) {
+			continue
+		}
+		if allowed, ok := strategy.Permissions[action]; ok {
+			return allowed, true
+		}
+	}
+	return true, false
+}
+
+func fileStrategyMatches(strategy model.PlatformItem, storageID string) bool {
+	if strategy.Type != "" && !strings.EqualFold(strategy.Type, "file") {
+		return false
+	}
+	if strategy.TargetID != "" && strategy.TargetID != storageID {
+		return false
+	}
+	if target, _ := strategy.Metadata["target_id"].(string); target != "" && target != storageID {
+		return false
+	}
+	if storage, _ := strategy.Metadata["storage_id"].(string); storage != "" && storage != storageID {
+		return false
+	}
+	return true
+}
+
+func copyFile(source, destination string) error {
+	if err := os.MkdirAll(filepath.Dir(destination), 0o770); err != nil {
+		return err
+	}
+	input, err := os.Open(source)
+	if err != nil {
+		return err
+	}
+	defer input.Close()
+	output, err := os.OpenFile(destination, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0o660)
+	if err != nil {
+		return err
+	}
+	defer output.Close()
+	_, err = io.Copy(output, input)
+	return err
+}
+
+func copyDirectory(source, destination string) error {
+	return filepath.WalkDir(source, func(path string, entry os.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		rel, err := filepath.Rel(source, path)
+		if err != nil {
+			return err
+		}
+		target := filepath.Join(destination, rel)
+		if entry.IsDir() {
+			return os.MkdirAll(target, 0o770)
+		}
+		return copyFile(path, target)
+	})
+}
+
+func sameOrChildPath(parent, child string) bool {
+	parentAbs, err := filepath.Abs(parent)
+	if err != nil {
+		return false
+	}
+	childAbs, err := filepath.Abs(child)
+	if err != nil {
+		return false
+	}
+	rel, err := filepath.Rel(parentAbs, childAbs)
+	if err != nil {
+		return false
+	}
+	return rel == "." || (!strings.HasPrefix(rel, ".."+string(filepath.Separator)) && rel != ".." && !filepath.IsAbs(rel))
 }
 
 func (s *Server) handleCertificateSelfSigned(w http.ResponseWriter, r *http.Request) {

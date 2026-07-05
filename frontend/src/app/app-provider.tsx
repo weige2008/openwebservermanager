@@ -13,6 +13,7 @@ interface AppContextValue {
   booted: boolean
   configured: boolean
   setupRequired: boolean
+  captchaRequired: boolean
   publicConfig: PublicConfig
   data: BootstrapData
   modal: ModalState
@@ -94,7 +95,7 @@ export function AppProvider({ children }: { children: ReactNode }) {
 
   const authStatus = useQuery({
     queryKey: ['auth-status'],
-    queryFn: () => apiRequest<{ configured: boolean }>('/api/auth/status'),
+    queryFn: () => apiRequest<{ configured: boolean; captcha_required?: boolean }>('/api/auth/status'),
     retry: false,
   })
 
@@ -241,6 +242,7 @@ export function AppProvider({ children }: { children: ReactNode }) {
       booted,
       configured,
       setupRequired: authStatus.isFetched ? !configured : false,
+      captchaRequired: Boolean(authStatus.data?.captcha_required),
       publicConfig,
       data,
       modal,
@@ -265,6 +267,7 @@ export function AppProvider({ children }: { children: ReactNode }) {
     [
       auth,
       authStatus.isFetched,
+      authStatus.data?.captcha_required,
       appearance,
       booted,
       configured,

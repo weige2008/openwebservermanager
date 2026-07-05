@@ -13,6 +13,7 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 	"testing/fstest"
@@ -830,6 +831,66 @@ func TestLoginSecurityPoliciesAndLocks(t *testing.T) {
 	logsRec := assertStatus(t, handler, http.MethodGet, "/api/admin/audit/login-logs", nil, adminCookie, http.StatusOK)
 	if !strings.Contains(logsRec.Body.String(), "blocked by login policy") {
 		t.Fatal("policy denial was not written to login logs")
+	}
+}
+
+func TestLoginCaptchaRequirement(t *testing.T) {
+	handler, adminCookie := newTestHandler(t)
+
+	assertStatus(t, handler, http.MethodPost, "/api/admin/system-settings", map[string]any{
+		"name":   "Login captcha",
+		"type":   "security",
+		"status": "enabled",
+		"metadata": map[string]any{
+			"captcha_enabled": true,
+		},
+	}, adminCookie, http.StatusCreated)
+
+	statusRec := assertStatus(t, handler, http.MethodGet, "/api/auth/status", nil, nil, http.StatusOK)
+	if !strings.Contains(statusRec.Body.String(), `"captcha_required":true`) {
+		t.Fatal("auth status did not report captcha requirement")
+	}
+	assertStatus(t, handler, http.MethodPost, "/api/auth/login", map[string]any{
+		"username": "admin",
+		"password": "password123",
+	}, nil, http.StatusBadRequest)
+
+	captchaRec := assertStatus(t, handler, http.MethodGet, "/api/auth/captcha", nil, nil, http.StatusOK)
+	var captcha map[string]any
+	decodeResponse(t, captchaRec, &captcha)
+	captchaID, _ := captcha["captcha_id"].(string)
+	question, _ := captcha["question"].(string)
+	if captchaID == "" || question == "" {
+		t.Fatalf("captcha response missing id/question: %v", captcha)
+	}
+	assertStatus(t, handler, http.MethodPost, "/api/auth/login", map[string]any{
+		"username":       "admin",
+		"password":       "password123",
+		"captcha_id":     captchaID,
+		"captcha_answer": "wrong",
+	}, nil, http.StatusBadRequest)
+	assertStatus(t, handler, http.MethodPost, "/api/auth/login", map[string]any{
+		"username":       "admin",
+		"password":       "password123",
+		"captcha_id":     captchaID,
+		"captcha_answer": captchaAnswerFromQuestion(question),
+	}, nil, http.StatusBadRequest)
+
+	nextCaptchaRec := assertStatus(t, handler, http.MethodGet, "/api/auth/captcha", nil, nil, http.StatusOK)
+	var nextCaptcha map[string]any
+	decodeResponse(t, nextCaptchaRec, &nextCaptcha)
+	loginRec := assertStatus(t, handler, http.MethodPost, "/api/auth/login", map[string]any{
+		"username":       "admin",
+		"password":       "password123",
+		"captcha_id":     nextCaptcha["captcha_id"],
+		"captcha_answer": captchaAnswerFromQuestion(stringValueFromAny(nextCaptcha["question"])),
+	}, nil, http.StatusOK)
+	if len(loginRec.Result().Cookies()) == 0 {
+		t.Fatal("captcha-protected login did not set auth cookie")
+	}
+	logsRec := assertStatus(t, handler, http.MethodGet, "/api/admin/audit/login-logs", nil, adminCookie, http.StatusOK)
+	if !strings.Contains(logsRec.Body.String(), "invalid captcha") {
+		t.Fatal("invalid captcha was not written to login logs")
 	}
 }
 
@@ -1768,6 +1829,21 @@ func stringSliceFromAny(value any) []string {
 		}
 	}
 	return out
+}
+
+func captchaAnswerFromQuestion(question string) string {
+	parts := strings.Fields(question)
+	if len(parts) < 3 {
+		return ""
+	}
+	left, _ := strconv.Atoi(parts[0])
+	right, _ := strconv.Atoi(parts[2])
+	return strconv.Itoa(left + right)
+}
+
+func stringValueFromAny(value any) string {
+	text, _ := value.(string)
+	return text
 }
 
 func zipHasEntry(reader *zip.Reader, filename string) bool {

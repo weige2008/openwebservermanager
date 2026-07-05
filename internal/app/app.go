@@ -101,6 +101,9 @@ func (s *Server) serveAPI(w http.ResponseWriter, r *http.Request) {
 	case r.Method == http.MethodGet && r.URL.Path == "/api/auth/status":
 		s.handleAuthStatus(w, r)
 		return
+	case r.Method == http.MethodGet && r.URL.Path == "/api/auth/captcha":
+		s.handleCaptcha(w, r)
+		return
 	case r.Method == http.MethodGet && r.URL.Path == "/api/public/config":
 		s.handlePublicConfig(w, r)
 		return

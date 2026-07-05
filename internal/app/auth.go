@@ -24,6 +24,7 @@ type authManager struct {
 	sessions      map[string]authSession
 	failures      map[string]loginFailure
 	mfaChallenges map[string]mfaChallenge
+	captchas      map[string]captchaChallenge
 }
 
 type authSession struct {
@@ -50,7 +51,8 @@ type mfaChallenge struct {
 }
 
 type authStatus struct {
-	Configured bool `json:"configured"`
+	Configured      bool `json:"configured"`
+	CaptchaRequired bool `json:"captcha_required"`
 }
 
 type setupRequest struct {
@@ -59,10 +61,12 @@ type setupRequest struct {
 }
 
 type loginRequest struct {
-	Username     string `json:"username"`
-	Password     string `json:"password"`
-	MFACode      string `json:"mfa_code"`
-	RecoveryCode string `json:"recovery_code"`
+	Username      string `json:"username"`
+	Password      string `json:"password"`
+	MFACode       string `json:"mfa_code"`
+	RecoveryCode  string `json:"recovery_code"`
+	CaptchaID     string `json:"captcha_id"`
+	CaptchaAnswer string `json:"captcha_answer"`
 }
 
 func newAuthManager() *authManager {
@@ -70,6 +74,7 @@ func newAuthManager() *authManager {
 		sessions:      map[string]authSession{},
 		failures:      map[string]loginFailure{},
 		mfaChallenges: map[string]mfaChallenge{},
+		captchas:      map[string]captchaChallenge{},
 	}
 }
 
@@ -159,6 +164,7 @@ func (m *authManager) clearSessions() {
 	defer m.mu.Unlock()
 	m.sessions = map[string]authSession{}
 	m.mfaChallenges = map[string]mfaChallenge{}
+	m.captchas = map[string]captchaChallenge{}
 }
 
 func (m *authManager) createMFAChallenge(challenge mfaChallenge) (string, error) {
@@ -218,7 +224,7 @@ func (s *Server) currentUserID(r *http.Request) string {
 }
 
 func (s *Server) handleAuthStatus(w http.ResponseWriter, _ *http.Request) {
-	writeJSON(w, http.StatusOK, authStatus{Configured: s.cfg.Store.AdminConfigured()})
+	writeJSON(w, http.StatusOK, authStatus{Configured: s.cfg.Store.AdminConfigured(), CaptchaRequired: s.captchaRequired()})
 }
 
 func (s *Server) handleSetup(w http.ResponseWriter, r *http.Request) {
@@ -277,6 +283,17 @@ func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
 	}
 	username := strings.TrimSpace(req.Username)
 	clientIP := s.clientIP(r)
+	if s.captchaRequired() && !s.verifyCaptcha(req.CaptchaID, req.CaptchaAnswer) {
+		_, _ = s.cfg.Store.CreatePlatformItem("login_logs", model.PlatformItemRequest{
+			Name:        username,
+			Type:        "captcha",
+			Status:      "failed",
+			Description: "invalid captcha",
+			Metadata:    map[string]any{"client_ip": clientIP, "account": username},
+		})
+		writeError(w, http.StatusBadRequest, "captcha is required or invalid")
+		return
+	}
 	if ok, reason := s.loginPolicyAllows(username, clientIP); !ok {
 		_, _ = s.cfg.Store.CreatePlatformItem("login_logs", model.PlatformItemRequest{
 			Name:        username,

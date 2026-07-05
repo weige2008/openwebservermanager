@@ -1,6 +1,6 @@
 import { useNavigate } from '@tanstack/react-router'
 import { Loader2 } from 'lucide-react'
-import { useState, type FormEvent } from 'react'
+import { useEffect, useState, type FormEvent } from 'react'
 import { useTranslation } from 'react-i18next'
 
 import { useApp } from '@/app/app-provider'
@@ -27,12 +27,31 @@ interface MFAChallenge {
   otpauthURL?: string
 }
 
+interface CaptchaChallenge {
+  captcha_id: string
+  question: string
+  expires_at: string
+}
+
 export function AuthPage() {
   const app = useApp()
   const { t } = useTranslation()
   const navigate = useNavigate()
   const [submitting, setSubmitting] = useState(false)
   const [mfaChallenge, setMFAChallenge] = useState<MFAChallenge | null>(null)
+  const [captcha, setCaptcha] = useState<CaptchaChallenge | null>(null)
+
+  const loadCaptcha = async () => {
+    setCaptcha(await apiRequest<CaptchaChallenge>('/api/auth/captcha'))
+  }
+
+  useEffect(() => {
+    if (!app.setupRequired && app.captchaRequired && !mfaChallenge) {
+      void loadCaptcha().catch(() => undefined)
+    } else {
+      setCaptcha(null)
+    }
+  }, [app.setupRequired, app.captchaRequired, mfaChallenge])
 
   const finishSignIn = async () => {
     const next = new URLSearchParams(window.location.search).get('next')
@@ -91,6 +110,8 @@ export function AuthPage() {
           body: JSON.stringify({
             username: String(form.get('username') || ''),
             password: String(form.get('password') || ''),
+            captcha_id: captcha?.captcha_id || '',
+            captcha_answer: String(form.get('captcha_answer') || ''),
           }),
         })
         if (result.mfa_required || result.mfa_setup_required) {
@@ -111,6 +132,9 @@ export function AuthPage() {
       }
     } catch (error) {
       app.handleApiError(error)
+      if (app.captchaRequired && !mfaChallenge && !app.setupRequired) {
+        void loadCaptcha().catch(() => undefined)
+      }
     } finally {
       setSubmitting(false)
     }
@@ -167,6 +191,16 @@ export function AuthPage() {
               <Field label={t('auth.confirmPassword')}>
                 <Input name='confirm_password' type='password' autoComplete='new-password' placeholder={t('auth.setupPasswordPlaceholder')} minLength={8} required />
               </Field>
+            ) : null}
+            {!app.setupRequired && app.captchaRequired ? (
+              <div className='grid gap-2'>
+                <div className='grid grid-cols-[minmax(0,1fr)_auto] items-end gap-2'>
+                  <Field label='Captcha'>
+                    <Input name='captcha_answer' inputMode='numeric' placeholder={captcha?.question || 'Loading...'} required />
+                  </Field>
+                  <Button type='button' variant='outline' onClick={() => void loadCaptcha()} disabled={submitting}>Refresh</Button>
+                </div>
+              </div>
             ) : null}
           </>
         )}

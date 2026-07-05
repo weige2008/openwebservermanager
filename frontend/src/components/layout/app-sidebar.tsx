@@ -29,7 +29,7 @@ export function AppSidebar({ collapsed = false }: { collapsed?: boolean }) {
   const role = auth?.role
   const visibleConsoleNav = consoleNavItems.filter((item) => item.to !== '/app/servers' || isAdminRole(role))
   const visiblePlatformGroups = platformNavGroups
-    .map((group) => ({ ...group, items: group.items.filter((item) => canViewPlatformPage(role, item)) }))
+    .map((group) => ({ ...group, items: group.items.filter((item) => canViewPlatformPage(role, item, auth?.menu_permissions)) }))
     .filter((group) => group.items.length > 0)
   const activeSection = [...visibleConsoleNav.map((item) => item.to), ...visiblePlatformGroups.flatMap((group) => group.items.map((item) => item.route))]
     .find((to) => (to === '/app' ? pathname === '/app' : pathname.startsWith(to))) ?? '/app'

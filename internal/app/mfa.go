@@ -141,7 +141,7 @@ func (s *Server) handleMFACompleteLogin(w http.ResponseWriter, r *http.Request) 
 		Description: "signed in with MFA",
 		Metadata:    map[string]any{"client_ip": challenge.ClientIP, "account": challenge.Username, "method": method},
 	})
-	writeJSON(w, http.StatusOK, map[string]any{"user": session, "recovery_codes": recoveryCodes})
+	writeJSON(w, http.StatusOK, map[string]any{"user": s.authUserPayload(session), "recovery_codes": recoveryCodes})
 }
 
 func (s *Server) handleAuthenticatedMFA(w http.ResponseWriter, r *http.Request) {

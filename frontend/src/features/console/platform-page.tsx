@@ -12,7 +12,7 @@ import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/com
 import { DialogShell } from '@/components/ui/dialog'
 import { Field, Input, Select, Textarea } from '@/components/ui/field'
 import { ApiError, apiRequest } from '@/lib/api'
-import { platformDescription, platformLabel, type PlatformPageConfig } from '@/lib/platform'
+import { platformDescription, platformLabel, platformPages, type PlatformPageConfig } from '@/lib/platform'
 import { cn, formatDate } from '@/lib/utils'
 import type { ConnectionSession, PlatformItem, Protocol } from '@/types'
 
@@ -214,7 +214,10 @@ export function PlatformTablePage({ config }: { config: PlatformPageConfig }) {
 
   const startCreate = () => {
     setEditing(null)
-    setForm({ ...initialForm, type: config.collection === 'credentials' ? 'ssh_password' : config.collection === 'users' ? 'local' : config.collection === 'departments' ? 'department' : '' })
+    setForm({
+      ...initialForm,
+      type: config.collection === 'credentials' ? 'ssh_password' : config.collection === 'users' ? 'local' : config.collection === 'departments' ? 'department' : config.collection === 'roles' ? 'custom' : '',
+    })
     setFormOpen(true)
   }
 
@@ -1087,6 +1090,8 @@ function PlatformItemDialog({
   const isCredential = collection === 'credentials'
   const isUser = collection === 'users'
   const isDepartment = collection === 'departments'
+  const isRole = collection === 'roles'
+  const roleItems = app.data.platform?.roles || []
   return (
     <DialogShell open={open} onOpenChange={onOpenChange} title={title} description={description}>
       <div className='grid gap-4'>
@@ -1128,6 +1133,18 @@ function PlatformItemDialog({
             <Input type='number' value={form.port} onChange={(event) => onChange({ port: event.currentTarget.value })} />
           </Field>
           <Field label={app.t('username', '用户')}><Input value={form.username} onChange={(event) => onChange({ username: event.currentTarget.value })} /></Field>
+          {isUser ? (
+            <Field label={app.t('role', '角色')}>
+              <Select value={roleValue(form.metadata)} onChange={(event) => onChange({ metadata: metadataWithValue(form.metadata, 'role', event.currentTarget.value) })}>
+                <option value='user'>{app.t('normalUser', '普通用户')}</option>
+                <option value='auditor'>{app.t('auditor', '审计员')}</option>
+                <option value='admin'>{app.t('administrator', '管理员')}</option>
+                {roleItems.map((item) => (
+                  <option key={item.id} value={item.name}>{item.name}</option>
+                ))}
+              </Select>
+            </Field>
+          ) : null}
           {isUser || (isCredential && form.type !== 'ssh_key') ? (
             <Field label={app.t('password', '密码')}><Input type='password' value={form.password} onChange={(event) => onChange({ password: event.currentTarget.value })} /></Field>
           ) : null}
@@ -1154,6 +1171,36 @@ function PlatformItemDialog({
           </Field>
           <Field label={app.t('tags', '标签')}><Input placeholder='prod,linux,web' value={form.tags} onChange={(event) => onChange({ tags: event.currentTarget.value })} /></Field>
         </div>
+        {isRole ? (
+          <div className='grid gap-4 rounded-lg border border-border bg-background/70 p-3'>
+            <Field label={app.t('apiPermissions', 'API 权限')}>
+              <Textarea
+                value={roleAPIText(form.metadata)}
+                onChange={(event) => onChange({ metadata: metadataWithList(form.metadata, 'api_permissions', splitLines(event.currentTarget.value)) })}
+                placeholder={'GET /api/admin/assets\nPOST /api/access/ssh/*\naudit:read'}
+              />
+            </Field>
+            <div className='grid gap-2'>
+              <div className='text-sm font-medium'>{app.t('menuPermissions', '菜单权限')}</div>
+              <div className='grid max-h-60 gap-2 overflow-auto rounded-lg border border-border bg-muted/20 p-2 sm:grid-cols-2 lg:grid-cols-3'>
+                {platformPages.map((page) => {
+                  const selected = roleMenuPermissions(form.metadata).includes(page.collection) || roleMenuPermissions(form.metadata).includes(page.route)
+                  return (
+                    <label key={page.route} className='flex min-w-0 items-center gap-2 rounded-md px-2 py-1.5 text-sm hover:bg-background'>
+                      <input
+                        type='checkbox'
+                        className='size-4 accent-primary'
+                        checked={selected}
+                        onChange={() => onChange({ metadata: metadataWithList(form.metadata, 'menu_permissions', toggleString(roleMenuPermissions(form.metadata), page.collection)) })}
+                      />
+                      <span className='truncate'>{platformLabel(page, app.locale)}</span>
+                    </label>
+                  )
+                })}
+              </div>
+            </div>
+          </div>
+        ) : null}
         <Field label={app.t('details')}><Textarea value={form.description} onChange={(event) => onChange({ description: event.currentTarget.value })} /></Field>
         <Field label='Metadata JSON'><Textarea value={form.metadata} onChange={(event) => onChange({ metadata: event.currentTarget.value })} /></Field>
         <div className='flex justify-end gap-2'>
@@ -1722,6 +1769,10 @@ function splitCSV(value: string) {
   return value.split(',').map((item) => item.trim()).filter(Boolean)
 }
 
+function splitLines(value: string) {
+  return value.split(/\r?\n|,/).map((item) => item.trim()).filter(Boolean)
+}
+
 function stringValue(value: unknown) {
   return typeof value === 'string' ? value : ''
 }
@@ -1754,6 +1805,54 @@ function userOnline(item: PlatformItem) {
 
 function stringArrayValue(value: unknown) {
   return Array.isArray(value) ? value.filter((item): item is string => typeof item === 'string') : []
+}
+
+function metadataObject(value: string): Record<string, unknown> {
+  if (!value.trim()) return {}
+  try {
+    const parsed = JSON.parse(value) as unknown
+    return parsed && typeof parsed === 'object' && !Array.isArray(parsed) ? parsed as Record<string, unknown> : {}
+  } catch {
+    return {}
+  }
+}
+
+function metadataWithValue(metadata: string, key: string, value: unknown) {
+  const next = metadataObject(metadata)
+  if (value === '' || value === undefined || value === null) {
+    delete next[key]
+  } else {
+    next[key] = value
+  }
+  return JSON.stringify(next, null, 2)
+}
+
+function metadataWithList(metadata: string, key: string, value: string[]) {
+  return metadataWithValue(metadata, key, value)
+}
+
+function metadataStringListFromForm(metadata: string, key: string) {
+  const value = metadataObject(metadata)[key]
+  if (Array.isArray(value)) return value.filter((item): item is string => typeof item === 'string')
+  if (typeof value === 'string') return splitLines(value)
+  return []
+}
+
+function roleValue(metadata: string) {
+  const value = metadataObject(metadata).role
+  return typeof value === 'string' && value.trim() ? value.trim() : 'user'
+}
+
+function roleAPIText(metadata: string) {
+  return metadataStringListFromForm(metadata, 'api_permissions').join('\n')
+}
+
+function roleMenuPermissions(metadata: string) {
+  return metadataStringListFromForm(metadata, 'menu_permissions')
+}
+
+function toggleString(items: string[], value: string) {
+  return items.includes(value) ? items.filter((item) => item !== value) : [...items, value]
 }
 
 function objectArrayValue(value: unknown) {

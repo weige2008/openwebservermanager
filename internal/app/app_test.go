@@ -870,6 +870,74 @@ func TestRoleBasedAccessControl(t *testing.T) {
 	assertStatus(t, handler, http.MethodPost, "/api/admin/assets", map[string]any{"name": "blocked"}, readerCookie, http.StatusForbidden)
 }
 
+func TestCustomRoleAPIAndMenuPermissions(t *testing.T) {
+	handler, adminCookie := newTestHandler(t)
+
+	roleRec := assertStatus(t, handler, http.MethodPost, "/api/admin/roles", map[string]any{
+		"name":   "asset-menu-reader",
+		"type":   "custom",
+		"status": "enabled",
+		"metadata": map[string]any{
+			"api_permissions":  []string{"GET /api/admin/assets"},
+			"menu_permissions": []string{"assets", "/app/assets"},
+		},
+	}, adminCookie, http.StatusCreated)
+	var role model.PlatformItem
+	decodeResponse(t, roleRec, &role)
+	assetRec := assertStatus(t, handler, http.MethodPost, "/api/admin/assets", map[string]any{
+		"name":     "custom-role-asset",
+		"type":     "linux",
+		"status":   "active",
+		"protocol": "ssh",
+		"host":     "10.20.30.40",
+		"port":     22,
+	}, adminCookie, http.StatusCreated)
+	var asset model.PlatformItem
+	decodeResponse(t, assetRec, &asset)
+
+	assertStatus(t, handler, http.MethodPost, "/api/admin/users", map[string]any{
+		"name":     "custom-role-user",
+		"type":     "local",
+		"status":   "enabled",
+		"password": "password123",
+		"metadata": map[string]any{"role": "asset-menu-reader"},
+	}, adminCookie, http.StatusCreated)
+	loginRec := assertStatus(t, handler, http.MethodPost, "/api/auth/login", map[string]any{
+		"username": "custom-role-user",
+		"password": "password123",
+	}, nil, http.StatusOK)
+	var loginPayload struct {
+		User authUserPayload `json:"user"`
+	}
+	decodeResponse(t, loginRec, &loginPayload)
+	if !stringSliceContains(loginPayload.User.APIPermissions, "GET /api/admin/assets") {
+		t.Fatalf("login response api permissions = %v", loginPayload.User.APIPermissions)
+	}
+	if !stringSliceContains(loginPayload.User.MenuPermissions, "assets") || !stringSliceContains(loginPayload.User.MenuPermissions, "/app/assets") {
+		t.Fatalf("login response menu permissions = %v", loginPayload.User.MenuPermissions)
+	}
+	userCookie := loginRec.Result().Cookies()[0]
+
+	meRec := assertStatus(t, handler, http.MethodGet, "/api/auth/me", nil, userCookie, http.StatusOK)
+	if !strings.Contains(meRec.Body.String(), "menu_permissions") || !strings.Contains(meRec.Body.String(), "GET /api/admin/assets") {
+		t.Fatal("auth me did not include custom role permissions")
+	}
+	assertStatus(t, handler, http.MethodGet, "/api/admin/assets", nil, userCookie, http.StatusOK)
+	assertStatus(t, handler, http.MethodPost, "/api/admin/assets", map[string]any{"name": "blocked"}, userCookie, http.StatusForbidden)
+	assertStatus(t, handler, http.MethodGet, "/api/admin/users", nil, userCookie, http.StatusForbidden)
+	bootstrapRec := assertStatus(t, handler, http.MethodGet, "/api/bootstrap", nil, userCookie, http.StatusOK)
+	if !strings.Contains(bootstrapRec.Body.String(), asset.ID) {
+		t.Fatal("custom role bootstrap did not include API-permitted assets collection")
+	}
+
+	assertStatus(t, handler, http.MethodPatch, "/api/admin/roles/"+role.ID, map[string]any{
+		"name":   "asset-menu-reader",
+		"type":   "custom",
+		"status": "disabled",
+	}, adminCookie, http.StatusOK)
+	assertStatus(t, handler, http.MethodGet, "/api/admin/assets", nil, userCookie, http.StatusForbidden)
+}
+
 func TestPlatformUserLoginPresenceAndDisable(t *testing.T) {
 	handler, adminCookie := newTestHandler(t)
 
@@ -2063,6 +2131,15 @@ func filterPlatformItemsByIDs(items []model.PlatformItem, ids ...string) []model
 		}
 	}
 	return result
+}
+
+func stringSliceContains(items []string, target string) bool {
+	for _, item := range items {
+		if item == target {
+			return true
+		}
+	}
+	return false
 }
 
 func loginCountFromAny(value any) int {

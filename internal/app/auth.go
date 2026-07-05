@@ -34,6 +34,15 @@ type authSession struct {
 	ExpiresAt time.Time `json:"expires_at"`
 }
 
+type authUserPayload struct {
+	UserID          string    `json:"id"`
+	Username        string    `json:"username"`
+	Role            string    `json:"role"`
+	ExpiresAt       time.Time `json:"expires_at"`
+	APIPermissions  []string  `json:"api_permissions,omitempty"`
+	MenuPermissions []string  `json:"menu_permissions,omitempty"`
+}
+
 type loginFailure struct {
 	Count       int
 	LastFailure time.Time
@@ -240,6 +249,18 @@ func (s *Server) currentUserID(r *http.Request) string {
 	return session.UserID
 }
 
+func (s *Server) authUserPayload(session authSession) authUserPayload {
+	decision := s.roleDecision(session.Role)
+	return authUserPayload{
+		UserID:          session.UserID,
+		Username:        session.Username,
+		Role:            session.Role,
+		ExpiresAt:       session.ExpiresAt,
+		APIPermissions:  decision.Permissions,
+		MenuPermissions: decision.MenuPermissions,
+	}
+}
+
 func (s *Server) handleAuthStatus(w http.ResponseWriter, _ *http.Request) {
 	writeJSON(w, http.StatusOK, authStatus{
 		Configured:            s.cfg.Store.AdminConfigured(),
@@ -288,7 +309,7 @@ func (s *Server) handleSetup(w http.ResponseWriter, r *http.Request) {
 		Description: "administrator initialized",
 		Metadata:    map[string]any{"client_ip": s.clientIP(r), "account": username},
 	})
-	writeJSON(w, http.StatusCreated, map[string]any{"user": session})
+	writeJSON(w, http.StatusCreated, map[string]any{"user": s.authUserPayload(session)})
 }
 
 func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
@@ -403,7 +424,7 @@ func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
 		Description: "signed in",
 		Metadata:    map[string]any{"client_ip": clientIP, "account": username},
 	})
-	writeJSON(w, http.StatusOK, map[string]any{"user": session})
+	writeJSON(w, http.StatusOK, map[string]any{"user": s.authUserPayload(session)})
 }
 
 func (s *Server) handleLogout(w http.ResponseWriter, r *http.Request) {
@@ -424,7 +445,7 @@ func (s *Server) handleMe(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusUnauthorized, "authentication required")
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"user": session})
+	writeJSON(w, http.StatusOK, map[string]any{"user": s.authUserPayload(session)})
 }
 
 func (s *Server) authCookie(r *http.Request, value string, maxAge int) *http.Cookie {

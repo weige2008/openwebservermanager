@@ -905,6 +905,30 @@ func auditBootstrapPlatform(platform map[string][]model.PlatformItem) map[string
 	return result
 }
 
+func customRoleBootstrapPlatform(platform map[string][]model.PlatformItem, userID string, decision roleDecision) map[string][]model.PlatformItem {
+	result := accessBootstrapPlatform(platform, userID)
+	for route, collection := range adminCollectionRoutes {
+		if customPermissionAllows(decision.Permissions, syntheticAPIRequest(http.MethodGet, "/api/admin/"+route)) {
+			result[collection] = platform[collection]
+		}
+	}
+	for route, collection := range authorizationCollectionRoutes {
+		if customPermissionAllows(decision.Permissions, syntheticAPIRequest(http.MethodGet, "/api/admin/authorizations/"+route)) {
+			result[collection] = platform[collection]
+		}
+	}
+	for route, collection := range auditCollectionRoutes {
+		if customPermissionAllows(decision.Permissions, syntheticAPIRequest(http.MethodGet, "/api/admin/audit/"+route)) {
+			result[collection] = platform[collection]
+		}
+	}
+	return result
+}
+
+func syntheticAPIRequest(method, path string) *http.Request {
+	return &http.Request{Method: method, URL: &url.URL{Path: path}}
+}
+
 func emptyPlatformBootstrap() map[string][]model.PlatformItem {
 	return map[string][]model.PlatformItem{
 		"users":                      {},

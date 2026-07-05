@@ -29,6 +29,8 @@ export interface AuthUser {
   username: string
   role: string
   expires_at: string
+  api_permissions?: string[]
+  menu_permissions?: string[]
 }
 
 export interface ManagedServer {

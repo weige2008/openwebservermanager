@@ -203,13 +203,20 @@ func (s *Server) handleBootstrap(w http.ResponseWriter, r *http.Request) {
 	}
 	platform["departments"] = departmentTreeItems(platform)
 	_, session, _ := s.auth.session(r)
-	switch s.roleDecision(session.Role).Kind {
+	decision := s.roleDecision(session.Role)
+	switch decision.Kind {
 	case roleSuperAdmin, roleAdmin:
 	case roleAuditor:
 		servers = nil
 		credentials = nil
 		sessions = nil
 		platform = auditBootstrapPlatform(platform)
+	case roleCustom:
+		servers = nil
+		credentials = nil
+		sessions = nil
+		auditLogs = nil
+		platform = customRoleBootstrapPlatform(platform, session.UserID, decision)
 	default:
 		servers = nil
 		credentials = nil

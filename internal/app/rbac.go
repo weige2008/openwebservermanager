@@ -18,8 +18,9 @@ const (
 )
 
 type roleDecision struct {
-	Kind        roleKind
-	Permissions []string
+	Kind            roleKind
+	Permissions     []string
+	MenuPermissions []string
 }
 
 func (s *Server) authorizeAPI(w http.ResponseWriter, r *http.Request) bool {
@@ -94,6 +95,9 @@ func (s *Server) roleDecision(rawRole string) roleDecision {
 	}
 	roleKey := strings.TrimSpace(rawRole)
 	for _, role := range roles {
+		if !platformItemEnabled(role) {
+			continue
+		}
 		if !roleMatches(role, roleKey) {
 			continue
 		}
@@ -104,7 +108,7 @@ func (s *Server) roleDecision(rawRole string) roleDecision {
 		if kind == roleCustom {
 			kind = roleCustom
 		}
-		return roleDecision{Kind: kind, Permissions: roleAPIPermissions(role)}
+		return roleDecision{Kind: kind, Permissions: roleAPIPermissions(role), MenuPermissions: roleMenuPermissions(role)}
 	}
 	return roleDecision{Kind: roleUser}
 }
@@ -144,6 +148,14 @@ func roleAPIPermissions(role model.PlatformItem) []string {
 		}
 	}
 	for _, key := range []string{"api_permissions", "apiPermissions", "apis"} {
+		permissions = append(permissions, stringListFromMetadata(role.Metadata[key])...)
+	}
+	return permissions
+}
+
+func roleMenuPermissions(role model.PlatformItem) []string {
+	permissions := []string{}
+	for _, key := range []string{"menu_permissions", "menuPermissions", "menus", "pages"} {
 		permissions = append(permissions, stringListFromMetadata(role.Metadata[key])...)
 	}
 	return permissions

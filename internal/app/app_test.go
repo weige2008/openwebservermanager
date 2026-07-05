@@ -833,6 +833,109 @@ func TestLoginSecurityPoliciesAndLocks(t *testing.T) {
 	}
 }
 
+func TestTOTPLoginMFASetupChallengeRecoveryAndDisable(t *testing.T) {
+	handler, adminCookie := newTestHandler(t)
+
+	statusRec := assertStatus(t, handler, http.MethodGet, "/api/auth/mfa/status", nil, adminCookie, http.StatusOK)
+	if !strings.Contains(statusRec.Body.String(), `"enabled":false`) {
+		t.Fatal("initial MFA status should be disabled")
+	}
+
+	setupRec := assertStatus(t, handler, http.MethodPost, "/api/auth/mfa/setup", nil, adminCookie, http.StatusOK)
+	var setup map[string]any
+	decodeResponse(t, setupRec, &setup)
+	secret, _ := setup["secret"].(string)
+	if secret == "" || !strings.Contains(setupRec.Body.String(), "otpauth://totp/") {
+		t.Fatal("MFA setup did not return secret and otpauth URL")
+	}
+	enableRec := assertStatus(t, handler, http.MethodPost, "/api/auth/mfa/enable", map[string]any{
+		"secret":   secret,
+		"mfa_code": totpCode(secret, time.Now().UTC()),
+	}, adminCookie, http.StatusOK)
+	var enabled map[string]any
+	decodeResponse(t, enableRec, &enabled)
+	recoveryCodes := stringSliceFromAny(enabled["recovery_codes"])
+	if len(recoveryCodes) != 8 {
+		t.Fatalf("recovery code count = %d, want 8", len(recoveryCodes))
+	}
+	usersRec := assertStatus(t, handler, http.MethodGet, "/api/admin/users", nil, adminCookie, http.StatusOK)
+	for _, leaked := range []string{secret, "mfa_secret_encrypted", "mfa_recovery_hashes"} {
+		if strings.Contains(usersRec.Body.String(), leaked) {
+			t.Fatalf("MFA secret material leaked in users response: %s", leaked)
+		}
+	}
+
+	loginChallengeRec := assertStatus(t, handler, http.MethodPost, "/api/auth/login", map[string]any{"username": "admin", "password": "password123"}, nil, http.StatusAccepted)
+	var challenge map[string]any
+	decodeResponse(t, loginChallengeRec, &challenge)
+	token, _ := challenge["mfa_token"].(string)
+	if token == "" || challenge["mfa_required"] != true {
+		t.Fatalf("login did not return MFA challenge: %v", challenge)
+	}
+	assertStatus(t, handler, http.MethodPost, "/api/auth/mfa/complete-login", map[string]any{"token": token, "mfa_code": "000000"}, nil, http.StatusUnauthorized)
+	completeRec := assertStatus(t, handler, http.MethodPost, "/api/auth/mfa/complete-login", map[string]any{
+		"token":    token,
+		"mfa_code": totpCode(secret, time.Now().UTC()),
+	}, nil, http.StatusOK)
+	if len(completeRec.Result().Cookies()) == 0 {
+		t.Fatal("MFA completion did not set auth cookie")
+	}
+
+	recoveryChallengeRec := assertStatus(t, handler, http.MethodPost, "/api/auth/login", map[string]any{"username": "admin", "password": "password123"}, nil, http.StatusAccepted)
+	var recoveryChallenge map[string]any
+	decodeResponse(t, recoveryChallengeRec, &recoveryChallenge)
+	recoveryToken, _ := recoveryChallenge["mfa_token"].(string)
+	recoveryLoginRec := assertStatus(t, handler, http.MethodPost, "/api/auth/mfa/complete-login", map[string]any{
+		"token":         recoveryToken,
+		"recovery_code": recoveryCodes[0],
+	}, nil, http.StatusOK)
+	recoveryCookie := recoveryLoginRec.Result().Cookies()[0]
+	reusedChallengeRec := assertStatus(t, handler, http.MethodPost, "/api/auth/login", map[string]any{"username": "admin", "password": "password123"}, nil, http.StatusAccepted)
+	var reusedChallenge map[string]any
+	decodeResponse(t, reusedChallengeRec, &reusedChallenge)
+	assertStatus(t, handler, http.MethodPost, "/api/auth/mfa/complete-login", map[string]any{
+		"token":         reusedChallenge["mfa_token"],
+		"recovery_code": recoveryCodes[0],
+	}, nil, http.StatusUnauthorized)
+
+	assertStatus(t, handler, http.MethodPost, "/api/auth/mfa/disable", map[string]any{
+		"current_password": "password123",
+		"mfa_code":         totpCode(secret, time.Now().UTC()),
+	}, recoveryCookie, http.StatusOK)
+	assertStatus(t, handler, http.MethodPost, "/api/auth/login", map[string]any{"username": "admin", "password": "password123"}, nil, http.StatusOK)
+}
+
+func TestForcedMFAEnrollmentDuringLogin(t *testing.T) {
+	handler, adminCookie := newTestHandler(t)
+
+	assertStatus(t, handler, http.MethodPost, "/api/admin/system-settings", map[string]any{
+		"name":   "Force MFA",
+		"type":   "security",
+		"status": "enabled",
+		"metadata": map[string]any{
+			"force_mfa": true,
+		},
+	}, adminCookie, http.StatusCreated)
+
+	loginRec := assertStatus(t, handler, http.MethodPost, "/api/auth/login", map[string]any{"username": "admin", "password": "password123"}, nil, http.StatusAccepted)
+	var challenge map[string]any
+	decodeResponse(t, loginRec, &challenge)
+	if challenge["mfa_setup_required"] != true {
+		t.Fatalf("forced MFA did not require setup: %v", challenge)
+	}
+	token, _ := challenge["mfa_token"].(string)
+	secret, _ := challenge["secret"].(string)
+	assertStatus(t, handler, http.MethodPost, "/api/auth/mfa/complete-login", map[string]any{
+		"token":    token,
+		"mfa_code": totpCode(secret, time.Now().UTC()),
+	}, nil, http.StatusOK)
+
+	nextLoginRec := assertStatus(t, handler, http.MethodPost, "/api/auth/login", map[string]any{"username": "admin", "password": "password123"}, nil, http.StatusAccepted)
+	if !strings.Contains(nextLoginRec.Body.String(), `"mfa_required":true`) {
+		t.Fatal("enrolled forced MFA account did not require MFA on next login")
+	}
+}
+
 func TestOIDCProviderAuthorizationCodeFlow(t *testing.T) {
 	handler, adminCookie := newTestHandler(t)
 
@@ -1651,6 +1754,20 @@ func assertZipContains(t *testing.T, raw []byte, filename, content string) {
 		return
 	}
 	t.Fatalf("zip entry %q not found", filename)
+}
+
+func stringSliceFromAny(value any) []string {
+	raw, ok := value.([]any)
+	if !ok {
+		return nil
+	}
+	out := make([]string, 0, len(raw))
+	for _, item := range raw {
+		if text, ok := item.(string); ok {
+			out = append(out, text)
+		}
+	}
+	return out
 }
 
 func zipHasEntry(reader *zip.Reader, filename string) bool {

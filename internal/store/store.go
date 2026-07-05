@@ -2,6 +2,7 @@ package store
 
 import (
 	"crypto/rand"
+	"crypto/sha256"
 	"database/sql"
 	"encoding/hex"
 	"encoding/json"
@@ -41,6 +42,12 @@ type CredentialSecret struct {
 	Password   string
 	PrivateKey string
 	Passphrase string
+}
+
+type MFAProfile struct {
+	Enabled       bool
+	Secret        string
+	RecoveryCount int
 }
 
 type AdminAuth struct {
@@ -701,10 +708,16 @@ func (s *Store) UpdatePlatformItem(collection, id string, req model.PlatformItem
 	existingClientSecretHash, _ := item.Metadata["client_secret_hash"].(string)
 	existingAgentTokenHash, _ := item.Metadata["agent_token_hash"].(string)
 	existingCredentialSecrets := copyMetadataSecrets(item.Metadata, "encrypted_password", "encrypted_private_key", "encrypted_passphrase")
+	existingUserMFA := copyMetadataSecrets(item.Metadata, "mfa_secret_encrypted")
+	existingUserMFA["mfa_enabled"] = metadataStringValue(item.Metadata["mfa_enabled"])
+	existingUserMFA["mfa_enabled_at"] = metadataStringValue(item.Metadata["mfa_enabled_at"])
+	existingUserMFA["mfa_recovery_count"] = metadataStringValue(item.Metadata["mfa_recovery_count"])
+	existingUserMFA["mfa_recovery_hashes"] = metadataStringValue(item.Metadata["mfa_recovery_hashes"])
 	if req.Metadata != nil {
 		item.Metadata = req.Metadata
 		if collection == "users" && existingPasswordHash != "" {
 			item.Metadata["password_hash"] = existingPasswordHash
+			restoreMetadataValues(item.Metadata, existingUserMFA)
 		}
 		if collection == "oidc_clients" {
 			delete(item.Metadata, "client_secret_hash")
@@ -1077,6 +1090,110 @@ func (s *Store) GetPlatformCredentialSecret(id string) (model.PlatformItem, Cred
 	return item, secret, true, nil
 }
 
+func (s *Store) UserMFAProfile(userID string) (MFAProfile, bool, error) {
+	item, ok, err := s.GetPlatformItem("users", userID)
+	if err != nil || !ok {
+		return MFAProfile{}, ok, err
+	}
+	profile := MFAProfile{
+		Enabled:       metadataBool(item.Metadata["mfa_enabled"]),
+		RecoveryCount: metadataIntValue(item.Metadata["mfa_recovery_count"]),
+	}
+	if encrypted, _ := item.Metadata["mfa_secret_encrypted"].(string); encrypted != "" {
+		profile.Secret, err = s.cipher.DecryptString(encrypted)
+		if err != nil {
+			return MFAProfile{}, true, err
+		}
+	}
+	if profile.RecoveryCount == 0 {
+		profile.RecoveryCount = len(metadataStringList(item.Metadata["mfa_recovery_hashes"]))
+	}
+	return profile, true, nil
+}
+
+func (s *Store) EnableUserMFA(userID, secret string, recoveryCodes []string) (MFAProfile, error) {
+	item, ok, err := s.GetPlatformItem("users", userID)
+	if err != nil {
+		return MFAProfile{}, err
+	}
+	if !ok {
+		return MFAProfile{}, os.ErrNotExist
+	}
+	if item.Metadata == nil {
+		item.Metadata = map[string]any{}
+	}
+	encrypted, err := s.cipher.EncryptString(strings.TrimSpace(secret))
+	if err != nil {
+		return MFAProfile{}, err
+	}
+	hashes := make([]string, 0, len(recoveryCodes))
+	for _, code := range recoveryCodes {
+		if hash := recoveryCodeHash(code); hash != "" {
+			hashes = append(hashes, hash)
+		}
+	}
+	item.Metadata["mfa_enabled"] = true
+	item.Metadata["mfa_enabled_at"] = time.Now().UTC().Format(time.RFC3339Nano)
+	item.Metadata["mfa_secret_encrypted"] = encrypted
+	item.Metadata["mfa_recovery_hashes"] = hashes
+	item.Metadata["mfa_recovery_count"] = len(hashes)
+	if _, err := s.SavePlatformItem("users", item); err != nil {
+		return MFAProfile{}, err
+	}
+	return MFAProfile{Enabled: true, Secret: strings.TrimSpace(secret), RecoveryCount: len(hashes)}, nil
+}
+
+func (s *Store) DisableUserMFA(userID string) error {
+	item, ok, err := s.GetPlatformItem("users", userID)
+	if err != nil {
+		return err
+	}
+	if !ok {
+		return os.ErrNotExist
+	}
+	if item.Metadata == nil {
+		item.Metadata = map[string]any{}
+	}
+	delete(item.Metadata, "mfa_enabled")
+	delete(item.Metadata, "mfa_enabled_at")
+	delete(item.Metadata, "mfa_secret_encrypted")
+	delete(item.Metadata, "mfa_recovery_hashes")
+	delete(item.Metadata, "mfa_recovery_count")
+	_, err = s.SavePlatformItem("users", item)
+	return err
+}
+
+func (s *Store) ConsumeUserMFARecoveryCode(userID, code string) (bool, error) {
+	hash := recoveryCodeHash(code)
+	if hash == "" {
+		return false, nil
+	}
+	item, ok, err := s.GetPlatformItem("users", userID)
+	if err != nil || !ok {
+		return false, err
+	}
+	hashes := metadataStringList(item.Metadata["mfa_recovery_hashes"])
+	next := make([]string, 0, len(hashes))
+	matched := false
+	for _, candidate := range hashes {
+		if !matched && candidate == hash {
+			matched = true
+			continue
+		}
+		next = append(next, candidate)
+	}
+	if !matched {
+		return false, nil
+	}
+	if item.Metadata == nil {
+		item.Metadata = map[string]any{}
+	}
+	item.Metadata["mfa_recovery_hashes"] = next
+	item.Metadata["mfa_recovery_count"] = len(next)
+	_, err = s.SavePlatformItem("users", item)
+	return err == nil, err
+}
+
 func copyMetadataSecrets(metadata map[string]any, keys ...string) map[string]string {
 	result := map[string]string{}
 	for _, key := range keys {
@@ -1084,6 +1201,114 @@ func copyMetadataSecrets(metadata map[string]any, keys ...string) map[string]str
 		result[key] = value
 	}
 	return result
+}
+
+func restoreMetadataValues(metadata map[string]any, values map[string]string) {
+	for key, value := range values {
+		delete(metadata, key)
+		if value != "" {
+			metadata[key] = value
+		}
+	}
+}
+
+func metadataStringValue(value any) string {
+	switch typed := value.(type) {
+	case string:
+		return typed
+	case bool:
+		if typed {
+			return "true"
+		}
+	case int:
+		if typed != 0 {
+			return fmt.Sprintf("%d", typed)
+		}
+	case int64:
+		if typed != 0 {
+			return fmt.Sprintf("%d", typed)
+		}
+	case float64:
+		if typed != 0 {
+			return fmt.Sprintf("%.0f", typed)
+		}
+	case []string:
+		if len(typed) > 0 {
+			raw, _ := json.Marshal(typed)
+			return string(raw)
+		}
+	case []any:
+		if len(typed) > 0 {
+			raw, _ := json.Marshal(typed)
+			return string(raw)
+		}
+	}
+	return ""
+}
+
+func metadataBool(value any) bool {
+	switch typed := value.(type) {
+	case bool:
+		return typed
+	case string:
+		text := strings.ToLower(strings.TrimSpace(typed))
+		return text == "true" || text == "1" || text == "yes" || text == "enabled"
+	default:
+		return false
+	}
+}
+
+func metadataIntValue(value any) int {
+	switch typed := value.(type) {
+	case int:
+		return typed
+	case int64:
+		return int(typed)
+	case float64:
+		return int(typed)
+	case string:
+		var parsed int
+		if _, err := fmt.Sscanf(strings.TrimSpace(typed), "%d", &parsed); err == nil {
+			return parsed
+		}
+	}
+	return 0
+}
+
+func metadataStringList(value any) []string {
+	switch typed := value.(type) {
+	case []string:
+		return append([]string{}, typed...)
+	case []any:
+		out := []string{}
+		for _, item := range typed {
+			if text, ok := item.(string); ok && strings.TrimSpace(text) != "" {
+				out = append(out, strings.TrimSpace(text))
+			}
+		}
+		return out
+	case string:
+		text := strings.TrimSpace(typed)
+		if text == "" {
+			return nil
+		}
+		var decoded []string
+		if strings.HasPrefix(text, "[") && json.Unmarshal([]byte(text), &decoded) == nil {
+			return decoded
+		}
+		return strings.FieldsFunc(text, func(r rune) bool { return r == ',' || r == ';' || r == '\n' })
+	default:
+		return nil
+	}
+}
+
+func recoveryCodeHash(code string) string {
+	normalized := strings.ToUpper(strings.ReplaceAll(strings.ReplaceAll(strings.TrimSpace(code), "-", ""), " ", ""))
+	if normalized == "" {
+		return ""
+	}
+	sum := sha256.Sum256([]byte(normalized))
+	return hex.EncodeToString(sum[:])
 }
 
 func firstMetadataString(metadata map[string]any, keys ...string) string {
@@ -1116,6 +1341,10 @@ func sanitizePlatformItem(item *model.PlatformItem) {
 	delete(item.Metadata, "encrypted_password")
 	delete(item.Metadata, "encrypted_private_key")
 	delete(item.Metadata, "encrypted_passphrase")
+	delete(item.Metadata, "mfa_secret")
+	delete(item.Metadata, "mfa_secret_encrypted")
+	delete(item.Metadata, "mfa_recovery_hashes")
+	delete(item.Metadata, "mfa_recovery_codes")
 	delete(item.Metadata, "plain_password")
 	delete(item.Metadata, "plain_private_key")
 	delete(item.Metadata, "plain_passphrase")

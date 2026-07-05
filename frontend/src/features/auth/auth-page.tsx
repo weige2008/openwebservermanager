@@ -10,11 +10,29 @@ import { Field, Input } from '@/components/ui/field'
 import { apiRequest } from '@/lib/api'
 import type { AuthUser } from '@/types'
 
+interface LoginResponse {
+  user?: AuthUser
+  mfa_required?: boolean
+  mfa_setup_required?: boolean
+  mfa_token?: string
+  secret?: string
+  otpauth_url?: string
+  recovery_codes?: string[]
+}
+
+interface MFAChallenge {
+  token: string
+  setupRequired: boolean
+  secret?: string
+  otpauthURL?: string
+}
+
 export function AuthPage() {
   const app = useApp()
   const { t } = useTranslation()
   const navigate = useNavigate()
   const [submitting, setSubmitting] = useState(false)
+  const [mfaChallenge, setMFAChallenge] = useState<MFAChallenge | null>(null)
 
   const finishSignIn = async () => {
     const next = new URLSearchParams(window.location.search).get('next')
@@ -31,7 +49,24 @@ export function AuthPage() {
     const form = new FormData(event.currentTarget)
 
     try {
-      if (app.setupRequired) {
+      if (mfaChallenge) {
+        const result = await apiRequest<LoginResponse>('/api/auth/mfa/complete-login', {
+          method: 'POST',
+          body: JSON.stringify({
+            token: mfaChallenge.token,
+            mfa_code: String(form.get('mfa_code') || ''),
+            recovery_code: String(form.get('recovery_code') || ''),
+          }),
+        })
+        if (!result.user) throw new Error(t('operationFailed'))
+        if (result.recovery_codes?.length) {
+          window.alert(`Recovery codes:\n\n${result.recovery_codes.join('\n')}`)
+        }
+        app.setAuthenticatedUser(result.user)
+        await app.refresh(true)
+        app.showToast(t('auth.signedIn'))
+        await finishSignIn()
+      } else if (app.setupRequired) {
         const password = String(form.get('password') || '')
         const confirm = String(form.get('confirm_password') || '')
         if (password !== confirm) {
@@ -51,13 +86,24 @@ export function AuthPage() {
         app.showToast(t('auth.adminCreated'))
         await finishSignIn()
       } else {
-        const result = await apiRequest<{ user: AuthUser }>('/api/auth/login', {
+        const result = await apiRequest<LoginResponse>('/api/auth/login', {
           method: 'POST',
           body: JSON.stringify({
             username: String(form.get('username') || ''),
             password: String(form.get('password') || ''),
           }),
         })
+        if (result.mfa_required || result.mfa_setup_required) {
+          if (!result.mfa_token) throw new Error(t('operationFailed'))
+          setMFAChallenge({
+            token: result.mfa_token,
+            setupRequired: Boolean(result.mfa_setup_required),
+            secret: result.secret,
+            otpauthURL: result.otpauth_url,
+          })
+          return
+        }
+        if (!result.user) throw new Error(t('operationFailed'))
         app.setAuthenticatedUser(result.user)
         await app.refresh(true)
         app.showToast(t('auth.signedIn'))
@@ -80,27 +126,53 @@ export function AuthPage() {
         </p>
       </div>
       <form className='grid gap-4' onSubmit={onSubmit}>
-        <Field label={t('auth.username')}>
-          <Input name='username' autoComplete='username' placeholder='admin' defaultValue={app.setupRequired ? 'admin' : ''} required />
-        </Field>
-        <Field label={app.setupRequired ? t('auth.newPassword') : t('auth.password')}>
-          <Input
-            name='password'
-            type='password'
-            autoComplete={app.setupRequired ? 'new-password' : 'current-password'}
-            placeholder={app.setupRequired ? t('auth.setupPasswordPlaceholder') : t('auth.loginPasswordPlaceholder')}
-            minLength={app.setupRequired ? 8 : undefined}
-            required
-          />
-        </Field>
-        {app.setupRequired ? (
-          <Field label={t('auth.confirmPassword')}>
-            <Input name='confirm_password' type='password' autoComplete='new-password' placeholder={t('auth.setupPasswordPlaceholder')} minLength={8} required />
-          </Field>
-        ) : null}
+        {mfaChallenge ? (
+          <>
+            {mfaChallenge.setupRequired ? (
+              <div className='rounded-lg border border-border bg-muted/40 p-3 text-sm'>
+                <div className='font-medium'>Set up MFA</div>
+                <p className='mt-1 text-muted-foreground'>Add this TOTP secret to your authenticator app, then enter the current code.</p>
+                <div className='mt-2 break-all font-mono text-xs'>{mfaChallenge.secret}</div>
+                {mfaChallenge.otpauthURL ? <div className='mt-2 break-all font-mono text-xs text-muted-foreground'>{mfaChallenge.otpauthURL}</div> : null}
+              </div>
+            ) : null}
+            <Field label='MFA code'>
+              <Input name='mfa_code' inputMode='numeric' autoComplete='one-time-code' placeholder='123456' />
+            </Field>
+            {!mfaChallenge.setupRequired ? (
+              <Field label='Recovery code'>
+                <Input name='recovery_code' autoComplete='one-time-code' placeholder='optional' />
+              </Field>
+            ) : null}
+            <button type='button' className='text-left text-xs text-muted-foreground hover:text-foreground' onClick={() => setMFAChallenge(null)}>
+              Back to password login
+            </button>
+          </>
+        ) : (
+          <>
+            <Field label={t('auth.username')}>
+              <Input name='username' autoComplete='username' placeholder='admin' defaultValue={app.setupRequired ? 'admin' : ''} required />
+            </Field>
+            <Field label={app.setupRequired ? t('auth.newPassword') : t('auth.password')}>
+              <Input
+                name='password'
+                type='password'
+                autoComplete={app.setupRequired ? 'new-password' : 'current-password'}
+                placeholder={app.setupRequired ? t('auth.setupPasswordPlaceholder') : t('auth.loginPasswordPlaceholder')}
+                minLength={app.setupRequired ? 8 : undefined}
+                required
+              />
+            </Field>
+            {app.setupRequired ? (
+              <Field label={t('auth.confirmPassword')}>
+                <Input name='confirm_password' type='password' autoComplete='new-password' placeholder={t('auth.setupPasswordPlaceholder')} minLength={8} required />
+              </Field>
+            ) : null}
+          </>
+        )}
         <Button type='submit' variant='primary' className='w-full' disabled={submitting}>
           {submitting ? <Loader2 className='size-4 animate-spin' /> : null}
-          {app.setupRequired ? t('auth.setupSubmit') : t('auth.loginSubmit')}
+          {mfaChallenge ? 'Verify MFA' : app.setupRequired ? t('auth.setupSubmit') : t('auth.loginSubmit')}
         </Button>
       </form>
       <p className='text-center text-xs text-muted-foreground'>

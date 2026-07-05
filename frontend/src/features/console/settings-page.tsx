@@ -1,13 +1,15 @@
-import { Monitor, Moon, RotateCcw, Sun, UserCircle } from 'lucide-react'
+import { Monitor, Moon, RotateCcw, ShieldCheck, Sun, UserCircle } from 'lucide-react'
+import { useEffect, useState } from 'react'
 import { useTranslation } from 'react-i18next'
 
 import { useApp } from '@/app/app-provider'
 import { CardStaggerContainer, CardStaggerItem, StaggerContainer, StaggerItem } from '@/components/page-transition'
 import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
-import { Field, Select } from '@/components/ui/field'
+import { Field, Input, Select } from '@/components/ui/field'
 import { AboutContent } from '@/features/about/about-page'
 import { INTERFACE_LANGUAGE_OPTIONS } from '@/i18n/languages'
+import { apiRequest } from '@/lib/api'
 import { formatDate } from '@/lib/utils'
 import type { Locale, Theme, ThemeContentLayout, ThemeFont, ThemePreset, ThemeRadius, ThemeScale, ThemeSidebarStyle } from '@/types'
 
@@ -46,12 +48,87 @@ const scaleOptions: Array<{ value: ThemeScale; labelKey: string }> = [
   { value: 'xl', labelKey: 'large' },
 ]
 
+interface MFAStatus {
+  enabled: boolean
+  forced: boolean
+  recovery_count: number
+}
+
+interface MFASetup {
+  secret: string
+  otpauth_url: string
+}
+
 export function SettingsPage() {
   const app = useApp()
   const { t } = useTranslation()
   const activeSessions = app.data.sessions.filter((session) => session.status === 'active').length
   const username = app.auth?.username || 'admin'
   const initials = username.slice(0, 2).toUpperCase()
+  const [mfaStatus, setMFAStatus] = useState<MFAStatus | null>(null)
+  const [mfaSetup, setMFASetup] = useState<MFASetup | null>(null)
+  const [mfaCode, setMFACode] = useState('')
+  const [mfaPassword, setMFAPassword] = useState('')
+  const [mfaBusy, setMFABusy] = useState(false)
+
+  const loadMFAStatus = async () => {
+    setMFAStatus(await apiRequest<MFAStatus>('/api/auth/mfa/status'))
+  }
+
+  useEffect(() => {
+    void loadMFAStatus().catch(() => undefined)
+  }, [])
+
+  const startMFASetup = async () => {
+    setMFABusy(true)
+    try {
+      setMFASetup(await apiRequest<MFASetup>('/api/auth/mfa/setup', { method: 'POST', body: '{}' }))
+      setMFACode('')
+    } catch (error) {
+      app.handleApiError(error)
+    } finally {
+      setMFABusy(false)
+    }
+  }
+
+  const enableMFA = async () => {
+    if (!mfaSetup) return
+    setMFABusy(true)
+    try {
+      const result = await apiRequest<{ recovery_codes: string[] }>('/api/auth/mfa/enable', {
+        method: 'POST',
+        body: JSON.stringify({ secret: mfaSetup.secret, mfa_code: mfaCode }),
+      })
+      setMFASetup(null)
+      setMFACode('')
+      await loadMFAStatus()
+      if (result.recovery_codes?.length) window.alert(`Recovery codes:\n\n${result.recovery_codes.join('\n')}`)
+      app.showToast('MFA enabled')
+    } catch (error) {
+      app.handleApiError(error)
+    } finally {
+      setMFABusy(false)
+    }
+  }
+
+  const disableMFA = async () => {
+    setMFABusy(true)
+    try {
+      await apiRequest('/api/auth/mfa/disable', {
+        method: 'POST',
+        body: JSON.stringify({ current_password: mfaPassword, mfa_code: mfaCode }),
+      })
+      setMFASetup(null)
+      setMFACode('')
+      setMFAPassword('')
+      await loadMFAStatus()
+      app.showToast('MFA disabled')
+    } catch (error) {
+      app.handleApiError(error)
+    } finally {
+      setMFABusy(false)
+    }
+  }
 
   return (
     <CardStaggerContainer className='grid gap-4'>
@@ -107,6 +184,58 @@ export function SettingsPage() {
             <InfoTile label={t('gateway')} value={app.data.guacd?.address || t('guacdOffline')} />
           </StaggerItem>
         </StaggerContainer>
+      </CardStaggerItem>
+
+      <CardStaggerItem className='grid gap-4 rounded-xl border border-border bg-card p-5 shadow-sm lg:grid-cols-[0.85fr_1.15fr]'>
+        <div className='flex min-w-0 items-start gap-3'>
+          <span className='grid size-12 shrink-0 place-items-center rounded-full bg-primary text-primary-foreground'>
+            <ShieldCheck className='size-5' />
+          </span>
+          <div className='min-w-0'>
+            <div className='flex flex-wrap items-center gap-2'>
+              <h2 className='truncate text-base font-semibold'>Multi-factor authentication</h2>
+              <Badge tone={mfaStatus?.enabled ? 'success' : 'warning'}>{mfaStatus?.enabled ? 'enabled' : 'disabled'}</Badge>
+              {mfaStatus?.forced ? <Badge tone='danger'>required</Badge> : null}
+            </div>
+            <p className='mt-1 max-w-lg text-sm leading-6 text-muted-foreground'>Use TOTP codes from an authenticator app before a browser session cookie is issued.</p>
+            <p className='mt-2 text-xs text-muted-foreground'>Recovery codes remaining: {mfaStatus?.recovery_count ?? 0}</p>
+          </div>
+        </div>
+        <div className='grid gap-3'>
+          {mfaSetup ? (
+            <div className='grid gap-3 rounded-lg border border-border bg-background/70 p-3'>
+              <Field label='TOTP secret'>
+                <Input readOnly className='font-mono text-xs' value={mfaSetup.secret} />
+              </Field>
+              <Field label='otpauth URL'>
+                <Input readOnly className='font-mono text-xs' value={mfaSetup.otpauth_url} />
+              </Field>
+              <Field label='Current MFA code'>
+                <Input value={mfaCode} onChange={(event) => setMFACode(event.currentTarget.value)} inputMode='numeric' placeholder='123456' />
+              </Field>
+              <div className='flex flex-wrap justify-end gap-2'>
+                <Button variant='outline' onClick={() => setMFASetup(null)} disabled={mfaBusy}>{t('cancel')}</Button>
+                <Button variant='primary' onClick={() => void enableMFA()} disabled={mfaBusy || !mfaCode.trim()}>Enable MFA</Button>
+              </div>
+            </div>
+          ) : mfaStatus?.enabled ? (
+            <div className='grid gap-3 rounded-lg border border-border bg-background/70 p-3'>
+              <Field label='Current password'>
+                <Input type='password' value={mfaPassword} onChange={(event) => setMFAPassword(event.currentTarget.value)} />
+              </Field>
+              <Field label='Current MFA code'>
+                <Input value={mfaCode} onChange={(event) => setMFACode(event.currentTarget.value)} inputMode='numeric' placeholder='123456' />
+              </Field>
+              <div className='flex justify-end'>
+                <Button variant='destructive' onClick={() => void disableMFA()} disabled={mfaBusy || !mfaPassword.trim() || !mfaCode.trim()}>Disable MFA</Button>
+              </div>
+            </div>
+          ) : (
+            <div className='flex justify-end'>
+              <Button variant='primary' onClick={() => void startMFASetup()} disabled={mfaBusy}>Set up MFA</Button>
+            </div>
+          )}
+        </div>
       </CardStaggerItem>
 
       <CardStaggerItem className='grid gap-4 rounded-xl border border-border bg-card p-5 shadow-sm lg:grid-cols-[1.1fr_0.9fr]'>

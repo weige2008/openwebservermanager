@@ -110,6 +110,9 @@ func (s *Server) serveAPI(w http.ResponseWriter, r *http.Request) {
 	case r.Method == http.MethodPost && r.URL.Path == "/api/auth/login":
 		s.handleLogin(w, r)
 		return
+	case r.Method == http.MethodPost && r.URL.Path == "/api/auth/mfa/complete-login":
+		s.handleMFACompleteLogin(w, r)
+		return
 	case r.Method == http.MethodPost && r.URL.Path == "/api/auth/logout":
 		s.handleLogout(w, r)
 		return
@@ -131,6 +134,8 @@ func (s *Server) serveAPI(w http.ResponseWriter, r *http.Request) {
 	switch {
 	case r.Method == http.MethodGet && r.URL.Path == "/api/bootstrap":
 		s.handleBootstrap(w, r)
+	case strings.HasPrefix(r.URL.Path, "/api/auth/mfa/"):
+		s.handleAuthenticatedMFA(w, r)
 	case !s.authorizeAPI(w, r):
 		return
 	case s.handlePlatformAPI(w, r):

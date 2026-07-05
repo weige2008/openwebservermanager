@@ -20,9 +20,10 @@ const (
 )
 
 type authManager struct {
-	mu       sync.RWMutex
-	sessions map[string]authSession
-	failures map[string]loginFailure
+	mu            sync.RWMutex
+	sessions      map[string]authSession
+	failures      map[string]loginFailure
+	mfaChallenges map[string]mfaChallenge
 }
 
 type authSession struct {
@@ -38,6 +39,16 @@ type loginFailure struct {
 	LockedUntil time.Time
 }
 
+type mfaChallenge struct {
+	User          store.AdminPublic
+	Username      string
+	ClientIP      string
+	FailureKey    string
+	SetupRequired bool
+	Secret        string
+	ExpiresAt     time.Time
+}
+
 type authStatus struct {
 	Configured bool `json:"configured"`
 }
@@ -48,14 +59,17 @@ type setupRequest struct {
 }
 
 type loginRequest struct {
-	Username string `json:"username"`
-	Password string `json:"password"`
+	Username     string `json:"username"`
+	Password     string `json:"password"`
+	MFACode      string `json:"mfa_code"`
+	RecoveryCode string `json:"recovery_code"`
 }
 
 func newAuthManager() *authManager {
 	return &authManager{
-		sessions: map[string]authSession{},
-		failures: map[string]loginFailure{},
+		sessions:      map[string]authSession{},
+		failures:      map[string]loginFailure{},
+		mfaChallenges: map[string]mfaChallenge{},
 	}
 }
 
@@ -144,6 +158,39 @@ func (m *authManager) clearSessions() {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	m.sessions = map[string]authSession{}
+	m.mfaChallenges = map[string]mfaChallenge{}
+}
+
+func (m *authManager) createMFAChallenge(challenge mfaChallenge) (string, error) {
+	token, err := randomToken()
+	if err != nil {
+		return "", err
+	}
+	challenge.ExpiresAt = time.Now().Add(5 * time.Minute).UTC()
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.mfaChallenges[token] = challenge
+	return token, nil
+}
+
+func (m *authManager) mfaChallenge(token string) (mfaChallenge, bool) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	challenge, ok := m.mfaChallenges[token]
+	if !ok {
+		return mfaChallenge{}, false
+	}
+	if time.Now().UTC().After(challenge.ExpiresAt) {
+		delete(m.mfaChallenges, token)
+		return mfaChallenge{}, false
+	}
+	return challenge, true
+}
+
+func (m *authManager) deleteMFAChallenge(token string) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	delete(m.mfaChallenges, token)
 }
 
 func (s *Server) requireAuth(w http.ResponseWriter, r *http.Request) bool {
@@ -281,6 +328,12 @@ func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	s.auth.resetLoginFailures(failureKey)
+
+	if proceed, handled := s.handleLoginMFA(w, r, admin, username, clientIP, failureKey, req); handled {
+		return
+	} else if !proceed {
+		return
+	}
 
 	token, session, err := s.auth.create(admin)
 	if err != nil {

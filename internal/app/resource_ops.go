@@ -31,6 +31,11 @@ type importRequest struct {
 	Items []model.PlatformItemRequest `json:"items"`
 }
 
+type userImportRequest struct {
+	Items          []model.PlatformItemRequest `json:"items"`
+	UpdateExisting bool                        `json:"update_existing"`
+}
+
 type fileWriteRequest struct {
 	Path     string `json:"path"`
 	Content  string `json:"content"`
@@ -70,6 +75,9 @@ func (s *Server) handleResourceOperation(w http.ResponseWriter, r *http.Request,
 		return true
 	case path == "admin/assets/import":
 		s.handleAssetImport(w, r)
+		return true
+	case path == "admin/users/import":
+		s.handleUserImport(w, r)
 		return true
 	case path == "admin/certificates/self-signed":
 		s.handleCertificateSelfSigned(w, r)
@@ -186,6 +194,94 @@ func (s *Server) handleAssetImport(w http.ResponseWriter, r *http.Request) {
 	}
 	_ = s.audit(r, "assets.import", "assets", "", "imported assets")
 	writeJSON(w, http.StatusCreated, map[string]any{"items": created})
+}
+
+func (s *Server) handleUserImport(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		writeError(w, http.StatusMethodNotAllowed, "method not allowed")
+		return
+	}
+	var req userImportRequest
+	if !decodeJSON(w, r, &req) {
+		return
+	}
+	if len(req.Items) == 0 {
+		writeError(w, http.StatusBadRequest, "items are required")
+		return
+	}
+	if len(req.Items) > 500 {
+		writeError(w, http.StatusBadRequest, "too many items")
+		return
+	}
+	existingUsers, err := s.cfg.Store.ListPlatformItems("users")
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	existingByName := map[string]model.PlatformItem{}
+	for _, user := range existingUsers {
+		existingByName[strings.ToLower(strings.TrimSpace(user.Name))] = user
+	}
+	seen := map[string]bool{}
+	created := []model.PlatformItem{}
+	updated := []model.PlatformItem{}
+	skipped := []map[string]string{}
+	for index, itemReq := range req.Items {
+		itemReq.Name = strings.TrimSpace(itemReq.Name)
+		if itemReq.Name == "" {
+			writeError(w, http.StatusBadRequest, fmt.Sprintf("items[%d].name is required", index))
+			return
+		}
+		key := strings.ToLower(itemReq.Name)
+		if seen[key] {
+			writeError(w, http.StatusBadRequest, "duplicate username in import: "+itemReq.Name)
+			return
+		}
+		seen[key] = true
+		if itemReq.Type == "" {
+			itemReq.Type = "local"
+		}
+		if itemReq.Status == "" {
+			itemReq.Status = "enabled"
+		}
+		if itemReq.Metadata == nil {
+			itemReq.Metadata = map[string]any{}
+		}
+		if _, ok := itemReq.Metadata["role"]; !ok {
+			itemReq.Metadata["role"] = "user"
+		}
+		if existing, ok := existingByName[key]; ok {
+			if !req.UpdateExisting {
+				skipped = append(skipped, map[string]string{"name": itemReq.Name, "reason": "user already exists"})
+				continue
+			}
+			item, err := s.cfg.Store.UpdatePlatformItem("users", existing.ID, itemReq)
+			if err != nil {
+				writeError(w, http.StatusInternalServerError, err.Error())
+				return
+			}
+			updated = append(updated, item)
+			continue
+		}
+		item, err := s.cfg.Store.CreatePlatformItem("users", itemReq)
+		if err != nil {
+			writeError(w, http.StatusBadRequest, fmt.Sprintf("import user %q: %v", itemReq.Name, err))
+			return
+		}
+		created = append(created, item)
+	}
+	_ = s.audit(r, "users.import", "users", "", "imported users")
+	writeJSON(w, http.StatusCreated, map[string]any{
+		"created": created,
+		"updated": updated,
+		"skipped": skipped,
+		"summary": map[string]int{
+			"created": len(created),
+			"updated": len(updated),
+			"skipped": len(skipped),
+			"total":   len(req.Items),
+		},
+	})
 }
 
 func (s *Server) handleStorageFiles(w http.ResponseWriter, r *http.Request, storageID, action string) {

@@ -189,6 +189,80 @@ func TestPlatformUserLoginAndAccessAuthorization(t *testing.T) {
 	}
 }
 
+func TestUserImportCreatesSkipsAndUpdatesLoginUsers(t *testing.T) {
+	handler, adminCookie := newTestHandler(t)
+
+	importRec := assertStatus(t, handler, http.MethodPost, "/api/admin/users/import", map[string]any{
+		"items": []map[string]any{
+			{
+				"name":     "import-user",
+				"type":     "local",
+				"status":   "enabled",
+				"password": "password123",
+				"metadata": map[string]any{"role": "user"},
+			},
+			{
+				"name":     "disabled-import-user",
+				"type":     "local",
+				"status":   "disabled",
+				"password": "password123",
+				"metadata": map[string]any{"role": "auditor"},
+			},
+		},
+	}, adminCookie, http.StatusCreated)
+	importBody := importRec.Body.String()
+	if !strings.Contains(importBody, `"created":2`) || strings.Contains(importBody, "password_hash") {
+		t.Fatalf("unexpected user import response: %s", importBody)
+	}
+
+	loginRec := assertStatus(t, handler, http.MethodPost, "/api/auth/login", map[string]any{"username": "import-user", "password": "password123"}, nil, http.StatusOK)
+	if !strings.Contains(loginRec.Body.String(), `"role":"user"`) {
+		t.Fatalf("imported user login did not carry role: %s", loginRec.Body.String())
+	}
+	assertStatus(t, handler, http.MethodPost, "/api/auth/login", map[string]any{"username": "disabled-import-user", "password": "password123"}, nil, http.StatusUnauthorized)
+
+	skipRec := assertStatus(t, handler, http.MethodPost, "/api/admin/users/import", map[string]any{
+		"items": []map[string]any{{
+			"name":     "import-user",
+			"type":     "local",
+			"status":   "enabled",
+			"password": "newpassword123",
+			"metadata": map[string]any{"role": "admin"},
+		}},
+	}, adminCookie, http.StatusCreated)
+	if !strings.Contains(skipRec.Body.String(), `"skipped":1`) {
+		t.Fatalf("duplicate user import was not skipped: %s", skipRec.Body.String())
+	}
+	assertStatus(t, handler, http.MethodPost, "/api/auth/login", map[string]any{"username": "import-user", "password": "newpassword123"}, nil, http.StatusUnauthorized)
+
+	updateRec := assertStatus(t, handler, http.MethodPost, "/api/admin/users/import", map[string]any{
+		"update_existing": true,
+		"items": []map[string]any{{
+			"name":     "import-user",
+			"type":     "local",
+			"status":   "enabled",
+			"password": "newpassword123",
+			"metadata": map[string]any{"role": "admin"},
+		}},
+	}, adminCookie, http.StatusCreated)
+	if !strings.Contains(updateRec.Body.String(), `"updated":1`) || strings.Contains(updateRec.Body.String(), "password_hash") {
+		t.Fatalf("unexpected user update import response: %s", updateRec.Body.String())
+	}
+	updatedLoginRec := assertStatus(t, handler, http.MethodPost, "/api/auth/login", map[string]any{"username": "import-user", "password": "newpassword123"}, nil, http.StatusOK)
+	if !strings.Contains(updatedLoginRec.Body.String(), `"role":"admin"`) {
+		t.Fatalf("updated imported user did not login with new role: %s", updatedLoginRec.Body.String())
+	}
+
+	usersRec := assertStatus(t, handler, http.MethodGet, "/api/admin/users", nil, adminCookie, http.StatusOK)
+	if strings.Contains(usersRec.Body.String(), "password_hash") {
+		t.Fatalf("user list leaked password hash: %s", usersRec.Body.String())
+	}
+	operationRec := assertStatus(t, handler, http.MethodGet, "/api/admin/audit/operation-logs", nil, adminCookie, http.StatusOK)
+	if !strings.Contains(operationRec.Body.String(), "users.import") {
+		t.Fatalf("user import operation audit missing: %s", operationRec.Body.String())
+	}
+}
+
 func TestSSHExecAccessRunsCommandAndLogs(t *testing.T) {
 	targetAddr, closeTarget := startFakeSSHExecServer(t, "root", "target-secret")
 	defer closeTarget()

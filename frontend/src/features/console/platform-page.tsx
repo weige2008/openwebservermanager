@@ -70,6 +70,7 @@ const filePermissionActions = [
 
 type ResourceOperation =
   | { type: 'asset-import' }
+  | { type: 'user-import' }
   | { type: 'agent-token'; item: PlatformItem }
   | { type: 'certificate-create' }
   | { type: 'certificate-upload' }
@@ -440,6 +441,15 @@ function ResourceHeaderActions({ config, onOperation }: { config: PlatformPageCo
     )
   }
 
+  if (config.collection === 'users') {
+    return (
+      <Button variant='outline' onClick={() => onOperation({ type: 'user-import' })}>
+        <Upload className='size-4' />
+        导入
+      </Button>
+    )
+  }
+
   if (config.collection === 'certificates') {
     return (
       <>
@@ -629,6 +639,7 @@ function ResourceRowActions({ config, item, onOperation }: { config: PlatformPag
 function ResourceOperationDialog({ operation, onOpenChange }: { operation: ResourceOperation | null; onOpenChange: (operation: ResourceOperation | null) => void }) {
   if (!operation) return null
   if (operation.type === 'asset-import') return <AssetImportDialog onClose={() => onOpenChange(null)} />
+  if (operation.type === 'user-import') return <UserImportDialog onClose={() => onOpenChange(null)} />
   if (operation.type === 'agent-token') return <AgentGatewayTokenDialog item={operation.item} onClose={() => onOpenChange(null)} />
   if (operation.type === 'certificate-create') return <CertificateCreateDialog onClose={() => onOpenChange(null)} />
   if (operation.type === 'certificate-upload') return <CertificateUploadDialog onClose={() => onOpenChange(null)} />
@@ -662,6 +673,57 @@ function AssetImportDialog({ onClose }: { onClose: () => void }) {
     <DialogShell open onOpenChange={(open) => !open && onClose()} title='导入资产' description='粘贴导出的 JSON，或使用 {"items":[...]} 格式批量导入。'>
       <div className='grid gap-4'>
         <Field label='资产 JSON'><Textarea className='min-h-64 font-mono text-xs' value={content} onChange={(event) => setContent(event.currentTarget.value)} /></Field>
+        <div className='flex justify-end gap-2'>
+          <Button variant='outline' onClick={onClose}>取消</Button>
+          <Button variant='primary' onClick={() => void submit()} disabled={saving}>
+            <Upload className='size-4' />
+            {saving ? '导入中' : '导入'}
+          </Button>
+        </div>
+      </div>
+    </DialogShell>
+  )
+}
+
+function UserImportDialog({ onClose }: { onClose: () => void }) {
+  const app = useApp()
+  const [content, setContent] = useState(JSON.stringify({
+    update_existing: false,
+    items: [
+      {
+        name: 'operator',
+        type: 'local',
+        status: 'enabled',
+        password: 'change-me-123',
+        metadata: { role: 'user' },
+      },
+    ],
+  }, null, 2))
+  const [saving, setSaving] = useState(false)
+
+  const submit = async () => {
+    setSaving(true)
+    try {
+      const parsed = JSON.parse(content) as unknown
+      const payload = Array.isArray(parsed) ? { update_existing: false, items: parsed } : parsed
+      await apiRequest('/api/admin/users/import', { method: 'POST', body: JSON.stringify(payload) })
+      await app.refresh(true)
+      app.showToast('用户已导入')
+      onClose()
+    } catch (error) {
+      app.handleApiError(error)
+    } finally {
+      setSaving(false)
+    }
+  }
+
+  return (
+    <DialogShell open onOpenChange={(open) => !open && onClose()} title='导入用户' description='粘贴用户 JSON；默认跳过已存在用户名，设置 update_existing 为 true 可按用户名更新。'>
+      <div className='grid gap-4'>
+        <Field label='用户 JSON'><Textarea className='min-h-64 font-mono text-xs' value={content} onChange={(event) => setContent(event.currentTarget.value)} /></Field>
+        <div className='rounded-lg border border-border bg-muted/30 p-3 text-xs text-muted-foreground'>
+          本地用户必须提供至少 8 位密码；角色写入 metadata.role，支持 user、auditor、admin 或自定义角色名。
+        </div>
         <div className='flex justify-end gap-2'>
           <Button variant='outline' onClick={onClose}>取消</Button>
           <Button variant='primary' onClick={() => void submit()} disabled={saving}>

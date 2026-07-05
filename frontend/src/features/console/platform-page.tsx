@@ -105,9 +105,14 @@ export function PlatformTablePage({ config }: { config: PlatformPageConfig }) {
       {
         header: app.t('name'),
         cell: ({ row }) => (
-          <div className='min-w-44'>
-            <strong className='block truncate'>{row.original.name}</strong>
-            <span className='block truncate text-xs text-muted-foreground'>{row.original.description || row.original.id}</span>
+          <div className='min-w-44' style={config.collection === 'departments' ? { paddingLeft: `${departmentLevel(row.original) * 18}px` } : undefined}>
+            <strong className='block truncate'>
+              {config.collection === 'departments' && departmentLevel(row.original) > 0 ? '└ ' : ''}
+              {row.original.name}
+            </strong>
+            <span className='block truncate text-xs text-muted-foreground'>
+              {config.collection === 'departments' ? metadataText(row.original.metadata?.path) || row.original.description || row.original.id : row.original.description || row.original.id}
+            </span>
           </div>
         ),
       },
@@ -136,6 +141,20 @@ export function PlatformTablePage({ config }: { config: PlatformPageConfig }) {
               <span className='text-muted-foreground'>{metadataText(row.original.metadata?.last_login_ip) || '-'}</span>
             </div>
           ),
+        },
+      ] satisfies ColumnDef<PlatformItem>[] : []),
+      ...(config.collection === 'departments' ? [
+        {
+          header: app.t('members', '成员'),
+          cell: ({ row }) => (
+            <span className='font-mono text-xs'>
+              {metadataNumber(row.original.metadata?.member_count)} / {metadataNumber(row.original.metadata?.total_member_count)}
+            </span>
+          ),
+        },
+        {
+          header: app.t('sort', '排序'),
+          cell: ({ row }) => <span className='font-mono text-xs'>{metadataNumber(row.original.metadata?.sort)}</span>,
         },
       ] satisfies ColumnDef<PlatformItem>[] : []),
       { header: app.t('address'), cell: ({ row }) => row.original.host ? <span className='font-mono text-xs'>{row.original.host}{row.original.port ? `:${row.original.port}` : ''}</span> : '-' },
@@ -195,7 +214,7 @@ export function PlatformTablePage({ config }: { config: PlatformPageConfig }) {
 
   const startCreate = () => {
     setEditing(null)
-    setForm({ ...initialForm, type: config.collection === 'credentials' ? 'ssh_password' : config.collection === 'users' ? 'local' : '' })
+    setForm({ ...initialForm, type: config.collection === 'credentials' ? 'ssh_password' : config.collection === 'users' ? 'local' : config.collection === 'departments' ? 'department' : '' })
     setFormOpen(true)
   }
 
@@ -259,6 +278,8 @@ export function PlatformTablePage({ config }: { config: PlatformPageConfig }) {
         open={formOpen}
         saving={saving}
         form={form}
+        items={rows}
+        editingId={editing?.id}
         onOpenChange={(open) => {
           setFormOpen(open)
           if (!open) setEditing(null)
@@ -1044,6 +1065,8 @@ function PlatformItemDialog({
   open,
   saving,
   form,
+  items,
+  editingId,
   onOpenChange,
   onChange,
   onSave,
@@ -1054,6 +1077,8 @@ function PlatformItemDialog({
   open: boolean
   saving: boolean
   form: PlatformFormState
+  items: PlatformItem[]
+  editingId?: string
   onOpenChange: (open: boolean) => void
   onChange: (form: Partial<PlatformFormState>) => void
   onSave: () => void
@@ -1061,6 +1086,7 @@ function PlatformItemDialog({
   const app = useApp()
   const isCredential = collection === 'credentials'
   const isUser = collection === 'users'
+  const isDepartment = collection === 'departments'
   return (
     <DialogShell open={open} onOpenChange={onOpenChange} title={title} description={description}>
       <div className='grid gap-4'>
@@ -1098,7 +1124,9 @@ function PlatformItemDialog({
             <option value='database'>Database</option>
           </Select></Field>
           <Field label={app.t('address')}><Input value={form.host} onChange={(event) => onChange({ host: event.currentTarget.value })} /></Field>
-          <Field label={app.t('ports')}><Input type='number' value={form.port} onChange={(event) => onChange({ port: event.currentTarget.value })} /></Field>
+          <Field label={isDepartment ? app.t('sort', '排序') : app.t('ports')}>
+            <Input type='number' value={form.port} onChange={(event) => onChange({ port: event.currentTarget.value })} />
+          </Field>
           <Field label={app.t('username', '用户')}><Input value={form.username} onChange={(event) => onChange({ username: event.currentTarget.value })} /></Field>
           {isUser || (isCredential && form.type !== 'ssh_key') ? (
             <Field label={app.t('password', '密码')}><Input type='password' value={form.password} onChange={(event) => onChange({ password: event.currentTarget.value })} /></Field>
@@ -1112,7 +1140,18 @@ function PlatformItemDialog({
           <Field label={app.t('group')}><Input value={form.group} onChange={(event) => onChange({ group: event.currentTarget.value })} /></Field>
           <Field label={app.t('owner', '归属用户/部门')}><Input value={form.owner_id} onChange={(event) => onChange({ owner_id: event.currentTarget.value })} /></Field>
           <Field label={app.t('target', '目标资源')}><Input value={form.target_id} onChange={(event) => onChange({ target_id: event.currentTarget.value })} /></Field>
-          <Field label={app.t('parent', '上级/分组')}><Input value={form.parent_id} onChange={(event) => onChange({ parent_id: event.currentTarget.value })} /></Field>
+          <Field label={isDepartment ? app.t('parentDepartment', '上级部门') : app.t('parent', '上级/分组')}>
+            {isDepartment ? (
+              <Select value={form.parent_id} onChange={(event) => onChange({ parent_id: event.currentTarget.value })}>
+                <option value=''>{app.t('none', '无')}</option>
+                {items.filter((item) => item.id !== editingId).map((item) => (
+                  <option key={item.id} value={item.id}>{metadataText(item.metadata?.path) || item.name}</option>
+                ))}
+              </Select>
+            ) : (
+              <Input value={form.parent_id} onChange={(event) => onChange({ parent_id: event.currentTarget.value })} />
+            )}
+          </Field>
           <Field label={app.t('tags', '标签')}><Input placeholder='prod,linux,web' value={form.tags} onChange={(event) => onChange({ tags: event.currentTarget.value })} /></Field>
         </div>
         <Field label={app.t('details')}><Textarea value={form.description} onChange={(event) => onChange({ description: event.currentTarget.value })} /></Field>
@@ -1692,6 +1731,14 @@ function metadataText(value: unknown) {
   if (typeof value === 'number' && Number.isFinite(value)) return String(value)
   if (typeof value === 'boolean') return value ? 'true' : 'false'
   return ''
+}
+
+function metadataNumber(value: unknown) {
+  return numberValue(value)
+}
+
+function departmentLevel(item: PlatformItem) {
+  return Math.max(0, metadataNumber(item.metadata?.level))
 }
 
 function metadataBool(value: unknown) {

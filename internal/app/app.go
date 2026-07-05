@@ -201,6 +201,7 @@ func (s *Server) handleBootstrap(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
+	platform["departments"] = departmentTreeItems(platform)
 	_, session, _ := s.auth.session(r)
 	switch s.roleDecision(session.Role).Kind {
 	case roleSuperAdmin, roleAdmin:

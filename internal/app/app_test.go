@@ -460,6 +460,82 @@ func TestAccessAuthorizationSupportsDepartmentsGroupsAndExpiry(t *testing.T) {
 	assertStatus(t, handler, http.MethodPost, "/api/access/ssh/"+expiredAsset.ID, nil, userCookie, http.StatusForbidden)
 }
 
+func TestDepartmentTreeMetadataAndMemberCounts(t *testing.T) {
+	handler, adminCookie := newTestHandler(t)
+
+	parentRec := assertStatus(t, handler, http.MethodPost, "/api/admin/departments", map[string]any{
+		"name":   "Engineering",
+		"type":   "department",
+		"status": "enabled",
+		"port":   10,
+	}, adminCookie, http.StatusCreated)
+	var parent model.PlatformItem
+	decodeResponse(t, parentRec, &parent)
+	platformRec := assertStatus(t, handler, http.MethodPost, "/api/admin/departments", map[string]any{
+		"name":      "Platform",
+		"type":      "department",
+		"status":    "enabled",
+		"parent_id": parent.ID,
+		"metadata":  map[string]any{"sort": 20},
+	}, adminCookie, http.StatusCreated)
+	var platform model.PlatformItem
+	decodeResponse(t, platformRec, &platform)
+	designRec := assertStatus(t, handler, http.MethodPost, "/api/admin/departments", map[string]any{
+		"name":      "Design",
+		"type":      "department",
+		"status":    "enabled",
+		"parent_id": parent.ID,
+		"metadata":  map[string]any{"sort": 10},
+	}, adminCookie, http.StatusCreated)
+	var design model.PlatformItem
+	decodeResponse(t, designRec, &design)
+
+	assertStatus(t, handler, http.MethodPost, "/api/admin/users", map[string]any{
+		"name":     "engineering-user",
+		"type":     "local",
+		"status":   "enabled",
+		"password": "password123",
+		"metadata": map[string]any{"role": "user", "department_id": parent.ID},
+	}, adminCookie, http.StatusCreated)
+	assertStatus(t, handler, http.MethodPost, "/api/admin/users", map[string]any{
+		"name":      "platform-user",
+		"type":      "local",
+		"status":    "enabled",
+		"password":  "password123",
+		"parent_id": platform.ID,
+		"metadata":  map[string]any{"role": "user"},
+	}, adminCookie, http.StatusCreated)
+
+	departmentRec := assertStatus(t, handler, http.MethodGet, "/api/admin/departments", nil, adminCookie, http.StatusOK)
+	var list struct {
+		Items []model.PlatformItem `json:"items"`
+	}
+	decodeResponse(t, departmentRec, &list)
+	if len(list.Items) < 3 {
+		t.Fatalf("department list returned %d items, want at least 3", len(list.Items))
+	}
+	createdDepartments := filterPlatformItemsByIDs(list.Items, parent.ID, design.ID, platform.ID)
+	if len(createdDepartments) != 3 {
+		t.Fatalf("department list did not include all created departments: %v", createdDepartments)
+	}
+	if createdDepartments[0].ID != parent.ID || createdDepartments[1].ID != design.ID || createdDepartments[2].ID != platform.ID {
+		t.Fatalf("department tree order = %s, %s, %s", createdDepartments[0].Name, createdDepartments[1].Name, createdDepartments[2].Name)
+	}
+	assertDepartmentMetadata(t, createdDepartments[0], 0, "Engineering", 1, 2, 2)
+	assertDepartmentMetadata(t, createdDepartments[1], 1, "Engineering / Design", 0, 0, 0)
+	assertDepartmentMetadata(t, createdDepartments[2], 1, "Engineering / Platform", 1, 1, 0)
+
+	bootstrapRec := assertStatus(t, handler, http.MethodGet, "/api/bootstrap", nil, adminCookie, http.StatusOK)
+	var bootstrap struct {
+		Platform map[string][]model.PlatformItem `json:"platform"`
+	}
+	decodeResponse(t, bootstrapRec, &bootstrap)
+	bootstrapDepartments := filterPlatformItemsByIDs(bootstrap.Platform["departments"], parent.ID, design.ID, platform.ID)
+	if len(bootstrapDepartments) != 3 || bootstrapDepartments[2].Metadata["path"] != "Engineering / Platform" {
+		t.Fatal("bootstrap did not include enriched department tree data")
+	}
+}
+
 func TestCommandSnippetBootstrapVisibility(t *testing.T) {
 	handler, adminCookie := newTestHandler(t)
 
@@ -1975,6 +2051,20 @@ func platformUserFromList(t *testing.T, handler http.Handler, adminCookie *http.
 	return model.PlatformItem{}
 }
 
+func filterPlatformItemsByIDs(items []model.PlatformItem, ids ...string) []model.PlatformItem {
+	wanted := map[string]bool{}
+	for _, id := range ids {
+		wanted[id] = true
+	}
+	result := []model.PlatformItem{}
+	for _, item := range items {
+		if wanted[item.ID] {
+			result = append(result, item)
+		}
+	}
+	return result
+}
+
 func loginCountFromAny(value any) int {
 	switch typed := value.(type) {
 	case int:
@@ -1986,6 +2076,25 @@ func loginCountFromAny(value any) int {
 		return parsed
 	default:
 		return 0
+	}
+}
+
+func assertDepartmentMetadata(t *testing.T, item model.PlatformItem, level int, path string, memberCount, totalMemberCount, childCount int) {
+	t.Helper()
+	if loginCountFromAny(item.Metadata["level"]) != level {
+		t.Fatalf("%s level = %v, want %d", item.Name, item.Metadata["level"], level)
+	}
+	if stringValueFromAny(item.Metadata["path"]) != path {
+		t.Fatalf("%s path = %v, want %q", item.Name, item.Metadata["path"], path)
+	}
+	if loginCountFromAny(item.Metadata["member_count"]) != memberCount {
+		t.Fatalf("%s member_count = %v, want %d", item.Name, item.Metadata["member_count"], memberCount)
+	}
+	if loginCountFromAny(item.Metadata["total_member_count"]) != totalMemberCount {
+		t.Fatalf("%s total_member_count = %v, want %d", item.Name, item.Metadata["total_member_count"], totalMemberCount)
+	}
+	if loginCountFromAny(item.Metadata["direct_child_count"]) != childCount {
+		t.Fatalf("%s direct_child_count = %v, want %d", item.Name, item.Metadata["direct_child_count"], childCount)
 	}
 }
 

@@ -8,6 +8,7 @@ import (
 	"net/url"
 	"os"
 	"runtime"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -121,6 +122,14 @@ func (s *Server) handleCollection(w http.ResponseWriter, r *http.Request, collec
 		if err != nil {
 			writeError(w, http.StatusInternalServerError, err.Error())
 			return
+		}
+		if collection == "departments" {
+			platform, err := s.cfg.Store.PlatformBootstrap()
+			if err != nil {
+				writeError(w, http.StatusInternalServerError, err.Error())
+				return
+			}
+			items = departmentTreeItems(platform)
 		}
 		writeJSON(w, http.StatusOK, map[string]any{"items": items})
 	case id == "" && r.Method == http.MethodPost:
@@ -536,6 +545,144 @@ func filterPlatformByProtocol(items []model.PlatformItem, protocol model.Protoco
 		}
 	}
 	return result
+}
+
+func departmentTreeItems(platform map[string][]model.PlatformItem) []model.PlatformItem {
+	departments := platform["departments"]
+	if len(departments) == 0 {
+		return []model.PlatformItem{}
+	}
+	byID := map[string]model.PlatformItem{}
+	children := map[string][]model.PlatformItem{}
+	for _, department := range departments {
+		if department.Metadata == nil {
+			department.Metadata = map[string]any{}
+		}
+		byID[department.ID] = department
+		parentID := strings.TrimSpace(department.ParentID)
+		if parentID != "" {
+			if _, ok := byID[parentID]; !ok {
+				for _, candidate := range departments {
+					if strings.EqualFold(candidate.Name, parentID) {
+						parentID = candidate.ID
+						break
+					}
+				}
+			}
+		}
+		children[parentID] = append(children[parentID], department)
+	}
+	for parentID := range children {
+		sort.SliceStable(children[parentID], func(i, j int) bool {
+			left := departmentSortValue(children[parentID][i])
+			right := departmentSortValue(children[parentID][j])
+			if left != right {
+				return left < right
+			}
+			return strings.ToLower(children[parentID][i].Name) < strings.ToLower(children[parentID][j].Name)
+		})
+	}
+
+	memberCounts := departmentMemberCounts(platform["users"], departments)
+	totalCounts := map[string]int{}
+	var countTotal func(string, map[string]bool) int
+	countTotal = func(departmentID string, seen map[string]bool) int {
+		if seen[departmentID] {
+			return memberCounts[departmentID]
+		}
+		seen[departmentID] = true
+		total := memberCounts[departmentID]
+		for _, child := range children[departmentID] {
+			total += countTotal(child.ID, seen)
+		}
+		totalCounts[departmentID] = total
+		return total
+	}
+	for _, department := range departments {
+		countTotal(department.ID, map[string]bool{})
+	}
+
+	result := []model.PlatformItem{}
+	visited := map[string]bool{}
+	var walk func(string, int, []string)
+	walk = func(parentID string, level int, path []string) {
+		for _, department := range children[parentID] {
+			if visited[department.ID] {
+				continue
+			}
+			visited[department.ID] = true
+			if department.Metadata == nil {
+				department.Metadata = map[string]any{}
+			}
+			department.Metadata["level"] = level
+			department.Metadata["path"] = strings.Join(append(path, department.Name), " / ")
+			department.Metadata["sort"] = departmentSortValue(department)
+			department.Metadata["member_count"] = memberCounts[department.ID]
+			department.Metadata["total_member_count"] = totalCounts[department.ID]
+			department.Metadata["direct_child_count"] = len(children[department.ID])
+			result = append(result, department)
+			walk(department.ID, level+1, append(path, department.Name))
+		}
+	}
+	walk("", 0, nil)
+	for _, department := range departments {
+		if visited[department.ID] {
+			continue
+		}
+		walk(department.ParentID, 0, nil)
+		if visited[department.ID] {
+			continue
+		}
+		if department.Metadata == nil {
+			department.Metadata = map[string]any{}
+		}
+		department.Metadata["level"] = 0
+		department.Metadata["path"] = department.Name
+		department.Metadata["sort"] = departmentSortValue(department)
+		department.Metadata["member_count"] = memberCounts[department.ID]
+		department.Metadata["total_member_count"] = totalCounts[department.ID]
+		department.Metadata["direct_child_count"] = len(children[department.ID])
+		result = append(result, department)
+		visited[department.ID] = true
+	}
+	return result
+}
+
+func departmentSortValue(item model.PlatformItem) int {
+	for _, key := range []string{"sort", "order", "priority", "weight"} {
+		if value, ok := metadataInt(item.Metadata[key]); ok {
+			return value
+		}
+	}
+	if item.Port != 0 {
+		return item.Port
+	}
+	return 0
+}
+
+func departmentMemberCounts(users, departments []model.PlatformItem) map[string]int {
+	keysByDepartment := map[string]map[string]bool{}
+	for _, department := range departments {
+		keys := map[string]bool{}
+		addAuthKeys(keys, department.ID, department.Name)
+		addMetadataAuthKeys(keys, department.Metadata, "department_id", "department_ids", "departmentId", "dept_id", "dept_ids", "department", "departments", "dept", "depts")
+		keysByDepartment[department.ID] = keys
+	}
+	counts := map[string]int{}
+	for _, user := range users {
+		userKeys := map[string]bool{}
+		addAuthKeys(userKeys, user.ParentID, user.Group)
+		addMetadataAuthKeys(userKeys, user.Metadata, "department_id", "department_ids", "departmentId", "dept_id", "dept_ids", "department", "departments", "dept", "depts")
+		if len(userKeys) == 0 {
+			continue
+		}
+		for departmentID, departmentKeys := range keysByDepartment {
+			if authKeysOverlap(userKeys, departmentKeys) {
+				counts[departmentID]++
+			}
+		}
+	}
+	return counts
 }
 
 func filterDesktopAssets(items []model.PlatformItem) []model.PlatformItem {

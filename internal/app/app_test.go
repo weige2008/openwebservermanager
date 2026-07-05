@@ -1826,6 +1826,7 @@ func TestStorageAuthorizationStrategyPermissions(t *testing.T) {
 		"status":      "enabled",
 		"target_id":   storage.ID,
 		"permissions": map[string]bool{"delete": true},
+		"metadata":    map[string]any{"path_prefix": ""},
 	}, adminCookie, http.StatusCreated)
 	assertStatus(t, handler, http.MethodDelete, "/api/admin/storages/"+storage.ID+"/files?path=docs/c.txt", nil, userCookie, http.StatusOK)
 
@@ -1837,6 +1838,82 @@ func TestStorageAuthorizationStrategyPermissions(t *testing.T) {
 		"permissions": map[string]bool{"upload": false},
 	}, adminCookie, http.StatusCreated)
 	assertMultipartStatus(t, handler, "/api/admin/storages/"+storage.ID+"/files-upload", map[string]string{"path": "docs"}, "blocked.txt", []byte("blocked"), userCookie, http.StatusForbidden)
+}
+
+func TestStorageAuthorizationStrategySubjectAndPathScope(t *testing.T) {
+	handler, adminCookie := newTestHandler(t)
+
+	storageRec := assertStatus(t, handler, http.MethodPost, "/api/admin/storages", map[string]any{
+		"name":   "scoped-drive",
+		"type":   "local",
+		"status": "enabled",
+	}, adminCookie, http.StatusCreated)
+	var storage model.PlatformItem
+	decodeResponse(t, storageRec, &storage)
+
+	assertStatus(t, handler, http.MethodPost, "/api/admin/storages/"+storage.ID+"/files-write", map[string]any{"path": "safe/blocked.txt", "content": "blocked"}, adminCookie, http.StatusCreated)
+	assertStatus(t, handler, http.MethodPost, "/api/admin/storages/"+storage.ID+"/files-write", map[string]any{"path": "safe/other.txt", "content": "other"}, adminCookie, http.StatusCreated)
+	assertStatus(t, handler, http.MethodPost, "/api/admin/storages/"+storage.ID+"/files-write", map[string]any{"path": "open/allowed.txt", "content": "allowed"}, adminCookie, http.StatusCreated)
+
+	assertStatus(t, handler, http.MethodPost, "/api/admin/roles", map[string]any{
+		"name":   "storage-scoped-operator",
+		"type":   "custom",
+		"status": "enabled",
+		"metadata": map[string]any{
+			"api_permissions": []string{
+				"DELETE /api/admin/storages/*",
+				"GET /api/admin/audit/file-logs",
+			},
+		},
+	}, adminCookie, http.StatusCreated)
+	scopedUserRec := assertStatus(t, handler, http.MethodPost, "/api/admin/users", map[string]any{
+		"name":     "storage-scoped-user",
+		"type":     "local",
+		"status":   "enabled",
+		"password": "password123",
+		"metadata": map[string]any{"role": "storage-scoped-operator"},
+	}, adminCookie, http.StatusCreated)
+	var scopedUser model.PlatformItem
+	decodeResponse(t, scopedUserRec, &scopedUser)
+	assertStatus(t, handler, http.MethodPost, "/api/admin/users", map[string]any{
+		"name":     "storage-other-user",
+		"type":     "local",
+		"status":   "enabled",
+		"password": "password123",
+		"metadata": map[string]any{"role": "storage-scoped-operator"},
+	}, adminCookie, http.StatusCreated)
+
+	assertStatus(t, handler, http.MethodPost, "/api/admin/strategies", map[string]any{
+		"name":        "allow scoped-drive delete",
+		"type":        "file",
+		"status":      "enabled",
+		"target_id":   storage.ID,
+		"permissions": map[string]bool{"delete": true},
+	}, adminCookie, http.StatusCreated)
+	assertStatus(t, handler, http.MethodPost, "/api/admin/strategies", map[string]any{
+		"name":        "deny scoped user safe delete",
+		"type":        "file",
+		"status":      "enabled",
+		"target_id":   storage.ID,
+		"owner_id":    scopedUser.ID,
+		"permissions": map[string]bool{"delete": false},
+		"metadata":    map[string]any{"path_prefix": "safe"},
+	}, adminCookie, http.StatusCreated)
+
+	scopedLoginRec := assertStatus(t, handler, http.MethodPost, "/api/auth/login", map[string]any{"username": "storage-scoped-user", "password": "password123"}, nil, http.StatusOK)
+	scopedCookie := scopedLoginRec.Result().Cookies()[0]
+	otherLoginRec := assertStatus(t, handler, http.MethodPost, "/api/auth/login", map[string]any{"username": "storage-other-user", "password": "password123"}, nil, http.StatusOK)
+	otherCookie := otherLoginRec.Result().Cookies()[0]
+
+	assertStatus(t, handler, http.MethodDelete, "/api/admin/storages/"+storage.ID+"/files?path=safe/blocked.txt", nil, scopedCookie, http.StatusForbidden)
+	assertStatus(t, handler, http.MethodDelete, "/api/admin/storages/"+storage.ID+"/files?path=open/allowed.txt", nil, scopedCookie, http.StatusOK)
+	assertStatus(t, handler, http.MethodDelete, "/api/admin/storages/"+storage.ID+"/files?path=safe/other.txt", nil, otherCookie, http.StatusOK)
+
+	logsRec := assertStatus(t, handler, http.MethodGet, "/api/admin/audit/file-logs", nil, scopedCookie, http.StatusOK)
+	logsBody := logsRec.Body.String()
+	if !strings.Contains(logsBody, "safe/blocked.txt") || !strings.Contains(logsBody, "denied") {
+		t.Fatal("scoped path denial did not write file log")
+	}
 }
 
 func TestAuditSessionOperations(t *testing.T) {

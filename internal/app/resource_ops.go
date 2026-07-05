@@ -558,7 +558,7 @@ func (s *Server) requireStoragePermission(w http.ResponseWriter, r *http.Request
 	if s.isAdminRequest(r) {
 		return true
 	}
-	allowed, matched := s.storagePermissionAllowed(storageID, action)
+	allowed, matched := s.storagePermissionAllowed(storageID, action, path, s.currentUserID(r))
 	if !matched {
 		return true
 	}
@@ -578,13 +578,14 @@ func (s *Server) requireStoragePermission(w http.ResponseWriter, r *http.Request
 	return false
 }
 
-func (s *Server) storagePermissionAllowed(storageID, action string) (bool, bool) {
-	strategies, err := s.cfg.Store.ListPlatformItems("authorization_strategies")
+func (s *Server) storagePermissionAllowed(storageID, action, path, userID string) (bool, bool) {
+	platform, err := s.cfg.Store.PlatformBootstrap()
 	if err != nil {
 		return true, false
 	}
-	for _, strategy := range strategies {
-		if !platformItemEnabled(strategy) || !fileStrategyMatches(strategy, storageID) {
+	ctx := accessAuthorizationContextFor(platform, userID)
+	for _, strategy := range platform["authorization_strategies"] {
+		if !platformItemEnabled(strategy) || !fileStrategyMatches(strategy, storageID, path, ctx) {
 			continue
 		}
 		if allowed, ok := strategy.Permissions[action]; ok {
@@ -594,20 +595,105 @@ func (s *Server) storagePermissionAllowed(storageID, action string) (bool, bool)
 	return true, false
 }
 
-func fileStrategyMatches(strategy model.PlatformItem, storageID string) bool {
+func fileStrategyMatches(strategy model.PlatformItem, storageID, path string, ctx accessAuthorizationContext) bool {
 	if strategy.Type != "" && !strings.EqualFold(strategy.Type, "file") {
 		return false
 	}
-	if strategy.TargetID != "" && strategy.TargetID != storageID {
+	if !fileStrategyStorageMatches(strategy, storageID) {
 		return false
 	}
-	if target, _ := strategy.Metadata["target_id"].(string); target != "" && target != storageID {
+	if fileStrategyHasSubjectScope(strategy) && !fileStrategySubjectMatches(strategy, ctx) {
 		return false
 	}
-	if storage, _ := strategy.Metadata["storage_id"].(string); storage != "" && storage != storageID {
+	if !fileStrategyPathMatches(strategy, path) {
 		return false
 	}
 	return true
+}
+
+func fileStrategyStorageMatches(strategy model.PlatformItem, storageID string) bool {
+	values := []string{strategy.TargetID}
+	for _, key := range []string{"target_id", "target_ids", "targetId", "storage_id", "storage_ids", "storageId"} {
+		values = append(values, metadataStrings(strategy.Metadata[key])...)
+	}
+	return strategyScopeMatches(values, storageID)
+}
+
+func fileStrategyHasSubjectScope(strategy model.PlatformItem) bool {
+	if strings.TrimSpace(strategy.OwnerID) != "" || strings.TrimSpace(strategy.Username) != "" || strings.TrimSpace(strategy.ParentID) != "" || strings.TrimSpace(strategy.Group) != "" {
+		return true
+	}
+	for _, key := range []string{
+		"subject_id", "subject_ids", "subjectId",
+		"user_id", "user_ids", "userId", "username", "usernames", "account", "accounts",
+		"owner_id", "owner_ids", "ownerId",
+		"department_id", "department_ids", "departmentId", "dept_id", "dept_ids", "department", "departments", "dept", "depts",
+	} {
+		if len(metadataStrings(strategy.Metadata[key])) > 0 {
+			return true
+		}
+	}
+	return false
+}
+
+func fileStrategySubjectMatches(strategy model.PlatformItem, ctx accessAuthorizationContext) bool {
+	subjectKeys := map[string]bool{}
+	addAuthKeys(subjectKeys, strategy.OwnerID, strategy.Username, strategy.ParentID, strategy.Group)
+	addMetadataAuthKeys(subjectKeys, strategy.Metadata,
+		"subject_id", "subject_ids", "subjectId",
+		"user_id", "user_ids", "userId", "username", "usernames", "account", "accounts",
+		"owner_id", "owner_ids", "ownerId",
+		"department_id", "department_ids", "departmentId", "dept_id", "dept_ids", "department", "departments", "dept", "depts",
+	)
+	return authKeysOverlap(ctx.SubjectKeys, subjectKeys)
+}
+
+func fileStrategyPathMatches(strategy model.PlatformItem, path string) bool {
+	values := []string{}
+	for _, key := range []string{"path", "paths", "path_prefix", "path_prefixes", "pathPrefix", "pathPrefixes", "prefix", "prefixes"} {
+		values = append(values, metadataStrings(strategy.Metadata[key])...)
+	}
+	rel := normalizeStoragePolicyPath(path)
+	scoped := false
+	for _, value := range values {
+		for _, part := range splitCriteria(value) {
+			scoped = true
+			prefix := normalizeStoragePolicyPath(part)
+			if prefix == "*" || prefix == "." || prefix == "" {
+				return true
+			}
+			if rel == prefix || strings.HasPrefix(rel, strings.TrimSuffix(prefix, "/")+"/") {
+				return true
+			}
+		}
+	}
+	return !scoped
+}
+
+func strategyScopeMatches(values []string, target string) bool {
+	scoped := false
+	for _, value := range values {
+		for _, part := range splitCriteria(value) {
+			scoped = true
+			if part == "*" || strings.EqualFold(strings.TrimSpace(part), strings.TrimSpace(target)) {
+				return true
+			}
+		}
+	}
+	return !scoped
+}
+
+func normalizeStoragePolicyPath(value string) string {
+	value = strings.TrimSpace(filepath.ToSlash(value))
+	if value == "" || value == "/" {
+		return "."
+	}
+	value = filepath.ToSlash(filepath.Clean(filepath.FromSlash(value)))
+	value = strings.TrimPrefix(value, "/")
+	if value == "" {
+		return "."
+	}
+	return value
 }
 
 func copyFile(source, destination string) error {

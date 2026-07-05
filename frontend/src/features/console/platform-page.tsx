@@ -32,6 +32,7 @@ interface PlatformFormState {
   parent_id: string
   target_id: string
   tags: string
+  permissions: Record<string, boolean>
   metadata: string
   description: string
 }
@@ -52,9 +53,20 @@ const initialForm: PlatformFormState = {
   parent_id: '',
   target_id: '',
   tags: '',
+  permissions: {},
   metadata: '',
   description: '',
 }
+
+const filePermissionActions = [
+  { key: 'upload', labelKey: 'upload', labelZh: '上传' },
+  { key: 'download', labelKey: 'download', labelZh: '下载' },
+  { key: 'edit', labelKey: 'edit', labelZh: '编辑' },
+  { key: 'delete', labelKey: 'delete', labelZh: '删除' },
+  { key: 'rename', labelKey: 'rename', labelZh: '重命名' },
+  { key: 'copy', labelKey: 'copy', labelZh: '复制' },
+  { key: 'paste', labelKey: 'paste', labelZh: '粘贴' },
+]
 
 type ResourceOperation =
   | { type: 'asset-import' }
@@ -177,7 +189,17 @@ export function PlatformTablePage({ config }: { config: PlatformPageConfig }) {
           cell: ({ row }) => <Badge tone={metadataBool(row.original.metadata?.append_newline) ? 'success' : 'neutral'}>{metadataBool(row.original.metadata?.append_newline) ? app.t('enabled', '启用') : app.t('disabled', '禁用')}</Badge>,
         },
       ] satisfies ColumnDef<PlatformItem>[] : []),
-      ...(!['command_filters', 'command_snippets'].includes(config.collection) ? [
+      ...(config.collection === 'authorization_strategies' ? [
+        {
+          header: app.t('permissionMatrix', '权限矩阵'),
+          cell: ({ row }) => <span className='font-mono text-xs'>{permissionSummary(row.original.permissions)}</span>,
+        },
+        {
+          header: app.t('pathPrefix', '路径前缀'),
+          cell: ({ row }) => <span className='font-mono text-xs'>{metadataText(row.original.metadata?.path_prefix) || '*'}</span>,
+        },
+      ] satisfies ColumnDef<PlatformItem>[] : []),
+      ...(!['command_filters', 'command_snippets', 'authorization_strategies'].includes(config.collection) ? [
         { header: app.t('address'), cell: ({ row }) => row.original.host ? <span className='font-mono text-xs'>{row.original.host}{row.original.port ? `:${row.original.port}` : ''}</span> : '-' },
       ] satisfies ColumnDef<PlatformItem>[] : []),
       ...(config.collection === 'agent_gateways' ? [
@@ -240,6 +262,7 @@ export function PlatformTablePage({ config }: { config: PlatformPageConfig }) {
       ...initialForm,
       type: defaultPlatformType(config.collection),
       protocol: config.collection === 'command_filters' ? 'ssh' : '',
+      permissions: defaultPlatformPermissions(config.collection),
       metadata: defaultPlatformMetadata(config.collection),
     })
     setFormOpen(true)
@@ -293,7 +316,7 @@ export function PlatformTablePage({ config }: { config: PlatformPageConfig }) {
               emptyTitle={app.t('empty', '暂无数据')}
               emptyBody={description}
               searchPlaceholder={app.t('filter', '关键词搜索')}
-              getSearchText={(item) => [item.name, item.type, item.status, item.protocol, item.host, item.group, item.username, item.description, metadataText(item.metadata?.pattern), metadataText(item.metadata?.command), metadataText(item.metadata?.risk), metadataText(item.metadata?.last_login_at), metadataText(item.metadata?.last_login_ip), item.tags?.join(' ')].filter(Boolean).join(' ')}
+              getSearchText={(item) => [item.name, item.type, item.status, item.protocol, item.host, item.group, item.username, item.description, metadataText(item.metadata?.pattern), metadataText(item.metadata?.command), metadataText(item.metadata?.risk), metadataText(item.metadata?.path_prefix), permissionSummary(item.permissions), metadataText(item.metadata?.last_login_at), metadataText(item.metadata?.last_login_ip), item.tags?.join(' ')].filter(Boolean).join(' ')}
             />
           </CardContent>
         </Card>
@@ -1117,7 +1140,9 @@ function PlatformItemDialog({
   const isRole = collection === 'roles'
   const isCommandFilter = collection === 'command_filters'
   const isCommandSnippet = collection === 'command_snippets'
+  const isAuthorizationStrategy = collection === 'authorization_strategies'
   const roleItems = app.data.platform?.roles || []
+  const storageItems = app.data.platform?.storages || []
   return (
     <DialogShell open={open} onOpenChange={onOpenChange} title={title} description={description}>
       <div className='grid gap-4'>
@@ -1165,6 +1190,52 @@ function PlatformItemDialog({
                 <Input placeholder={app.t('emptyMeansAllUsers', '留空表示全部用户')} value={form.owner_id} onChange={(event) => onChange({ owner_id: event.currentTarget.value })} />
               </Field>
               <Field label={app.t('tags', '标签')}><Input placeholder='prod,linux,web' value={form.tags} onChange={(event) => onChange({ tags: event.currentTarget.value })} /></Field>
+            </>
+          ) : isAuthorizationStrategy ? (
+            <>
+              <Field label={app.t('name')}><Input value={form.name} onChange={(event) => onChange({ name: event.currentTarget.value })} /></Field>
+              <Field label={app.t('status')}>
+                <Select value={form.status || 'enabled'} onChange={(event) => onChange({ status: event.currentTarget.value })}>
+                  <option value='enabled'>{app.t('enabled', '启用')}</option>
+                  <option value='disabled'>{app.t('disabled', '禁用')}</option>
+                </Select>
+              </Field>
+              <Field label={app.t('type', '类型')}>
+                <Select value={form.type || 'file'} onChange={(event) => onChange({ type: event.currentTarget.value })}>
+                  <option value='file'>{app.t('filePermissionStrategy', '文件权限策略')}</option>
+                </Select>
+              </Field>
+              <Field label={app.t('targetStorage', '目标存储')}>
+                <Select value={form.target_id} onChange={(event) => onChange({ target_id: event.currentTarget.value })}>
+                  <option value=''>{app.t('allStorages', '全部存储')}</option>
+                  {storageItems.map((storage) => (
+                    <option key={storage.id} value={storage.id}>{storage.name}</option>
+                  ))}
+                </Select>
+              </Field>
+              <Field label={app.t('owner', '适用用户/部门')}>
+                <Input placeholder={app.t('emptyMeansAllUsers', '留空表示全部用户')} value={form.owner_id} onChange={(event) => onChange({ owner_id: event.currentTarget.value })} />
+              </Field>
+              <Field label={app.t('pathPrefix', '路径前缀')}>
+                <Input placeholder={app.t('emptyMeansAllPaths', '留空表示全部路径')} value={metadataFormText(form.metadata, 'path_prefix')} onChange={(event) => onChange({ metadata: metadataWithValue(form.metadata, 'path_prefix', event.currentTarget.value) })} />
+              </Field>
+              <div className='grid gap-2 rounded-lg border border-border bg-muted/20 p-3 sm:col-span-2'>
+                <div className='text-sm font-medium'>{app.t('permissionMatrix', '权限矩阵')}</div>
+                <div className='grid gap-2 sm:grid-cols-2 lg:grid-cols-4'>
+                  {filePermissionActions.map((action) => (
+                    <label key={action.key} className='flex items-center justify-between gap-3 rounded-md border border-border bg-background px-3 py-2 text-sm'>
+                      <span>{app.t(action.labelKey, action.labelZh)}</span>
+                      <input
+                        type='checkbox'
+                        className='size-4 accent-primary'
+                        checked={Boolean(form.permissions[action.key])}
+                        onChange={(event) => onChange({ permissions: { ...form.permissions, [action.key]: event.currentTarget.checked } })}
+                      />
+                    </label>
+                  ))}
+                </div>
+              </div>
+              <Field label={app.t('tags', '标签')}><Input placeholder='storage,readonly' value={form.tags} onChange={(event) => onChange({ tags: event.currentTarget.value })} /></Field>
             </>
           ) : isCommandSnippet ? (
             <>
@@ -1333,12 +1404,19 @@ function defaultPlatformType(collection: string) {
   if (collection === 'roles') return 'custom'
   if (collection === 'command_filters') return 'deny'
   if (collection === 'command_snippets') return 'public'
+  if (collection === 'authorization_strategies') return 'file'
   return ''
+}
+
+function defaultPlatformPermissions(collection: string): Record<string, boolean> {
+  if (collection !== 'authorization_strategies') return {}
+  return { upload: true, download: true, edit: true, delete: false, rename: true, copy: true, paste: true }
 }
 
 function defaultPlatformMetadata(collection: string) {
   if (collection === 'command_filters') return JSON.stringify({ risk: 'high' }, null, 2)
   if (collection === 'command_snippets') return JSON.stringify({ command: '', append_newline: false }, null, 2)
+  if (collection === 'authorization_strategies') return JSON.stringify({ path_prefix: '' }, null, 2)
   return ''
 }
 
@@ -1359,6 +1437,7 @@ function formFromPlatformItem(item: PlatformItem): PlatformFormState {
     parent_id: item.parent_id || '',
     target_id: item.target_id || '',
     tags: item.tags?.join(',') || '',
+    permissions: item.permissions || {},
     metadata: item.metadata ? JSON.stringify(item.metadata, null, 2) : '',
     description: item.description || '',
   }
@@ -1385,6 +1464,7 @@ function platformRequestFromForm(form: PlatformFormState) {
     parent_id: form.parent_id,
     target_id: form.target_id,
     tags: form.tags.split(',').map((tag) => tag.trim()).filter(Boolean),
+    permissions: form.permissions,
     metadata,
     description: form.description,
   }
@@ -1952,6 +2032,13 @@ function metadataFormText(metadata: string, key: string) {
 
 function metadataBoolFromForm(metadata: string, key: string) {
   return metadataBool(metadataObject(metadata)[key])
+}
+
+function permissionSummary(permissions: Record<string, boolean> | undefined) {
+  const source = permissions || {}
+  const enabled = filePermissionActions.filter((action) => source[action.key]).map((action) => action.key)
+  const disabled = filePermissionActions.filter((action) => Object.prototype.hasOwnProperty.call(source, action.key) && !source[action.key]).map((action) => `-${action.key}`)
+  return [...enabled, ...disabled].join(' ') || '-'
 }
 
 function metadataWithValue(metadata: string, key: string, value: unknown) {

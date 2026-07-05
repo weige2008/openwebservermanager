@@ -458,6 +458,74 @@ func TestWebAssetProxyRequiresAuthorizationAndLogs(t *testing.T) {
 	}
 }
 
+func TestDatabaseAssetQueryRequiresAuthorizationAndLogs(t *testing.T) {
+	handler, adminCookie := newTestHandler(t)
+
+	userRec := assertStatus(t, handler, http.MethodPost, "/api/admin/users", map[string]any{
+		"name":     "database-user",
+		"type":     "local",
+		"status":   "enabled",
+		"password": "password123",
+		"metadata": map[string]any{"role": "user"},
+	}, adminCookie, http.StatusCreated)
+	var user model.PlatformItem
+	decodeResponse(t, userRec, &user)
+
+	databaseRec := assertStatus(t, handler, http.MethodPost, "/api/admin/database-assets", map[string]any{
+		"name":     "ops-db",
+		"type":     "sqlite",
+		"status":   "enabled",
+		"protocol": "database",
+		"metadata": map[string]any{"sqlite_path": "ops.db", "row_limit": 10},
+	}, adminCookie, http.StatusCreated)
+	var databaseAsset model.PlatformItem
+	decodeResponse(t, databaseRec, &databaseAsset)
+
+	loginRec := assertStatus(t, handler, http.MethodPost, "/api/auth/login", map[string]any{"username": "database-user", "password": "password123"}, nil, http.StatusOK)
+	userCookie := loginRec.Result().Cookies()[0]
+
+	assertStatus(t, handler, http.MethodPost, "/api/access/database/"+databaseAsset.ID+"/query", map[string]any{
+		"sql": "SELECT 1 AS answer",
+	}, userCookie, http.StatusForbidden)
+
+	assertStatus(t, handler, http.MethodPost, "/api/admin/authorizations/databases", map[string]any{
+		"name":      "database-user ops-db",
+		"owner_id":  user.ID,
+		"target_id": databaseAsset.ID,
+		"status":    "enabled",
+	}, adminCookie, http.StatusCreated)
+
+	accessRec := assertStatus(t, handler, http.MethodGet, "/api/access/assets", nil, userCookie, http.StatusOK)
+	if !strings.Contains(accessRec.Body.String(), databaseAsset.ID) {
+		t.Fatal("authorized database asset did not appear in access portal")
+	}
+
+	assertStatus(t, handler, http.MethodPost, "/api/access/database/"+databaseAsset.ID+"/query", map[string]any{
+		"sql": "CREATE TABLE servers(id INTEGER PRIMARY KEY, name TEXT)",
+	}, userCookie, http.StatusOK)
+	assertStatus(t, handler, http.MethodPost, "/api/access/database/"+databaseAsset.ID+"/query", map[string]any{
+		"sql": "INSERT INTO servers(name) VALUES ('alpha')",
+	}, userCookie, http.StatusOK)
+	selectRec := assertStatus(t, handler, http.MethodPost, "/api/access/database/"+databaseAsset.ID+"/query", map[string]any{
+		"sql": "SELECT name FROM servers",
+	}, userCookie, http.StatusOK)
+	if !strings.Contains(selectRec.Body.String(), "alpha") || !strings.Contains(selectRec.Body.String(), "columns") {
+		t.Fatal("database query response did not include selected rows")
+	}
+
+	assertStatus(t, handler, http.MethodPost, "/api/access/database/"+databaseAsset.ID+"/query", map[string]any{
+		"sql": "SELECT * FROM missing_table",
+	}, userCookie, http.StatusBadRequest)
+
+	logsRec := assertStatus(t, handler, http.MethodGet, "/api/admin/audit/sql-logs", nil, adminCookie, http.StatusOK)
+	logsBody := logsRec.Body.String()
+	for _, want := range []string{databaseAsset.ID, "database_access", "alpha", "missing_table", "failed"} {
+		if !strings.Contains(logsBody, want) {
+			t.Fatalf("sql logs did not include %q", want)
+		}
+	}
+}
+
 func TestRoleBasedAccessControl(t *testing.T) {
 	handler, adminCookie := newTestHandler(t)
 

@@ -217,6 +217,14 @@ func (s *Server) handleAccessAction(w http.ResponseWriter, r *http.Request) {
 		s.handleWebAssetProxy(w, r, asset, userID, strings.Join(parts[3:], "/"))
 		return
 	}
+	if len(parts) >= 3 && (parts[2] == "query" || parts[2] == "execute") {
+		if protocol != model.ProtocolDatabase {
+			writeError(w, http.StatusBadRequest, "query access is only supported for database assets")
+			return
+		}
+		s.handleDatabaseAssetQuery(w, r, asset, userID)
+		return
+	}
 	item, err := s.cfg.Store.CreatePlatformItem("online_sessions", model.PlatformItemRequest{
 		Name:        protocolSessionName(protocol, asset.Name),
 		Type:        string(protocol),

@@ -737,22 +737,36 @@ function TaskLogsDialog({ item, onClose }: { item: PlatformItem; onClose: () => 
   )
 }
 
-function SQLExecuteDialog({ item, onClose }: { item: PlatformItem; onClose: () => void }) {
+function SQLExecuteDialog({
+  item,
+  onClose,
+  endpoint,
+  initialSQL,
+  successMessage,
+  description,
+}: {
+  item: PlatformItem
+  onClose: () => void
+  endpoint?: string
+  initialSQL?: string
+  successMessage?: string
+  description?: string
+}) {
   const app = useApp()
-  const [sql, setSQL] = useState(stringValue(item.metadata?.sql))
+  const [sql, setSQL] = useState(initialSQL ?? stringValue(item.metadata?.sql))
   const [result, setResult] = useState<PlatformItem | null>(null)
   const [running, setRunning] = useState(false)
 
   const execute = async () => {
     setRunning(true)
     try {
-      const data = await apiRequest<PlatformItem>(`/api/admin/sql-work-orders/${item.id}/execute`, {
+      const data = await apiRequest<PlatformItem>(endpoint || `/api/admin/sql-work-orders/${item.id}/execute`, {
         method: 'POST',
         body: JSON.stringify({ sql }),
       })
       setResult(data)
       await app.refresh(true)
-      app.showToast('SQL 工单已执行')
+      app.showToast(successMessage || 'SQL 工单已执行')
     } catch (error) {
       app.handleApiError(error)
     } finally {
@@ -761,18 +775,10 @@ function SQLExecuteDialog({ item, onClose }: { item: PlatformItem; onClose: () =
   }
 
   return (
-    <DialogShell open onOpenChange={(open) => !open && onClose()} title={`${item.name} 执行`} description='执行结果会写入 SQL 日志；SELECT 查询最多展示前 100 行。'>
+    <DialogShell open onOpenChange={(open) => !open && onClose()} title={`${item.name} 执行`} description={description || '执行结果会写入 SQL 日志；SELECT 查询最多展示前 100 行。'}>
       <div className='grid gap-4'>
         <Field label='SQL'><Textarea className='min-h-44 font-mono text-xs' value={sql} onChange={(event) => setSQL(event.currentTarget.value)} /></Field>
-        {result ? (
-          <div className='rounded-xl border border-border bg-background/60 p-3'>
-            <div className='flex items-center justify-between gap-3 text-sm'>
-              <strong>{result.description || result.name}</strong>
-              <Badge tone={statusTone(result.status)}>{result.status}</Badge>
-            </div>
-            <pre className='mt-3 max-h-80 overflow-auto rounded-lg bg-muted p-2 text-xs'>{JSON.stringify(result.metadata || {}, null, 2)}</pre>
-          </div>
-        ) : null}
+        {result ? <SQLResultPanel result={result} /> : null}
         <div className='flex justify-end gap-2'>
           <Button variant='outline' onClick={onClose}>关闭</Button>
           <Button variant='primary' onClick={() => void execute()} disabled={running || !sql.trim()}>
@@ -782,6 +788,38 @@ function SQLExecuteDialog({ item, onClose }: { item: PlatformItem; onClose: () =
         </div>
       </div>
     </DialogShell>
+  )
+}
+
+function SQLResultPanel({ result }: { result: PlatformItem }) {
+  const columns = stringArrayValue(result.metadata?.columns)
+  const rows = objectArrayValue(result.metadata?.rows)
+  return (
+    <div className='rounded-xl border border-border bg-background/60 p-3'>
+      <div className='flex items-center justify-between gap-3 text-sm'>
+        <strong>{result.description || result.name}</strong>
+        <Badge tone={statusTone(result.status)}>{result.status}</Badge>
+      </div>
+      {columns.length && rows.length ? (
+        <div className='mt-3 max-h-80 overflow-auto rounded-lg border border-border'>
+          <table className='min-w-full text-left text-xs'>
+            <thead className='bg-muted text-muted-foreground'>
+              <tr>
+                {columns.map((column) => <th key={column} className='whitespace-nowrap px-3 py-2 font-medium'>{column}</th>)}
+              </tr>
+            </thead>
+            <tbody>
+              {rows.map((row, index) => (
+                <tr key={index} className='border-t border-border'>
+                  {columns.map((column) => <td key={column} className='whitespace-nowrap px-3 py-2 font-mono'>{String(row[column] ?? '')}</td>)}
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      ) : null}
+      <pre className='mt-3 max-h-80 overflow-auto rounded-lg bg-muted p-2 text-xs'>{JSON.stringify(result.metadata || {}, null, 2)}</pre>
+    </div>
   )
 }
 
@@ -937,6 +975,7 @@ export function AccessPortalPage() {
   const assets = app.data.platform?.assets || []
   const webAssets = app.data.platform?.web_assets || []
   const databaseAssets = app.data.platform?.database_assets || []
+  const [databaseQueryItem, setDatabaseQueryItem] = useState<PlatformItem | null>(null)
   const textAssets = assets.filter((item) => item.protocol === 'ssh')
   const desktopAssets = assets.filter((item) => item.protocol === 'rdp' || item.protocol === 'vnc')
   return (
@@ -957,17 +996,41 @@ export function AccessPortalPage() {
       <AccessSection title='文本协议' items={textAssets} />
       <AccessSection title='图形协议' items={desktopAssets} />
       <AccessSection title='Web资产' items={webAssets} protocol='http' />
-      <AccessSection title='数据库资产' items={databaseAssets} protocol='database' />
+      <AccessSection title='数据库资产' items={databaseAssets} protocol='database' onDatabaseQuery={setDatabaseQueryItem} />
+      {databaseQueryItem ? (
+        <SQLExecuteDialog
+          item={databaseQueryItem}
+          endpoint={`/api/access/database/${databaseQueryItem.id}/query`}
+          initialSQL={stringValue(databaseQueryItem.metadata?.sql) || 'SELECT name FROM sqlite_master WHERE type = "table";'}
+          successMessage='SQL 已执行'
+          description='在授权数据库资产上执行 SQL，结果会写入 SQL 日志；SELECT 查询按资产配置的 row_limit 返回。'
+          onClose={() => setDatabaseQueryItem(null)}
+        />
+      ) : null}
     </div>
   )
 }
 
-function AccessSection({ title, items, protocol }: { title: string; items: PlatformItem[]; protocol?: string }) {
+function AccessSection({
+  title,
+  items,
+  protocol,
+  onDatabaseQuery,
+}: {
+  title: string
+  items: PlatformItem[]
+  protocol?: string
+  onDatabaseQuery?: (item: PlatformItem) => void
+}) {
   const app = useApp()
   const connect = async (item: PlatformItem) => {
     const accessProtocol = protocol || item.protocol || 'ssh'
     if (accessProtocol === 'http') {
       window.open(`/api/access/http/${item.id}/proxy/`, '_blank', 'noopener,noreferrer')
+      return
+    }
+    if (accessProtocol === 'database') {
+      onDatabaseQuery?.(item)
       return
     }
     try {
@@ -1095,6 +1158,14 @@ function splitCSV(value: string) {
 
 function stringValue(value: unknown) {
   return typeof value === 'string' ? value : ''
+}
+
+function stringArrayValue(value: unknown) {
+  return Array.isArray(value) ? value.filter((item): item is string => typeof item === 'string') : []
+}
+
+function objectArrayValue(value: unknown) {
+  return Array.isArray(value) ? value.filter((item): item is Record<string, unknown> => Boolean(item) && typeof item === 'object' && !Array.isArray(item)) : []
 }
 
 function itemHasRecording(item: PlatformItem) {

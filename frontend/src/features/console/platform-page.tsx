@@ -366,7 +366,22 @@ export function PlatformTablePage({ config }: { config: PlatformPageConfig }) {
         },
       ] satisfies ColumnDef<PlatformItem>[] : []),
       ...(!['asset_groups', 'command_filters', 'command_snippets', 'authorization_strategies'].includes(config.collection) ? [
-        { header: app.t('address'), cell: ({ row }) => row.original.host ? <span className='font-mono text-xs'>{row.original.host}{row.original.port ? `:${row.original.port}` : ''}</span> : '-' },
+        {
+          header: app.t('address'),
+          cell: ({ row }) => {
+            const targetURL = config.collection === 'web_assets' ? metadataText(row.original.metadata?.target_url) : ''
+            const address = targetURL || (row.original.host ? `${row.original.host}${row.original.port ? `:${row.original.port}` : ''}` : '')
+            return address ? <span className='font-mono text-xs'>{address}</span> : '-'
+          },
+        },
+      ] satisfies ColumnDef<PlatformItem>[] : []),
+      ...(config.collection === 'web_assets' ? [
+        {
+          header: 'mTLS',
+          cell: ({ row }) => metadataText(row.original.metadata?.certificate_id) || metadataText(row.original.metadata?.mtls_certificate_id)
+            ? <Badge tone='warning'>{metadataText(row.original.metadata?.certificate_id) || metadataText(row.original.metadata?.mtls_certificate_id)}</Badge>
+            : <Badge tone='neutral'>{app.t('disabled', 'Disabled')}</Badge>,
+        },
       ] satisfies ColumnDef<PlatformItem>[] : []),
       ...(config.collection === 'agent_gateways' ? [
         { header: '延迟', cell: ({ row }) => <span className='font-mono text-xs'>{formatNumberValue(row.original.metadata?.latency_ms)} ms</span> },
@@ -427,7 +442,7 @@ export function PlatformTablePage({ config }: { config: PlatformPageConfig }) {
     setForm({
       ...initialForm,
       type: defaultPlatformType(config.collection),
-      protocol: config.collection === 'command_filters' || config.collection === 'asset_groups' ? 'ssh' : config.collection === 'database_assets' ? 'database' : '',
+      protocol: config.collection === 'command_filters' || config.collection === 'asset_groups' ? 'ssh' : config.collection === 'database_assets' ? 'database' : config.collection === 'web_assets' ? 'http' : '',
       permissions: defaultPlatformPermissions(config.collection),
       metadata: defaultPlatformMetadata(config.collection),
     })
@@ -482,7 +497,7 @@ export function PlatformTablePage({ config }: { config: PlatformPageConfig }) {
               emptyTitle={app.t('empty', '暂无数据')}
               emptyBody={description}
               searchPlaceholder={app.t('filter', '关键词搜索')}
-              getSearchText={(item) => [item.name, item.type, item.status, item.protocol, item.host, item.group, item.username, item.description, metadataText(item.metadata?.database), metadataText(item.metadata?.sqlite_path), metadataText(item.metadata?.credential_id), metadataText(item.metadata?.pattern), metadataText(item.metadata?.command), metadataText(item.metadata?.risk), metadataText(item.metadata?.path_prefix), permissionSummary(item.permissions), metadataText(item.metadata?.last_login_at), metadataText(item.metadata?.last_login_ip), item.tags?.join(' ')].filter(Boolean).join(' ')}
+              getSearchText={(item) => [item.name, item.type, item.status, item.protocol, item.host, item.group, item.username, item.description, metadataText(item.metadata?.target_url), metadataText(item.metadata?.certificate_id), metadataText(item.metadata?.mtls_certificate_id), metadataText(item.metadata?.tls_server_name), metadataText(item.metadata?.database), metadataText(item.metadata?.sqlite_path), metadataText(item.metadata?.credential_id), metadataText(item.metadata?.pattern), metadataText(item.metadata?.command), metadataText(item.metadata?.risk), metadataText(item.metadata?.path_prefix), permissionSummary(item.permissions), metadataText(item.metadata?.last_login_at), metadataText(item.metadata?.last_login_ip), item.tags?.join(' ')].filter(Boolean).join(' ')}
             />
           </CardContent>
         </Card>
@@ -1342,7 +1357,7 @@ function CertificateMTLSDialog({ item, onClose }: { item: PlatformItem; onClose:
   }
 
   return (
-    <DialogShell open onOpenChange={(open) => !open && onClose()} title={`${item.name} mTLS`} description='保存证书的 mTLS 标记和可选客户端 CA PEM，用于后续网关/代理服务读取。'>
+    <DialogShell open onOpenChange={(open) => !open && onClose()} title={`${item.name} mTLS`} description='启用后可被 Web 资产反向代理作为上游客户端证书使用；可选客户端 CA PEM 会参与上游 TLS 校验。'>
       <div className='grid gap-4'>
         <CheckboxRow checked={enabled} onChange={setEnabled} label='启用 mTLS' />
         <Field label='Client CA PEM'><Textarea className='min-h-44 font-mono text-xs' value={clientCA} onChange={(event) => setClientCA(event.currentTarget.value)} placeholder='-----BEGIN CERTIFICATE-----' /></Field>
@@ -1919,12 +1934,14 @@ function PlatformItemDialog({
   const isCommandFilter = collection === 'command_filters'
   const isCommandSnippet = collection === 'command_snippets'
   const isAuthorizationStrategy = collection === 'authorization_strategies'
+  const isWebAsset = collection === 'web_assets'
   const isDatabaseAsset = collection === 'database_assets'
   const isScheduledTask = collection === 'scheduled_tasks'
   const roleItems = app.data.platform?.roles || []
   const assetGroupItems = (app.data.platform?.asset_groups || items).filter((item) => item.id !== editingId)
   const storageItems = app.data.platform?.storages || []
   const databaseCredentials = (app.data.platform?.credentials || []).filter((item) => item.type === 'database_password')
+  const mtlsCertificates = (app.data.platform?.certificates || []).filter((item) => metadataBool(item.metadata?.mtls_enabled) && metadataBool(item.metadata?.has_private_key))
   return (
     <DialogShell open={open} onOpenChange={onOpenChange} title={title} description={description}>
       <div className='grid gap-4'>
@@ -2068,6 +2085,66 @@ function PlatformItemDialog({
                 </div>
               </div>
               <Field label={app.t('tags', '标签')}><Input placeholder='storage,readonly' value={form.tags} onChange={(event) => onChange({ tags: event.currentTarget.value })} /></Field>
+            </>
+          ) : isWebAsset ? (
+            <>
+              <Field label={app.t('name')}><Input value={form.name} onChange={(event) => onChange({ name: event.currentTarget.value })} /></Field>
+              <Field label={app.t('status')}>
+                <Select value={form.status || 'enabled'} onChange={(event) => onChange({ status: event.currentTarget.value })}>
+                  <option value='enabled'>{app.t('enabled', 'Enabled')}</option>
+                  <option value='disabled'>{app.t('disabled', 'Disabled')}</option>
+                </Select>
+              </Field>
+              <Field label={app.t('type', 'Type')}>
+                <Select value={form.type || 'http'} onChange={(event) => onChange({ type: event.currentTarget.value, protocol: 'http' })}>
+                  <option value='http'>HTTP</option>
+                  <option value='https'>HTTPS</option>
+                </Select>
+              </Field>
+              <Field label={app.t('targetUrl', 'Target URL')}>
+                <Input
+                  placeholder='https://internal.example.local'
+                  value={metadataFormText(form.metadata, 'target_url')}
+                  onChange={(event) => onChange({ metadata: metadataWithValue(form.metadata, 'target_url', event.currentTarget.value) })}
+                />
+              </Field>
+              <Field label={app.t('hostDomain', 'Host / domain')}>
+                <Input placeholder='app.example.com' value={form.host} onChange={(event) => onChange({ host: event.currentTarget.value })} />
+              </Field>
+              <Field label={app.t('ports')}>
+                <Input type='number' placeholder={form.type === 'https' ? '443' : '80'} value={form.port} onChange={(event) => onChange({ port: event.currentTarget.value })} />
+              </Field>
+              <Field label={app.t('clientCertificate', 'Client certificate')}>
+                <Select
+                  value={metadataFormText(form.metadata, 'certificate_id') || metadataFormText(form.metadata, 'mtls_certificate_id')}
+                  onChange={(event) => onChange({ metadata: metadataWithWebAssetCertificate(form.metadata, event.currentTarget.value) })}
+                >
+                  <option value=''>{app.t('none', 'None')}</option>
+                  {mtlsCertificates.map((certificate) => (
+                    <option key={certificate.id} value={certificate.id}>{certificate.name}</option>
+                  ))}
+                </Select>
+              </Field>
+              <Field label={app.t('tlsServerName', 'TLS server name')}>
+                <Input
+                  placeholder='internal.example.local'
+                  value={metadataFormText(form.metadata, 'tls_server_name')}
+                  onChange={(event) => onChange({ metadata: metadataWithValue(form.metadata, 'tls_server_name', event.currentTarget.value) })}
+                />
+              </Field>
+              <Field className='sm:col-span-2' label={app.t('caBundle', 'CA bundle')}>
+                <Textarea
+                  className='min-h-36 font-mono text-xs'
+                  placeholder='-----BEGIN CERTIFICATE-----'
+                  value={metadataFormText(form.metadata, 'mtls_ca')}
+                  onChange={(event) => onChange({ metadata: metadataWithValue(form.metadata, 'mtls_ca', event.currentTarget.value) })}
+                />
+              </Field>
+              <Field label={app.t('group')}><Input value={form.group} onChange={(event) => onChange({ group: event.currentTarget.value })} /></Field>
+              <Field label={app.t('tags', 'Tags')}><Input placeholder='web,prod' value={form.tags} onChange={(event) => onChange({ tags: event.currentTarget.value })} /></Field>
+              <Field className='sm:col-span-2' label={app.t('details')}>
+                <Textarea value={form.description} onChange={(event) => onChange({ description: event.currentTarget.value })} />
+              </Field>
             </>
           ) : isDatabaseAsset ? (
             <>
@@ -2394,6 +2471,7 @@ function defaultPlatformType(collection: string) {
   if (collection === 'command_filters') return 'deny'
   if (collection === 'command_snippets') return 'public'
   if (collection === 'authorization_strategies') return 'file'
+  if (collection === 'web_assets') return 'http'
   if (collection === 'database_assets') return 'sqlite'
   if (collection === 'scheduled_tasks') return 'asset-status'
   return ''
@@ -2409,6 +2487,7 @@ function defaultPlatformMetadata(collection: string) {
   if (collection === 'asset_groups') return JSON.stringify({ sort: 0, collapsed: false }, null, 2)
   if (collection === 'command_snippets') return JSON.stringify({ command: '', append_newline: false }, null, 2)
   if (collection === 'authorization_strategies') return JSON.stringify({ path_prefix: '' }, null, 2)
+  if (collection === 'web_assets') return JSON.stringify({ target_url: '' }, null, 2)
   if (collection === 'database_assets') return JSON.stringify({ sqlite_path: '', row_limit: 100 }, null, 2)
   if (collection === 'scheduled_tasks') return JSON.stringify({ interval_seconds: 600, timeout_ms: 2000 }, null, 2)
   return ''
@@ -3775,6 +3854,15 @@ function metadataWithValue(metadata: string, key: string, value: unknown) {
   } else {
     next[key] = value
   }
+  return JSON.stringify(next, null, 2)
+}
+
+function metadataWithWebAssetCertificate(metadata: string, value: string) {
+  const next = metadataObject(metadata)
+  for (const key of ['certificate_id', 'mtls_certificate_id', 'client_certificate_id', 'cert_id']) {
+    delete next[key]
+  }
+  if (value.trim()) next.certificate_id = value.trim()
   return JSON.stringify(next, null, 2)
 }
 

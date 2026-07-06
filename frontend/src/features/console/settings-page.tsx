@@ -144,6 +144,7 @@ export function SettingsPage() {
   const [ldapTestBusy, setLDAPTestBusy] = useState(false)
   const [wecomSettings, setWeComSettings] = useState<WeComSettingsState>(() => defaultWeComSettings())
   const [wecomBusy, setWeComBusy] = useState(false)
+  const [wecomTestBusy, setWeComTestBusy] = useState(false)
 
   const loadMFAStatus = async () => {
     setMFAStatus(await apiRequest<MFAStatus>('/api/auth/mfa/status'))
@@ -423,6 +424,21 @@ export function SettingsPage() {
       app.handleApiError(error)
     } finally {
       setWeComBusy(false)
+    }
+  }
+
+  const testWeComSettings = async () => {
+    setWeComTestBusy(true)
+    try {
+      await apiRequest('/api/admin/system-settings/wecom/test', {
+        method: 'POST',
+        body: JSON.stringify({ setting_id: wecomSettings.setting?.id }),
+      })
+      app.showToast(t('settingsPage.wecomTestSucceeded', { defaultValue: 'Enterprise WeChat token test succeeded' }))
+    } catch (error) {
+      app.handleApiError(error)
+    } finally {
+      setWeComTestBusy(false)
     }
   }
 
@@ -802,6 +818,21 @@ export function SettingsPage() {
             />
             <span>{t('settingsPage.wecomAutoCreate', { defaultValue: 'Create Enterprise WeChat users on first successful login' })}</span>
           </label>
+          <div className='grid gap-3 rounded-lg border border-border bg-background/70 p-3'>
+            <div>
+              <div className='text-sm font-medium'>{t('settingsPage.wecomTestTitle', { defaultValue: 'Test Enterprise WeChat token' })}</div>
+              <p className='mt-1 text-xs leading-5 text-muted-foreground'>{t('settingsPage.wecomTestDescription', { defaultValue: 'Validate the saved Corp ID and agent secret by requesting a WeCom access token. Tokens and secrets are never shown.' })}</p>
+            </div>
+            <div className='flex justify-end'>
+              <Button
+                variant='outline'
+                onClick={() => void testWeComSettings()}
+                disabled={wecomTestBusy || !wecomSettings.setting?.id}
+              >
+                {wecomTestBusy ? t('testing') : t('settingsPage.testWeCom', { defaultValue: 'Test WeCom' })}
+              </Button>
+            </div>
+          </div>
           <div className='flex justify-end'>
             <Button variant='primary' onClick={() => void saveWeComSettings()} disabled={wecomBusy || (wecomSettings.enabled && (!wecomSettings.corpID.trim() || !wecomSettings.agentSecret.trim() && !wecomSettings.agentSecretSet))}>
               {wecomBusy ? t('saving') : t('save')}

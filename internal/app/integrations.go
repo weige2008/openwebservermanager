@@ -38,6 +38,11 @@ type ldapTestRequest struct {
 	Password   string `json:"password"`
 }
 
+type weComTestRequest struct {
+	SettingID  string `json:"setting_id"`
+	ProviderID string `json:"provider_id"`
+}
+
 type smtpDeliveryConfig struct {
 	SettingID          string
 	Host               string
@@ -236,6 +241,52 @@ func (s *Server) handleLDAPTest(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
+func (s *Server) handleWeComTest(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		writeError(w, http.StatusMethodNotAllowed, "method not allowed")
+		return
+	}
+	var req weComTestRequest
+	if !decodeJSON(w, r, &req) {
+		return
+	}
+	item, providers, ok, err := s.weComTestSetting(req.SettingID)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	if !ok {
+		writeError(w, http.StatusNotFound, "Enterprise WeChat identity setting not found")
+		return
+	}
+	provider, ok := selectWeComTestProvider(providers, req.ProviderID)
+	if !ok {
+		writeError(w, http.StatusBadRequest, "Enterprise WeChat provider is not configured")
+		return
+	}
+	started := time.Now()
+	expiresIn, err := testExternalWeComAccessToken(provider)
+	if err != nil {
+		errText := sanitizedWeComTestError(provider, err)
+		_ = s.audit(r, "system_settings.wecom_test.failed", item.ID, "", "Enterprise WeChat test failed: "+errText)
+		writeError(w, http.StatusBadGateway, "test Enterprise WeChat token: "+errText)
+		return
+	}
+	_ = s.audit(r, "system_settings.wecom_test", item.ID, "", "Enterprise WeChat token test succeeded")
+	writeJSON(w, http.StatusOK, map[string]any{
+		"ok":                 true,
+		"message":            "Enterprise WeChat token test succeeded",
+		"setting_id":         item.ID,
+		"provider_id":        provider.ID,
+		"provider":           provider.Name,
+		"corp_id":            provider.CorpID,
+		"agent_id":           provider.AgentID,
+		"expires_in_seconds": expiresIn,
+		"duration_ms":        time.Since(started).Milliseconds(),
+		"tested_at":          time.Now().UTC(),
+	})
+}
+
 func (s *Server) smtpIntegrationSetting(id string) (model.PlatformItem, bool, error) {
 	if strings.TrimSpace(id) != "" {
 		return s.cfg.Store.GetPlatformItem("system_settings", strings.TrimSpace(id))
@@ -306,6 +357,52 @@ func (s *Server) ldapTestSetting(id string) (model.PlatformItem, []externalLDAPP
 	return model.PlatformItem{}, nil, false, nil
 }
 
+func (s *Server) weComTestSetting(id string) (model.PlatformItem, []externalWeComProvider, bool, error) {
+	if strings.TrimSpace(id) != "" {
+		item, ok, err := s.cfg.Store.GetPlatformItem("system_settings", strings.TrimSpace(id))
+		if err != nil || !ok {
+			return model.PlatformItem{}, nil, ok, err
+		}
+		providers, err := s.externalWeComProvidersFromMetadata(item.Metadata)
+		if err != nil {
+			return model.PlatformItem{}, nil, false, err
+		}
+		return item, providers, true, nil
+	}
+	items, err := s.cfg.Store.ListPlatformItems("system_settings")
+	if err != nil {
+		return model.PlatformItem{}, nil, false, err
+	}
+	sort.SliceStable(items, func(i, j int) bool {
+		return items[i].UpdatedAt.After(items[j].UpdatedAt)
+	})
+	for _, item := range items {
+		if !strings.EqualFold(strings.TrimSpace(item.Type), "identity") || !platformItemEnabled(item) {
+			continue
+		}
+		providers, err := s.externalWeComProvidersFromMetadata(item.Metadata)
+		if err != nil {
+			return model.PlatformItem{}, nil, false, err
+		}
+		if len(providers) > 0 {
+			return item, providers, true, nil
+		}
+	}
+	for _, item := range items {
+		if !strings.EqualFold(strings.TrimSpace(item.Type), "identity") {
+			continue
+		}
+		providers, err := s.externalWeComProvidersFromMetadata(item.Metadata)
+		if err != nil {
+			return model.PlatformItem{}, nil, false, err
+		}
+		if len(providers) > 0 {
+			return item, providers, true, nil
+		}
+	}
+	return model.PlatformItem{}, nil, false, nil
+}
+
 func selectLDAPTestProvider(providers []externalLDAPProvider, id string) (externalLDAPProvider, bool) {
 	id = strings.TrimSpace(id)
 	if id == "" && len(providers) > 0 {
@@ -317,6 +414,50 @@ func selectLDAPTestProvider(providers []externalLDAPProvider, id string) (extern
 		}
 	}
 	return externalLDAPProvider{}, false
+}
+
+func selectWeComTestProvider(providers []externalWeComProvider, id string) (externalWeComProvider, bool) {
+	id = strings.TrimSpace(id)
+	if id == "" && len(providers) > 0 {
+		return providers[0], true
+	}
+	for _, provider := range providers {
+		if provider.ID == id {
+			return provider, true
+		}
+	}
+	return externalWeComProvider{}, false
+}
+
+func testExternalWeComAccessToken(provider externalWeComProvider) (int, error) {
+	client := http.Client{Timeout: 10 * time.Second}
+	tokenURL, err := url.Parse(provider.TokenEndpoint)
+	if err != nil {
+		return 0, err
+	}
+	tokenQuery := tokenURL.Query()
+	tokenQuery.Set("corpid", provider.CorpID)
+	tokenQuery.Set("corpsecret", provider.AgentSecret)
+	tokenURL.RawQuery = tokenQuery.Encode()
+	payload, err := fetchExternalWeComJSON(client, tokenURL.String())
+	if err != nil {
+		return 0, err
+	}
+	if firstMetadataString(payload, "access_token") == "" {
+		return 0, errors.New("wecom token response missing access_token")
+	}
+	expiresIn, _ := metadataInt(payload["expires_in"])
+	return expiresIn, nil
+}
+
+func sanitizedWeComTestError(provider externalWeComProvider, err error) string {
+	text := err.Error()
+	for _, secret := range []string{provider.AgentSecret} {
+		if strings.TrimSpace(secret) != "" {
+			text = strings.ReplaceAll(text, secret, "[redacted]")
+		}
+	}
+	return text
 }
 
 func smtpDeliveryConfigFromSetting(item model.PlatformItem, password, toOverride string) (smtpDeliveryConfig, error) {

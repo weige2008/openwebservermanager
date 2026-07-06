@@ -2558,6 +2558,99 @@ func TestLDAPIntegrationTestLogin(t *testing.T) {
 	}
 }
 
+func TestWeComIntegrationTokenTest(t *testing.T) {
+	handler, adminCookie := newTestHandler(t)
+	var gotCorpID string
+	var gotSecret string
+	provider := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/gettoken" {
+			http.NotFound(w, r)
+			return
+		}
+		gotCorpID = r.URL.Query().Get("corpid")
+		gotSecret = r.URL.Query().Get("corpsecret")
+		if gotCorpID != "ww-openweb" || gotSecret != "wecom-secret" {
+			writeJSON(w, http.StatusOK, map[string]any{"errcode": 40014, "errmsg": "invalid " + gotSecret})
+			return
+		}
+		writeJSON(w, http.StatusOK, map[string]any{"errcode": 0, "access_token": "wecom-access", "expires_in": 7200})
+	}))
+	defer provider.Close()
+
+	settingRec := assertStatus(t, handler, http.MethodPost, "/api/admin/system-settings", map[string]any{
+		"name":   "Enterprise WeChat identity",
+		"type":   "identity",
+		"status": "enabled",
+		"metadata": map[string]any{
+			"wecom_enabled":           true,
+			"wecom_provider_id":       "corp-wecom",
+			"wecom_provider_name":     "Corp WeCom",
+			"wecom_corp_id":           "ww-openweb",
+			"wecom_agent_id":          "100001",
+			"wecom_agent_secret":      "wecom-secret",
+			"wecom_token_endpoint":    provider.URL + "/gettoken",
+			"wecom_userinfo_endpoint": provider.URL + "/getuserinfo",
+		},
+	}, adminCookie, http.StatusCreated)
+	var setting model.PlatformItem
+	decodeResponse(t, settingRec, &setting)
+
+	settingsRec := assertStatus(t, handler, http.MethodGet, "/api/admin/system-settings", nil, adminCookie, http.StatusOK)
+	for _, leaked := range []string{"wecom-secret", "wecom_agent_secret_encrypted", "agent_secret_encrypted"} {
+		if strings.Contains(settingsRec.Body.String(), leaked) {
+			t.Fatalf("wecom settings leaked sensitive value %q: %s", leaked, settingsRec.Body.String())
+		}
+	}
+	testRec := assertStatus(t, handler, http.MethodPost, "/api/admin/system-settings/wecom/test", map[string]any{
+		"setting_id": setting.ID,
+	}, adminCookie, http.StatusOK)
+	if gotCorpID != "ww-openweb" || gotSecret != "wecom-secret" {
+		t.Fatalf("wecom token endpoint received corp_id=%q secret=%q", gotCorpID, gotSecret)
+	}
+	body := testRec.Body.String()
+	for _, expected := range []string{`"ok":true`, `"provider_id":"corp-wecom"`, `"corp_id":"ww-openweb"`, `"agent_id":"100001"`, `"expires_in_seconds":7200`} {
+		if !strings.Contains(body, expected) {
+			t.Fatalf("wecom test response missing %q: %s", expected, body)
+		}
+	}
+	for _, leaked := range []string{"wecom-secret", "wecom-access", "corpsecret", "wecom_agent_secret_encrypted", "agent_secret_encrypted"} {
+		if strings.Contains(body, leaked) {
+			t.Fatalf("wecom test response leaked sensitive value %q: %s", leaked, body)
+		}
+	}
+	usersRec := assertStatus(t, handler, http.MethodGet, "/api/admin/users", nil, adminCookie, http.StatusOK)
+	if strings.Contains(usersRec.Body.String(), `"type":"wecom"`) {
+		t.Fatalf("wecom token test unexpectedly created a user: %s", usersRec.Body.String())
+	}
+
+	badSettingRec := assertStatus(t, handler, http.MethodPost, "/api/admin/system-settings", map[string]any{
+		"name":   "Broken Enterprise WeChat identity",
+		"type":   "identity",
+		"status": "enabled",
+		"metadata": map[string]any{
+			"wecom_enabled":           true,
+			"wecom_provider_id":       "bad-wecom",
+			"wecom_provider_name":     "Bad WeCom",
+			"wecom_corp_id":           "ww-openweb",
+			"wecom_agent_secret":      "bad-secret",
+			"wecom_token_endpoint":    provider.URL + "/gettoken",
+			"wecom_userinfo_endpoint": provider.URL + "/getuserinfo",
+		},
+	}, adminCookie, http.StatusCreated)
+	var badSetting model.PlatformItem
+	decodeResponse(t, badSettingRec, &badSetting)
+	failedRec := assertStatus(t, handler, http.MethodPost, "/api/admin/system-settings/wecom/test", map[string]any{
+		"setting_id": badSetting.ID,
+	}, adminCookie, http.StatusBadGateway)
+	if strings.Contains(failedRec.Body.String(), "bad-secret") {
+		t.Fatalf("wecom failed test leaked secret: %s", failedRec.Body.String())
+	}
+	logsRec := assertStatus(t, handler, http.MethodGet, "/api/admin/audit/operation-logs", nil, adminCookie, http.StatusOK)
+	if !strings.Contains(logsRec.Body.String(), "system_settings.wecom_test") || !strings.Contains(logsRec.Body.String(), "system_settings.wecom_test.failed") || strings.Contains(logsRec.Body.String(), "bad-secret") {
+		t.Fatalf("wecom test operation logs missing entries or leaked secret: %s", logsRec.Body.String())
+	}
+}
+
 func TestExternalWeComLoginCreatesUserAndSession(t *testing.T) {
 	handler, adminCookie := newTestHandler(t)
 	var authorizeState string

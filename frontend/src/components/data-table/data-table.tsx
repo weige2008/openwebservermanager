@@ -7,11 +7,12 @@ import {
   type ColumnDef,
   type PaginationState,
   type Row,
+  type RowSelectionState,
   type VisibilityState,
 } from '@tanstack/react-table'
 import { Check, ChevronLeft, ChevronRight, Columns3, SearchIcon, X } from 'lucide-react'
 import type { ReactNode } from 'react'
-import { useEffect, useMemo, useState } from 'react'
+import { useEffect, useMemo, useRef, useState } from 'react'
 import { useTranslation } from 'react-i18next'
 import { Menu as BaseMenu } from '@base-ui/react/menu'
 
@@ -35,6 +36,8 @@ export function DataTable<TData>({
   className,
   searchPlaceholder,
   getSearchText,
+  getRowID,
+  selection,
 }: {
   columns: ColumnDef<TData>[]
   data: TData[]
@@ -43,27 +46,71 @@ export function DataTable<TData>({
   className?: string
   searchPlaceholder?: string
   getSearchText?: (row: TData) => string
+  getRowID?: (row: TData) => string
+  selection?: {
+    selectedIDs: string[]
+    onSelectedIDsChange: (selectedIDs: string[]) => void
+    actions?: ReactNode
+  }
 }) {
   const { t } = useTranslation()
   const [query, setQuery] = useState('')
   const [columnVisibility, setColumnVisibility] = useState<VisibilityState>({})
   const [pagination, setPagination] = useState<PaginationState>({ pageIndex: 0, pageSize: 20 })
   const normalizedQuery = query.trim().toLowerCase()
-  const tableColumns = useMemo(() => withStableColumnIDs(columns), [columns])
+  const stableColumns = useMemo(() => withStableColumnIDs(columns), [columns])
+  const selectionColumn = useMemo<ColumnDef<TData> | null>(() => {
+    if (!selection || !getRowID) return null
+    return {
+      id: '__select',
+      enableHiding: false,
+      header: ({ table }) => (
+        <SelectionCheckbox
+          ariaLabel={t('selectAllRows')}
+          checked={table.getIsAllPageRowsSelected()}
+          indeterminate={table.getIsSomePageRowsSelected()}
+          onChange={(checked) => table.toggleAllPageRowsSelected(checked)}
+        />
+      ),
+      cell: ({ row }) => (
+        <SelectionCheckbox
+          ariaLabel={t('selectRow')}
+          checked={row.getIsSelected()}
+          disabled={!row.getCanSelect()}
+          onChange={(checked) => row.toggleSelected(checked)}
+        />
+      ),
+    }
+  }, [getRowID, selection, t])
+  const tableColumns = useMemo(() => selectionColumn ? [selectionColumn, ...stableColumns] : stableColumns, [selectionColumn, stableColumns])
   const filteredData = useMemo(() => {
     if (!normalizedQuery || !getSearchText) return data
     return data.filter((row) => getSearchText(row).toLowerCase().includes(normalizedQuery))
   }, [data, getSearchText, normalizedQuery])
+  const rowSelection = useMemo<RowSelectionState>(() => {
+    if (!selection) return {}
+    return Object.fromEntries(selection.selectedIDs.map((id) => [id, true]))
+  }, [selection])
 
   const table = useReactTable({
     data: filteredData,
     columns: tableColumns,
+    getRowId: getRowID,
+    enableRowSelection: Boolean(selection && getRowID),
     state: {
       columnVisibility,
       pagination,
+      rowSelection,
     },
     onColumnVisibilityChange: setColumnVisibility,
     onPaginationChange: setPagination,
+    onRowSelectionChange: selection
+      ? (updater) => {
+        const previous = Object.fromEntries(selection.selectedIDs.map((id) => [id, true]))
+        const next = typeof updater === 'function' ? updater(previous) : updater
+        selection.onSelectedIDsChange(Object.keys(next).filter((id) => next[id]))
+      }
+      : undefined,
     getCoreRowModel: getCoreRowModel(),
     getPaginationRowModel: getPaginationRowModel(),
   })
@@ -107,6 +154,19 @@ export function DataTable<TData>({
           <ColumnVisibilityMenu columns={visibleLeafColumns} />
         </div>
       </div>
+      {selection && selection.selectedIDs.length ? (
+        <div className='flex flex-wrap items-center justify-between gap-2 rounded-xl border border-primary/20 bg-primary/5 px-3 py-2 text-sm'>
+          <span className='font-medium text-primary'>
+            {t('selectedRows', { defaultValue: '{{count}} selected', count: selection.selectedIDs.length })}
+          </span>
+          <div className='flex flex-wrap items-center justify-end gap-2'>
+            {selection.actions}
+            <Button variant='ghost' size='sm' onClick={() => selection.onSelectedIDsChange([])}>
+              {t('clearSelection')}
+            </Button>
+          </div>
+        </div>
+      ) : null}
       {!filteredData.length ? (
         <div data-slot='table-empty' className='rounded-xl ring-1 ring-foreground/10'>
           <EmptyState title={t('noMatches')} body={t('noMatchesBody')} />
@@ -165,10 +225,14 @@ export function DataTable<TData>({
 
 function withStableColumnIDs<TData>(columns: ColumnDef<TData>[]): ColumnDef<TData>[] {
   return columns.map((column, index) => {
-    if (column.id) return column
     const header = typeof column.header === 'string' || typeof column.header === 'number' ? String(column.header) : ''
     const base = header || `column-${index + 1}`
-    return { ...column, id: stableColumnID(base, index) }
+    const id = column.id || stableColumnID(base, index)
+    return {
+      ...column,
+      id,
+      enableHiding: id === 'actions' || id === '__select' ? false : column.enableHiding,
+    }
   })
 }
 
@@ -274,12 +338,25 @@ function TablePagination({
 }
 
 function MobileRowCard<TData>({ row }: { row: Row<TData> }) {
-  const visibleCells = row.getVisibleCells()
+  const allCells = row.getVisibleCells()
+  const selectCell = allCells.find((cell) => cell.column.id === '__select')
+  const actionsCell = allCells.find((cell) => cell.column.id === 'actions')
+  const visibleCells = allCells.filter((cell) => cell.column.id !== '__select' && cell.column.id !== 'actions')
   const [primaryCell, ...detailCells] = visibleCells
 
   return (
     <article data-slot='mobile-row-card' className='rounded-xl bg-card p-3 text-sm ring-1 ring-foreground/10'>
-      <div className='min-w-0 font-medium'>{primaryCell ? flexRender(primaryCell.column.columnDef.cell, primaryCell.getContext()) : null}</div>
+      <div className='flex min-w-0 items-start justify-between gap-3'>
+        <div className='flex min-w-0 items-start gap-2'>
+          {selectCell ? (
+            <div className='pt-0.5'>{flexRender(selectCell.column.columnDef.cell, selectCell.getContext())}</div>
+          ) : null}
+          <div className='min-w-0 font-medium'>{primaryCell ? flexRender(primaryCell.column.columnDef.cell, primaryCell.getContext()) : null}</div>
+        </div>
+        {actionsCell ? (
+          <div className='shrink-0'>{flexRender(actionsCell.column.columnDef.cell, actionsCell.getContext())}</div>
+        ) : null}
+      </div>
       <dl className='mt-3 grid gap-2'>
         {detailCells.map((cell) => (
           <div key={cell.id} className='grid grid-cols-[6rem_minmax(0,1fr)] gap-3 text-xs'>
@@ -295,4 +372,37 @@ function MobileRowCard<TData>({ row }: { row: Row<TData> }) {
 function renderHeader<TData>(header: ColumnDef<TData>['header'], fallback: string): ReactNode {
   if (typeof header === 'string' || typeof header === 'number') return header
   return fallback
+}
+
+function SelectionCheckbox({
+  checked,
+  indeterminate,
+  disabled,
+  ariaLabel,
+  onChange,
+}: {
+  checked: boolean
+  indeterminate?: boolean
+  disabled?: boolean
+  ariaLabel: string
+  onChange: (checked: boolean) => void
+}) {
+  const ref = useRef<HTMLInputElement>(null)
+
+  useEffect(() => {
+    if (ref.current) ref.current.indeterminate = Boolean(indeterminate)
+  }, [indeterminate])
+
+  return (
+    <input
+      ref={ref}
+      type='checkbox'
+      className='size-4 rounded border-border accent-primary'
+      checked={checked}
+      disabled={disabled}
+      aria-label={ariaLabel}
+      onClick={(event) => event.stopPropagation()}
+      onChange={(event) => onChange(event.currentTarget.checked)}
+    />
+  )
 }

@@ -313,8 +313,25 @@ export function PlatformTablePage({ config }: { config: PlatformPageConfig }) {
   const [operation, setOperation] = useState<ResourceOperation | null>(null)
   const [departmentView, setDepartmentView] = useState<'table' | 'tree'>('table')
   const [assetGroupView, setAssetGroupView] = useState<'table' | 'tree'>('table')
+  const [selectedIDs, setSelectedIDs] = useState<string[]>([])
   const { requestAccessMFACode, accessMFADialog } = useAccessMFADialog()
   const { confirm, confirmDialog } = useConfirmDialog()
+  const selectedRows = useMemo(() => {
+    const ids = new Set(selectedIDs)
+    return rows.filter((item) => ids.has(item.id))
+  }, [rows, selectedIDs])
+  const canBulkAuthorize = ['assets', 'web_assets', 'database_assets'].includes(config.collection)
+  const canBulkDelete = Boolean(config.apiPath && !config.apiPath.startsWith('/api/admin/audit/'))
+  const selectionEnabled = canBulkAuthorize || canBulkDelete
+
+  useEffect(() => {
+    setSelectedIDs([])
+  }, [config.collection])
+
+  useEffect(() => {
+    const rowIDs = new Set(rows.map((item) => item.id))
+    setSelectedIDs((current) => current.filter((id) => rowIDs.has(id)))
+  }, [rows])
 
   const columns = useMemo<ColumnDef<PlatformItem>[]>(
     () => [
@@ -637,6 +654,50 @@ export function PlatformTablePage({ config }: { config: PlatformPageConfig }) {
     }
   }
 
+  const bulkDelete = async () => {
+    if (!selectedRows.length || !canBulkDelete) return
+    const targets = selectedRows
+    const countText = String(targets.length)
+    const confirmed = await confirm({
+      title: app.t('bulkDeleteConfirmTitle', 'Delete {{count}} selected items?').replace('{{count}}', countText),
+      description: app.t('bulkDeleteConfirmDescription', 'This will permanently delete the selected records. This action cannot be undone.').replace('{{count}}', countText),
+      confirmText: app.t('bulkDelete', 'Bulk delete'),
+      destructive: true,
+    })
+    if (!confirmed) return
+    try {
+      for (const item of targets) {
+        await apiRequest(`${config.apiPath || `/api/admin/${config.collection}`}/${item.id}`, { method: 'DELETE' })
+      }
+      setSelectedIDs([])
+      await app.refresh(true)
+      app.showToast(app.t('bulkDeleteCompleted', '{{count}} item(s) deleted.').replace('{{count}}', countText))
+    } catch (error) {
+      app.handleApiError(error)
+    }
+  }
+
+  const selectionActions = selectedRows.length ? (
+    <>
+      {canBulkAuthorize ? (
+        <Button
+          size='sm'
+          variant='outline'
+          onClick={() => setOperation({ type: 'bulk-authorize', collection: config.collection, items: selectedRows })}
+        >
+          <ShieldCheck className='size-3.5' />
+          {app.t('bulkAuthorizeSelected', 'Authorize selected')}
+        </Button>
+      ) : null}
+      {canBulkDelete ? (
+        <Button size='sm' variant='destructive' onClick={() => void bulkDelete()}>
+          <Trash2 className='size-3.5' />
+          {app.t('bulkDelete', 'Bulk delete')}
+        </Button>
+      ) : null}
+    </>
+  ) : null
+
   return (
     <CardStaggerContainer>
       <CardStaggerItem>
@@ -700,6 +761,12 @@ export function PlatformTablePage({ config }: { config: PlatformPageConfig }) {
                 data={rows}
                 emptyTitle={app.t('empty', '暂无数据')}
                 emptyBody={description}
+                getRowID={(item) => item.id}
+                selection={selectionEnabled ? {
+                  selectedIDs,
+                  onSelectedIDsChange: (ids) => setSelectedIDs(ids),
+                  actions: selectionActions,
+                } : undefined}
                 searchPlaceholder={app.t('filter', '关键词搜索')}
                 getSearchText={(item) => [item.name, item.type, item.status, item.protocol, item.host, item.group, item.username, item.description, metadataText(item.metadata?.target_url), metadataText(item.metadata?.certificate_id), metadataText(item.metadata?.mtls_certificate_id), metadataText(item.metadata?.tls_server_name), metadataText(item.metadata?.database), metadataText(item.metadata?.sqlite_path), metadataText(item.metadata?.credential_id), metadataText(item.metadata?.gateway_group_id), metadataText(item.metadata?.gateway_id), metadataText(item.metadata?.pattern), metadataText(item.metadata?.command), metadataText(item.metadata?.risk), metadataText(item.metadata?.path_prefix), permissionSummary(item.permissions), metadataText(item.metadata?.last_login_at), metadataText(item.metadata?.last_login_ip), item.tags?.join(' ')].filter(Boolean).join(' ')}
               />

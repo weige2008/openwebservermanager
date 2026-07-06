@@ -80,6 +80,9 @@ func (s *Server) saveProxyServices(req proxyServicesRequest) (model.PlatformItem
 	if err := s.syncSSHGatewayFromProxySetting(req.SSHEnabled, sshListen, req.SSHDisablePasswordAuth, sshAllowlist); err != nil {
 		return model.PlatformItem{}, err
 	}
+	if err := s.reloadSSHGatewayRuntime(); err != nil {
+		return model.PlatformItem{}, err
+	}
 	return setting, nil
 }
 
@@ -172,14 +175,17 @@ func (s *Server) proxyServicesResponse(item model.PlatformItem) map[string]any {
 	if s.cfg.Guacd != nil {
 		guacdAddress = s.cfg.Guacd.Address()
 	}
+	sshLiveAddress := s.sshGatewayAddress()
+	sshLastError := s.sshGatewayLastError()
 	return map[string]any{
 		"settings": item,
 		"status": map[string]any{
 			"ssh_gateway": map[string]any{
 				"enabled":        sshEnabled,
 				"listen_address": firstMetadataString(metadata, "ssh_listen_address", "listen_address"),
-				"live_address":   s.cfg.SSHGatewayAddress,
-				"state":          proxyRuntimeState(sshEnabled, s.cfg.SSHGatewayAddress),
+				"live_address":   sshLiveAddress,
+				"state":          proxyRuntimeState(sshEnabled, sshLiveAddress, sshLastError),
+				"last_error":     sshLastError,
 			},
 			"rdp_proxy": map[string]any{
 				"enabled":        rdpEnabled,
@@ -194,6 +200,27 @@ func (s *Server) proxyServicesResponse(item model.PlatformItem) map[string]any {
 			},
 		},
 	}
+}
+
+func (s *Server) reloadSSHGatewayRuntime() error {
+	if s.cfg.SSHGateway == nil {
+		return nil
+	}
+	return s.cfg.SSHGateway.Reload()
+}
+
+func (s *Server) sshGatewayAddress() string {
+	if s.cfg.SSHGateway != nil {
+		return s.cfg.SSHGateway.Address()
+	}
+	return s.cfg.SSHGatewayAddress
+}
+
+func (s *Server) sshGatewayLastError() string {
+	if s.cfg.SSHGateway != nil {
+		return s.cfg.SSHGateway.LastError()
+	}
+	return ""
 }
 
 func (s *Server) rawSystemSettingByType(settingType string) (model.PlatformItem, bool, error) {
@@ -284,9 +311,12 @@ func enabledStatus(enabled bool) string {
 	return "disabled"
 }
 
-func proxyRuntimeState(enabled bool, liveAddress string) string {
+func proxyRuntimeState(enabled bool, liveAddress, lastError string) string {
 	if !enabled {
 		return "disabled"
+	}
+	if strings.TrimSpace(lastError) != "" {
+		return "error"
 	}
 	if strings.TrimSpace(liveAddress) != "" {
 		return "running"

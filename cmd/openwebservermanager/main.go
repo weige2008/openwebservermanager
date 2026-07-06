@@ -78,26 +78,16 @@ func run() error {
 
 	rootCtx, rootCancel := context.WithCancel(context.Background())
 	defer rootCancel()
-	sshGatewayConfig, err := sshrunner.GatewayConfigFromStore(st, dataDir, env("OPENWEBSERVERMANAGER_SSH_GATEWAY_ADDR", ""))
-	var sshGateway *sshrunner.Gateway
-	if err != nil {
-		slog.Warn("ssh gateway configuration unavailable", "error", err)
-	} else {
-		sshGateway, err = sshrunner.StartGateway(rootCtx, sshGatewayConfig)
-		if err != nil {
-			slog.Warn("ssh gateway unavailable", "error", err)
-		}
+	sshGateway := sshrunner.NewGatewayManager(rootCtx, st, dataDir, env("OPENWEBSERVERMANAGER_SSH_GATEWAY_ADDR", ""), slog.Default())
+	if err := sshGateway.Reload(); err != nil {
+		slog.Warn("ssh gateway unavailable", "error", err)
 	}
-	if sshGateway != nil {
-		defer sshGateway.Close()
+	defer sshGateway.Close()
+	if sshGateway.Address() != "" {
 		slog.Info("ssh gateway ready", "addr", sshGateway.Address())
 	}
-	sshGatewayAddress := ""
-	if sshGateway != nil {
-		sshGatewayAddress = sshGateway.Address()
-	}
 
-	appServer := app.NewServer(app.Config{Store: st, Guacd: guacd, SSHGatewayAddress: sshGatewayAddress, StaticFS: staticFS, DataDir: dataDir, Public: publicConfig(), TrustProxyHeaders: envBool("OPENWEBSERVERMANAGER_TRUST_PROXY_HEADERS")})
+	appServer := app.NewServer(app.Config{Store: st, Guacd: guacd, SSHGateway: sshGateway, StaticFS: staticFS, DataDir: dataDir, Public: publicConfig(), TrustProxyHeaders: envBool("OPENWEBSERVERMANAGER_TRUST_PROXY_HEADERS")})
 	scheduler := appServer.StartScheduler(rootCtx, app.SchedulerConfig{
 		PollInterval: schedulerPollInterval(),
 		Logger:       slog.Default(),

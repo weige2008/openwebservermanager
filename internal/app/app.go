@@ -27,11 +27,18 @@ type Config struct {
 	Store             *store.Store
 	Guacd             *guac.Manager
 	SSHGatewayAddress string
+	SSHGateway        sshGatewayRuntime
 	StaticFS          fs.FS
 	DataDir           string
 	Public            PublicConfig
 	TrustProxyHeaders bool
 	LDAPAuthenticator ldapAuthenticator
+}
+
+type sshGatewayRuntime interface {
+	Address() string
+	Reload() error
+	LastError() string
 }
 
 type PublicConfig struct {

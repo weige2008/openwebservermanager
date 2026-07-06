@@ -417,6 +417,57 @@ func TestGatewayConfigUsesProxyServicePrivateKeyAsHostKey(t *testing.T) {
 	}
 }
 
+func TestGatewayManagerReloadStartsAndStopsGateway(t *testing.T) {
+	st := newGatewayTestStore(t)
+	gatewayItem, err := st.CreatePlatformItem("ssh_gateways", model.PlatformItemRequest{
+		Name:   "builtin",
+		Status: "enabled",
+		Metadata: map[string]any{
+			"listen_address": "127.0.0.1:0",
+		},
+	})
+	if err != nil {
+		t.Fatalf("create gateway item: %v", err)
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	manager := NewGatewayManager(ctx, st, t.TempDir(), "", nil)
+	defer manager.Close()
+	if err := manager.Reload(); err != nil {
+		t.Fatalf("reload start gateway: %v", err)
+	}
+	address := manager.Address()
+	if address == "" {
+		t.Fatal("gateway manager did not expose live address")
+	}
+	conn, err := net.DialTimeout("tcp", address, time.Second)
+	if err != nil {
+		t.Fatalf("dial live gateway: %v", err)
+	}
+	_ = conn.Close()
+
+	if _, err := st.UpdatePlatformItem("ssh_gateways", gatewayItem.ID, model.PlatformItemRequest{
+		Name:   "builtin",
+		Status: "disabled",
+		Metadata: map[string]any{
+			"listen_address": "127.0.0.1:0",
+		},
+	}); err != nil {
+		t.Fatalf("disable gateway item: %v", err)
+	}
+	if err := manager.Reload(); err != nil {
+		t.Fatalf("reload stopped gateway: %v", err)
+	}
+	if manager.Address() != "" {
+		t.Fatalf("gateway manager address after disable = %q, want empty", manager.Address())
+	}
+	if conn, err := net.DialTimeout("tcp", address, 200*time.Millisecond); err == nil {
+		_ = conn.Close()
+		t.Fatalf("old gateway address %s still accepts connections after disable", address)
+	}
+}
+
 func createGatewayUserAssetAndCredential(t *testing.T, st *store.Store, targetAddr string) model.PlatformItem {
 	t.Helper()
 	userRec, err := st.CreatePlatformItem("users", model.PlatformItemRequest{

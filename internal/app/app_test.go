@@ -2795,6 +2795,30 @@ func TestProxyServiceSettingsPersistStatusAndSyncSSHGateway(t *testing.T) {
 	}
 }
 
+func TestProxyServiceSettingsReloadSSHGatewayRuntime(t *testing.T) {
+	runtime := &fakeSSHGatewayRuntime{address: "127.0.0.1:22022"}
+	handler, cookie := newTestServer(t, func(cfg *Config) {
+		cfg.SSHGateway = runtime
+	})
+
+	saveRec := assertStatus(t, handler, http.MethodPost, "/api/admin/proxy-services", map[string]any{
+		"ssh_enabled":        true,
+		"ssh_listen_address": "127.0.0.1:22022",
+	}, cookie, http.StatusOK)
+	saveBody := saveRec.Body.String()
+	if runtime.reloads != 1 {
+		t.Fatalf("ssh gateway runtime reloads = %d, want 1", runtime.reloads)
+	}
+	for _, want := range []string{`"state":"running"`, `"live_address":"127.0.0.1:22022"`} {
+		if !strings.Contains(saveBody, want) {
+			t.Fatalf("proxy service response missing %s: %s", want, saveBody)
+		}
+	}
+	if strings.Contains(saveBody, "restart_required") {
+		t.Fatalf("proxy service still requires restart after runtime reload: %s", saveBody)
+	}
+}
+
 func TestBackupListDownloadAndRestore(t *testing.T) {
 	handler, cookie := newTestHandler(t)
 
@@ -3560,6 +3584,11 @@ func testPasskeyAssertionAuthData(t *testing.T, rpID string, signCount uint32) [
 }
 
 func newTestHandler(t *testing.T) (http.Handler, *http.Cookie) {
+	server, cookie := newTestServer(t, nil)
+	return server, cookie
+}
+
+func newTestServer(t *testing.T, configure func(*Config)) (*Server, *http.Cookie) {
 	t.Helper()
 	key := make([]byte, 32)
 	cipher, err := security.NewCipher(key)
@@ -3571,18 +3600,41 @@ func newTestHandler(t *testing.T) (http.Handler, *http.Cookie) {
 		t.Fatalf("open store: %v", err)
 	}
 	t.Cleanup(func() { _ = st.Close() })
-	handler := New(Config{
+	cfg := Config{
 		Store:    st,
 		Guacd:    guac.NewManager(guac.ManagerConfig{}),
 		StaticFS: fstest.MapFS{"static/index.html": &fstest.MapFile{Data: []byte("<html></html>")}},
 		DataDir:  t.TempDir(),
-	})
-	rec := assertStatus(t, handler, http.MethodPost, "/api/auth/setup", map[string]any{"username": "admin", "password": "password123"}, nil, http.StatusCreated)
+	}
+	if configure != nil {
+		configure(&cfg)
+	}
+	server := NewServer(cfg)
+	rec := assertStatus(t, server, http.MethodPost, "/api/auth/setup", map[string]any{"username": "admin", "password": "password123"}, nil, http.StatusCreated)
 	cookies := rec.Result().Cookies()
 	if len(cookies) == 0 {
 		t.Fatal("setup did not set auth cookie")
 	}
-	return handler, cookies[0]
+	return server, cookies[0]
+}
+
+type fakeSSHGatewayRuntime struct {
+	address string
+	errText string
+	reloads int
+}
+
+func (f *fakeSSHGatewayRuntime) Address() string {
+	return f.address
+}
+
+func (f *fakeSSHGatewayRuntime) Reload() error {
+	f.reloads++
+	return nil
+}
+
+func (f *fakeSSHGatewayRuntime) LastError() string {
+	return f.errText
 }
 
 func waitForCondition(t *testing.T, timeout time.Duration, condition func() bool) {

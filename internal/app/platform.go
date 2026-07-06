@@ -793,6 +793,8 @@ func webAssetRewriteableContentType(contentType string) bool {
 
 func rewriteWebAssetProxyText(body string, target *url.URL, proxyBasePath string) string {
 	rewritten := rewriteWebAssetProxyQuotedURLs(body, target, proxyBasePath)
+	rewritten = rewriteWebAssetProxySrcsetURLs(rewritten, target, proxyBasePath)
+	rewritten = rewriteWebAssetProxyMetaRefreshURLs(rewritten, target, proxyBasePath)
 	return rewriteWebAssetProxyCSSURLs(rewritten, target, proxyBasePath)
 }
 
@@ -807,6 +809,22 @@ func rewriteWebAssetProxyQuotedURLs(body string, target *url.URL, proxyBasePath 
 	for _, token := range tokens {
 		quote := token[len(token)-1]
 		body = rewriteWebAssetProxyDelimitedValues(body, token, quote, target, proxyBasePath)
+	}
+	return body
+}
+
+func rewriteWebAssetProxySrcsetURLs(body string, target *url.URL, proxyBasePath string) string {
+	for _, token := range []string{`srcset="`, `srcset='`} {
+		quote := token[len(token)-1]
+		body = rewriteWebAssetProxyDelimitedValuesWith(body, token, quote, target, proxyBasePath, rewriteWebAssetProxySrcsetValue)
+	}
+	return body
+}
+
+func rewriteWebAssetProxyMetaRefreshURLs(body string, target *url.URL, proxyBasePath string) string {
+	for _, token := range []string{`content="`, `content='`} {
+		quote := token[len(token)-1]
+		body = rewriteWebAssetProxyDelimitedValuesWith(body, token, quote, target, proxyBasePath, rewriteWebAssetProxyRefreshContent)
 	}
 	return body
 }
@@ -853,6 +871,10 @@ func rewriteWebAssetProxyCSSURLs(body string, target *url.URL, proxyBasePath str
 }
 
 func rewriteWebAssetProxyDelimitedValues(body, token string, quote byte, target *url.URL, proxyBasePath string) string {
+	return rewriteWebAssetProxyDelimitedValuesWith(body, token, quote, target, proxyBasePath, rewriteWebAssetProxyURLValue)
+}
+
+func rewriteWebAssetProxyDelimitedValuesWith(body, token string, quote byte, target *url.URL, proxyBasePath string, rewrite func(string, *url.URL, string) string) string {
 	var out strings.Builder
 	cursor := 0
 	for {
@@ -870,9 +892,85 @@ func rewriteWebAssetProxyDelimitedValues(body, token string, quote byte, target 
 		}
 		valueEnd += valueStart
 		out.WriteString(body[cursor:valueStart])
-		out.WriteString(rewriteWebAssetProxyURLValue(body[valueStart:valueEnd], target, proxyBasePath))
+		out.WriteString(rewrite(body[valueStart:valueEnd], target, proxyBasePath))
 		cursor = valueEnd
 	}
+}
+
+func rewriteWebAssetProxySrcsetValue(raw string, target *url.URL, proxyBasePath string) string {
+	entries := splitWebAssetSrcset(raw)
+	if len(entries) == 0 {
+		return raw
+	}
+	var out strings.Builder
+	for index, entry := range entries {
+		if index > 0 {
+			out.WriteByte(',')
+		}
+		out.WriteString(rewriteWebAssetSrcsetEntry(entry, target, proxyBasePath))
+	}
+	return out.String()
+}
+
+func splitWebAssetSrcset(value string) []string {
+	entries := []string{}
+	start := 0
+	for index := 0; index < len(value); index++ {
+		if value[index] != ',' {
+			continue
+		}
+		if index+1 < len(value) && !isASCIISpace(value[index+1]) {
+			continue
+		}
+		entries = append(entries, value[start:index])
+		start = index + 1
+	}
+	entries = append(entries, value[start:])
+	return entries
+}
+
+func rewriteWebAssetSrcsetEntry(entry string, target *url.URL, proxyBasePath string) string {
+	prefix := leadingWhitespace(entry)
+	rest := entry[len(prefix):]
+	if rest == "" {
+		return entry
+	}
+	urlEnd := len(rest)
+	for index := 0; index < len(rest); index++ {
+		if isASCIISpace(rest[index]) {
+			urlEnd = index
+			break
+		}
+	}
+	if urlEnd == 0 {
+		return entry
+	}
+	rawURL := rest[:urlEnd]
+	return prefix + rewriteWebAssetProxyURLValue(rawURL, target, proxyBasePath) + rest[urlEnd:]
+}
+
+func rewriteWebAssetProxyRefreshContent(raw string, target *url.URL, proxyBasePath string) string {
+	lower := strings.ToLower(raw)
+	index := strings.Index(lower, "url=")
+	if index < 0 {
+		return raw
+	}
+	valueStart := index + len("url=")
+	valueEnd := len(raw)
+	prefix := raw[:valueStart]
+	value := raw[valueStart:valueEnd]
+	leading := leadingWhitespace(value)
+	trailing := trailingWhitespace(value)
+	inner := strings.TrimSpace(value)
+	quotePrefix, quoteSuffix := "", ""
+	if len(inner) >= 2 {
+		if (inner[0] == '\'' && inner[len(inner)-1] == '\'') || (inner[0] == '"' && inner[len(inner)-1] == '"') {
+			quotePrefix = string(inner[0])
+			quoteSuffix = string(inner[len(inner)-1])
+			inner = inner[1 : len(inner)-1]
+		}
+	}
+	return prefix + leading + quotePrefix + rewriteWebAssetProxyURLValue(inner, target, proxyBasePath) + quoteSuffix + trailing
 }
 
 func rewriteWebAssetProxyURLValue(raw string, target *url.URL, proxyBasePath string) string {

@@ -2470,9 +2470,11 @@ func TestWebAssetProxyRequiresAuthorizationAndLogs(t *testing.T) {
 			}
 			w.Header().Set("Content-Type", "text/html; charset=utf-8")
 			body := `<html><head>` +
+				`<meta http-equiv="refresh" content="0; url=/root/refresh-login">` +
 				`<script src="/static/app.js"></script>` +
 				`<style>.hero{background:url('/root/assets/bg.png')}.external{background:url("https://cdn.example.test/bg.png")}</style>` +
 				`</head><body>` +
+				`<img srcset="/root/img-small.png 480w, http://` + r.Host + `/root/img-large.png 960w, https://cdn.example.test/img.png 2x, data:image/png;base64,abc 1x">` +
 				`<a href="/root/dashboard?tab=1">Dashboard</a>` +
 				`<a href="http://` + r.Host + `/root/reports">Reports</a>` +
 				`<a href="mailto:ops@example.test">Mail</a>` +
@@ -2612,6 +2614,8 @@ func TestWebAssetProxyRequiresAuthorizationAndLogs(t *testing.T) {
 		`href="` + proxyBase + `/reports"`,
 		`action="` + proxyBase + `/login?next=/root/dashboard"`,
 		`url('` + proxyBase + `/assets/bg.png')`,
+		`content="0; url=` + proxyBase + `/refresh-login"`,
+		`srcset="` + proxyBase + `/img-small.png 480w, ` + proxyBase + `/img-large.png 960w, https://cdn.example.test/img.png 2x, data:image/png;base64,abc 1x"`,
 		`href="mailto:ops@example.test"`,
 		`url("https://cdn.example.test/bg.png")`,
 	} {
@@ -2619,7 +2623,7 @@ func TestWebAssetProxyRequiresAuthorizationAndLogs(t *testing.T) {
 			t.Fatalf("rewritten proxy page missing %q: %s", want, pageBody)
 		}
 	}
-	for _, leaked := range []string{`href="/root/dashboard`, `src="/static/app.js"`, upstreamURL.Host + `/root/reports`, upstreamURL.Host + `/root/login`} {
+	for _, leaked := range []string{`href="/root/dashboard`, `src="/static/app.js"`, `url=/root/refresh-login`, `/root/img-small.png`, upstreamURL.Host + `/root/reports`, upstreamURL.Host + `/root/login`, upstreamURL.Host + `/root/img-large.png`} {
 		if strings.Contains(pageBody, leaked) {
 			t.Fatalf("rewritten proxy page retained upstream URL %q: %s", leaked, pageBody)
 		}

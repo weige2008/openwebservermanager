@@ -3001,6 +3001,82 @@ func TestExternalOIDCLoginCreatesUserAndSession(t *testing.T) {
 	}
 }
 
+func TestExternalOIDCCallbackAutoCreateDisabledIsAudited(t *testing.T) {
+	handler, adminCookie := newTestHandler(t)
+	srv := handler.(*Server)
+	var tokenEndpointCalls int
+	provider := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/token":
+			tokenEndpointCalls++
+			if err := r.ParseForm(); err != nil {
+				http.Error(w, "bad form", http.StatusBadRequest)
+				return
+			}
+			clientID, clientSecret, _ := r.BasicAuth()
+			if clientID != "openweb-client" || clientSecret != "openweb-secret" || r.PostForm.Get("code") != "denied-code" {
+				http.Error(w, "bad token request", http.StatusUnauthorized)
+				return
+			}
+			writeJSON(w, http.StatusOK, map[string]any{"access_token": "denied-access", "token_type": "Bearer", "expires_in": 300})
+		case "/userinfo":
+			if r.Header.Get("Authorization") != "Bearer denied-access" {
+				http.Error(w, "bad bearer", http.StatusUnauthorized)
+				return
+			}
+			writeJSON(w, http.StatusOK, map[string]any{
+				"sub":                "external-denied-subject",
+				"preferred_username": "oidc-denied",
+			})
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer provider.Close()
+
+	assertStatus(t, handler, http.MethodPost, "/api/admin/system-settings", map[string]any{
+		"name":   "External OIDC deny auto create",
+		"type":   "identity",
+		"status": "enabled",
+		"metadata": map[string]any{
+			"oidc_login_enabled":          true,
+			"oidc_provider_id":            "deny-sso",
+			"oidc_provider_name":          "Deny SSO",
+			"oidc_authorization_endpoint": provider.URL + "/authorize",
+			"oidc_token_endpoint":         provider.URL + "/token",
+			"oidc_userinfo_endpoint":      provider.URL + "/userinfo",
+			"oidc_client_id":              "openweb-client",
+			"oidc_client_secret":          "openweb-secret",
+			"oidc_scopes":                 []string{"openid", "profile"},
+			"oidc_role":                   "user",
+			"oidc_auto_create":            false,
+		},
+	}, adminCookie, http.StatusCreated)
+	state, _, err := srv.auth.createExternalOIDCState("deny-sso", "/app/access")
+	if err != nil {
+		t.Fatalf("create external oidc state: %v", err)
+	}
+	deniedRec := assertStatus(t, handler, http.MethodGet, "/api/auth/oidc/callback?state="+url.QueryEscape(state)+"&code=denied-code", nil, nil, http.StatusForbidden)
+	if !strings.Contains(deniedRec.Body.String(), "auto creation is disabled") {
+		t.Fatalf("oidc auto-create denial response missing reason: %s", deniedRec.Body.String())
+	}
+	if tokenEndpointCalls != 1 {
+		t.Fatalf("oidc token endpoint calls = %d, want 1", tokenEndpointCalls)
+	}
+	usersRec := assertStatus(t, handler, http.MethodGet, "/api/admin/users", nil, adminCookie, http.StatusOK)
+	if strings.Contains(usersRec.Body.String(), "oidc-denied") {
+		t.Fatalf("oidc auto-create disabled still created user: %s", usersRec.Body.String())
+	}
+	loginLogsRec := assertStatus(t, handler, http.MethodGet, "/api/admin/audit/login-logs", nil, adminCookie, http.StatusOK)
+	if !strings.Contains(loginLogsRec.Body.String(), `"type":"oidc"`) || !strings.Contains(loginLogsRec.Body.String(), `"status":"failed"`) || !strings.Contains(loginLogsRec.Body.String(), "deny-sso") || !strings.Contains(loginLogsRec.Body.String(), "auto creation is disabled") {
+		t.Fatalf("oidc failed login log missing denial details: %s", loginLogsRec.Body.String())
+	}
+	operationLogsRec := assertStatus(t, handler, http.MethodGet, "/api/admin/audit/operation-logs", nil, adminCookie, http.StatusOK)
+	if !strings.Contains(operationLogsRec.Body.String(), "auth.oidc.login_failed") {
+		t.Fatalf("oidc failed login audit missing: %s", operationLogsRec.Body.String())
+	}
+}
+
 func TestOIDCIntegrationAuthorizationEndpointTest(t *testing.T) {
 	handler, adminCookie := newTestHandler(t)
 	var gotClientID string
@@ -3612,6 +3688,74 @@ func TestExternalWeComLoginCreatesUserAndSession(t *testing.T) {
 	loginLogsRec := assertStatus(t, handler, http.MethodGet, "/api/admin/audit/login-logs", nil, adminCookie, http.StatusOK)
 	if !strings.Contains(loginLogsRec.Body.String(), `"type":"wecom"`) || !strings.Contains(loginLogsRec.Body.String(), "corp-wecom") {
 		t.Fatalf("wecom login log missing: %s", loginLogsRec.Body.String())
+	}
+}
+
+func TestExternalWeComCallbackAutoCreateDisabledIsAudited(t *testing.T) {
+	handler, adminCookie := newTestHandler(t)
+	srv := handler.(*Server)
+	var tokenEndpointCalls int
+	provider := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/gettoken":
+			tokenEndpointCalls++
+			if r.URL.Query().Get("corpid") != "ww-openweb" || r.URL.Query().Get("corpsecret") != "wecom-secret" {
+				http.Error(w, "bad token request", http.StatusUnauthorized)
+				return
+			}
+			writeJSON(w, http.StatusOK, map[string]any{"errcode": 0, "access_token": "wecom-denied-access", "expires_in": 7200})
+		case "/getuserinfo":
+			if r.URL.Query().Get("access_token") != "wecom-denied-access" || r.URL.Query().Get("code") != "denied-code" {
+				http.Error(w, "bad userinfo request", http.StatusUnauthorized)
+				return
+			}
+			writeJSON(w, http.StatusOK, map[string]any{"errcode": 0, "UserId": "wecom-denied-user"})
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer provider.Close()
+
+	assertStatus(t, handler, http.MethodPost, "/api/admin/system-settings", map[string]any{
+		"name":   "Enterprise WeChat deny auto create",
+		"type":   "identity",
+		"status": "enabled",
+		"metadata": map[string]any{
+			"wecom_enabled":            true,
+			"wecom_provider_id":        "deny-wecom",
+			"wecom_provider_name":      "Deny WeCom",
+			"wecom_corp_id":            "ww-openweb",
+			"wecom_agent_id":           "100001",
+			"wecom_agent_secret":       "wecom-secret",
+			"wecom_authorize_endpoint": provider.URL + "/authorize",
+			"wecom_token_endpoint":     provider.URL + "/gettoken",
+			"wecom_userinfo_endpoint":  provider.URL + "/getuserinfo",
+			"wecom_role":               "user",
+			"wecom_auto_create":        false,
+		},
+	}, adminCookie, http.StatusCreated)
+	state, err := srv.auth.createExternalWeComState("deny-wecom", "/app/access")
+	if err != nil {
+		t.Fatalf("create external wecom state: %v", err)
+	}
+	deniedRec := assertStatus(t, handler, http.MethodGet, "/api/auth/wecom/callback?state="+url.QueryEscape(state)+"&code=denied-code", nil, nil, http.StatusForbidden)
+	if !strings.Contains(deniedRec.Body.String(), "auto creation is disabled") {
+		t.Fatalf("wecom auto-create denial response missing reason: %s", deniedRec.Body.String())
+	}
+	if tokenEndpointCalls != 1 {
+		t.Fatalf("wecom token endpoint calls = %d, want 1", tokenEndpointCalls)
+	}
+	usersRec := assertStatus(t, handler, http.MethodGet, "/api/admin/users", nil, adminCookie, http.StatusOK)
+	if strings.Contains(usersRec.Body.String(), "wecom-denied-user") {
+		t.Fatalf("wecom auto-create disabled still created user: %s", usersRec.Body.String())
+	}
+	loginLogsRec := assertStatus(t, handler, http.MethodGet, "/api/admin/audit/login-logs", nil, adminCookie, http.StatusOK)
+	if !strings.Contains(loginLogsRec.Body.String(), `"type":"wecom"`) || !strings.Contains(loginLogsRec.Body.String(), `"status":"failed"`) || !strings.Contains(loginLogsRec.Body.String(), "deny-wecom") || !strings.Contains(loginLogsRec.Body.String(), "auto creation is disabled") {
+		t.Fatalf("wecom failed login log missing denial details: %s", loginLogsRec.Body.String())
+	}
+	operationLogsRec := assertStatus(t, handler, http.MethodGet, "/api/admin/audit/operation-logs", nil, adminCookie, http.StatusOK)
+	if !strings.Contains(operationLogsRec.Body.String(), "auth.wecom.login_failed") {
+		t.Fatalf("wecom failed login audit missing: %s", operationLogsRec.Body.String())
 	}
 }
 

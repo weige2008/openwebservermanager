@@ -151,6 +151,7 @@ func (s *Server) handleExternalWeComCallback(w http.ResponseWriter, r *http.Requ
 		if errors.Is(err, errExternalWeComUserDisabled) || errors.Is(err, errExternalWeComUserNotAllowed) {
 			status = http.StatusForbidden
 		}
+		s.recordExternalWeComLoginFailure(r, provider, claims, err)
 		writeError(w, status, err.Error())
 		return
 	}
@@ -171,6 +172,27 @@ func (s *Server) handleExternalWeComCallback(w http.ResponseWriter, r *http.Requ
 		Metadata:    map[string]any{"client_ip": s.clientIP(r), "provider_id": provider.ID, "subject": claims.Subject},
 	})
 	http.Redirect(w, r, state.Next, http.StatusFound)
+}
+
+func (s *Server) recordExternalWeComLoginFailure(r *http.Request, provider externalWeComProvider, claims externalWeComClaims, err error) {
+	detail := "external wecom login failed"
+	if err != nil {
+		detail = err.Error()
+	}
+	account := firstNonEmpty(claims.Username, claims.UserID, claims.OpenID, claims.Subject)
+	_, _ = s.cfg.Store.CreatePlatformItem("login_logs", model.PlatformItemRequest{
+		Name:        account,
+		Type:        "wecom",
+		Status:      "failed",
+		Description: detail,
+		Metadata: map[string]any{
+			"client_ip":   s.clientIP(r),
+			"account":     account,
+			"provider_id": provider.ID,
+			"subject":     claims.Subject,
+		},
+	})
+	_ = s.audit(r, "auth.wecom.login_failed", provider.ID, "wecom", detail)
 }
 
 func (s *Server) fetchExternalWeComClaims(provider externalWeComProvider, code string) (externalWeComClaims, error) {

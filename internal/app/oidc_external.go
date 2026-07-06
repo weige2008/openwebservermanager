@@ -137,6 +137,7 @@ func (s *Server) handleExternalOIDCCallback(w http.ResponseWriter, r *http.Reque
 		if errors.Is(err, errExternalOIDCUserNotAllowed) {
 			status = http.StatusForbidden
 		}
+		s.recordExternalOIDCLoginFailure(r, provider, claims, err)
 		writeError(w, status, err.Error())
 		return
 	}
@@ -157,6 +158,31 @@ func (s *Server) handleExternalOIDCCallback(w http.ResponseWriter, r *http.Reque
 		Metadata:    map[string]any{"client_ip": s.clientIP(r), "provider_id": provider.ID, "subject": firstMetadataString(claims, "sub")},
 	})
 	http.Redirect(w, r, state.Next, http.StatusFound)
+}
+
+func (s *Server) recordExternalOIDCLoginFailure(r *http.Request, provider externalOIDCProvider, claims map[string]any, err error) {
+	detail := "external oidc login failed"
+	if err != nil {
+		detail = err.Error()
+	}
+	subject := firstMetadataString(claims, "sub", "id", "user_id")
+	account := firstMetadataString(claims, "preferred_username", "name", "email", "login")
+	if account == "" {
+		account = subject
+	}
+	_, _ = s.cfg.Store.CreatePlatformItem("login_logs", model.PlatformItemRequest{
+		Name:        account,
+		Type:        "oidc",
+		Status:      "failed",
+		Description: detail,
+		Metadata: map[string]any{
+			"client_ip":   s.clientIP(r),
+			"account":     account,
+			"provider_id": provider.ID,
+			"subject":     subject,
+		},
+	})
+	_ = s.audit(r, "auth.oidc.login_failed", provider.ID, "oidc", detail)
 }
 
 func (s *Server) exchangeExternalOIDCCode(r *http.Request, provider externalOIDCProvider, code string) (map[string]any, error) {

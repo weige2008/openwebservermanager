@@ -3338,7 +3338,7 @@ func TestResourceOperationEndpoints(t *testing.T) {
 	if !strings.Contains(exportRec.Body.String(), asset.ID) {
 		t.Fatal("asset export did not include created asset")
 	}
-	assertStatus(t, handler, http.MethodPost, "/api/admin/assets/import", map[string]any{
+	importAssetRec := assertStatus(t, handler, http.MethodPost, "/api/admin/assets/import", map[string]any{
 		"items": []map[string]any{{
 			"name":     "imported-rdp",
 			"type":     "windows",
@@ -3348,6 +3348,9 @@ func TestResourceOperationEndpoints(t *testing.T) {
 			"port":     3389,
 		}},
 	}, cookie, http.StatusCreated)
+	if !strings.Contains(importAssetRec.Body.String(), `"created":1`) || !strings.Contains(importAssetRec.Body.String(), `"total":1`) {
+		t.Fatalf("asset import summary missing: %s", importAssetRec.Body.String())
+	}
 
 	storageRec := assertStatus(t, handler, http.MethodPost, "/api/admin/storages", map[string]any{
 		"name":   "team-drive",

@@ -112,6 +112,8 @@ interface BackupInfo {
   files?: string[]
 }
 
+type ImportSummary = Record<string, number>
+
 interface SMTPIntegrationForm {
   host: string
   port: string
@@ -872,16 +874,18 @@ function AssetImportDialog({ onClose }: { onClose: () => void }) {
   const app = useApp()
   const [content, setContent] = useState('{\n  "items": []\n}')
   const [saving, setSaving] = useState(false)
+  const [summary, setSummary] = useState<ImportSummary | null>(null)
 
   const submit = async () => {
     setSaving(true)
+    setSummary(null)
     try {
       const parsed = JSON.parse(content) as unknown
       const payload = Array.isArray(parsed) ? { items: parsed } : parsed
-      await apiRequest('/api/admin/assets/import', { method: 'POST', body: JSON.stringify(payload) })
+      const data = await apiRequest<{ items?: PlatformItem[]; summary?: ImportSummary }>('/api/admin/assets/import', { method: 'POST', body: JSON.stringify(payload) })
+      setSummary(data.summary || { created: data.items?.length || 0, total: data.items?.length || 0 })
       await app.refresh(true)
       app.showToast('资产已导入')
-      onClose()
     } catch (error) {
       app.handleApiError(error)
     } finally {
@@ -892,12 +896,13 @@ function AssetImportDialog({ onClose }: { onClose: () => void }) {
   return (
     <DialogShell open onOpenChange={(open) => !open && onClose()} title='导入资产' description='粘贴导出的 JSON，或使用 {"items":[...]} 格式批量导入。'>
       <div className='grid gap-4'>
-        <Field label='资产 JSON'><Textarea className='min-h-64 font-mono text-xs' value={content} onChange={(event) => setContent(event.currentTarget.value)} /></Field>
+        <Field label='资产 JSON'><Textarea className='min-h-64 font-mono text-xs' value={content} onChange={(event) => { setContent(event.currentTarget.value); setSummary(null) }} /></Field>
+        {summary ? <ImportSummaryPanel summary={summary} /> : null}
         <div className='flex justify-end gap-2'>
-          <Button variant='outline' onClick={onClose}>取消</Button>
+          <Button variant='outline' onClick={onClose}>{summary ? '关闭' : '取消'}</Button>
           <Button variant='primary' onClick={() => void submit()} disabled={saving}>
             <Upload className='size-4' />
-            {saving ? '导入中' : '导入'}
+            {saving ? '导入中' : summary ? '重新导入' : '导入'}
           </Button>
         </div>
       </div>
@@ -920,16 +925,18 @@ function UserImportDialog({ onClose }: { onClose: () => void }) {
     ],
   }, null, 2))
   const [saving, setSaving] = useState(false)
+  const [summary, setSummary] = useState<ImportSummary | null>(null)
 
   const submit = async () => {
     setSaving(true)
+    setSummary(null)
     try {
       const parsed = JSON.parse(content) as unknown
       const payload = Array.isArray(parsed) ? { update_existing: false, items: parsed } : parsed
-      await apiRequest('/api/admin/users/import', { method: 'POST', body: JSON.stringify(payload) })
+      const data = await apiRequest<{ summary?: ImportSummary }>('/api/admin/users/import', { method: 'POST', body: JSON.stringify(payload) })
+      setSummary(data.summary || null)
       await app.refresh(true)
       app.showToast('用户已导入')
-      onClose()
     } catch (error) {
       app.handleApiError(error)
     } finally {
@@ -940,19 +947,51 @@ function UserImportDialog({ onClose }: { onClose: () => void }) {
   return (
     <DialogShell open onOpenChange={(open) => !open && onClose()} title='导入用户' description='粘贴用户 JSON；默认跳过已存在用户名，设置 update_existing 为 true 可按用户名更新。'>
       <div className='grid gap-4'>
-        <Field label='用户 JSON'><Textarea className='min-h-64 font-mono text-xs' value={content} onChange={(event) => setContent(event.currentTarget.value)} /></Field>
+        <Field label='用户 JSON'><Textarea className='min-h-64 font-mono text-xs' value={content} onChange={(event) => { setContent(event.currentTarget.value); setSummary(null) }} /></Field>
         <div className='rounded-lg border border-border bg-muted/30 p-3 text-xs text-muted-foreground'>
           本地用户必须提供至少 8 位密码；角色写入 metadata.role，支持 user、auditor、admin 或自定义角色名。
         </div>
+        {summary ? <ImportSummaryPanel summary={summary} /> : null}
         <div className='flex justify-end gap-2'>
-          <Button variant='outline' onClick={onClose}>取消</Button>
+          <Button variant='outline' onClick={onClose}>{summary ? '关闭' : '取消'}</Button>
           <Button variant='primary' onClick={() => void submit()} disabled={saving}>
             <Upload className='size-4' />
-            {saving ? '导入中' : '导入'}
+            {saving ? '导入中' : summary ? '重新导入' : '导入'}
           </Button>
         </div>
       </div>
     </DialogShell>
+  )
+}
+
+function ImportSummaryPanel({ summary }: { summary: ImportSummary }) {
+  const labels: Record<string, string> = {
+    created: '创建',
+    updated: '更新',
+    skipped: '跳过',
+    failed: '失败',
+    total: '总计',
+  }
+  const orderedKeys = ['created', 'updated', 'skipped', 'failed', 'total']
+  const keys = [
+    ...orderedKeys.filter((key) => typeof summary[key] === 'number'),
+    ...Object.keys(summary).filter((key) => !orderedKeys.includes(key) && typeof summary[key] === 'number'),
+  ]
+
+  if (!keys.length) return null
+
+  return (
+    <div className='grid gap-2 rounded-lg border border-border bg-muted/30 p-3 text-xs text-muted-foreground'>
+      <div className='font-medium text-foreground'>导入结果</div>
+      <div className='grid gap-2 sm:grid-cols-4'>
+        {keys.map((key) => (
+          <div key={key} className='rounded-md border border-border/70 bg-background/70 px-2.5 py-2'>
+            <span>{labels[key] || key}</span>
+            <strong className='ml-2 font-mono text-foreground'>{summary[key]}</strong>
+          </div>
+        ))}
+      </div>
+    </div>
   )
 }
 
@@ -4143,8 +4182,8 @@ function downloadText(filename: string, content: string, type: string) {
 async function downloadResponse(path: string, filename: string) {
   const response = await fetch(path, { credentials: 'same-origin' })
   if (!response.ok) {
-    const payload = await response.json().catch(() => ({})) as { error?: string }
-    throw new Error(payload.error || response.statusText)
+    const payload = await response.json().catch(() => ({})) as { error?: string; setup_required?: boolean }
+    throw new ApiError(payload.error || response.statusText, response.status, Boolean(payload.setup_required), payload)
   }
   downloadBlob(filename, await response.blob())
 }

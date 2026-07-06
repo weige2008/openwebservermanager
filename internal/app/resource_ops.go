@@ -304,7 +304,13 @@ func (s *Server) handleAssetImport(w http.ResponseWriter, r *http.Request) {
 		created = append(created, item)
 	}
 	_ = s.audit(r, "assets.import", "assets", "", "imported assets")
-	writeJSON(w, http.StatusCreated, map[string]any{"items": created})
+	writeJSON(w, http.StatusCreated, map[string]any{
+		"items": created,
+		"summary": map[string]int{
+			"created": len(created),
+			"total":   len(req.Items),
+		},
+	})
 }
 
 func (s *Server) handleUserImport(w http.ResponseWriter, r *http.Request) {

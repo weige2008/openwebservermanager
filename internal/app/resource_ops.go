@@ -2970,7 +2970,12 @@ func (s *Server) handleScheduledTaskRun(w http.ResponseWriter, r *http.Request, 
 	}
 	logItem, err := s.executeScheduledTask(r, task, "manual")
 	if err != nil {
-		writeError(w, http.StatusInternalServerError, err.Error())
+		_ = s.audit(r, "scheduled_task.run.failed", id, "", "failed scheduled task "+task.Name+": "+err.Error())
+		status := http.StatusInternalServerError
+		if errors.Is(err, errUnsupportedScheduledTaskType) {
+			status = http.StatusUnprocessableEntity
+		}
+		writeJSON(w, status, map[string]any{"error": err.Error(), "log": logItem})
 		return
 	}
 	_ = s.audit(r, "scheduled_task.run", id, "", "ran scheduled task "+task.Name)

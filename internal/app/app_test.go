@@ -7307,6 +7307,28 @@ func TestScheduledTaskRunners(t *testing.T) {
 	if logs := scheduledTaskLogsForTest(t, srv, disabledTask.ID); len(logs) != 0 {
 		t.Fatalf("disabled manual scheduled task should not run, got logs: %#v", logs)
 	}
+	unsupportedTaskRec := assertStatus(t, handler, http.MethodPost, "/api/admin/scheduled-tasks", map[string]any{
+		"name":   "Unsupported scheduled task",
+		"type":   "custom-runner",
+		"status": "enabled",
+	}, cookie, http.StatusCreated)
+	var unsupportedTask model.PlatformItem
+	decodeResponse(t, unsupportedTaskRec, &unsupportedTask)
+	unsupportedRunRec := assertStatus(t, handler, http.MethodPost, "/api/admin/scheduled-tasks/"+unsupportedTask.ID+"/run", nil, cookie, http.StatusUnprocessableEntity)
+	if !strings.Contains(unsupportedRunRec.Body.String(), "scheduled task type is not supported") || !strings.Contains(unsupportedRunRec.Body.String(), `"status":"failed"`) || !strings.Contains(unsupportedRunRec.Body.String(), `"supported":false`) {
+		t.Fatalf("unsupported scheduled task did not return failed log context: %s", unsupportedRunRec.Body.String())
+	}
+	unsupportedLogs := scheduledTaskLogsForTest(t, srv, unsupportedTask.ID)
+	if len(unsupportedLogs) != 1 || unsupportedLogs[0].Status != "failed" || firstMetadataString(unsupportedLogs[0].Metadata, "error") == "" {
+		t.Fatalf("unsupported scheduled task did not persist failed log: %#v", unsupportedLogs)
+	}
+	storedUnsupportedTask, ok, err := srv.cfg.Store.GetPlatformItem("scheduled_tasks", unsupportedTask.ID)
+	if err != nil || !ok {
+		t.Fatalf("load unsupported scheduled task: ok=%v err=%v", ok, err)
+	}
+	if firstMetadataString(storedUnsupportedTask.Metadata, "last_run_status") != "failed" || firstMetadataString(storedUnsupportedTask.Metadata, "last_run_error") == "" {
+		t.Fatalf("unsupported scheduled task did not persist failed metadata: %#v", storedUnsupportedTask.Metadata)
+	}
 
 	oldAccessRec := assertStatus(t, handler, http.MethodPost, "/api/admin/audit/access-logs", map[string]any{
 		"name":     "old access",

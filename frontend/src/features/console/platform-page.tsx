@@ -1094,6 +1094,7 @@ function ResourceRowActions({ config, item, onOperation }: { config: PlatformPag
       await app.refresh(true)
       app.showToast('任务已触发')
     } catch (error) {
+      await app.refresh(true)
       app.handleApiError(error)
     }
   }

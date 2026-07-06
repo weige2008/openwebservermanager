@@ -17,6 +17,8 @@ import (
 	"openwebservermanager/internal/model"
 )
 
+var errUnsupportedScheduledTaskType = errors.New("scheduled task type is not supported")
+
 func (s *Server) runScheduledTask(_ *http.Request, task model.PlatformItem) (string, map[string]any, error) {
 	switch normalizeScheduledTaskType(task.Type) {
 	case "backup":
@@ -32,7 +34,12 @@ func (s *Server) runScheduledTask(_ *http.Request, task model.PlatformItem) (str
 		metadata, err := s.renewDueSelfSignedCertificates(task)
 		return "certificate renewal completed", metadata, err
 	default:
-		return "task type recorded", map[string]any{"supported": false, "message": "task type has no runner yet"}, nil
+		taskType := normalizeScheduledTaskType(task.Type)
+		if taskType == "" {
+			taskType = "(empty)"
+		}
+		message := "scheduled task type is not supported: " + taskType
+		return message, map[string]any{"supported": false, "message": message}, fmt.Errorf("%w: %s", errUnsupportedScheduledTaskType, taskType)
 	}
 }
 

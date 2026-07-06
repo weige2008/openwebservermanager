@@ -425,6 +425,32 @@ export function PlatformTablePage({ config }: { config: PlatformPageConfig }) {
           cell: ({ row }) => <Badge tone={metadataBool(row.original.metadata?.append_newline) ? 'success' : 'neutral'}>{metadataBool(row.original.metadata?.append_newline) ? app.t('enabled', '启用') : app.t('disabled', '禁用')}</Badge>,
         },
       ] satisfies ColumnDef<PlatformItem>[] : []),
+      ...(config.collection === 'oidc_clients' ? [
+        {
+          header: app.t('oidcClientID', 'Client ID'),
+          cell: ({ row }) => <span className='font-mono text-xs'>{metadataText(row.original.metadata?.client_id) || row.original.name}</span>,
+        },
+        {
+          header: app.t('oidcRedirectURIs', 'Redirect URIs'),
+          cell: ({ row }) => <span className='line-clamp-2 font-mono text-xs'>{metadataInlineListText(row.original.metadata?.redirect_uris) || '-'}</span>,
+        },
+        {
+          header: app.t('oidcScopes', 'Scopes'),
+          cell: ({ row }) => <span className='font-mono text-xs'>{metadataInlineListText(row.original.metadata?.scopes) || 'openid profile email'}</span>,
+        },
+        {
+          header: app.t('oidcAuthMethod', 'Auth method'),
+          cell: ({ row }) => <Badge tone='neutral'>{metadataText(row.original.metadata?.token_endpoint_auth_method) || (row.original.type === 'public' ? 'none' : 'client_secret_basic')}</Badge>,
+        },
+        {
+          header: app.t('secretStatus', 'Secret status'),
+          cell: ({ row }) => (
+            <Badge tone={metadataBool(row.original.metadata?.client_secret_set) ? 'success' : 'neutral'}>
+              {metadataBool(row.original.metadata?.client_secret_set) ? app.t('passwordSaved') : app.t('passwordNotSet')}
+            </Badge>
+          ),
+        },
+      ] satisfies ColumnDef<PlatformItem>[] : []),
       ...(config.collection === 'authorization_strategies' ? [
         {
           header: app.t('permissionMatrix', '权限矩阵'),
@@ -435,7 +461,7 @@ export function PlatformTablePage({ config }: { config: PlatformPageConfig }) {
           cell: ({ row }) => <span className='font-mono text-xs'>{metadataText(row.original.metadata?.path_prefix) || '*'}</span>,
         },
       ] satisfies ColumnDef<PlatformItem>[] : []),
-      ...(!['asset_groups', 'command_filters', 'command_snippets', 'authorization_strategies'].includes(config.collection) ? [
+      ...(!['asset_groups', 'command_filters', 'command_snippets', 'oidc_clients', 'authorization_strategies'].includes(config.collection) ? [
         {
           header: app.t('address'),
           cell: ({ row }) => {
@@ -2551,6 +2577,7 @@ function PlatformItemDialog({
   const isCommandFilter = collection === 'command_filters'
   const isCommandSnippet = collection === 'command_snippets'
   const isAuthorizationStrategy = collection === 'authorization_strategies'
+  const isOIDCClient = collection === 'oidc_clients'
   const isAsset = collection === 'assets'
   const isWebAsset = collection === 'web_assets'
   const isDatabaseAsset = collection === 'database_assets'
@@ -2974,6 +3001,76 @@ function PlatformItemDialog({
               <Field label={app.t('group')}><Input value={form.group} onChange={(event) => onChange({ group: event.currentTarget.value })} /></Field>
               <Field label={app.t('tags', '标签')}><Input placeholder='linux,database' value={form.tags} onChange={(event) => onChange({ tags: event.currentTarget.value })} /></Field>
             </>
+          ) : isOIDCClient ? (
+            <>
+              <Field label={app.t('name')}><Input value={form.name} onChange={(event) => onChange({ name: event.currentTarget.value })} /></Field>
+              <Field label={app.t('status')}>
+                <Select value={form.status || 'enabled'} onChange={(event) => onChange({ status: event.currentTarget.value })}>
+                  <option value='enabled'>{app.t('enabled', 'Enabled')}</option>
+                  <option value='disabled'>{app.t('disabled', 'Disabled')}</option>
+                </Select>
+              </Field>
+              <Field label={app.t('clientType', 'Client type')}>
+                <Select
+                  value={form.type || 'confidential'}
+                  onChange={(event) => {
+                    const nextType = event.currentTarget.value
+                    onChange({
+                      type: nextType,
+                      password: nextType === 'public' ? '' : form.password,
+                      metadata: metadataWithValue(form.metadata, 'token_endpoint_auth_method', nextType === 'public' ? 'none' : 'client_secret_basic'),
+                    })
+                  }}
+                >
+                  <option value='confidential'>{app.t('confidentialClient', 'Confidential')}</option>
+                  <option value='public'>{app.t('publicClient', 'Public')}</option>
+                </Select>
+              </Field>
+              <Field label={app.t('oidcClientID', 'Client ID')}>
+                <Input
+                  placeholder='openweb-client'
+                  value={metadataFormText(form.metadata, 'client_id')}
+                  onChange={(event) => onChange({ metadata: metadataWithValue(form.metadata, 'client_id', event.currentTarget.value) })}
+                />
+              </Field>
+              <Field label={app.t('oidcClientSecret', 'Client secret')}>
+                <Input
+                  type='password'
+                  value={form.password}
+                  placeholder={editingId ? app.t('keepCurrentSecret', 'Leave blank to keep current secret') : ''}
+                  autoComplete='new-password'
+                  disabled={(form.type || 'confidential') === 'public'}
+                  onChange={(event) => onChange({ password: event.currentTarget.value })}
+                />
+              </Field>
+              <Field label={app.t('oidcAuthMethod', 'Token auth method')}>
+                <Select
+                  value={metadataFormText(form.metadata, 'token_endpoint_auth_method') || ((form.type || 'confidential') === 'public' ? 'none' : 'client_secret_basic')}
+                  onChange={(event) => onChange({ metadata: metadataWithValue(form.metadata, 'token_endpoint_auth_method', event.currentTarget.value) })}
+                >
+                  <option value='client_secret_basic'>client_secret_basic</option>
+                  <option value='client_secret_post'>client_secret_post</option>
+                  <option value='none'>none</option>
+                </Select>
+              </Field>
+              <Field className='sm:col-span-2' label={app.t('oidcRedirectURIs', 'Redirect URIs')}>
+                <Textarea
+                  className='font-mono text-xs'
+                  placeholder={'https://client.example.com/callback\nhttp://localhost:3000/callback'}
+                  value={metadataFormText(form.metadata, 'redirect_uris')}
+                  onChange={(event) => onChange({ metadata: metadataWithList(form.metadata, 'redirect_uris', splitLines(event.currentTarget.value)) })}
+                />
+              </Field>
+              <Field className='sm:col-span-2' label={app.t('oidcScopes', 'Scopes')}>
+                <Input
+                  placeholder='openid profile email'
+                  value={metadataListInputText(form.metadata, 'scopes')}
+                  onChange={(event) => onChange({ metadata: metadataWithList(form.metadata, 'scopes', splitWords(event.currentTarget.value)) })}
+                />
+              </Field>
+              <Field label={app.t('group')}><Input value={form.group} onChange={(event) => onChange({ group: event.currentTarget.value })} /></Field>
+              <Field label={app.t('tags', 'Tags')}><Input placeholder='sso,internal' value={form.tags} onChange={(event) => onChange({ tags: event.currentTarget.value })} /></Field>
+            </>
           ) : (
             <>
               <Field label={app.t('name')}><Input value={form.name} onChange={(event) => onChange({ name: event.currentTarget.value })} /></Field>
@@ -3116,6 +3213,7 @@ function defaultPlatformType(collection: string) {
   if (collection === 'command_filters') return 'deny'
   if (collection === 'command_snippets') return 'public'
   if (collection === 'authorization_strategies') return 'file'
+  if (collection === 'oidc_clients') return 'confidential'
   if (collection === 'web_assets') return 'http'
   if (collection === 'database_assets') return 'sqlite'
   if (collection === 'scheduled_tasks') return 'asset-status'
@@ -3132,6 +3230,12 @@ function defaultPlatformMetadata(collection: string) {
   if (collection === 'asset_groups') return JSON.stringify({ sort: 0, collapsed: false }, null, 2)
   if (collection === 'command_snippets') return JSON.stringify({ command: '', append_newline: false }, null, 2)
   if (collection === 'authorization_strategies') return JSON.stringify({ path_prefix: '' }, null, 2)
+  if (collection === 'oidc_clients') return JSON.stringify({
+    client_id: '',
+    redirect_uris: [],
+    scopes: ['openid', 'profile', 'email'],
+    token_endpoint_auth_method: 'client_secret_basic',
+  }, null, 2)
   if (collection === 'web_assets') return JSON.stringify({ target_url: '' }, null, 2)
   if (collection === 'database_assets') return JSON.stringify({ sqlite_path: '', row_limit: 100 }, null, 2)
   if (collection === 'scheduled_tasks') return JSON.stringify({ interval_seconds: 600, timeout_ms: 2000 }, null, 2)
@@ -4694,6 +4798,10 @@ function splitLines(value: string) {
   return value.split(/\r?\n|,/).map((item) => item.trim()).filter(Boolean)
 }
 
+function splitWords(value: string) {
+  return value.split(/[\s,]+/).map((item) => item.trim()).filter(Boolean)
+}
+
 function stringValue(value: unknown) {
   return typeof value === 'string' ? value : ''
 }
@@ -4908,6 +5016,13 @@ function stringArrayValue(value: unknown) {
   return Array.isArray(value) ? value.filter((item): item is string => typeof item === 'string') : []
 }
 
+function metadataInlineListText(value: unknown) {
+  const array = stringArrayValue(value)
+  if (array.length) return array.join(', ')
+  const text = metadataText(value)
+  return text ? splitWords(text).join(', ') : ''
+}
+
 function metadataObject(value: string): Record<string, unknown> {
   if (!value.trim()) return {}
   try {
@@ -4921,6 +5036,13 @@ function metadataObject(value: string): Record<string, unknown> {
 function metadataFormText(metadata: string, key: string) {
   const value = metadataObject(metadata)[key]
   if (Array.isArray(value)) return value.map((item) => metadataText(item)).filter(Boolean).join('\n')
+  return metadataText(value)
+}
+
+function metadataListInputText(metadata: string, key: string) {
+  const value = metadataObject(metadata)[key]
+  const array = stringArrayValue(value)
+  if (array.length) return array.join(' ')
   return metadataText(value)
 }
 

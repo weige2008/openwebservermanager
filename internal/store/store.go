@@ -69,7 +69,9 @@ type AdminPublic struct {
 
 type RestoreSummary struct {
 	LegacyStateRestored     bool           `json:"legacy_state_restored"`
+	CoreStateRestored       bool           `json:"core_state_restored,omitempty"`
 	PlatformRecords         int            `json:"platform_records"`
+	CoreRecords             int            `json:"core_records,omitempty"`
 	RecordsByCollection     map[string]int `json:"records_by_collection"`
 	MigratedPlatformSecrets int            `json:"migrated_platform_secrets,omitempty"`
 }
@@ -81,6 +83,14 @@ type platformRecordSnapshot struct {
 	CreatedAt  string
 	UpdatedAt  string
 	Migrated   bool
+}
+
+type coreRecordSnapshot struct {
+	Kind      string
+	ID        string
+	Payload   string
+	CreatedAt string
+	UpdatedAt string
 }
 
 var ErrAdminAlreadyConfigured = errors.New("admin already configured")
@@ -115,6 +125,10 @@ func Open(path string, cipher *security.Cipher) (*Store, error) {
 	}
 	st.ensureMaps()
 	if err := st.migratePlatformDB(); err != nil {
+		_ = db.Close()
+		return nil, err
+	}
+	if err := st.loadOrImportCoreState(); err != nil {
 		_ = db.Close()
 		return nil, err
 	}
@@ -480,6 +494,15 @@ func (s *Store) migratePlatformDB() error {
 			PRIMARY KEY (collection, id)
 		)`,
 		`CREATE INDEX IF NOT EXISTS idx_platform_records_collection_created ON platform_records(collection, created_at DESC)`,
+		`CREATE TABLE IF NOT EXISTS core_records (
+			kind TEXT NOT NULL,
+			id TEXT NOT NULL,
+			payload TEXT NOT NULL,
+			created_at TEXT NOT NULL,
+			updated_at TEXT NOT NULL,
+			PRIMARY KEY (kind, id)
+		)`,
+		`CREATE INDEX IF NOT EXISTS idx_core_records_kind_created ON core_records(kind, created_at DESC)`,
 		`INSERT OR IGNORE INTO schema_migrations(version, applied_at) VALUES (1, strftime('%Y-%m-%dT%H:%M:%fZ','now'))`,
 	}
 	for _, statement := range statements {
@@ -488,6 +511,94 @@ func (s *Store) migratePlatformDB() error {
 		}
 	}
 	return nil
+}
+
+func (s *Store) loadOrImportCoreState() error {
+	if s.db == nil {
+		return nil
+	}
+	var count int
+	if err := s.db.QueryRow(`SELECT COUNT(*) FROM core_records`).Scan(&count); err != nil {
+		return fmt.Errorf("count core records: %w", err)
+	}
+	if count > 0 {
+		next, err := s.readCoreStateFromDB()
+		if err != nil {
+			return err
+		}
+		s.state = next
+		s.ensureMaps()
+		return nil
+	}
+	if !s.hasLegacyState() {
+		return nil
+	}
+	return s.syncCoreStateLocked()
+}
+
+func (s *Store) hasLegacyState() bool {
+	return s.state.Admin != nil ||
+		len(s.state.Servers) > 0 ||
+		len(s.state.Credentials) > 0 ||
+		len(s.state.Sessions) > 0 ||
+		len(s.state.AuditLogs) > 0
+}
+
+func (s *Store) readCoreStateFromDB() (state, error) {
+	records, err := s.readCoreRecordSnapshot(s.DatabasePath())
+	if err != nil {
+		return state{}, err
+	}
+	return stateFromCoreRecords(records)
+}
+
+func stateFromCoreRecords(records []coreRecordSnapshot) (state, error) {
+	next := state{
+		Servers:     map[string]model.Server{},
+		Credentials: map[string]model.Credential{},
+		Sessions:    map[string]model.ConnectionSession{},
+		AuditLogs:   []model.AuditLog{},
+	}
+	for _, record := range records {
+		switch record.Kind {
+		case "admin":
+			var admin AdminAuth
+			if err := json.Unmarshal([]byte(record.Payload), &admin); err != nil {
+				return state{}, fmt.Errorf("decode core admin record: %w", err)
+			}
+			next.Admin = &admin
+		case "servers":
+			var item model.Server
+			if err := json.Unmarshal([]byte(record.Payload), &item); err != nil {
+				return state{}, fmt.Errorf("decode core server record: %w", err)
+			}
+			next.Servers[item.ID] = item
+		case "credentials":
+			var item model.Credential
+			if err := json.Unmarshal([]byte(record.Payload), &item); err != nil {
+				return state{}, fmt.Errorf("decode core credential record: %w", err)
+			}
+			next.Credentials[item.ID] = item
+		case "sessions":
+			var item model.ConnectionSession
+			if err := json.Unmarshal([]byte(record.Payload), &item); err != nil {
+				return state{}, fmt.Errorf("decode core session record: %w", err)
+			}
+			next.Sessions[item.ID] = item
+		case "audit_logs":
+			var item model.AuditLog
+			if err := json.Unmarshal([]byte(record.Payload), &item); err != nil {
+				return state{}, fmt.Errorf("decode core audit record: %w", err)
+			}
+			next.AuditLogs = append(next.AuditLogs, item)
+		default:
+			return state{}, fmt.Errorf("unsupported core record kind %q", record.Kind)
+		}
+	}
+	sort.Slice(next.AuditLogs, func(i, j int) bool {
+		return next.AuditLogs[i].CreatedAt.Before(next.AuditLogs[j].CreatedAt)
+	})
+	return next, nil
 }
 
 func (s *Store) seedPlatformData() error {
@@ -1026,6 +1137,8 @@ func (s *Store) DeletePlatformItem(collection, id string) error {
 
 func (s *Store) RestoreSnapshot(legacyRaw []byte, sqlitePath string) (RestoreSummary, error) {
 	var nextState *state
+	legacyStateRestored := false
+	coreStateRestored := false
 	if len(legacyRaw) > 0 {
 		parsed := state{}
 		if err := json.Unmarshal(legacyRaw, &parsed); err != nil {
@@ -1035,14 +1148,29 @@ func (s *Store) RestoreSnapshot(legacyRaw []byte, sqlitePath string) (RestoreSum
 			return RestoreSummary{}, errors.New("backup legacy store does not contain an administrator")
 		}
 		nextState = &parsed
+		legacyStateRestored = true
 	}
 
 	var records []platformRecordSnapshot
+	var coreRecords []coreRecordSnapshot
 	var err error
 	if sqlitePath != "" {
 		records, err = s.readPlatformRecordSnapshot(sqlitePath)
 		if err != nil {
 			return RestoreSummary{}, err
+		}
+		coreRecords, err = s.readCoreRecordSnapshot(sqlitePath)
+		if err != nil {
+			return RestoreSummary{}, err
+		}
+		if len(coreRecords) > 0 {
+			restoredState, err := stateFromCoreRecords(coreRecords)
+			if err != nil {
+				return RestoreSummary{}, err
+			}
+			nextState = &restoredState
+			legacyStateRestored = false
+			coreStateRestored = true
 		}
 	}
 	if nextState == nil && len(records) == 0 {
@@ -1059,7 +1187,9 @@ func (s *Store) RestoreSnapshot(legacyRaw []byte, sqlitePath string) (RestoreSum
 		if err := s.saveLocked(); err != nil {
 			return RestoreSummary{}, err
 		}
-		summary.LegacyStateRestored = true
+		summary.LegacyStateRestored = legacyStateRestored
+		summary.CoreStateRestored = coreStateRestored
+		summary.CoreRecords = len(coreRecords)
 	}
 	if len(records) > 0 {
 		tx, err := s.db.Begin()
@@ -1105,6 +1235,9 @@ func (s *Store) readPlatformRecordSnapshot(sqlitePath string) ([]platformRecordS
 	}
 	defer db.Close()
 	rows, err := db.Query(`SELECT collection, id, payload, created_at, updated_at FROM platform_records ORDER BY collection, created_at`)
+	if isMissingTableError(err) {
+		return []platformRecordSnapshot{}, nil
+	}
 	if err != nil {
 		return nil, fmt.Errorf("read backup platform records: %w", err)
 	}
@@ -1138,6 +1271,54 @@ func (s *Store) readPlatformRecordSnapshot(sqlitePath string) ([]platformRecordS
 		return nil, err
 	}
 	return records, nil
+}
+
+func (s *Store) readCoreRecordSnapshot(sqlitePath string) ([]coreRecordSnapshot, error) {
+	db, err := sql.Open("sqlite", sqlitePath)
+	if err != nil {
+		return nil, fmt.Errorf("open core sqlite store: %w", err)
+	}
+	defer db.Close()
+	rows, err := db.Query(`SELECT kind, id, payload, created_at, updated_at FROM core_records ORDER BY kind, created_at`)
+	if isMissingTableError(err) {
+		return []coreRecordSnapshot{}, nil
+	}
+	if err != nil {
+		return nil, fmt.Errorf("read core records: %w", err)
+	}
+	defer rows.Close()
+	records := []coreRecordSnapshot{}
+	for rows.Next() {
+		var record coreRecordSnapshot
+		if err := rows.Scan(&record.Kind, &record.ID, &record.Payload, &record.CreatedAt, &record.UpdatedAt); err != nil {
+			return nil, err
+		}
+		if !allowedCoreRecordKind(record.Kind) {
+			return nil, fmt.Errorf("backup contains unsupported core record kind %q", record.Kind)
+		}
+		records = append(records, record)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return records, nil
+}
+
+func isMissingTableError(err error) bool {
+	if err == nil {
+		return false
+	}
+	value := strings.ToLower(err.Error())
+	return strings.Contains(value, "no such table")
+}
+
+func allowedCoreRecordKind(kind string) bool {
+	switch kind {
+	case "admin", "servers", "credentials", "sessions", "audit_logs":
+		return true
+	default:
+		return false
+	}
 }
 
 func (s *Store) normalizeRestoredPlatformRecord(collection, id string, item model.PlatformItem) (string, bool, error) {
@@ -2378,8 +2559,90 @@ func optionalBoolValue(value *bool) any {
 	return *value
 }
 
+func (s *Store) syncCoreStateLocked() error {
+	if s.db == nil {
+		return nil
+	}
+	tx, err := s.db.Begin()
+	if err != nil {
+		return err
+	}
+	if _, err := tx.Exec(`DELETE FROM core_records`); err != nil {
+		_ = tx.Rollback()
+		return fmt.Errorf("clear core records: %w", err)
+	}
+	stmt, err := tx.Prepare(`INSERT INTO core_records(kind, id, payload, created_at, updated_at) VALUES (?, ?, ?, ?, ?)`)
+	if err != nil {
+		_ = tx.Rollback()
+		return fmt.Errorf("prepare core record sync: %w", err)
+	}
+	insert := func(kind, id string, payload any, createdAt, updatedAt time.Time) error {
+		if id == "" {
+			return nil
+		}
+		raw, err := json.Marshal(payload)
+		if err != nil {
+			return err
+		}
+		if createdAt.IsZero() {
+			createdAt = time.Now().UTC()
+		}
+		if updatedAt.IsZero() {
+			updatedAt = createdAt
+		}
+		_, err = stmt.Exec(kind, id, string(raw), createdAt.Format(time.RFC3339Nano), updatedAt.Format(time.RFC3339Nano))
+		return err
+	}
+	if s.state.Admin != nil {
+		if err := insert("admin", s.state.Admin.UserID, s.state.Admin, s.state.Admin.CreatedAt, s.state.Admin.UpdatedAt); err != nil {
+			_ = stmt.Close()
+			_ = tx.Rollback()
+			return fmt.Errorf("sync admin core record: %w", err)
+		}
+	}
+	for _, server := range s.state.Servers {
+		if err := insert("servers", server.ID, server, server.CreatedAt, server.UpdatedAt); err != nil {
+			_ = stmt.Close()
+			_ = tx.Rollback()
+			return fmt.Errorf("sync server core record: %w", err)
+		}
+	}
+	for _, credential := range s.state.Credentials {
+		if err := insert("credentials", credential.ID, credential, credential.CreatedAt, credential.UpdatedAt); err != nil {
+			_ = stmt.Close()
+			_ = tx.Rollback()
+			return fmt.Errorf("sync credential core record: %w", err)
+		}
+	}
+	for _, session := range s.state.Sessions {
+		if err := insert("sessions", session.ID, session, session.StartedAt, session.LastActivityAt); err != nil {
+			_ = stmt.Close()
+			_ = tx.Rollback()
+			return fmt.Errorf("sync session core record: %w", err)
+		}
+	}
+	for _, log := range s.state.AuditLogs {
+		if err := insert("audit_logs", log.ID, log, log.CreatedAt, log.CreatedAt); err != nil {
+			_ = stmt.Close()
+			_ = tx.Rollback()
+			return fmt.Errorf("sync audit core record: %w", err)
+		}
+	}
+	if err := stmt.Close(); err != nil {
+		_ = tx.Rollback()
+		return err
+	}
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("commit core record sync: %w", err)
+	}
+	return nil
+}
+
 func (s *Store) saveLocked() error {
 	if err := os.MkdirAll(filepath.Dir(s.path), 0o700); err != nil {
+		return err
+	}
+	if err := s.syncCoreStateLocked(); err != nil {
 		return err
 	}
 	raw, err := json.MarshalIndent(s.state, "", "  ")

@@ -995,6 +995,13 @@ func (s *Store) UpdatePlatformItem(collection, id string, req model.PlatformItem
 	existingPasswordHash, _ := item.Metadata["password_hash"].(string)
 	existingClientSecretHash, _ := item.Metadata["client_secret_hash"].(string)
 	existingAgentTokenHash, _ := item.Metadata["agent_token_hash"].(string)
+	existingAgentTokenState := copyMetadataValues(item.Metadata,
+		"token_issued_at",
+		"token_rotated_at",
+		"token_issued_by",
+		"token_generation",
+		"token_expires_at",
+	)
 	existingCredentialSecrets := copyMetadataSecrets(item.Metadata, "encrypted_password", "encrypted_private_key", "encrypted_passphrase")
 	existingSystemSettingSecrets := copyMetadataSecrets(item.Metadata, "smtp_password_encrypted", "llm_api_key_encrypted", "oidc_client_secret_encrypted", "ldap_bind_password_encrypted", "wecom_agent_secret_encrypted", "dns_api_token_encrypted", "proxy_private_key_encrypted")
 	existingCertificateSecrets := copyMetadataSecrets(item.Metadata, "certificate_private_key_encrypted")
@@ -1053,6 +1060,7 @@ func (s *Store) UpdatePlatformItem(collection, id string, req model.PlatformItem
 			if existingAgentTokenHash != "" {
 				item.Metadata["agent_token_hash"] = existingAgentTokenHash
 			}
+			restoreMetadataAnyValues(item.Metadata, existingAgentTokenState)
 		}
 		if collection == "credentials" {
 			for key, value := range existingCredentialSecrets {

@@ -11,6 +11,7 @@ import (
 )
 
 const defaultAgentHeartbeatTimeout = 120 * time.Second
+const defaultAgentRegistrationTokenTTL = 30 * 24 * time.Hour
 
 type agentGatewayAuthRequest struct {
 	GatewayID         string `json:"gateway_id"`
@@ -108,6 +109,10 @@ func (s *Server) handleAgentGatewayToken(w http.ResponseWriter, r *http.Request,
 	item.Metadata["token_issued_by"] = s.currentUserID(r)
 	item.Metadata["token_generation"] = metadataIntDefault(item.Metadata["token_generation"], 0) + 1
 	item.Metadata["heartbeat_timeout_seconds"] = agentHeartbeatTimeout(item).Seconds()
+	tokenTTL := agentRegistrationTokenTTL(item)
+	expiresAt := now.Add(tokenTTL)
+	item.Metadata["registration_token_ttl_seconds"] = int(tokenTTL.Seconds())
+	item.Metadata["token_expires_at"] = expiresAt.Format(time.RFC3339Nano)
 	saved, err := s.cfg.Store.SavePlatformItem("agent_gateways", item)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, err.Error())
@@ -119,7 +124,7 @@ func (s *Server) handleAgentGatewayToken(w http.ResponseWriter, r *http.Request,
 		"gateway_id":         item.ID,
 		"token":              secret,
 		"registration_token": item.ID + "." + secret,
-		"expires_at":         nil,
+		"expires_at":         expiresAt,
 	})
 }
 
@@ -290,6 +295,10 @@ func (s *Server) agentGatewayFromAuth(w http.ResponseWriter, r *http.Request, au
 		writeError(w, http.StatusUnauthorized, "agent gateway token is invalid")
 		return model.PlatformItem{}, false
 	}
+	if agentGatewayTokenExpired(item, time.Now().UTC()) {
+		writeError(w, http.StatusUnauthorized, "agent gateway token expired")
+		return model.PlatformItem{}, false
+	}
 	return item, true
 }
 
@@ -373,6 +382,17 @@ func agentHeartbeatTimeout(item model.PlatformItem) time.Duration {
 	seconds := metadataIntDefault(item.Metadata["heartbeat_timeout_seconds"], int(defaultAgentHeartbeatTimeout.Seconds()))
 	seconds = clampInt(seconds, 30, 3600, int(defaultAgentHeartbeatTimeout.Seconds()))
 	return time.Duration(seconds) * time.Second
+}
+
+func agentRegistrationTokenTTL(item model.PlatformItem) time.Duration {
+	seconds := metadataIntDefault(item.Metadata["registration_token_ttl_seconds"], int(defaultAgentRegistrationTokenTTL.Seconds()))
+	seconds = clampInt(seconds, 3600, int((365 * 24 * time.Hour).Seconds()), int(defaultAgentRegistrationTokenTTL.Seconds()))
+	return time.Duration(seconds) * time.Second
+}
+
+func agentGatewayTokenExpired(item model.PlatformItem, now time.Time) bool {
+	expiresAt, ok := metadataTime(item.Metadata["token_expires_at"])
+	return ok && !expiresAt.IsZero() && !now.Before(expiresAt)
 }
 
 func applyAgentIdentityMetadata(metadata map[string]any, hostname, version, osName, arch string) {

@@ -5229,6 +5229,7 @@ func TestNotificationsReflectRuntimeAndFilterByUser(t *testing.T) {
 
 func TestAgentGatewayRegistrationHeartbeatAndTimeout(t *testing.T) {
 	handler, adminCookie := newTestHandler(t)
+	srv := handler.(*Server)
 
 	gatewayRec := assertStatus(t, handler, http.MethodPost, "/api/admin/agent-gateways", map[string]any{
 		"name":     "edge-gateway",
@@ -5254,6 +5255,14 @@ func TestAgentGatewayRegistrationHeartbeatAndTimeout(t *testing.T) {
 	registrationToken, _ := tokenPayload["registration_token"].(string)
 	if registrationToken == "" || !strings.HasPrefix(registrationToken, gateway.ID+".") {
 		t.Fatalf("registration token = %q, want gateway scoped token", registrationToken)
+	}
+	expiresAtText, _ := tokenPayload["expires_at"].(string)
+	expiresAt, err := time.Parse(time.RFC3339Nano, expiresAtText)
+	if err != nil {
+		t.Fatalf("registration token expires_at = %q, want RFC3339 timestamp: %v", expiresAtText, err)
+	}
+	if !expiresAt.After(time.Now().UTC().Add(29*24*time.Hour)) || !expiresAt.Before(time.Now().UTC().Add(31*24*time.Hour)) {
+		t.Fatalf("registration token expires_at = %s, want about 30 days from now", expiresAt)
 	}
 
 	assertStatus(t, handler, http.MethodPost, "/api/agent/gateways/register", map[string]any{
@@ -5321,6 +5330,13 @@ func TestAgentGatewayRegistrationHeartbeatAndTimeout(t *testing.T) {
 			"latency_ms":                18,
 		},
 	}, adminCookie, http.StatusOK)
+	patchedGateway, ok, err := srv.cfg.Store.GetPlatformItem("agent_gateways", gateway.ID)
+	if err != nil || !ok {
+		t.Fatalf("load patched gateway: ok=%v err=%v", ok, err)
+	}
+	if got := firstMetadataString(patchedGateway.Metadata, "token_expires_at"); got != expiresAtText {
+		t.Fatalf("agent gateway metadata patch did not preserve token_expires_at: got %q want %q", got, expiresAtText)
+	}
 	offlineRec := assertStatus(t, handler, http.MethodGet, "/api/admin/agent-gateways", nil, adminCookie, http.StatusOK)
 	if !strings.Contains(offlineRec.Body.String(), `"status":"offline"`) || !strings.Contains(offlineRec.Body.String(), "heartbeat timeout") {
 		t.Fatal("stale heartbeat did not mark agent gateway offline")
@@ -5360,6 +5376,21 @@ func TestAgentGatewayRegistrationHeartbeatAndTimeout(t *testing.T) {
 	rotatedRecoveredRec := assertStatus(t, handler, http.MethodGet, "/api/admin/agent-gateways", nil, adminCookie, http.StatusOK)
 	if !strings.Contains(rotatedRecoveredRec.Body.String(), `"status":"online"`) || !strings.Contains(rotatedRecoveredRec.Body.String(), `"latency_ms":6`) {
 		t.Fatalf("rotated token heartbeat did not recover gateway: %s", rotatedRecoveredRec.Body.String())
+	}
+	expiredGateway, ok, err := srv.cfg.Store.GetPlatformItem("agent_gateways", gateway.ID)
+	if err != nil || !ok {
+		t.Fatalf("load gateway before expiry check: ok=%v err=%v", ok, err)
+	}
+	expiredGateway.Metadata["token_expires_at"] = time.Now().UTC().Add(-time.Minute).Format(time.RFC3339Nano)
+	if _, err := srv.cfg.Store.SavePlatformItem("agent_gateways", expiredGateway); err != nil {
+		t.Fatalf("save expired gateway token metadata: %v", err)
+	}
+	expiredHeartbeatRec := assertStatus(t, handler, http.MethodPost, "/api/agent/gateways/heartbeat", map[string]any{
+		"registration_token": rotatedRegistrationToken,
+		"latency_ms":         5,
+	}, nil, http.StatusUnauthorized)
+	if !strings.Contains(expiredHeartbeatRec.Body.String(), "expired") {
+		t.Fatalf("expired agent token did not return clear error: %s", expiredHeartbeatRec.Body.String())
 	}
 
 	assertStatus(t, handler, http.MethodPatch, "/api/admin/agent-gateways/"+gateway.ID, map[string]any{

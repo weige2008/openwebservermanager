@@ -1638,6 +1638,7 @@ function AgentGatewayTokenDialog({ item, onClose }: { item: PlatformItem; onClos
   const app = useApp()
   const [loading, setLoading] = useState(true)
   const [token, setToken] = useState('')
+  const [expiresAt, setExpiresAt] = useState('')
   const [error, setError] = useState('')
 
   useEffect(() => {
@@ -1645,13 +1646,15 @@ function AgentGatewayTokenDialog({ item, onClose }: { item: PlatformItem; onClos
     const issue = async () => {
       setLoading(true)
       setError('')
+      setExpiresAt('')
       try {
-        const data = await apiRequest<{ registration_token: string; gateway_id: string }>(`/api/admin/agent-gateways/${item.id}/token`, {
+        const data = await apiRequest<{ registration_token: string; gateway_id: string; expires_at?: string }>(`/api/admin/agent-gateways/${item.id}/token`, {
           method: 'POST',
           body: '{}',
         })
         if (!alive) return
         setToken(data.registration_token || '')
+        setExpiresAt(data.expires_at || '')
         await app.refresh(true)
       } catch (requestError) {
         if (!alive) return
@@ -1699,6 +1702,7 @@ function AgentGatewayTokenDialog({ item, onClose }: { item: PlatformItem; onClos
                 </Button>
               </div>
             </Field>
+            <Field label={app.t('expiresAt', 'Expires at')}><Input readOnly value={formatDate(expiresAt)} /></Field>
             <div className='grid gap-3'>
               <div className='rounded-lg border border-border bg-background/70 p-3'>
                 <div className='mb-2 text-xs font-medium text-muted-foreground'>注册请求</div>

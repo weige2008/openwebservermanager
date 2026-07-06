@@ -87,6 +87,15 @@ func run() error {
 		slog.Info("ssh gateway ready", "addr", sshGateway.Address())
 	}
 
+	rdpProxy := app.NewRDPProxyManager(rootCtx, st, slog.Default())
+	if err := rdpProxy.Reload(); err != nil {
+		slog.Warn("rdp proxy unavailable", "error", err)
+	}
+	defer rdpProxy.Close()
+	if rdpProxy.Address() != "" {
+		slog.Info("rdp proxy ready", "addr", rdpProxy.Address(), "target", rdpProxy.Target())
+	}
+
 	databaseProxy := app.NewDatabaseProxyManager(rootCtx, st, slog.Default())
 	if err := databaseProxy.Reload(); err != nil {
 		slog.Warn("database proxy unavailable", "error", err)
@@ -96,7 +105,7 @@ func run() error {
 		slog.Info("database proxy ready", "addr", databaseProxy.Address(), "target", databaseProxy.Target())
 	}
 
-	appServer := app.NewServer(app.Config{Store: st, Guacd: guacd, SSHGateway: sshGateway, DatabaseProxy: databaseProxy, StaticFS: staticFS, DataDir: dataDir, Public: publicConfig(), TrustProxyHeaders: envBool("OPENWEBSERVERMANAGER_TRUST_PROXY_HEADERS")})
+	appServer := app.NewServer(app.Config{Store: st, Guacd: guacd, SSHGateway: sshGateway, RDPProxy: rdpProxy, DatabaseProxy: databaseProxy, StaticFS: staticFS, DataDir: dataDir, Public: publicConfig(), TrustProxyHeaders: envBool("OPENWEBSERVERMANAGER_TRUST_PROXY_HEADERS")})
 	scheduler := appServer.StartScheduler(rootCtx, app.SchedulerConfig{
 		PollInterval: schedulerPollInterval(),
 		Logger:       slog.Default(),

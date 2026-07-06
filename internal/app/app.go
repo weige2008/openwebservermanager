@@ -29,6 +29,7 @@ type Config struct {
 	Guacd             *guac.Manager
 	SSHGatewayAddress string
 	SSHGateway        sshGatewayRuntime
+	RDPProxy          rdpProxyRuntime
 	DatabaseProxy     databaseProxyRuntime
 	StaticFS          fs.FS
 	DataDir           string
@@ -44,6 +45,14 @@ type sshGatewayRuntime interface {
 }
 
 type databaseProxyRuntime interface {
+	Address() string
+	Target() string
+	Reload() error
+	LastError() string
+	ActiveConnections() int
+}
+
+type rdpProxyRuntime interface {
 	Address() string
 	Target() string
 	Reload() error

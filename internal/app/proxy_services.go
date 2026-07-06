@@ -20,6 +20,7 @@ type proxyServicesRequest struct {
 	SSHPrivateKey            string         `json:"ssh_private_key"`
 	RDPEnabled               bool           `json:"rdp_enabled"`
 	RDPListenAddress         string         `json:"rdp_listen_address"`
+	RDPForwardAllowlist      []string       `json:"rdp_forward_allowlist"`
 	DatabaseEnabled          bool           `json:"database_enabled"`
 	DatabaseListenAddress    string         `json:"database_listen_address"`
 	DatabaseForwardAllowlist []string       `json:"database_forward_allowlist"`
@@ -59,6 +60,7 @@ func (s *Server) saveProxyServices(req proxyServicesRequest) (model.PlatformItem
 	rdpListen := normalizeListenAddress(req.RDPListenAddress, "0.0.0.0:23389")
 	databaseListen := normalizeListenAddress(req.DatabaseListenAddress, "127.0.0.1:23306")
 	sshAllowlist := uniqueNonEmptyStrings(req.SSHForwardAllowlist)
+	rdpAllowlist := uniqueNonEmptyStrings(req.RDPForwardAllowlist)
 	databaseAllowlist := uniqueNonEmptyStrings(req.DatabaseForwardAllowlist)
 
 	metadata["ssh_gateway_enabled"] = req.SSHEnabled
@@ -67,6 +69,7 @@ func (s *Server) saveProxyServices(req proxyServicesRequest) (model.PlatformItem
 	metadata["ssh_forward_allowlist"] = sshAllowlist
 	metadata["rdp_proxy_enabled"] = req.RDPEnabled
 	metadata["rdp_listen_address"] = rdpListen
+	metadata["rdp_forward_allowlist"] = rdpAllowlist
 	metadata["database_proxy_enabled"] = req.DatabaseEnabled
 	metadata["database_listen_address"] = databaseListen
 	metadata["database_forward_allowlist"] = databaseAllowlist
@@ -83,6 +86,9 @@ func (s *Server) saveProxyServices(req proxyServicesRequest) (model.PlatformItem
 		return model.PlatformItem{}, err
 	}
 	if err := s.reloadSSHGatewayRuntime(); err != nil {
+		return model.PlatformItem{}, err
+	}
+	if err := s.reloadRDPProxyRuntime(); err != nil {
 		return model.PlatformItem{}, err
 	}
 	if err := s.reloadDatabaseProxyRuntime(); err != nil {
@@ -156,6 +162,7 @@ func (s *Server) proxyServiceSetting() (model.PlatformItem, error) {
 				"ssh_listen_address":         "0.0.0.0:2022",
 				"rdp_proxy_enabled":          false,
 				"rdp_listen_address":         "0.0.0.0:23389",
+				"rdp_forward_allowlist":      []string{},
 				"database_proxy_enabled":     false,
 				"database_listen_address":    "127.0.0.1:23306",
 				"ssh_forward_allowlist":      []string{},
@@ -182,6 +189,11 @@ func (s *Server) proxyServicesResponse(item model.PlatformItem) map[string]any {
 	}
 	sshLiveAddress := s.sshGatewayAddress()
 	sshLastError := s.sshGatewayLastError()
+	rdpListen := firstMetadataString(metadata, "rdp_listen_address")
+	rdpAllowlist := metadataStrings(metadata["rdp_forward_allowlist"])
+	rdpLiveAddress := s.rdpProxyAddress()
+	rdpTarget := firstNonEmpty(s.rdpProxyTarget(), firstString(rdpAllowlist))
+	rdpLastError := s.rdpProxyLastError()
 	databaseListen := firstMetadataString(metadata, "database_listen_address")
 	databaseAllowlist := metadataStrings(metadata["database_forward_allowlist"])
 	databaseLiveAddress := s.databaseProxyAddress()
@@ -198,10 +210,15 @@ func (s *Server) proxyServicesResponse(item model.PlatformItem) map[string]any {
 				"last_error":     sshLastError,
 			},
 			"rdp_proxy": map[string]any{
-				"enabled":        rdpEnabled,
-				"listen_address": firstMetadataString(metadata, "rdp_listen_address"),
-				"guacd_address":  guacdAddress,
-				"state":          rdpProxyRuntimeState(rdpEnabled, guacdAddress),
+				"enabled":         rdpEnabled,
+				"listen_address":  rdpListen,
+				"live_address":    rdpLiveAddress,
+				"target":          rdpTarget,
+				"active":          s.rdpProxyActiveConnections(),
+				"allowlist_count": len(rdpAllowlist),
+				"guacd_address":   guacdAddress,
+				"state":           rdpProxyRuntimeState(rdpEnabled, rdpListen, rdpAllowlist, rdpLiveAddress, rdpLastError),
+				"last_error":      rdpProxyRuntimeError(rdpEnabled, rdpListen, rdpAllowlist, rdpLiveAddress, rdpLastError),
 			},
 			"database_proxy": map[string]any{
 				"enabled":         databaseEnabled,
@@ -231,6 +248,13 @@ func (s *Server) reloadDatabaseProxyRuntime() error {
 	return s.cfg.DatabaseProxy.Reload()
 }
 
+func (s *Server) reloadRDPProxyRuntime() error {
+	if s.cfg.RDPProxy == nil {
+		return nil
+	}
+	return s.cfg.RDPProxy.Reload()
+}
+
 func (s *Server) sshGatewayAddress() string {
 	if s.cfg.SSHGateway != nil {
 		return s.cfg.SSHGateway.Address()
@@ -243,6 +267,34 @@ func (s *Server) sshGatewayLastError() string {
 		return s.cfg.SSHGateway.LastError()
 	}
 	return ""
+}
+
+func (s *Server) rdpProxyAddress() string {
+	if s.cfg.RDPProxy != nil {
+		return s.cfg.RDPProxy.Address()
+	}
+	return ""
+}
+
+func (s *Server) rdpProxyTarget() string {
+	if s.cfg.RDPProxy != nil {
+		return s.cfg.RDPProxy.Target()
+	}
+	return ""
+}
+
+func (s *Server) rdpProxyLastError() string {
+	if s.cfg.RDPProxy != nil {
+		return s.cfg.RDPProxy.LastError()
+	}
+	return ""
+}
+
+func (s *Server) rdpProxyActiveConnections() int {
+	if s.cfg.RDPProxy != nil {
+		return s.cfg.RDPProxy.ActiveConnections()
+	}
+	return 0
 }
 
 func (s *Server) databaseProxyAddress() string {
@@ -377,14 +429,42 @@ func proxyRuntimeState(enabled bool, liveAddress, lastError string) string {
 	return "restart_required"
 }
 
-func rdpProxyRuntimeState(enabled bool, guacdAddress string) string {
+func rdpProxyRuntimeState(enabled bool, listenAddress string, allowlist []string, liveAddress, lastError string) string {
 	if !enabled {
 		return "disabled"
 	}
-	if strings.TrimSpace(guacdAddress) != "" {
-		return "online"
+	if err := validateRDPProxyConfig(listenAddress, allowlist); err != nil {
+		return "invalid_config"
 	}
-	return "guacd_unavailable"
+	if strings.TrimSpace(lastError) != "" {
+		return "error"
+	}
+	if strings.TrimSpace(liveAddress) != "" {
+		return "running"
+	}
+	if err := probeTCPListenAddress(listenAddress); err != nil {
+		return "port_unavailable"
+	}
+	return "ready"
+}
+
+func rdpProxyRuntimeError(enabled bool, listenAddress string, allowlist []string, liveAddress, lastError string) string {
+	if !enabled {
+		return ""
+	}
+	if err := validateRDPProxyConfig(listenAddress, allowlist); err != nil {
+		return err.Error()
+	}
+	if strings.TrimSpace(lastError) != "" {
+		return lastError
+	}
+	if strings.TrimSpace(liveAddress) != "" {
+		return ""
+	}
+	if err := probeTCPListenAddress(listenAddress); err != nil {
+		return err.Error()
+	}
+	return ""
 }
 
 func databaseProxyRuntimeState(enabled bool, listenAddress string, allowlist []string, liveAddress, lastError string) string {
@@ -435,6 +515,21 @@ func validateDatabaseProxyConfig(listenAddress string, allowlist []string) error
 	for _, entry := range allowlist {
 		if err := validateHostPort(entry); err != nil {
 			return fmt.Errorf("invalid database proxy allowlist entry %q: %w", entry, err)
+		}
+	}
+	return nil
+}
+
+func validateRDPProxyConfig(listenAddress string, allowlist []string) error {
+	if err := validateListenAddress(listenAddress); err != nil {
+		return err
+	}
+	if len(allowlist) == 0 {
+		return errors.New("rdp proxy forward allowlist is required")
+	}
+	for _, entry := range allowlist {
+		if err := validateHostPort(entry); err != nil {
+			return fmt.Errorf("invalid rdp proxy allowlist entry %q: %w", entry, err)
 		}
 	}
 	return nil

@@ -155,6 +155,7 @@ interface ProxyServicesForm {
   sshForwardAllowlist: string
   rdpEnabled: boolean
   rdpListenAddress: string
+  rdpForwardAllowlist: string
   databaseEnabled: boolean
   databaseListenAddress: string
   databaseForwardAllowlist: string
@@ -2836,9 +2837,18 @@ export function PlatformSettingsPage({ config }: { config: PlatformPageConfig })
                   <Field label={app.t('listenAddress', 'Listen address')}>
                     <Input value={proxyForm.rdpListenAddress} onChange={(event) => patchProxyForm({ rdpListenAddress: event.currentTarget.value })} placeholder='0.0.0.0:23389' />
                   </Field>
+                  <Field label={app.t('forwardAllowlist', 'Forward allowlist')}>
+                    <Textarea className='min-h-24 font-mono text-xs' value={proxyForm.rdpForwardAllowlist} onChange={(event) => patchProxyForm({ rdpForwardAllowlist: event.currentTarget.value })} placeholder={'windows.internal:3389\n10.0.0.20:3389'} />
+                  </Field>
                   <div className='rounded-lg border border-border bg-background/60 p-3 text-xs text-muted-foreground'>
                     <div>{app.t('guacdAddress', 'guacd address')}: {metadataText(proxyStatus.rdp_proxy?.guacd_address) || '-'}</div>
                     <div>{app.t('state', 'State')}: {metadataText(proxyStatus.rdp_proxy?.state) || '-'}</div>
+                    <div>{app.t('listenAddress', 'Listen address')}: {metadataText(proxyStatus.rdp_proxy?.listen_address) || '-'}</div>
+                    <div>{app.t('liveAddress', 'Live address')}: {metadataText(proxyStatus.rdp_proxy?.live_address) || '-'}</div>
+                    <div>{app.t('target', 'Target')}: {metadataText(proxyStatus.rdp_proxy?.target) || '-'}</div>
+                    <div>{app.t('activeConnections', 'Active connections')}: {metadataText(proxyStatus.rdp_proxy?.active) || '0'}</div>
+                    <div>{app.t('forwardAllowlist', 'Forward allowlist')}: {metadataText(proxyStatus.rdp_proxy?.allowlist_count) || '0'}</div>
+                    {metadataText(proxyStatus.rdp_proxy?.last_error) ? <div className='text-destructive'>{metadataText(proxyStatus.rdp_proxy?.last_error)}</div> : null}
                   </div>
                 </div>
                 <div className='grid gap-3 rounded-lg border border-border bg-muted/20 p-3'>
@@ -3031,6 +3041,7 @@ function proxyServicesFormFromItem(item?: PlatformItem): ProxyServicesForm {
     sshForwardAllowlist: metadataListText(metadata.ssh_forward_allowlist || metadata.forward_allowlist),
     rdpEnabled: metadataBool(metadata.rdp_proxy_enabled),
     rdpListenAddress: metadataText(metadata.rdp_listen_address) || '0.0.0.0:23389',
+    rdpForwardAllowlist: metadataListText(metadata.rdp_forward_allowlist),
     databaseEnabled: metadataBool(metadata.database_proxy_enabled),
     databaseListenAddress: metadataText(metadata.database_listen_address) || '127.0.0.1:23306',
     databaseForwardAllowlist: metadataListText(metadata.database_forward_allowlist),
@@ -3047,6 +3058,7 @@ function proxyServicesPayloadFromForm(form: ProxyServicesForm) {
     ssh_forward_allowlist: splitLines(form.sshForwardAllowlist),
     rdp_enabled: form.rdpEnabled,
     rdp_listen_address: form.rdpListenAddress.trim(),
+    rdp_forward_allowlist: splitLines(form.rdpForwardAllowlist),
     database_enabled: form.databaseEnabled,
     database_listen_address: form.databaseListenAddress.trim(),
     database_forward_allowlist: splitLines(form.databaseForwardAllowlist),

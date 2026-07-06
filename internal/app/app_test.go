@@ -3278,6 +3278,7 @@ func TestLLMIntegrationTestPrompt(t *testing.T) {
 
 func TestProxyServiceSettingsPersistStatusAndSyncSSHGateway(t *testing.T) {
 	handler, cookie := newTestHandler(t)
+	rdpListen := freeLocalTCPAddress(t)
 	databaseListen := freeLocalTCPAddress(t)
 
 	initialRec := assertStatus(t, handler, http.MethodGet, "/api/admin/proxy-services", nil, cookie, http.StatusOK)
@@ -3292,13 +3293,14 @@ func TestProxyServiceSettingsPersistStatusAndSyncSSHGateway(t *testing.T) {
 		"ssh_forward_allowlist":      []string{"db.internal:5432", "10.0.0.5:22"},
 		"proxy_private_key":          "proxy-secret-key",
 		"rdp_enabled":                true,
-		"rdp_listen_address":         "127.0.0.1:23389",
+		"rdp_listen_address":         rdpListen,
+		"rdp_forward_allowlist":      []string{"windows.internal:3389"},
 		"database_enabled":           true,
 		"database_listen_address":    databaseListen,
 		"database_forward_allowlist": []string{"db.internal:3306"},
 	}, cookie, http.StatusOK)
 	saveBody := saveRec.Body.String()
-	for _, want := range []string{"proxy_private_key_set", "127.0.0.1:22022", databaseListen, "db.internal:5432", "restart_required", "rdp_proxy", "database_proxy", `"state":"ready"`, `"allowlist_count":1`} {
+	for _, want := range []string{"proxy_private_key_set", "127.0.0.1:22022", rdpListen, databaseListen, "db.internal:5432", "windows.internal:3389", "restart_required", "rdp_proxy", "database_proxy", `"state":"ready"`, `"allowlist_count":1`} {
 		if !strings.Contains(saveBody, want) {
 			t.Fatalf("proxy service response missing %s: %s", want, saveBody)
 		}
@@ -3311,7 +3313,7 @@ func TestProxyServiceSettingsPersistStatusAndSyncSSHGateway(t *testing.T) {
 
 	settingsRec := assertStatus(t, handler, http.MethodGet, "/api/admin/system-settings", nil, cookie, http.StatusOK)
 	settingsBody := settingsRec.Body.String()
-	if !strings.Contains(settingsBody, "proxy_private_key_set") || !strings.Contains(settingsBody, "ssh_forward_allowlist") {
+	if !strings.Contains(settingsBody, "proxy_private_key_set") || !strings.Contains(settingsBody, "ssh_forward_allowlist") || !strings.Contains(settingsBody, "rdp_forward_allowlist") {
 		t.Fatalf("system settings list missing proxy state: %s", settingsBody)
 	}
 	for _, leaked := range []string{"proxy-secret-key", "proxy_private_key_encrypted"} {
@@ -3379,6 +3381,36 @@ func TestProxyServiceDatabaseProxyReportsConfigErrors(t *testing.T) {
 	}
 }
 
+func TestProxyServiceRDPProxyReportsConfigErrors(t *testing.T) {
+	handler, cookie := newTestHandler(t)
+
+	invalidRec := assertStatus(t, handler, http.MethodPost, "/api/admin/proxy-services", map[string]any{
+		"rdp_enabled":           true,
+		"rdp_listen_address":    "127.0.0.1:23389",
+		"rdp_forward_allowlist": []string{"missing-port"},
+	}, cookie, http.StatusOK)
+	invalidBody := invalidRec.Body.String()
+	for _, want := range []string{`"state":"invalid_config"`, "invalid rdp proxy allowlist entry", "missing-port"} {
+		if !strings.Contains(invalidBody, want) {
+			t.Fatalf("invalid rdp proxy response missing %s: %s", want, invalidBody)
+		}
+	}
+
+	listener, closeListener := startAppTestTCPListener(t)
+	defer closeListener()
+	occupiedRec := assertStatus(t, handler, http.MethodPost, "/api/admin/proxy-services", map[string]any{
+		"rdp_enabled":           true,
+		"rdp_listen_address":    listener.Addr().String(),
+		"rdp_forward_allowlist": []string{"windows.internal:3389"},
+	}, cookie, http.StatusOK)
+	occupiedBody := occupiedRec.Body.String()
+	for _, want := range []string{`"state":"port_unavailable"`, listener.Addr().String()} {
+		if !strings.Contains(occupiedBody, want) {
+			t.Fatalf("occupied rdp proxy response missing %s: %s", want, occupiedBody)
+		}
+	}
+}
+
 func TestProxyServiceSettingsReloadSSHGatewayRuntime(t *testing.T) {
 	runtime := &fakeSSHGatewayRuntime{address: "127.0.0.1:22022"}
 	handler, cookie := newTestServer(t, func(cfg *Config) {
@@ -3400,6 +3432,84 @@ func TestProxyServiceSettingsReloadSSHGatewayRuntime(t *testing.T) {
 	}
 	if strings.Contains(saveBody, "restart_required") {
 		t.Fatalf("proxy service still requires restart after runtime reload: %s", saveBody)
+	}
+}
+
+func TestRDPProxyRuntimeForwardsAllowedTarget(t *testing.T) {
+	upstreamAddress, received, closeUpstream := startEchoTCPServer(t)
+	defer closeUpstream()
+	listenAddress := freeLocalTCPAddress(t)
+	var rdpProxy *RDPProxyManager
+	handler, cookie := newTestServer(t, func(cfg *Config) {
+		ctx, cancel := context.WithCancel(context.Background())
+		t.Cleanup(cancel)
+		rdpProxy = NewRDPProxyManager(ctx, cfg.Store, slog.Default())
+		t.Cleanup(func() { _ = rdpProxy.Close() })
+		cfg.RDPProxy = rdpProxy
+	})
+
+	saveRec := assertStatus(t, handler, http.MethodPost, "/api/admin/proxy-services", map[string]any{
+		"rdp_enabled":           true,
+		"rdp_listen_address":    listenAddress,
+		"rdp_forward_allowlist": []string{upstreamAddress},
+	}, cookie, http.StatusOK)
+	saveBody := saveRec.Body.String()
+	for _, want := range []string{`"state":"running"`, `"live_address":"` + listenAddress + `"`, `"target":"` + upstreamAddress + `"`} {
+		if !strings.Contains(saveBody, want) {
+			t.Fatalf("rdp proxy runtime response missing %s: %s", want, saveBody)
+		}
+	}
+
+	conn, err := net.DialTimeout("tcp", rdpProxy.Address(), 2*time.Second)
+	if err != nil {
+		t.Fatalf("dial rdp proxy: %v", err)
+	}
+	if _, err := conn.Write([]byte("mstsc hello\n")); err != nil {
+		t.Fatalf("write rdp proxy: %v", err)
+	}
+	line, err := bufio.NewReader(conn).ReadString('\n')
+	if err != nil {
+		t.Fatalf("read rdp proxy response: %v", err)
+	}
+	if err := conn.Close(); err != nil {
+		t.Fatalf("close rdp proxy conn: %v", err)
+	}
+	if line != "echo:mstsc hello\n" {
+		t.Fatalf("rdp proxy response = %q", line)
+	}
+	select {
+	case got := <-received:
+		if got != "mstsc hello\n" {
+			t.Fatalf("upstream received %q", got)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("upstream did not receive rdp proxy payload")
+	}
+
+	var logsBody string
+	for i := 0; i < 20; i++ {
+		logsRec := assertStatus(t, handler, http.MethodGet, "/api/admin/audit/operation-logs", nil, cookie, http.StatusOK)
+		logsBody = logsRec.Body.String()
+		if strings.Contains(logsBody, "rdp_proxy.connect") && strings.Contains(logsBody, upstreamAddress) {
+			break
+		}
+		time.Sleep(25 * time.Millisecond)
+	}
+	if !strings.Contains(logsBody, "rdp_proxy.connect") || !strings.Contains(logsBody, upstreamAddress) {
+		t.Fatalf("rdp proxy connection was not audited: %s", logsBody)
+	}
+
+	assertStatus(t, handler, http.MethodPost, "/api/admin/proxy-services", map[string]any{
+		"rdp_enabled":           false,
+		"rdp_listen_address":    listenAddress,
+		"rdp_forward_allowlist": []string{upstreamAddress},
+	}, cookie, http.StatusOK)
+	if rdpProxy.Address() != "" {
+		t.Fatalf("rdp proxy address still active after disable: %s", rdpProxy.Address())
+	}
+	if disabledConn, err := net.DialTimeout("tcp", listenAddress, 100*time.Millisecond); err == nil {
+		_ = disabledConn.Close()
+		t.Fatal("rdp proxy listener still accepts connections after disable")
 	}
 }
 

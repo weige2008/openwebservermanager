@@ -4723,6 +4723,18 @@ func TestStorageAuthorizationStrategyPermissions(t *testing.T) {
 		"permissions": map[string]bool{"upload": false},
 	}, adminCookie, http.StatusCreated)
 	assertMultipartStatus(t, handler, "/api/admin/storages/"+storage.ID+"/files-upload", map[string]string{"path": "docs"}, "blocked.txt", []byte("blocked"), userCookie, http.StatusForbidden)
+
+	assertStatus(t, handler, http.MethodPost, "/api/admin/storages/"+storage.ID+"/files-write", map[string]any{"path": "open/rename-source.txt", "content": "rename"}, adminCookie, http.StatusCreated)
+	assertStatus(t, handler, http.MethodPost, "/api/admin/strategies", map[string]any{
+		"name":        "deny strategy-drive paste into safe",
+		"type":        "file",
+		"status":      "enabled",
+		"target_id":   storage.ID,
+		"permissions": map[string]bool{"paste": false},
+		"metadata":    map[string]any{"path_prefix": "safe"},
+	}, adminCookie, http.StatusCreated)
+	assertStatus(t, handler, http.MethodPost, "/api/admin/storages/"+storage.ID+"/files-rename", map[string]any{"path": "open/rename-source.txt", "destination": "safe/rename-blocked.txt"}, userCookie, http.StatusForbidden)
+	assertStatus(t, handler, http.MethodPost, "/api/admin/storages/"+storage.ID+"/files-rename", map[string]any{"path": "open/rename-source.txt", "destination": "open/rename-ok.txt"}, userCookie, http.StatusOK)
 }
 
 func TestStorageQuotaEnforcedAndUsageUpdated(t *testing.T) {

@@ -945,6 +945,9 @@ func (s *Server) handleStorageRename(w http.ResponseWriter, r *http.Request, roo
 	if !s.requireStoragePermission(w, r, storage.ID, "rename", sourceRel) {
 		return
 	}
+	if !s.requireStoragePermission(w, r, storage.ID, "paste", destinationRel) {
+		return
+	}
 	if _, err := os.Stat(source); err != nil {
 		writeError(w, http.StatusNotFound, "source not found")
 		return

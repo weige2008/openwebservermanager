@@ -26,13 +26,14 @@ func (s *Server) handleDesktopDrive(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusNotFound, "drive endpoint not found")
 		return
 	}
-	session, root, ok := s.desktopDriveTarget(w, r, parts[0])
-	if !ok {
-		return
-	}
 	action := ""
 	if len(parts) > 2 {
 		action = parts[2]
+	}
+	operation := desktopDriveOperation(action, r.Method)
+	session, root, ok := s.desktopDriveTarget(w, r, parts[0], operation)
+	if !ok {
+		return
 	}
 	switch {
 	case action == "" && r.Method == http.MethodGet:
@@ -48,7 +49,22 @@ func (s *Server) handleDesktopDrive(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
-func (s *Server) desktopDriveTarget(w http.ResponseWriter, r *http.Request, sessionID string) (model.ConnectionSession, string, bool) {
+func desktopDriveOperation(action, method string) string {
+	switch {
+	case action == "" && method == http.MethodGet:
+		return "list"
+	case action == "" && method == http.MethodDelete:
+		return "delete"
+	case action == "download":
+		return "download"
+	case action == "upload":
+		return "upload"
+	default:
+		return "access"
+	}
+}
+
+func (s *Server) desktopDriveTarget(w http.ResponseWriter, r *http.Request, sessionID, operation string) (model.ConnectionSession, string, bool) {
 	session, ok := s.cfg.Store.GetSession(sessionID)
 	if !ok {
 		writeError(w, http.StatusNotFound, "session not found")
@@ -59,11 +75,13 @@ func (s *Server) desktopDriveTarget(w http.ResponseWriter, r *http.Request, sess
 		return model.ConnectionSession{}, "", false
 	}
 	if !s.canAccessSession(r, session) {
+		s.recordDesktopDriveDenied(r, session, operation, "session_access", r.URL.Query().Get("path"))
 		writeError(w, http.StatusForbidden, "session access denied")
 		return model.ConnectionSession{}, "", false
 	}
 	policy := s.desktopAccessPolicy(session.Protocol)
 	if !boolPtrValue(session.FileTransferEnabled, policy.FileTransferEnabled) {
+		s.recordDesktopDriveDenied(r, session, operation, "file_transfer_disabled", r.URL.Query().Get("path"))
 		writeError(w, http.StatusForbidden, "desktop file transfer is disabled")
 		return model.ConnectionSession{}, "", false
 	}
@@ -237,6 +255,19 @@ func (s *Server) recordDesktopDriveFileLog(r *http.Request, session model.Connec
 		Description: "desktop session drive file " + action,
 		Metadata:    metadata,
 	})
+}
+
+func (s *Server) recordDesktopDriveDenied(r *http.Request, session model.ConnectionSession, action, reason, path string) {
+	action = strings.TrimSpace(action)
+	if action == "" {
+		action = "access"
+	}
+	metadata := map[string]any{
+		"path":   filepath.ToSlash(strings.TrimSpace(path)),
+		"reason": reason,
+	}
+	s.recordDesktopDriveFileLog(r, session, action, "denied", path, metadata)
+	_ = s.audit(r, "connection.drive."+action+".denied", session.ID, session.Protocol, "denied session drive "+action+": "+reason)
 }
 
 func sanitizeAttachmentName(value string) string {

@@ -8058,9 +8058,15 @@ func TestDesktopSessionDriveFiles(t *testing.T) {
 	assertMultipartStatus(t, handler, "/api/connections/"+session.ID+"/drive/upload", map[string]string{"path": "reports"}, "blocked.txt", []byte("blocked"), adminCookie, http.StatusForbidden)
 
 	fileLogs := assertStatus(t, handler, http.MethodGet, "/api/admin/audit/file-logs", nil, adminCookie, http.StatusOK)
-	for _, want := range []string{session.ID, "upload", "download", "delete"} {
+	for _, want := range []string{session.ID, "upload", "download", "delete", "denied", "session_access", "file_transfer_disabled"} {
 		if !strings.Contains(fileLogs.Body.String(), want) {
 			t.Fatalf("drive file log missing %q: %s", want, fileLogs.Body.String())
+		}
+	}
+	operationLogs := assertStatus(t, handler, http.MethodGet, "/api/admin/audit/operation-logs", nil, adminCookie, http.StatusOK)
+	for _, want := range []string{"connection.drive.list.denied", "connection.drive.upload.denied"} {
+		if !strings.Contains(operationLogs.Body.String(), want) {
+			t.Fatalf("drive denied operation log missing %q: %s", want, operationLogs.Body.String())
 		}
 	}
 }

@@ -2184,12 +2184,22 @@ func TestWebAssetProxyUsesMTLSCertificate(t *testing.T) {
 func TestDatabaseAssetQueryRequiresAuthorizationAndLogs(t *testing.T) {
 	handler, adminCookie := newTestHandler(t)
 
+	assertStatus(t, handler, http.MethodPost, "/api/admin/roles", map[string]any{
+		"name":   "sql-self-approver",
+		"type":   "custom",
+		"status": "enabled",
+		"metadata": map[string]any{
+			"api_permissions": []string{
+				"POST /api/admin/sql-work-orders/*",
+			},
+		},
+	}, adminCookie, http.StatusCreated)
 	userRec := assertStatus(t, handler, http.MethodPost, "/api/admin/users", map[string]any{
 		"name":     "database-user",
 		"type":     "local",
 		"status":   "enabled",
 		"password": "password123",
-		"metadata": map[string]any{"role": "user"},
+		"metadata": map[string]any{"role": "sql-self-approver"},
 	}, adminCookie, http.StatusCreated)
 	var user model.PlatformItem
 	decodeResponse(t, userRec, &user)
@@ -2249,7 +2259,14 @@ func TestDatabaseAssetQueryRequiresAuthorizationAndLogs(t *testing.T) {
 	if workOrder.Status != "pending" || workOrder.TargetID != databaseAsset.ID || workOrder.OwnerID != user.ID {
 		t.Fatalf("work order = status %q target %q owner %q", workOrder.Status, workOrder.TargetID, workOrder.OwnerID)
 	}
+	if got := firstMetadataString(workOrder.Metadata, "requested_by"); got != user.ID {
+		t.Fatalf("work order requested_by = %q, want %q", got, user.ID)
+	}
 	assertStatus(t, handler, http.MethodPost, "/api/admin/sql-work-orders/"+workOrder.ID+"/execute", map[string]any{}, adminCookie, http.StatusConflict)
+	selfApproveRec := assertStatus(t, handler, http.MethodPost, "/api/admin/sql-work-orders/"+workOrder.ID+"/approve", map[string]any{"note": "self approve"}, userCookie, http.StatusForbidden)
+	if !strings.Contains(selfApproveRec.Body.String(), "self-approved") {
+		t.Fatalf("self approval denial did not explain reason: %s", selfApproveRec.Body.String())
+	}
 	assertStatus(t, handler, http.MethodPost, "/api/admin/sql-work-orders/"+workOrder.ID+"/approve", map[string]any{"note": "approved for test"}, adminCookie, http.StatusOK)
 	assertStatus(t, handler, http.MethodPost, "/api/admin/sql-work-orders/"+workOrder.ID+"/reject", map[string]any{"note": "too late"}, adminCookie, http.StatusConflict)
 	assertStatus(t, handler, http.MethodPost, "/api/admin/sql-work-orders/"+workOrder.ID+"/execute", map[string]any{
@@ -2299,7 +2316,7 @@ func TestDatabaseAssetQueryRequiresAuthorizationAndLogs(t *testing.T) {
 
 	logsRec := assertStatus(t, handler, http.MethodGet, "/api/admin/audit/sql-logs", nil, adminCookie, http.StatusOK)
 	logsBody := logsRec.Body.String()
-	for _, want := range []string{databaseAsset.ID, "database_access", "alpha", "missing_table", "failed", "work_order", workOrder.ID, "work_order_hosts", failingOrder.ID, "missing_work_order_table"} {
+	for _, want := range []string{databaseAsset.ID, user.ID, "database_access", "alpha", "missing_table", "failed", "work_order", workOrder.ID, "work_order_hosts", failingOrder.ID, "missing_work_order_table"} {
 		if !strings.Contains(logsBody, want) {
 			t.Fatalf("sql logs did not include %q", want)
 		}

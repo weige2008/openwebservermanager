@@ -2536,7 +2536,7 @@ func (s *Server) handleSQLWorkOrderExecute(w http.ResponseWriter, r *http.Reques
 		WorkOrderID: id,
 		Reason:      firstMetadataString(order.Metadata, "reason", "description"),
 		ExtraMetadata: map[string]any{
-			"requested_by": firstMetadataString(order.Metadata, "requested_by", "requester", "requester_id"),
+			"requested_by": sqlWorkOrderRequesterID(order),
 			"approved_by":  firstMetadataString(order.Metadata, "approved_by"),
 		},
 	})
@@ -2600,6 +2600,11 @@ func (s *Server) handleSQLWorkOrderDecision(w http.ResponseWriter, r *http.Reque
 	if !decodeJSON(w, r, &req) {
 		return
 	}
+	userID, isAdmin := s.accessUser(r)
+	if nextStatus == "approved" && !isAdmin && userID != "" && sqlWorkOrderRequesterMatches(order, userID) {
+		writeError(w, http.StatusForbidden, "sql work order cannot be self-approved")
+		return
+	}
 	asset, userID, ok := s.sqlWorkOrderDatabaseAsset(w, r, order)
 	if !ok {
 		return
@@ -2631,6 +2636,19 @@ func (s *Server) handleSQLWorkOrderDecision(w http.ResponseWriter, r *http.Reque
 	}
 	_ = s.audit(r, "sql_work_order."+nextStatus, id, model.ProtocolDatabase, "set sql work order "+nextStatus)
 	writeJSON(w, http.StatusOK, item)
+}
+
+func sqlWorkOrderRequesterID(order model.PlatformItem) string {
+	return firstNonEmpty(
+		firstMetadataString(order.Metadata, "requested_by", "requester", "requester_id", "applicant_id", "applicant"),
+		order.OwnerID,
+		order.Username,
+	)
+}
+
+func sqlWorkOrderRequesterMatches(order model.PlatformItem, userID string) bool {
+	requester := sqlWorkOrderRequesterID(order)
+	return requester != "" && strings.EqualFold(strings.TrimSpace(requester), strings.TrimSpace(userID))
 }
 
 func (s *Server) sqlWorkOrderDatabaseAsset(w http.ResponseWriter, r *http.Request, order model.PlatformItem) (model.PlatformItem, string, bool) {

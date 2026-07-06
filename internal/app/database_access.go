@@ -113,6 +113,7 @@ func (s *Server) handleDatabaseWorkOrderCreate(w http.ResponseWriter, r *http.Re
 			"asset_name":   asset.Name,
 			"client_ip":    s.clientIP(r),
 			"source":       "access_portal",
+			"requested_by": userID,
 			"requested_at": time.Now().UTC(),
 		},
 	})

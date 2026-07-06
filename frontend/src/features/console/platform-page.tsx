@@ -91,6 +91,17 @@ interface StorageEntry {
   modified: string
 }
 
+interface StorageUsage {
+  bytes: number
+  files: number
+  dirs: number
+  limit_bytes?: number
+  available_bytes?: number
+  used?: string
+  limit?: string
+  checked_at?: string
+}
+
 interface BackupInfo {
   name: string
   size: number
@@ -1376,6 +1387,7 @@ function StorageFilesDialog({ item, onClose }: { item: PlatformItem; onClose: ()
   const app = useApp()
   const [path, setPath] = useState('.')
   const [entries, setEntries] = useState<StorageEntry[]>([])
+  const [usage, setUsage] = useState<StorageUsage | null>(null)
   const [loading, setLoading] = useState(false)
   const [folderName, setFolderName] = useState('')
   const [filePath, setFilePath] = useState('')
@@ -1390,9 +1402,10 @@ function StorageFilesDialog({ item, onClose }: { item: PlatformItem; onClose: ()
   const load = async (target = path) => {
     setLoading(true)
     try {
-      const data = await apiRequest<{ path: string; entries: StorageEntry[] }>(`/api/admin/storages/${item.id}/files?path=${encodeURIComponent(target)}`)
+      const data = await apiRequest<{ path: string; entries: StorageEntry[]; usage?: StorageUsage }>(`/api/admin/storages/${item.id}/files?path=${encodeURIComponent(target)}`)
       setPath(data.path || '.')
       setEntries(data.entries || [])
+      setUsage(data.usage || null)
     } catch (error) {
       app.handleApiError(error)
     } finally {
@@ -1513,6 +1526,8 @@ function StorageFilesDialog({ item, onClose }: { item: PlatformItem; onClose: ()
     }
   }
 
+  const usagePercent = usage?.limit_bytes ? Math.min(100, Math.round((numberValue(usage.bytes) / numberValue(usage.limit_bytes)) * 100)) : 0
+
   return (
     <DialogShell open onOpenChange={(open) => !open && onClose()} title={`${item.name} 文件`} description='浏览文件盘，创建目录，写入、下载和删除文件，操作会写入文件日志。'>
       <div className='grid gap-4'>
@@ -1521,6 +1536,25 @@ function StorageFilesDialog({ item, onClose }: { item: PlatformItem; onClose: ()
           <Button variant='outline' onClick={() => void load()} disabled={loading}><RefreshCw className='size-4' />打开</Button>
           <Button variant='outline' onClick={() => void load(parentStoragePath(path))} disabled={path === '.' || loading}>上级</Button>
         </div>
+        {usage ? (
+          <div className='grid gap-2 rounded-xl border border-border bg-background/60 p-3 text-sm'>
+            <div className='flex flex-wrap items-center justify-between gap-2'>
+              <span className='font-medium'>
+                已用 {formatBytesValue(usage.bytes)}
+                {usage.limit_bytes ? ` / ${formatBytesValue(usage.limit_bytes)}` : ''}
+              </span>
+              <span className='text-xs text-muted-foreground'>
+                {formatNumberValue(usage.files)} 文件 · {formatNumberValue(usage.dirs)} 目录
+                {usage.limit_bytes ? ` · 剩余 ${formatBytesValue(usage.available_bytes || 0)}` : ''}
+              </span>
+            </div>
+            {usage.limit_bytes ? (
+              <div className='h-2 overflow-hidden rounded-full bg-muted'>
+                <div className='h-full rounded-full bg-primary transition-all' style={{ width: `${usagePercent}%` }} />
+              </div>
+            ) : null}
+          </div>
+        ) : null}
         <div className='grid gap-2 rounded-xl border border-border bg-background/60 p-3'>
           {entries.length ? entries.map((entry) => (
             <div key={entry.path} className='grid gap-2 rounded-lg border border-border bg-card p-2 text-sm sm:grid-cols-[minmax(0,1fr)_7rem_auto] sm:items-center'>

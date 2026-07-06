@@ -3220,6 +3220,56 @@ func TestStorageAuthorizationStrategyPermissions(t *testing.T) {
 	assertMultipartStatus(t, handler, "/api/admin/storages/"+storage.ID+"/files-upload", map[string]string{"path": "docs"}, "blocked.txt", []byte("blocked"), userCookie, http.StatusForbidden)
 }
 
+func TestStorageQuotaEnforcedAndUsageUpdated(t *testing.T) {
+	srv, adminCookie := newTestServer(t, nil)
+	handler := http.Handler(srv)
+
+	storageRec := assertStatus(t, handler, http.MethodPost, "/api/admin/storages", map[string]any{
+		"name":     "quota-drive",
+		"type":     "local",
+		"status":   "enabled",
+		"metadata": map[string]any{"limit_bytes": 8},
+	}, adminCookie, http.StatusCreated)
+	var storage model.PlatformItem
+	decodeResponse(t, storageRec, &storage)
+
+	assertStatus(t, handler, http.MethodPost, "/api/admin/storages/"+storage.ID+"/files-write", map[string]any{"path": "a.txt", "content": "12345"}, adminCookie, http.StatusCreated)
+	listRec := assertStatus(t, handler, http.MethodGet, "/api/admin/storages/"+storage.ID+"/files", nil, adminCookie, http.StatusOK)
+	var listPayload struct {
+		Usage storageUsageInfo `json:"usage"`
+	}
+	decodeResponse(t, listRec, &listPayload)
+	if listPayload.Usage.Bytes != 5 || listPayload.Usage.LimitBytes != 8 || listPayload.Usage.AvailableBytes != 3 {
+		t.Fatalf("usage after first write = %#v, want 5/8/3 bytes", listPayload.Usage)
+	}
+
+	quotaRec := assertStatus(t, handler, http.MethodPost, "/api/admin/storages/"+storage.ID+"/files-write", map[string]any{"path": "b.txt", "content": "1234"}, adminCookie, http.StatusRequestEntityTooLarge)
+	if !strings.Contains(quotaRec.Body.String(), "quota") {
+		t.Fatalf("quota denial body = %q, want quota detail", quotaRec.Body.String())
+	}
+	logsRec := assertStatus(t, handler, http.MethodGet, "/api/admin/audit/file-logs", nil, adminCookie, http.StatusOK)
+	if !strings.Contains(logsRec.Body.String(), "storage quota exceeded") || !strings.Contains(logsRec.Body.String(), "denied") {
+		t.Fatal("quota denial was not written to file logs")
+	}
+
+	assertStatus(t, handler, http.MethodPost, "/api/admin/storages/"+storage.ID+"/files-write", map[string]any{"path": "a.txt", "content": "12"}, adminCookie, http.StatusCreated)
+	assertMultipartStatus(t, handler, "/api/admin/storages/"+storage.ID+"/files-upload", map[string]string{}, "c.bin", []byte("3456"), adminCookie, http.StatusCreated)
+	assertStatus(t, handler, http.MethodPost, "/api/admin/storages/"+storage.ID+"/files-copy", map[string]any{"path": "c.bin", "destination": "d.bin"}, adminCookie, http.StatusRequestEntityTooLarge)
+	assertStatus(t, handler, http.MethodDelete, "/api/admin/storages/"+storage.ID+"/files?path=c.bin", nil, adminCookie, http.StatusOK)
+	assertStatus(t, handler, http.MethodPost, "/api/admin/storages/"+storage.ID+"/files-write", map[string]any{"path": "b.txt", "content": "123456"}, adminCookie, http.StatusCreated)
+
+	saved, ok, err := srv.cfg.Store.GetPlatformItem("storages", storage.ID)
+	if err != nil || !ok {
+		t.Fatalf("get saved storage: ok=%v err=%v", ok, err)
+	}
+	if used, ok := parseStorageByteSize(saved.Metadata["used_bytes"]); !ok || used != 8 {
+		t.Fatalf("saved used_bytes = %#v, want 8", saved.Metadata["used_bytes"])
+	}
+	if files, ok := metadataInt(saved.Metadata["files"]); !ok || files != 2 {
+		t.Fatalf("saved files = %#v, want 2", saved.Metadata["files"])
+	}
+}
+
 func TestStorageAuthorizationStrategySubjectAndPathScope(t *testing.T) {
 	handler, adminCookie := newTestHandler(t)
 

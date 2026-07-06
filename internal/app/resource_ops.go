@@ -10,6 +10,7 @@ import (
 	"crypto/x509/pkix"
 	"database/sql"
 	"encoding/base64"
+	"encoding/json"
 	"encoding/pem"
 	"errors"
 	"fmt"
@@ -19,6 +20,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"time"
 
@@ -69,6 +71,17 @@ type fileMoveRequest struct {
 	Path        string `json:"path"`
 	Destination string `json:"destination"`
 	Overwrite   bool   `json:"overwrite"`
+}
+
+type storageUsageInfo struct {
+	Bytes          int64  `json:"bytes"`
+	Files          int    `json:"files"`
+	Dirs           int    `json:"dirs"`
+	LimitBytes     int64  `json:"limit_bytes,omitempty"`
+	AvailableBytes int64  `json:"available_bytes,omitempty"`
+	Used           string `json:"used"`
+	Limit          string `json:"limit,omitempty"`
+	CheckedAt      string `json:"checked_at"`
 }
 
 type certificateRequest struct {
@@ -502,7 +515,8 @@ func cloneMetadata(source map[string]any) map[string]any {
 }
 
 func (s *Server) handleStorageFiles(w http.ResponseWriter, r *http.Request, storageID, action string) {
-	if _, ok, err := s.cfg.Store.GetPlatformItem("storages", storageID); err != nil {
+	storage, ok, err := s.cfg.Store.GetPlatformItem("storages", storageID)
+	if err != nil {
 		writeError(w, http.StatusInternalServerError, err.Error())
 		return
 	} else if !ok {
@@ -518,9 +532,9 @@ func (s *Server) handleStorageFiles(w http.ResponseWriter, r *http.Request, stor
 	case "files":
 		switch r.Method {
 		case http.MethodGet:
-			s.handleStorageList(w, r, root, storageID)
+			s.handleStorageList(w, r, root, storage)
 		case http.MethodDelete:
-			s.handleStorageDelete(w, r, root, storageID)
+			s.handleStorageDelete(w, r, root, storage)
 		default:
 			writeError(w, http.StatusMethodNotAllowed, "method not allowed")
 		}
@@ -529,43 +543,43 @@ func (s *Server) handleStorageFiles(w http.ResponseWriter, r *http.Request, stor
 			writeError(w, http.StatusMethodNotAllowed, "method not allowed")
 			return
 		}
-		s.handleStorageWrite(w, r, root, storageID)
+		s.handleStorageWrite(w, r, root, storage)
 	case "files-mkdir":
 		if r.Method != http.MethodPost {
 			writeError(w, http.StatusMethodNotAllowed, "method not allowed")
 			return
 		}
-		s.handleStorageMkdir(w, r, root, storageID)
+		s.handleStorageMkdir(w, r, root, storage)
 	case "files-download":
 		if r.Method != http.MethodGet {
 			writeError(w, http.StatusMethodNotAllowed, "method not allowed")
 			return
 		}
-		s.handleStorageDownload(w, r, root, storageID)
+		s.handleStorageDownload(w, r, root, storage.ID)
 	case "files-upload":
 		if r.Method != http.MethodPost {
 			writeError(w, http.StatusMethodNotAllowed, "method not allowed")
 			return
 		}
-		s.handleStorageUpload(w, r, root, storageID)
+		s.handleStorageUpload(w, r, root, storage)
 	case "files-rename":
 		if r.Method != http.MethodPost {
 			writeError(w, http.StatusMethodNotAllowed, "method not allowed")
 			return
 		}
-		s.handleStorageRename(w, r, root, storageID)
+		s.handleStorageRename(w, r, root, storage)
 	case "files-copy":
 		if r.Method != http.MethodPost {
 			writeError(w, http.StatusMethodNotAllowed, "method not allowed")
 			return
 		}
-		s.handleStorageCopy(w, r, root, storageID)
+		s.handleStorageCopy(w, r, root, storage)
 	default:
 		writeError(w, http.StatusNotFound, "file operation not found")
 	}
 }
 
-func (s *Server) handleStorageList(w http.ResponseWriter, r *http.Request, root, storageID string) {
+func (s *Server) handleStorageList(w http.ResponseWriter, r *http.Request, root string, storage model.PlatformItem) {
 	dirPath, rel, ok := s.storagePath(w, r, root, r.URL.Query().Get("path"))
 	if !ok {
 		return
@@ -589,11 +603,16 @@ func (s *Server) handleStorageList(w http.ResponseWriter, r *http.Request, root,
 			"modified": info.ModTime().UTC(),
 		})
 	}
-	_ = s.audit(r, "storage.files.list", storageID, "", "listed files")
-	writeJSON(w, http.StatusOK, map[string]any{"path": filepath.ToSlash(rel), "entries": result})
+	usage, err := s.updateStorageUsage(storage.ID, root)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	_ = s.audit(r, "storage.files.list", storage.ID, "", "listed files")
+	writeJSON(w, http.StatusOK, map[string]any{"path": filepath.ToSlash(rel), "entries": result, "usage": usage})
 }
 
-func (s *Server) handleStorageWrite(w http.ResponseWriter, r *http.Request, root, storageID string) {
+func (s *Server) handleStorageWrite(w http.ResponseWriter, r *http.Request, root string, storage model.PlatformItem) {
 	var req fileWriteRequest
 	if !decodeJSON(w, r, &req) {
 		return
@@ -606,7 +625,7 @@ func (s *Server) handleStorageWrite(w http.ResponseWriter, r *http.Request, root
 	if _, err := os.Stat(target); err == nil {
 		permission = "edit"
 	}
-	if !s.requireStoragePermission(w, r, storageID, permission, rel) {
+	if !s.requireStoragePermission(w, r, storage.ID, permission, rel) {
 		return
 	}
 	content := []byte(req.Content)
@@ -618,6 +637,18 @@ func (s *Server) handleStorageWrite(w http.ResponseWriter, r *http.Request, root
 		}
 		content = decoded
 	}
+	existingBytes, exists, isDir, err := storageNodeBytes(target)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	if exists && isDir {
+		writeError(w, http.StatusBadRequest, "target is a directory")
+		return
+	}
+	if !s.requireStorageQuota(w, r, storage, root, "write", rel, int64(len(content))-existingBytes) {
+		return
+	}
 	if err := os.MkdirAll(filepath.Dir(target), 0o770); err != nil {
 		writeError(w, http.StatusInternalServerError, err.Error())
 		return
@@ -626,12 +657,17 @@ func (s *Server) handleStorageWrite(w http.ResponseWriter, r *http.Request, root
 		writeError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
-	_, _ = s.cfg.Store.CreatePlatformItem("file_logs", model.PlatformItemRequest{Name: rel, Type: "write", Status: "success", TargetID: storageID, OwnerID: s.currentUserID(r), Description: "wrote file"})
-	_ = s.audit(r, "storage.files.write", storageID, "", "wrote "+rel)
-	writeJSON(w, http.StatusCreated, map[string]any{"path": filepath.ToSlash(rel), "size": len(content)})
+	usage, err := s.updateStorageUsage(storage.ID, root)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	_, _ = s.cfg.Store.CreatePlatformItem("file_logs", model.PlatformItemRequest{Name: rel, Type: "write", Status: "success", TargetID: storage.ID, OwnerID: s.currentUserID(r), Description: "wrote file"})
+	_ = s.audit(r, "storage.files.write", storage.ID, "", "wrote "+rel)
+	writeJSON(w, http.StatusCreated, map[string]any{"path": filepath.ToSlash(rel), "size": len(content), "usage": usage})
 }
 
-func (s *Server) handleStorageUpload(w http.ResponseWriter, r *http.Request, root, storageID string) {
+func (s *Server) handleStorageUpload(w http.ResponseWriter, r *http.Request, root string, storage model.PlatformItem) {
 	r.Body = http.MaxBytesReader(w, r.Body, 512<<20)
 	if err := r.ParseMultipartForm(32 << 20); err != nil {
 		writeError(w, http.StatusBadRequest, "invalid multipart upload: "+err.Error())
@@ -661,7 +697,23 @@ func (s *Server) handleStorageUpload(w http.ResponseWriter, r *http.Request, roo
 	if _, err := os.Stat(target); err == nil {
 		permission = "edit"
 	}
-	if !s.requireStoragePermission(w, r, storageID, permission, rel) {
+	if !s.requireStoragePermission(w, r, storage.ID, permission, rel) {
+		return
+	}
+	existingBytes, exists, isDir, err := storageNodeBytes(target)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	if exists && isDir {
+		writeError(w, http.StatusBadRequest, "target is a directory")
+		return
+	}
+	incomingBytes := int64(0)
+	if header != nil {
+		incomingBytes = header.Size
+	}
+	if !s.requireStorageQuota(w, r, storage, root, "upload", rel, incomingBytes-existingBytes) {
 		return
 	}
 	if err := os.MkdirAll(filepath.Dir(target), 0o770); err != nil {
@@ -685,20 +737,25 @@ func (s *Server) handleStorageUpload(w http.ResponseWriter, r *http.Request, roo
 		writeError(w, http.StatusInternalServerError, closeErr.Error())
 		return
 	}
+	usage, err := s.updateStorageUsage(storage.ID, root)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
 	_, _ = s.cfg.Store.CreatePlatformItem("file_logs", model.PlatformItemRequest{
 		Name:        rel,
 		Type:        "upload",
 		Status:      "success",
-		TargetID:    storageID,
+		TargetID:    storage.ID,
 		OwnerID:     s.currentUserID(r),
 		Description: "uploaded file",
 		Metadata:    map[string]any{"size": written, "permission": permission},
 	})
-	_ = s.audit(r, "storage.files.upload", storageID, "", "uploaded "+rel)
-	writeJSON(w, http.StatusCreated, map[string]any{"path": filepath.ToSlash(rel), "size": written, "name": fileName})
+	_ = s.audit(r, "storage.files.upload", storage.ID, "", "uploaded "+rel)
+	writeJSON(w, http.StatusCreated, map[string]any{"path": filepath.ToSlash(rel), "size": written, "name": fileName, "usage": usage})
 }
 
-func (s *Server) handleStorageMkdir(w http.ResponseWriter, r *http.Request, root, storageID string) {
+func (s *Server) handleStorageMkdir(w http.ResponseWriter, r *http.Request, root string, storage model.PlatformItem) {
 	var req filePathRequest
 	if !decodeJSON(w, r, &req) {
 		return
@@ -707,19 +764,24 @@ func (s *Server) handleStorageMkdir(w http.ResponseWriter, r *http.Request, root
 	if !ok {
 		return
 	}
-	if !s.requireStoragePermission(w, r, storageID, "upload", rel) {
+	if !s.requireStoragePermission(w, r, storage.ID, "upload", rel) {
 		return
 	}
 	if err := os.MkdirAll(target, 0o770); err != nil {
 		writeError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
-	_, _ = s.cfg.Store.CreatePlatformItem("file_logs", model.PlatformItemRequest{Name: rel, Type: "mkdir", Status: "success", TargetID: storageID, OwnerID: s.currentUserID(r), Description: "created directory"})
-	_ = s.audit(r, "storage.files.mkdir", storageID, "", "created "+rel)
-	writeJSON(w, http.StatusCreated, map[string]any{"path": filepath.ToSlash(rel)})
+	usage, err := s.updateStorageUsage(storage.ID, root)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	_, _ = s.cfg.Store.CreatePlatformItem("file_logs", model.PlatformItemRequest{Name: rel, Type: "mkdir", Status: "success", TargetID: storage.ID, OwnerID: s.currentUserID(r), Description: "created directory"})
+	_ = s.audit(r, "storage.files.mkdir", storage.ID, "", "created "+rel)
+	writeJSON(w, http.StatusCreated, map[string]any{"path": filepath.ToSlash(rel), "usage": usage})
 }
 
-func (s *Server) handleStorageDelete(w http.ResponseWriter, r *http.Request, root, storageID string) {
+func (s *Server) handleStorageDelete(w http.ResponseWriter, r *http.Request, root string, storage model.PlatformItem) {
 	target, rel, ok := s.storagePath(w, r, root, r.URL.Query().Get("path"))
 	if !ok {
 		return
@@ -728,16 +790,21 @@ func (s *Server) handleStorageDelete(w http.ResponseWriter, r *http.Request, roo
 		writeError(w, http.StatusBadRequest, "cannot delete storage root")
 		return
 	}
-	if !s.requireStoragePermission(w, r, storageID, "delete", rel) {
+	if !s.requireStoragePermission(w, r, storage.ID, "delete", rel) {
 		return
 	}
 	if err := os.RemoveAll(target); err != nil {
 		writeError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
-	_, _ = s.cfg.Store.CreatePlatformItem("file_logs", model.PlatformItemRequest{Name: rel, Type: "delete", Status: "success", TargetID: storageID, OwnerID: s.currentUserID(r), Description: "deleted file"})
-	_ = s.audit(r, "storage.files.delete", storageID, "", "deleted "+rel)
-	writeJSON(w, http.StatusOK, map[string]bool{"ok": true})
+	usage, err := s.updateStorageUsage(storage.ID, root)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	_, _ = s.cfg.Store.CreatePlatformItem("file_logs", model.PlatformItemRequest{Name: rel, Type: "delete", Status: "success", TargetID: storage.ID, OwnerID: s.currentUserID(r), Description: "deleted file"})
+	_ = s.audit(r, "storage.files.delete", storage.ID, "", "deleted "+rel)
+	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "usage": usage})
 }
 
 func (s *Server) handleStorageDownload(w http.ResponseWriter, r *http.Request, root, storageID string) {
@@ -758,7 +825,7 @@ func (s *Server) handleStorageDownload(w http.ResponseWriter, r *http.Request, r
 	http.ServeFile(w, r, target)
 }
 
-func (s *Server) handleStorageRename(w http.ResponseWriter, r *http.Request, root, storageID string) {
+func (s *Server) handleStorageRename(w http.ResponseWriter, r *http.Request, root string, storage model.PlatformItem) {
 	var req fileMoveRequest
 	if !decodeJSON(w, r, &req) {
 		return
@@ -775,7 +842,7 @@ func (s *Server) handleStorageRename(w http.ResponseWriter, r *http.Request, roo
 		writeError(w, http.StatusBadRequest, "source and destination are required")
 		return
 	}
-	if !s.requireStoragePermission(w, r, storageID, "rename", sourceRel) {
+	if !s.requireStoragePermission(w, r, storage.ID, "rename", sourceRel) {
 		return
 	}
 	if _, err := os.Stat(source); err != nil {
@@ -784,6 +851,10 @@ func (s *Server) handleStorageRename(w http.ResponseWriter, r *http.Request, roo
 	}
 	if _, err := os.Stat(destination); err == nil && !req.Overwrite {
 		writeError(w, http.StatusConflict, "destination exists")
+		return
+	}
+	if sameOrChildPath(source, destination) && sameOrChildPath(destination, source) {
+		writeError(w, http.StatusBadRequest, "source and destination are the same")
 		return
 	}
 	if err := os.MkdirAll(filepath.Dir(destination), 0o770); err != nil {
@@ -797,12 +868,17 @@ func (s *Server) handleStorageRename(w http.ResponseWriter, r *http.Request, roo
 		writeError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
-	_, _ = s.cfg.Store.CreatePlatformItem("file_logs", model.PlatformItemRequest{Name: sourceRel + " -> " + destinationRel, Type: "rename", Status: "success", TargetID: storageID, OwnerID: s.currentUserID(r), Description: "renamed file"})
-	_ = s.audit(r, "storage.files.rename", storageID, "", "renamed "+sourceRel+" to "+destinationRel)
-	writeJSON(w, http.StatusOK, map[string]any{"path": filepath.ToSlash(destinationRel)})
+	usage, err := s.updateStorageUsage(storage.ID, root)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	_, _ = s.cfg.Store.CreatePlatformItem("file_logs", model.PlatformItemRequest{Name: sourceRel + " -> " + destinationRel, Type: "rename", Status: "success", TargetID: storage.ID, OwnerID: s.currentUserID(r), Description: "renamed file"})
+	_ = s.audit(r, "storage.files.rename", storage.ID, "", "renamed "+sourceRel+" to "+destinationRel)
+	writeJSON(w, http.StatusOK, map[string]any{"path": filepath.ToSlash(destinationRel), "usage": usage})
 }
 
-func (s *Server) handleStorageCopy(w http.ResponseWriter, r *http.Request, root, storageID string) {
+func (s *Server) handleStorageCopy(w http.ResponseWriter, r *http.Request, root string, storage model.PlatformItem) {
 	var req fileMoveRequest
 	if !decodeJSON(w, r, &req) {
 		return
@@ -819,7 +895,7 @@ func (s *Server) handleStorageCopy(w http.ResponseWriter, r *http.Request, root,
 		writeError(w, http.StatusBadRequest, "source and destination are required")
 		return
 	}
-	if !s.requireStoragePermission(w, r, storageID, "copy", sourceRel) || !s.requireStoragePermission(w, r, storageID, "paste", destinationRel) {
+	if !s.requireStoragePermission(w, r, storage.ID, "copy", sourceRel) || !s.requireStoragePermission(w, r, storage.ID, "paste", destinationRel) {
 		return
 	}
 	info, err := os.Stat(source)
@@ -831,8 +907,25 @@ func (s *Server) handleStorageCopy(w http.ResponseWriter, r *http.Request, root,
 		writeError(w, http.StatusConflict, "destination exists")
 		return
 	}
+	if sameOrChildPath(source, destination) && sameOrChildPath(destination, source) {
+		writeError(w, http.StatusBadRequest, "source and destination are the same")
+		return
+	}
 	if info.IsDir() && sameOrChildPath(source, destination) {
 		writeError(w, http.StatusBadRequest, "cannot copy a directory into itself")
+		return
+	}
+	sourceBytes, _, _, err := storageNodeBytes(source)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	destinationBytes, _, _, err := storageNodeBytes(destination)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	if !s.requireStorageQuota(w, r, storage, root, "copy", destinationRel, sourceBytes-destinationBytes) {
 		return
 	}
 	if req.Overwrite {
@@ -847,9 +940,14 @@ func (s *Server) handleStorageCopy(w http.ResponseWriter, r *http.Request, root,
 		writeError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
-	_, _ = s.cfg.Store.CreatePlatformItem("file_logs", model.PlatformItemRequest{Name: sourceRel + " -> " + destinationRel, Type: "copy", Status: "success", TargetID: storageID, OwnerID: s.currentUserID(r), Description: "copied file"})
-	_ = s.audit(r, "storage.files.copy", storageID, "", "copied "+sourceRel+" to "+destinationRel)
-	writeJSON(w, http.StatusCreated, map[string]any{"path": filepath.ToSlash(destinationRel)})
+	usage, err := s.updateStorageUsage(storage.ID, root)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	_, _ = s.cfg.Store.CreatePlatformItem("file_logs", model.PlatformItemRequest{Name: sourceRel + " -> " + destinationRel, Type: "copy", Status: "success", TargetID: storage.ID, OwnerID: s.currentUserID(r), Description: "copied file"})
+	_ = s.audit(r, "storage.files.copy", storage.ID, "", "copied "+sourceRel+" to "+destinationRel)
+	writeJSON(w, http.StatusCreated, map[string]any{"path": filepath.ToSlash(destinationRel), "usage": usage})
 }
 
 func (s *Server) storagePath(w http.ResponseWriter, _ *http.Request, root, value string) (string, string, bool) {
@@ -875,6 +973,233 @@ func (s *Server) storagePath(w http.ResponseWriter, _ *http.Request, root, value
 		return "", "", false
 	}
 	return target, rel, true
+}
+
+func (s *Server) requireStorageQuota(w http.ResponseWriter, r *http.Request, storage model.PlatformItem, root, action, path string, deltaBytes int64) bool {
+	if deltaBytes <= 0 {
+		return true
+	}
+	limitBytes := storageLimitBytes(storage)
+	if limitBytes <= 0 {
+		return true
+	}
+	usage, err := collectStorageUsage(root)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err.Error())
+		return false
+	}
+	if usage.Bytes+deltaBytes <= limitBytes {
+		return true
+	}
+	_, _ = s.cfg.Store.CreatePlatformItem("file_logs", model.PlatformItemRequest{
+		Name:        path,
+		Type:        action,
+		Status:      "denied",
+		TargetID:    storage.ID,
+		OwnerID:     s.currentUserID(r),
+		Description: "storage quota exceeded",
+		Metadata: map[string]any{
+			"reason":         "quota",
+			"used_bytes":     usage.Bytes,
+			"incoming_bytes": deltaBytes,
+			"limit_bytes":    limitBytes,
+		},
+	})
+	_ = s.audit(r, "storage.files."+action+".quota.denied", storage.ID, "", "quota denied "+path)
+	writeError(w, http.StatusRequestEntityTooLarge, "storage quota exceeded")
+	return false
+}
+
+func (s *Server) updateStorageUsage(storageID, root string) (storageUsageInfo, error) {
+	item, ok, err := s.cfg.Store.GetPlatformItem("storages", storageID)
+	if err != nil {
+		return storageUsageInfo{}, err
+	}
+	if !ok {
+		return storageUsageInfo{}, os.ErrNotExist
+	}
+	usage, err := collectStorageUsage(root)
+	if err != nil {
+		return storageUsageInfo{}, err
+	}
+	limitBytes := storageLimitBytes(item)
+	checkedAt := time.Now().UTC().Format(time.RFC3339)
+	response := usage.withLimit(limitBytes, checkedAt)
+	if item.Metadata == nil {
+		item.Metadata = map[string]any{}
+	}
+	item.Metadata["used_bytes"] = usage.Bytes
+	item.Metadata["used"] = formatStorageBytes(usage.Bytes)
+	item.Metadata["files"] = usage.Files
+	item.Metadata["dirs"] = usage.Dirs
+	item.Metadata["quota_checked_at"] = checkedAt
+	if limitBytes > 0 {
+		item.Metadata["available_bytes"] = maxInt64(limitBytes-usage.Bytes, 0)
+	} else {
+		delete(item.Metadata, "available_bytes")
+	}
+	if _, err := s.cfg.Store.SavePlatformItem("storages", item); err != nil {
+		return storageUsageInfo{}, err
+	}
+	return response, nil
+}
+
+func collectStorageUsage(root string) (storageUsageInfo, error) {
+	usage := storageUsageInfo{}
+	err := filepath.WalkDir(root, func(path string, entry os.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		if path == root {
+			return nil
+		}
+		info, err := entry.Info()
+		if err != nil {
+			return err
+		}
+		if entry.IsDir() {
+			usage.Dirs++
+			return nil
+		}
+		usage.Files++
+		usage.Bytes += info.Size()
+		return nil
+	})
+	if err != nil {
+		return storageUsageInfo{}, err
+	}
+	usage.Used = formatStorageBytes(usage.Bytes)
+	return usage, nil
+}
+
+func (usage storageUsageInfo) withLimit(limitBytes int64, checkedAt string) storageUsageInfo {
+	usage.Used = formatStorageBytes(usage.Bytes)
+	usage.CheckedAt = checkedAt
+	if limitBytes > 0 {
+		usage.LimitBytes = limitBytes
+		usage.AvailableBytes = maxInt64(limitBytes-usage.Bytes, 0)
+		usage.Limit = formatStorageBytes(limitBytes)
+	}
+	return usage
+}
+
+func storageLimitBytes(item model.PlatformItem) int64 {
+	for _, key := range []string{"limit_bytes", "quota_bytes", "capacity_bytes", "limit", "quota", "capacity"} {
+		if bytes, ok := parseStorageByteSize(item.Metadata[key]); ok {
+			return bytes
+		}
+	}
+	return 0
+}
+
+func parseStorageByteSize(value any) (int64, bool) {
+	switch typed := value.(type) {
+	case nil:
+		return 0, false
+	case int:
+		return int64(typed), typed > 0
+	case int64:
+		return typed, typed > 0
+	case int32:
+		return int64(typed), typed > 0
+	case float64:
+		return int64(typed), typed > 0
+	case float32:
+		return int64(typed), typed > 0
+	case json.Number:
+		parsed, err := typed.Int64()
+		if err != nil {
+			return 0, false
+		}
+		return parsed, parsed > 0
+	case string:
+		return parseStorageByteString(typed)
+	default:
+		return 0, false
+	}
+}
+
+func parseStorageByteString(value string) (int64, bool) {
+	normalized := strings.TrimSpace(strings.ReplaceAll(value, ",", ""))
+	if normalized == "" {
+		return 0, false
+	}
+	index := 0
+	for index < len(normalized) {
+		ch := normalized[index]
+		if (ch >= '0' && ch <= '9') || ch == '.' {
+			index++
+			continue
+		}
+		break
+	}
+	if index == 0 {
+		return 0, false
+	}
+	number, err := strconv.ParseFloat(strings.TrimSpace(normalized[:index]), 64)
+	if err != nil || number <= 0 {
+		return 0, false
+	}
+	unit := strings.ToLower(strings.TrimSpace(normalized[index:]))
+	unit = strings.TrimSuffix(unit, "s")
+	multiplier := float64(1)
+	switch unit {
+	case "", "b", "byte":
+	case "k", "kb", "kib":
+		multiplier = 1024
+	case "m", "mb", "mib":
+		multiplier = 1024 * 1024
+	case "g", "gb", "gib":
+		multiplier = 1024 * 1024 * 1024
+	case "t", "tb", "tib":
+		multiplier = 1024 * 1024 * 1024 * 1024
+	default:
+		return 0, false
+	}
+	return int64(number * multiplier), true
+}
+
+func storageNodeBytes(path string) (int64, bool, bool, error) {
+	info, err := os.Stat(path)
+	if errors.Is(err, os.ErrNotExist) {
+		return 0, false, false, nil
+	}
+	if err != nil {
+		return 0, false, false, err
+	}
+	if !info.IsDir() {
+		return info.Size(), true, false, nil
+	}
+	usage, err := collectStorageUsage(path)
+	if err != nil {
+		return 0, true, true, err
+	}
+	return usage.Bytes, true, true, nil
+}
+
+func formatStorageBytes(bytes int64) string {
+	if bytes < 1024 {
+		return fmt.Sprintf("%d B", bytes)
+	}
+	units := []string{"KB", "MB", "GB", "TB"}
+	current := float64(bytes) / 1024
+	unitIndex := 0
+	for current >= 1024 && unitIndex < len(units)-1 {
+		current /= 1024
+		unitIndex++
+	}
+	precision := 2
+	if current >= 10 {
+		precision = 1
+	}
+	return fmt.Sprintf("%.*f %s", precision, current, units[unitIndex])
+}
+
+func maxInt64(left, right int64) int64 {
+	if left > right {
+		return left
+	}
+	return right
 }
 
 func (s *Server) requireStoragePermission(w http.ResponseWriter, r *http.Request, storageID, action, path string) bool {

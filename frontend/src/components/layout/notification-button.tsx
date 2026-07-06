@@ -6,6 +6,7 @@ import { useTranslation } from 'react-i18next'
 
 import { useApp } from '@/app/app-provider'
 import { apiRequest } from '@/lib/api'
+import { isAdminRole, isAuditorRole } from '@/lib/rbac'
 import { cn } from '@/lib/utils'
 import { useNotificationStore } from '@/stores/notification-store'
 
@@ -36,6 +37,7 @@ export function NotificationButton({
   const { auth, data } = useApp()
   const { t } = useTranslation()
   const productName = t('productName')
+  const canSeeRuntime = Boolean(auth && (isAdminRole(auth.role) || isAuditorRole(auth.role)))
   const [activeTab, setActiveTab] = useState<'notice' | 'timeline'>('notice')
   const readKeys = useNotificationStore((state) => state.readKeys)
   const markRead = useNotificationStore((state) => state.markRead)
@@ -48,6 +50,16 @@ export function NotificationButton({
   })
 
   const fallbackNotifications = useMemo<NotificationItem[]>(() => {
+    const items: NotificationItem[] = [
+      {
+        id: 'audit',
+        type: 'info',
+        title_key: 'sessionAuditEnabled',
+        body_key: 'sessionAuditEnabledBody',
+        created_at: new Date().toISOString(),
+      },
+    ]
+    if (!canSeeRuntime) return items
     const gatewayReady = Boolean(data.guacd?.address)
     return [
       {
@@ -57,15 +69,9 @@ export function NotificationButton({
         body: gatewayReady ? data.guacd?.address || '' : t('rdpGatewayOfflineBody'),
         created_at: new Date().toISOString(),
       },
-      {
-        id: 'audit',
-        type: 'info',
-        title_key: 'sessionAuditEnabled',
-        body_key: 'sessionAuditEnabledBody',
-        created_at: new Date().toISOString(),
-      },
+      ...items,
     ]
-  }, [data.guacd?.address, t])
+  }, [canSeeRuntime, data.guacd?.address, t])
   const notifications = auth && notificationQuery.data?.items?.length ? notificationQuery.data.items : fallbackNotifications
 
   const noticeKey = 'notice:connection-workspace'

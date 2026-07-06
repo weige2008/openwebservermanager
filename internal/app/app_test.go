@@ -3960,6 +3960,10 @@ func TestNotificationsReflectRuntimeAndFilterByUser(t *testing.T) {
 			t.Fatalf("admin notifications missing %q: %s", want, adminBody)
 		}
 	}
+	adminBootstrapRec := assertStatus(t, handler, http.MethodGet, "/api/bootstrap", nil, adminCookie, http.StatusOK)
+	if !strings.Contains(adminBootstrapRec.Body.String(), `"guacd"`) {
+		t.Fatalf("admin bootstrap missing runtime guacd state: %s", adminBootstrapRec.Body.String())
+	}
 
 	userRec := assertStatus(t, handler, http.MethodPost, "/api/admin/users", map[string]any{
 		"name":     "limited-user",
@@ -3991,8 +3995,12 @@ func TestNotificationsReflectRuntimeAndFilterByUser(t *testing.T) {
 	if !strings.Contains(limitedBody, "limited-user") {
 		t.Fatalf("limited user did not receive own login notification: %s", limitedBody)
 	}
-	if strings.Contains(limitedBody, "other-user") || strings.Contains(limitedBody, "notification.taskFailed") {
+	if strings.Contains(limitedBody, "other-user") || strings.Contains(limitedBody, "notification.taskFailed") || strings.Contains(limitedBody, "rdpGatewayOffline") || strings.Contains(limitedBody, `"category":"runtime"`) {
 		t.Fatalf("limited user received another user's/system notification: %s", limitedBody)
+	}
+	limitedBootstrapRec := assertStatus(t, handler, http.MethodGet, "/api/bootstrap", nil, userCookie, http.StatusOK)
+	if strings.Contains(limitedBootstrapRec.Body.String(), `"guacd"`) {
+		t.Fatalf("limited user bootstrap leaked runtime guacd state: %s", limitedBootstrapRec.Body.String())
 	}
 }
 

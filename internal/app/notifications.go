@@ -56,7 +56,9 @@ func (s *Server) buildNotifications(session authSession) ([]notificationItem, er
 	operator := notificationCanSeeSystem(s.roleDecision(session.Role))
 	items := []notificationItem{}
 
-	items = append(items, s.runtimeNotifications(now)...)
+	if operator {
+		items = append(items, s.runtimeNotifications(now)...)
+	}
 	items = append(items, sessionNotifications(sessions, platform["online_sessions"], session.UserID, operator, now)...)
 	items = append(items, loginNotifications(platform["login_logs"], session, operator)...)
 	if operator {

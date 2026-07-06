@@ -288,16 +288,19 @@ func (s *Server) handleBootstrap(w http.ResponseWriter, r *http.Request) {
 		auditLogs = nil
 		platform = accessBootstrapPlatform(platform, session.UserID)
 	}
-	writeJSON(w, http.StatusOK, map[string]any{
+	payload := map[string]any{
 		"servers":     servers,
 		"credentials": credentials,
 		"sessions":    sessions,
 		"audit_logs":  auditLogs,
 		"platform":    platform,
-		"guacd": map[string]any{
+	}
+	if notificationCanSeeSystem(decision) {
+		payload["guacd"] = map[string]any{
 			"address": s.cfg.Guacd.Address(),
-		},
-	})
+		}
+	}
+	writeJSON(w, http.StatusOK, payload)
 }
 
 func (s *Server) handleCreateServer(w http.ResponseWriter, r *http.Request) {

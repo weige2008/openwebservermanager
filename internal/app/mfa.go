@@ -39,6 +39,12 @@ type mfaDisableRequest struct {
 	RecoveryCode    string `json:"recovery_code"`
 }
 
+type mfaRecoveryCodesRequest struct {
+	CurrentPassword string `json:"current_password"`
+	MFACode         string `json:"mfa_code"`
+	RecoveryCode    string `json:"recovery_code"`
+}
+
 func (s *Server) handleLoginMFA(w http.ResponseWriter, r *http.Request, user store.AdminPublic, username, clientIP, failureKey string, req loginRequest) (bool, bool) {
 	profile, _, err := s.cfg.Store.UserMFAProfile(user.UserID)
 	if err != nil {
@@ -154,6 +160,8 @@ func (s *Server) handleAuthenticatedMFA(w http.ResponseWriter, r *http.Request) 
 		s.handleMFAEnable(w, r)
 	case r.Method == http.MethodPost && r.URL.Path == "/api/auth/mfa/disable":
 		s.handleMFADisable(w, r)
+	case r.Method == http.MethodPost && r.URL.Path == "/api/auth/mfa/recovery-codes":
+		s.handleMFARegenerateRecoveryCodes(w, r)
 	default:
 		writeError(w, http.StatusNotFound, "MFA endpoint not found")
 	}
@@ -245,6 +253,52 @@ func (s *Server) handleMFADisable(w http.ResponseWriter, r *http.Request) {
 	}
 	_ = s.audit(r, "auth.mfa.disable", session.UserID, "", "disabled MFA")
 	writeJSON(w, http.StatusOK, map[string]any{"enabled": false})
+}
+
+func (s *Server) handleMFARegenerateRecoveryCodes(w http.ResponseWriter, r *http.Request) {
+	var req mfaRecoveryCodesRequest
+	if !decodeJSON(w, r, &req) {
+		return
+	}
+	_, session, _ := s.auth.session(r)
+	if !s.verifyCurrentPassword(session.Username, req.CurrentPassword) {
+		writeError(w, http.StatusUnauthorized, "current password is invalid")
+		return
+	}
+	profile, _, err := s.cfg.Store.UserMFAProfile(session.UserID)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	if !profile.Enabled {
+		writeError(w, http.StatusConflict, "MFA is not enabled")
+		return
+	}
+	verified, _, err := s.verifyMFAInput(session.UserID, profile, req.MFACode, req.RecoveryCode)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	if !verified {
+		writeError(w, http.StatusUnauthorized, "MFA code is invalid")
+		return
+	}
+	recoveryCodes, err := generateRecoveryCodes(8)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	nextProfile, err := s.cfg.Store.ReplaceUserMFARecoveryCodes(session.UserID, recoveryCodes)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	_ = s.audit(r, "auth.mfa.recovery_codes.regenerate", session.UserID, "", "regenerated MFA recovery codes")
+	writeJSON(w, http.StatusOK, map[string]any{
+		"enabled":        nextProfile.Enabled,
+		"recovery_count": nextProfile.RecoveryCount,
+		"recovery_codes": recoveryCodes,
+	})
 }
 
 func (s *Server) writeMFAChallenge(w http.ResponseWriter, r *http.Request, user store.AdminPublic, username, clientIP, failureKey string, setupRequired bool, secret string) {

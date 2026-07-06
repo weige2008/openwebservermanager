@@ -161,6 +161,7 @@ export function SettingsPage() {
   const [mfaSetup, setMFASetup] = useState<MFASetup | null>(null)
   const [mfaCode, setMFACode] = useState('')
   const [mfaPassword, setMFAPassword] = useState('')
+  const [mfaRecoveryCodes, setMFARecoveryCodes] = useState<string[]>([])
   const [mfaBusy, setMFABusy] = useState(false)
   const [passkeys, setPasskeys] = useState<PasskeyItem[]>([])
   const [passkeyBusy, setPasskeyBusy] = useState(false)
@@ -256,8 +257,8 @@ export function SettingsPage() {
       setMFASetup(null)
       setMFACode('')
       await loadMFAStatus()
-      if (result.recovery_codes?.length) window.alert(`Recovery codes:\n\n${result.recovery_codes.join('\n')}`)
-      app.showToast('MFA enabled')
+      setMFARecoveryCodes(result.recovery_codes || [])
+      app.showToast(t('settingsPage.mfaEnabled'))
     } catch (error) {
       app.handleApiError(error)
     } finally {
@@ -275,8 +276,28 @@ export function SettingsPage() {
       setMFASetup(null)
       setMFACode('')
       setMFAPassword('')
+      setMFARecoveryCodes([])
       await loadMFAStatus()
-      app.showToast('MFA disabled')
+      app.showToast(t('settingsPage.mfaDisabled'))
+    } catch (error) {
+      app.handleApiError(error)
+    } finally {
+      setMFABusy(false)
+    }
+  }
+
+  const regenerateMFARecoveryCodes = async () => {
+    setMFABusy(true)
+    try {
+      const result = await apiRequest<{ recovery_codes: string[]; recovery_count: number }>('/api/auth/mfa/recovery-codes', {
+        method: 'POST',
+        body: JSON.stringify({ current_password: mfaPassword, mfa_code: mfaCode }),
+      })
+      setMFACode('')
+      setMFAPassword('')
+      setMFARecoveryCodes(result.recovery_codes || [])
+      await loadMFAStatus()
+      app.showToast(t('settingsPage.mfaRecoveryCodesRegenerated'))
     } catch (error) {
       app.handleApiError(error)
     } finally {
@@ -869,46 +890,64 @@ export function SettingsPage() {
           </span>
           <div className='min-w-0'>
             <div className='flex flex-wrap items-center gap-2'>
-              <h2 className='truncate text-base font-semibold'>Multi-factor authentication</h2>
-              <Badge tone={mfaStatus?.enabled ? 'success' : 'warning'}>{mfaStatus?.enabled ? 'enabled' : 'disabled'}</Badge>
-              {mfaStatus?.forced ? <Badge tone='danger'>required</Badge> : null}
+              <h2 className='truncate text-base font-semibold'>{t('settingsPage.mfaTitle')}</h2>
+              <Badge tone={mfaStatus?.enabled ? 'success' : 'warning'}>
+                {mfaStatus?.enabled ? t('settingsPage.mfaEnabledStatus') : t('settingsPage.mfaDisabledStatus')}
+              </Badge>
+              {mfaStatus?.forced ? <Badge tone='danger'>{t('settingsPage.mfaRequiredStatus')}</Badge> : null}
             </div>
-            <p className='mt-1 max-w-lg text-sm leading-6 text-muted-foreground'>Use TOTP codes from an authenticator app before a browser session cookie is issued.</p>
-            <p className='mt-2 text-xs text-muted-foreground'>Recovery codes remaining: {mfaStatus?.recovery_count ?? 0}</p>
+            <p className='mt-1 max-w-lg text-sm leading-6 text-muted-foreground'>{t('settingsPage.mfaDescription')}</p>
+            <p className='mt-2 text-xs text-muted-foreground'>{t('settingsPage.mfaRecoveryRemaining', { count: mfaStatus?.recovery_count ?? 0 })}</p>
           </div>
         </div>
         <div className='grid gap-3'>
+          {mfaRecoveryCodes.length ? (
+            <div className='grid gap-2 rounded-lg border border-warning/35 bg-warning/10 p-3'>
+              <div className='text-sm font-medium'>{t('settingsPage.mfaRecoveryCodesTitle')}</div>
+              <p className='text-xs leading-5 text-muted-foreground'>{t('settingsPage.mfaRecoveryCodesDescription')}</p>
+              <div className='grid gap-1 rounded-md border border-border bg-background/80 p-3 font-mono text-xs sm:grid-cols-2'>
+                {mfaRecoveryCodes.map((code) => (
+                  <span key={code}>{code}</span>
+                ))}
+              </div>
+            </div>
+          ) : null}
           {mfaSetup ? (
             <div className='grid gap-3 rounded-lg border border-border bg-background/70 p-3'>
-              <Field label='TOTP secret'>
+              <Field label={t('settingsPage.mfaTotpSecret')}>
                 <Input readOnly className='font-mono text-xs' value={mfaSetup.secret} />
               </Field>
-              <Field label='otpauth URL'>
+              <Field label={t('settingsPage.mfaOtpauthUrl')}>
                 <Input readOnly className='font-mono text-xs' value={mfaSetup.otpauth_url} />
               </Field>
-              <Field label='Current MFA code'>
+              <Field label={t('settingsPage.mfaCurrentCode')}>
                 <Input value={mfaCode} onChange={(event) => setMFACode(event.currentTarget.value)} inputMode='numeric' placeholder='123456' />
               </Field>
               <div className='flex flex-wrap justify-end gap-2'>
                 <Button variant='outline' onClick={() => setMFASetup(null)} disabled={mfaBusy}>{t('cancel')}</Button>
-                <Button variant='primary' onClick={() => void enableMFA()} disabled={mfaBusy || !mfaCode.trim()}>Enable MFA</Button>
+                <Button variant='primary' onClick={() => void enableMFA()} disabled={mfaBusy || !mfaCode.trim()}>{t('settingsPage.enableMFA')}</Button>
               </div>
             </div>
           ) : mfaStatus?.enabled ? (
             <div className='grid gap-3 rounded-lg border border-border bg-background/70 p-3'>
-              <Field label='Current password'>
+              <Field label={t('settingsPage.currentPassword')}>
                 <Input type='password' value={mfaPassword} onChange={(event) => setMFAPassword(event.currentTarget.value)} />
               </Field>
-              <Field label='Current MFA code'>
+              <Field label={t('settingsPage.mfaCurrentCode')}>
                 <Input value={mfaCode} onChange={(event) => setMFACode(event.currentTarget.value)} inputMode='numeric' placeholder='123456' />
               </Field>
-              <div className='flex justify-end'>
-                <Button variant='destructive' onClick={() => void disableMFA()} disabled={mfaBusy || !mfaPassword.trim() || !mfaCode.trim()}>Disable MFA</Button>
+              <div className='flex flex-wrap justify-end gap-2'>
+                <Button variant='outline' onClick={() => void regenerateMFARecoveryCodes()} disabled={mfaBusy || !mfaPassword.trim() || !mfaCode.trim()}>
+                  {t('settingsPage.regenerateRecoveryCodes')}
+                </Button>
+                <Button variant='destructive' onClick={() => void disableMFA()} disabled={mfaBusy || !mfaPassword.trim() || !mfaCode.trim()}>
+                  {t('settingsPage.disableMFA')}
+                </Button>
               </div>
             </div>
           ) : (
             <div className='flex justify-end'>
-              <Button variant='primary' onClick={() => void startMFASetup()} disabled={mfaBusy}>Set up MFA</Button>
+              <Button variant='primary' onClick={() => void startMFASetup()} disabled={mfaBusy}>{t('settingsPage.setupMFA')}</Button>
             </div>
           )}
         </div>

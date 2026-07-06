@@ -1443,6 +1443,39 @@ func (s *Store) DisableUserMFA(userID string) error {
 	return err
 }
 
+func (s *Store) ReplaceUserMFARecoveryCodes(userID string, recoveryCodes []string) (MFAProfile, error) {
+	item, ok, err := s.GetPlatformItem("users", userID)
+	if err != nil {
+		return MFAProfile{}, err
+	}
+	if !ok {
+		return MFAProfile{}, os.ErrNotExist
+	}
+	if !metadataBool(item.Metadata["mfa_enabled"]) {
+		return MFAProfile{}, os.ErrInvalid
+	}
+	hashes := make([]string, 0, len(recoveryCodes))
+	for _, code := range recoveryCodes {
+		if hash := recoveryCodeHash(code); hash != "" {
+			hashes = append(hashes, hash)
+		}
+	}
+	if item.Metadata == nil {
+		item.Metadata = map[string]any{}
+	}
+	item.Metadata["mfa_recovery_hashes"] = hashes
+	item.Metadata["mfa_recovery_count"] = len(hashes)
+	if _, err := s.SavePlatformItem("users", item); err != nil {
+		return MFAProfile{}, err
+	}
+	profile, _, err := s.UserMFAProfile(userID)
+	if err != nil {
+		return MFAProfile{}, err
+	}
+	profile.RecoveryCount = len(hashes)
+	return profile, nil
+}
+
 func (s *Store) ConsumeUserMFARecoveryCode(userID, code string) (bool, error) {
 	hash := recoveryCodeHash(code)
 	if hash == "" {

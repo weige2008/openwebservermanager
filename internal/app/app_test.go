@@ -2176,6 +2176,19 @@ func TestTOTPLoginMFASetupChallengeRecoveryAndDisable(t *testing.T) {
 	if len(recoveryCodes) != 8 {
 		t.Fatalf("recovery code count = %d, want 8", len(recoveryCodes))
 	}
+	regenerateRec := assertStatus(t, handler, http.MethodPost, "/api/auth/mfa/recovery-codes", map[string]any{
+		"current_password": "password123",
+		"mfa_code":         totpCode(secret, time.Now().UTC()),
+	}, adminCookie, http.StatusOK)
+	var regenerated map[string]any
+	decodeResponse(t, regenerateRec, &regenerated)
+	regeneratedCodes := stringSliceFromAny(regenerated["recovery_codes"])
+	if len(regeneratedCodes) != 8 {
+		t.Fatalf("regenerated recovery code count = %d, want 8", len(regeneratedCodes))
+	}
+	if regeneratedCodes[0] == recoveryCodes[0] {
+		t.Fatal("regenerated recovery code unexpectedly matched old code")
+	}
 	usersRec := assertStatus(t, handler, http.MethodGet, "/api/admin/users", nil, adminCookie, http.StatusOK)
 	for _, leaked := range []string{secret, "mfa_secret_encrypted", "mfa_recovery_hashes"} {
 		if strings.Contains(usersRec.Body.String(), leaked) {
@@ -2203,9 +2216,16 @@ func TestTOTPLoginMFASetupChallengeRecoveryAndDisable(t *testing.T) {
 	var recoveryChallenge map[string]any
 	decodeResponse(t, recoveryChallengeRec, &recoveryChallenge)
 	recoveryToken, _ := recoveryChallenge["mfa_token"].(string)
-	recoveryLoginRec := assertStatus(t, handler, http.MethodPost, "/api/auth/mfa/complete-login", map[string]any{
+	assertStatus(t, handler, http.MethodPost, "/api/auth/mfa/complete-login", map[string]any{
 		"token":         recoveryToken,
 		"recovery_code": recoveryCodes[0],
+	}, nil, http.StatusUnauthorized)
+	recoveryChallengeRec = assertStatus(t, handler, http.MethodPost, "/api/auth/login", map[string]any{"username": "admin", "password": "password123"}, nil, http.StatusAccepted)
+	decodeResponse(t, recoveryChallengeRec, &recoveryChallenge)
+	recoveryToken, _ = recoveryChallenge["mfa_token"].(string)
+	recoveryLoginRec := assertStatus(t, handler, http.MethodPost, "/api/auth/mfa/complete-login", map[string]any{
+		"token":         recoveryToken,
+		"recovery_code": regeneratedCodes[0],
 	}, nil, http.StatusOK)
 	recoveryCookie := recoveryLoginRec.Result().Cookies()[0]
 	reusedChallengeRec := assertStatus(t, handler, http.MethodPost, "/api/auth/login", map[string]any{"username": "admin", "password": "password123"}, nil, http.StatusAccepted)
@@ -2213,7 +2233,7 @@ func TestTOTPLoginMFASetupChallengeRecoveryAndDisable(t *testing.T) {
 	decodeResponse(t, reusedChallengeRec, &reusedChallenge)
 	assertStatus(t, handler, http.MethodPost, "/api/auth/mfa/complete-login", map[string]any{
 		"token":         reusedChallenge["mfa_token"],
-		"recovery_code": recoveryCodes[0],
+		"recovery_code": regeneratedCodes[0],
 	}, nil, http.StatusUnauthorized)
 
 	assertStatus(t, handler, http.MethodPost, "/api/auth/mfa/disable", map[string]any{

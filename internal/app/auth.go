@@ -440,33 +440,18 @@ func (s *Server) refreshAuthSession(token string, session authSession) (authSess
 		s.auth.delete(token)
 		return authSession{}, false
 	}
-	user, ok, err := s.cfg.Store.GetPlatformItem("users", session.UserID)
+	user, ok, err := s.authUserByID(session.UserID)
 	if err != nil {
 		return session, true
 	}
 	if !ok {
-		admin, adminOK := s.cfg.Store.AdminUser()
-		if adminOK && admin.UserID == session.UserID {
-			refreshed := authSession{
-				UserID:    admin.UserID,
-				Username:  admin.Username,
-				Role:      admin.Role,
-				ExpiresAt: session.ExpiresAt,
-			}
-			s.auth.refreshSession(token, refreshed)
-			return refreshed, true
-		}
-		s.auth.delete(token)
-		return authSession{}, false
-	}
-	if !platformItemEnabled(user) {
 		s.auth.delete(token)
 		return authSession{}, false
 	}
 	refreshed := authSession{
-		UserID:    user.ID,
-		Username:  strings.TrimSpace(user.Name),
-		Role:      userRole(user),
+		UserID:    user.UserID,
+		Username:  strings.TrimSpace(user.Username),
+		Role:      user.Role,
 		ExpiresAt: session.ExpiresAt,
 	}
 	if refreshed.Username == "" {
@@ -474,6 +459,34 @@ func (s *Server) refreshAuthSession(token string, session authSession) (authSess
 	}
 	s.auth.refreshSession(token, refreshed)
 	return refreshed, true
+}
+
+func (s *Server) authUserByID(userID string) (store.AdminPublic, bool, error) {
+	userID = strings.TrimSpace(userID)
+	if userID == "" {
+		return store.AdminPublic{}, false, nil
+	}
+	item, ok, err := s.cfg.Store.GetPlatformItem("users", userID)
+	if err != nil {
+		return store.AdminPublic{}, false, err
+	}
+	if ok {
+		if !platformItemEnabled(item) {
+			return store.AdminPublic{}, false, nil
+		}
+		return store.AdminPublic{
+			UserID:    item.ID,
+			Username:  item.Name,
+			Role:      userRole(item),
+			CreatedAt: item.CreatedAt,
+			UpdatedAt: item.UpdatedAt,
+		}, true, nil
+	}
+	admin, adminOK := s.cfg.Store.AdminUser()
+	if adminOK && admin.UserID == userID {
+		return admin, true, nil
+	}
+	return store.AdminPublic{}, false, nil
 }
 
 func userRole(user model.PlatformItem) string {

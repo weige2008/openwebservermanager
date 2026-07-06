@@ -638,6 +638,58 @@ func TestAccessMFAWebAssetPreflightUnlocksProxy(t *testing.T) {
 	assertStatus(t, handler, http.MethodGet, "/api/access/http/"+webAsset.ID+"/proxy/", nil, userCookie, http.StatusUnauthorized)
 }
 
+func TestMFACompleteLoginRejectsDisabledUser(t *testing.T) {
+	handler, adminCookie := newTestHandler(t)
+	srv := handler.(*Server)
+
+	userRec := assertStatus(t, handler, http.MethodPost, "/api/admin/users", map[string]any{
+		"name":     "disabled-mfa-login",
+		"type":     "local",
+		"status":   "enabled",
+		"password": "password123",
+		"metadata": map[string]any{"role": "user"},
+	}, adminCookie, http.StatusCreated)
+	var user model.PlatformItem
+	decodeResponse(t, userRec, &user)
+	secret := "JBSWY3DPEHPK3PXP"
+	if _, err := srv.cfg.Store.EnableUserMFA(user.ID, secret, []string{"VWXYZ-ABCDE"}); err != nil {
+		t.Fatalf("enable user MFA: %v", err)
+	}
+
+	loginRec := assertStatus(t, handler, http.MethodPost, "/api/auth/login", map[string]any{
+		"username": "disabled-mfa-login",
+		"password": "password123",
+	}, nil, http.StatusAccepted)
+	var challenge map[string]any
+	decodeResponse(t, loginRec, &challenge)
+	token, _ := challenge["mfa_token"].(string)
+	if token == "" {
+		t.Fatalf("login MFA challenge missing token: %v", challenge)
+	}
+
+	assertStatus(t, handler, http.MethodPatch, "/api/admin/users/"+user.ID, map[string]any{
+		"status": "disabled",
+	}, adminCookie, http.StatusOK)
+	completeRec := assertStatus(t, handler, http.MethodPost, "/api/auth/mfa/complete-login", map[string]any{
+		"token":    token,
+		"mfa_code": totpCode(secret, time.Now().UTC()),
+	}, nil, http.StatusUnauthorized)
+	if len(completeRec.Result().Cookies()) != 0 {
+		t.Fatal("disabled user MFA completion returned an auth cookie")
+	}
+	if !strings.Contains(completeRec.Body.String(), "MFA account is disabled or no longer exists") {
+		t.Fatalf("disabled user MFA response did not explain account state: %s", completeRec.Body.String())
+	}
+	assertStatus(t, handler, http.MethodPost, "/api/auth/mfa/complete-login", map[string]any{
+		"token":    token,
+		"mfa_code": totpCode(secret, time.Now().UTC()),
+	}, nil, http.StatusUnauthorized)
+	logsRec := assertStatus(t, handler, http.MethodGet, "/api/admin/audit/login-logs", nil, adminCookie, http.StatusOK)
+	if !strings.Contains(logsRec.Body.String(), "disabled-mfa-login") || !strings.Contains(logsRec.Body.String(), "MFA account is disabled or no longer exists") {
+		t.Fatalf("disabled user MFA failure was not written to login logs: %s", logsRec.Body.String())
+	}
+}
+
 func TestPasskeyRegistrationAndLogin(t *testing.T) {
 	handler, adminCookie := newTestHandler(t)
 

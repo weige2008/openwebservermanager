@@ -91,6 +91,17 @@ func (s *Server) handleMFACompleteLogin(w http.ResponseWriter, r *http.Request) 
 		writeError(w, http.StatusUnauthorized, "MFA challenge expired")
 		return
 	}
+	currentUser, userOK, err := s.authUserByID(challenge.User.UserID)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	if !userOK {
+		s.auth.deleteMFAChallenge(token)
+		s.recordMFAFailure(w, r, challenge.Username, challenge.ClientIP, challenge.FailureKey, "MFA account is disabled or no longer exists")
+		return
+	}
+	challenge.User = currentUser
 	var recoveryCodes []string
 	var method string
 	if challenge.SetupRequired {

@@ -1286,6 +1286,22 @@ func (s *Store) SystemSettingSMTPPassword(id string) (string, bool, error) {
 	return secret, true, nil
 }
 
+func (s *Store) SystemSettingLLMAPIKey(id string) (string, bool, error) {
+	item, ok, err := s.GetPlatformItem("system_settings", id)
+	if err != nil || !ok {
+		return "", ok, err
+	}
+	encrypted, _ := item.Metadata["llm_api_key_encrypted"].(string)
+	if encrypted == "" {
+		return "", true, nil
+	}
+	secret, err := s.cipher.DecryptString(encrypted)
+	if err != nil {
+		return "", true, err
+	}
+	return secret, true, nil
+}
+
 func (s *Store) SystemSettingProxyPrivateKey() (string, bool, error) {
 	rows, err := s.db.Query(`SELECT payload FROM platform_records WHERE collection = ?`, "system_settings")
 	if err != nil {

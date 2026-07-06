@@ -3190,6 +3190,92 @@ func TestSMTPIntegrationTestEmail(t *testing.T) {
 	}, cookie, http.StatusNotFound)
 }
 
+func TestLLMIntegrationTestPrompt(t *testing.T) {
+	handler, cookie := newTestHandler(t)
+	var gotAuth string
+	var gotPath string
+	var gotModel string
+	llmServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotAuth = r.Header.Get("Authorization")
+		gotPath = r.URL.Path
+		var payload map[string]any
+		if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
+			t.Fatalf("decode llm request: %v", err)
+		}
+		gotModel, _ = payload["model"].(string)
+		writeJSON(w, http.StatusOK, map[string]any{
+			"choices": []map[string]any{
+				{"message": map[string]any{"content": "pong"}},
+			},
+		})
+	}))
+	defer llmServer.Close()
+
+	settingRec := assertStatus(t, handler, http.MethodPost, "/api/admin/system-settings", map[string]any{
+		"name":   "LLM integrations",
+		"type":   "integration",
+		"status": "enabled",
+		"metadata": map[string]any{
+			"llm_provider": "openai-compatible",
+			"llm_base_url": llmServer.URL + "/v1",
+			"llm_model":    "test-model",
+			"llm_api_key":  "llm-secret",
+		},
+	}, cookie, http.StatusCreated)
+	var setting model.PlatformItem
+	decodeResponse(t, settingRec, &setting)
+	settingsRec := assertStatus(t, handler, http.MethodGet, "/api/admin/system-settings", nil, cookie, http.StatusOK)
+	settingsBody := settingsRec.Body.String()
+	for _, leaked := range []string{"llm-secret", "llm_api_key_encrypted"} {
+		if strings.Contains(settingsBody, leaked) {
+			t.Fatalf("system settings leaked LLM secret value %q", leaked)
+		}
+	}
+	if !strings.Contains(settingsBody, "llm_api_key_set") {
+		t.Fatal("system settings did not expose LLM secret presence flag")
+	}
+
+	testRec := assertStatus(t, handler, http.MethodPost, "/api/admin/system-settings/llm/test", map[string]any{
+		"setting_id": setting.ID,
+		"prompt":     "ping",
+	}, cookie, http.StatusOK)
+	if gotAuth != "Bearer llm-secret" || gotPath != "/v1/chat/completions" || gotModel != "test-model" {
+		t.Fatalf("unexpected LLM provider request auth=%q path=%q model=%q", gotAuth, gotPath, gotModel)
+	}
+	if !strings.Contains(testRec.Body.String(), "pong") || strings.Contains(testRec.Body.String(), "llm-secret") {
+		t.Fatalf("LLM test response missing completion or leaked secret: %s", testRec.Body.String())
+	}
+	logsRec := assertStatus(t, handler, http.MethodGet, "/api/admin/audit/operation-logs", nil, cookie, http.StatusOK)
+	if !strings.Contains(logsRec.Body.String(), "system_settings.llm_test") {
+		t.Fatal("LLM test did not write operation log")
+	}
+
+	failingServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Error(w, "provider down", http.StatusBadGateway)
+	}))
+	defer failingServer.Close()
+	failingSettingRec := assertStatus(t, handler, http.MethodPost, "/api/admin/system-settings", map[string]any{
+		"name":   "Failing LLM integrations",
+		"type":   "integration",
+		"status": "enabled",
+		"metadata": map[string]any{
+			"llm_base_url": failingServer.URL + "/v1",
+			"llm_model":    "test-model",
+		},
+	}, cookie, http.StatusCreated)
+	var failingSetting model.PlatformItem
+	decodeResponse(t, failingSettingRec, &failingSetting)
+	failedRec := assertStatus(t, handler, http.MethodPost, "/api/admin/system-settings/llm/test", map[string]any{
+		"setting_id": failingSetting.ID,
+	}, cookie, http.StatusBadGateway)
+	if !strings.Contains(failedRec.Body.String(), "send LLM test prompt") {
+		t.Fatal("failed LLM test did not return a clear provider error")
+	}
+	assertStatus(t, handler, http.MethodPost, "/api/admin/system-settings/llm/test", map[string]any{
+		"setting_id": "missing",
+	}, cookie, http.StatusNotFound)
+}
+
 func TestProxyServiceSettingsPersistStatusAndSyncSSHGateway(t *testing.T) {
 	handler, cookie := newTestHandler(t)
 	databaseListen := freeLocalTCPAddress(t)

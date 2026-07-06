@@ -2574,6 +2574,7 @@ export function PlatformSettingsPage({ config }: { config: PlatformPageConfig })
   const [savingProxy, setSavingProxy] = useState(false)
   const [saving, setSaving] = useState(false)
   const [testing, setTesting] = useState(false)
+  const [testingLLM, setTestingLLM] = useState(false)
 
   useEffect(() => {
     setAccessForm(desktopAccessFormFromItem(accessSetting))
@@ -2684,6 +2685,27 @@ export function PlatformSettingsPage({ config }: { config: PlatformPageConfig })
       app.handleApiError(error)
     } finally {
       setTesting(false)
+    }
+  }
+
+  const testLLM = async () => {
+    setTestingLLM(true)
+    try {
+      const saved = await saveIntegration(true)
+      if (!saved) return
+      const result = await apiRequest<{ message?: string; response?: string }>('/api/admin/system-settings/llm/test', {
+        method: 'POST',
+        body: JSON.stringify({
+          setting_id: saved.id,
+          prompt: 'Reply with the single word: ok',
+        }),
+      })
+      const suffix = result.response ? `: ${result.response.slice(0, 120)}` : ''
+      app.showToast((result.message || app.t('llmTestCompleted', 'LLM test prompt completed')) + suffix)
+    } catch (error) {
+      app.handleApiError(error)
+    } finally {
+      setTestingLLM(false)
     }
   }
 
@@ -2918,7 +2940,7 @@ export function PlatformSettingsPage({ config }: { config: PlatformPageConfig })
                 <div>
                   <h3 className='text-sm font-semibold'>{app.t('llmIntegration', 'LLM integration')}</h3>
                   <p className='mt-1 text-xs leading-5 text-muted-foreground'>
-                    {app.t('llmIntegrationDescription', 'Store provider, endpoint, model, and API key for later AI-assisted operations. This phase only persists configuration.')}
+                    {app.t('llmIntegrationDescription', 'Configure an OpenAI-compatible endpoint and send a live test prompt. API keys are encrypted server-side and never returned by API responses.')}
                   </p>
                 </div>
                 <Badge tone={form.llmApiKeySet ? 'success' : 'neutral'}>{form.llmApiKeySet ? app.t('apiKeySaved', 'API key saved') : app.t('notConfigured', 'Not configured')}</Badge>
@@ -2937,10 +2959,14 @@ export function PlatformSettingsPage({ config }: { config: PlatformPageConfig })
                   <Input type='password' value={form.llmApiKey} onChange={(event) => patchForm({ llmApiKey: event.currentTarget.value })} placeholder={form.llmApiKeySet ? 'Leave blank to keep current API key' : ''} autoComplete='new-password' />
                 </Field>
               </div>
-              <div className='flex justify-end'>
-                <Button variant='outline' onClick={() => void saveIntegration()} disabled={saving || testing}>
+              <div className='flex flex-wrap justify-end gap-2'>
+                <Button variant='outline' onClick={() => void saveIntegration()} disabled={saving || testing || testingLLM}>
                   <Save className='size-4' />
                   {saving ? app.t('saving', 'Saving') : app.t('save', 'Save')}
+                </Button>
+                <Button variant='primary' onClick={() => void testLLM()} disabled={saving || testing || testingLLM || !form.llmBaseUrl.trim() || !form.llmModel.trim()}>
+                  <Play className='size-4' />
+                  {testingLLM ? app.t('testing', 'Testing') : app.t('testLLM', 'Test LLM')}
                 </Button>
               </div>
             </section>

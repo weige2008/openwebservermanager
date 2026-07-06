@@ -1,13 +1,16 @@
 package app
 
 import (
+	"bytes"
 	"crypto/tls"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
 	"net"
 	"net/http"
 	"net/smtp"
+	"net/url"
 	"sort"
 	"strconv"
 	"strings"
@@ -23,6 +26,11 @@ type smtpTestRequest struct {
 	Body      string `json:"body"`
 }
 
+type llmTestRequest struct {
+	SettingID string `json:"setting_id"`
+	Prompt    string `json:"prompt"`
+}
+
 type smtpDeliveryConfig struct {
 	SettingID          string
 	Host               string
@@ -35,6 +43,14 @@ type smtpDeliveryConfig struct {
 	StartTLS           bool
 	ServerName         string
 	InsecureSkipVerify bool
+}
+
+type llmDeliveryConfig struct {
+	SettingID string
+	Provider  string
+	BaseURL   string
+	Model     string
+	APIKey    string
 }
 
 func (s *Server) handleSMTPTest(w http.ResponseWriter, r *http.Request) {
@@ -94,6 +110,64 @@ func (s *Server) handleSMTPTest(w http.ResponseWriter, r *http.Request) {
 		"to":          cfg.To,
 		"duration_ms": time.Since(started).Milliseconds(),
 		"sent_at":     time.Now().UTC(),
+	})
+}
+
+func (s *Server) handleLLMTest(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		writeError(w, http.StatusMethodNotAllowed, "method not allowed")
+		return
+	}
+	var req llmTestRequest
+	if !decodeJSON(w, r, &req) {
+		return
+	}
+	item, ok, err := s.smtpIntegrationSetting(req.SettingID)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	if !ok {
+		writeError(w, http.StatusNotFound, "LLM integration setting not found")
+		return
+	}
+	apiKey, ok, err := s.cfg.Store.SystemSettingLLMAPIKey(item.ID)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	if !ok {
+		writeError(w, http.StatusNotFound, "LLM integration setting not found")
+		return
+	}
+	cfg, err := llmDeliveryConfigFromSetting(item, apiKey)
+	if err != nil {
+		_ = s.audit(r, "system_settings.llm_test.failed", item.ID, "", err.Error())
+		writeError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	prompt := strings.TrimSpace(req.Prompt)
+	if prompt == "" {
+		prompt = "Reply with the single word: ok"
+	}
+	started := time.Now()
+	content, err := sendLLMTestPrompt(cfg, prompt)
+	if err != nil {
+		_ = s.audit(r, "system_settings.llm_test.failed", item.ID, "", "LLM test failed: "+err.Error())
+		writeError(w, http.StatusBadGateway, "send LLM test prompt: "+err.Error())
+		return
+	}
+	_ = s.audit(r, "system_settings.llm_test", item.ID, "", "sent LLM test prompt")
+	writeJSON(w, http.StatusOK, map[string]any{
+		"ok":          true,
+		"message":     "LLM test prompt completed",
+		"setting_id":  item.ID,
+		"provider":    cfg.Provider,
+		"base_url":    cfg.BaseURL,
+		"model":       cfg.Model,
+		"response":    content,
+		"duration_ms": time.Since(started).Milliseconds(),
+		"tested_at":   time.Now().UTC(),
 	})
 }
 
@@ -161,6 +235,32 @@ func smtpDeliveryConfigFromSetting(item model.PlatformItem, password, toOverride
 	if cfg.ServerName == "" {
 		cfg.ServerName = cfg.Host
 	}
+	return cfg, nil
+}
+
+func llmDeliveryConfigFromSetting(item model.PlatformItem, apiKey string) (llmDeliveryConfig, error) {
+	metadata := item.Metadata
+	if metadata == nil {
+		metadata = map[string]any{}
+	}
+	cfg := llmDeliveryConfig{
+		SettingID: item.ID,
+		Provider:  firstNonEmpty(smtpMetadataString(metadata, "llm_provider", "provider"), "openai-compatible"),
+		BaseURL:   smtpMetadataString(metadata, "llm_base_url", "base_url", "api_base_url", "openai_base_url"),
+		Model:     smtpMetadataString(metadata, "llm_model", "model"),
+		APIKey:    apiKey,
+	}
+	if cfg.BaseURL == "" {
+		return llmDeliveryConfig{}, errors.New("llm_base_url is required")
+	}
+	if cfg.Model == "" {
+		return llmDeliveryConfig{}, errors.New("llm_model is required")
+	}
+	target, err := llmChatCompletionsURL(cfg.BaseURL)
+	if err != nil {
+		return llmDeliveryConfig{}, err
+	}
+	cfg.BaseURL = target
 	return cfg, nil
 }
 
@@ -232,6 +332,86 @@ func sendSMTPTestMail(cfg smtpDeliveryConfig, subject, body string) error {
 		return err
 	}
 	return client.Quit()
+}
+
+func sendLLMTestPrompt(cfg llmDeliveryConfig, prompt string) (string, error) {
+	payload := map[string]any{
+		"model": cfg.Model,
+		"messages": []map[string]string{
+			{"role": "system", "content": "You are a connectivity probe for Open Web Server Manager."},
+			{"role": "user", "content": prompt},
+		},
+		"max_tokens":  24,
+		"temperature": 0,
+	}
+	body, err := json.Marshal(payload)
+	if err != nil {
+		return "", err
+	}
+	req, err := http.NewRequest(http.MethodPost, cfg.BaseURL, bytes.NewReader(body))
+	if err != nil {
+		return "", err
+	}
+	req.Header.Set("Content-Type", "application/json")
+	if strings.TrimSpace(cfg.APIKey) != "" {
+		req.Header.Set("Authorization", "Bearer "+strings.TrimSpace(cfg.APIKey))
+	}
+	client := &http.Client{Timeout: 20 * time.Second}
+	resp, err := client.Do(req)
+	if err != nil {
+		return "", err
+	}
+	defer resp.Body.Close()
+	limited, err := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
+	if err != nil {
+		return "", err
+	}
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		return "", fmt.Errorf("LLM provider returned %s: %s", resp.Status, strings.TrimSpace(string(limited)))
+	}
+	var decoded struct {
+		Choices []struct {
+			Message struct {
+				Content string `json:"content"`
+			} `json:"message"`
+			Text string `json:"text"`
+		} `json:"choices"`
+	}
+	if err := json.Unmarshal(limited, &decoded); err != nil {
+		return "", fmt.Errorf("decode LLM provider response: %w", err)
+	}
+	for _, choice := range decoded.Choices {
+		if content := strings.TrimSpace(choice.Message.Content); content != "" {
+			return content, nil
+		}
+		if content := strings.TrimSpace(choice.Text); content != "" {
+			return content, nil
+		}
+	}
+	return "", errors.New("LLM provider response did not include a completion")
+}
+
+func llmChatCompletionsURL(base string) (string, error) {
+	raw := strings.TrimSpace(base)
+	if raw == "" {
+		return "", errors.New("llm_base_url is required")
+	}
+	parsed, err := url.Parse(raw)
+	if err != nil || parsed.Scheme == "" || parsed.Host == "" {
+		return "", errors.New("llm_base_url is invalid")
+	}
+	if parsed.Scheme != "http" && parsed.Scheme != "https" {
+		return "", errors.New("llm_base_url must use http or https")
+	}
+	parsed.Path = strings.TrimRight(parsed.Path, "/")
+	if parsed.Path == "" {
+		parsed.Path = "/v1/chat/completions"
+	} else if !strings.HasSuffix(parsed.Path, "/chat/completions") {
+		parsed.Path += "/chat/completions"
+	}
+	parsed.RawQuery = ""
+	parsed.Fragment = ""
+	return parsed.String(), nil
 }
 
 func smtpMessage(from string, to []string, subject, body string) string {

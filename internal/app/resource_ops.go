@@ -167,6 +167,9 @@ func (s *Server) handleResourceOperation(w http.ResponseWriter, r *http.Request,
 	case path == "admin/system-settings/smtp/test":
 		s.handleSMTPTest(w, r)
 		return true
+	case path == "admin/system-settings/llm/test":
+		s.handleLLMTest(w, r)
+		return true
 	case path == "admin/audit/access-stats":
 		s.handleAccessStats(w, r)
 		return true

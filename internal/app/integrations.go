@@ -223,8 +223,9 @@ func (s *Server) handleLDAPTest(w http.ResponseWriter, r *http.Request) {
 	started := time.Now()
 	claims, authenticated, err := s.ldap.Authenticate(r.Context(), provider, username, req.Password)
 	if err != nil {
-		_ = s.audit(r, "system_settings.ldap_test.failed", item.ID, "", "LDAP test failed: "+err.Error())
-		writeError(w, http.StatusBadGateway, "test LDAP login: "+err.Error())
+		errText := sanitizeLDAPText(provider, req.Password, err.Error())
+		_ = s.audit(r, "system_settings.ldap_test.failed", item.ID, "", "LDAP test failed: "+errText)
+		writeError(w, http.StatusBadGateway, "test LDAP login: "+errText)
 		return
 	}
 	if !authenticated {

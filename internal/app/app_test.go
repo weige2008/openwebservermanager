@@ -3924,6 +3924,61 @@ func TestExternalLDAPLoginCreatesUserAndSession(t *testing.T) {
 	}
 }
 
+func TestExternalLDAPLoginFailureRedactsSecrets(t *testing.T) {
+	handler, adminCookie := newTestHandler(t)
+	srv := handler.(*Server)
+	fakeLDAP := &fakeLDAPAuthenticator{
+		err: errors.New("bind failed with directory-secret and user password directory-password"),
+	}
+	srv.ldap = fakeLDAP
+
+	assertStatus(t, handler, http.MethodPost, "/api/admin/system-settings", map[string]any{
+		"name":   "LDAP identity",
+		"type":   "identity",
+		"status": "enabled",
+		"metadata": map[string]any{
+			"disable_password_login":      true,
+			"ldap_enabled":                true,
+			"ldap_provider_id":            "corp-ldap",
+			"ldap_url":                    "ldap://directory.example.test:389",
+			"ldap_bind_dn":                "cn=reader,dc=example,dc=test",
+			"ldap_bind_password":          "directory-secret",
+			"ldap_base_dn":                "ou=people,dc=example,dc=test",
+			"ldap_user_filter":            "(uid={username})",
+			"ldap_username_attribute":     "uid",
+			"ldap_display_name_attribute": "cn",
+			"ldap_email_attribute":        "mail",
+			"ldap_role":                   "user",
+			"ldap_auto_create":            true,
+		},
+	}, adminCookie, http.StatusCreated)
+
+	loginRec := assertStatus(t, handler, http.MethodPost, "/api/auth/login", map[string]any{
+		"username": "ldap-operator",
+		"password": "directory-password",
+	}, nil, http.StatusBadGateway)
+	loginBody := loginRec.Body.String()
+	for _, leaked := range []string{"directory-secret", "directory-password"} {
+		if strings.Contains(loginBody, leaked) {
+			t.Fatalf("ldap login failure response leaked secret %q: %s", leaked, loginBody)
+		}
+	}
+	if !strings.Contains(loginBody, "[redacted]") {
+		t.Fatalf("ldap login failure response did not contain redaction marker: %s", loginBody)
+	}
+
+	loginLogsRec := assertStatus(t, handler, http.MethodGet, "/api/admin/audit/login-logs", nil, adminCookie, http.StatusOK)
+	loginLogsBody := loginLogsRec.Body.String()
+	for _, leaked := range []string{"directory-secret", "directory-password"} {
+		if strings.Contains(loginLogsBody, leaked) {
+			t.Fatalf("ldap login log leaked secret %q: %s", leaked, loginLogsBody)
+		}
+	}
+	if !strings.Contains(loginLogsBody, `"type":"ldap"`) || !strings.Contains(loginLogsBody, "[redacted]") {
+		t.Fatalf("ldap login log missing redacted ldap failure: %s", loginLogsBody)
+	}
+}
+
 func TestExternalLDAPLoginRejectsAutoCreateDisabledAndDisabledUsers(t *testing.T) {
 	handler, adminCookie := newTestHandler(t)
 	srv := handler.(*Server)
@@ -4106,6 +4161,63 @@ func TestLDAPIntegrationTestLogin(t *testing.T) {
 	}, adminCookie, http.StatusNotFound)
 	if fakeLDAP.calls != 2 {
 		t.Fatalf("disabled ldap setting should not call authenticator, calls=%d", fakeLDAP.calls)
+	}
+}
+
+func TestLDAPIntegrationTestFailureRedactsSecrets(t *testing.T) {
+	handler, adminCookie := newTestHandler(t)
+	srv := handler.(*Server)
+	fakeLDAP := &fakeLDAPAuthenticator{
+		err: errors.New("directory error exposed directory-secret and directory-password"),
+	}
+	srv.ldap = fakeLDAP
+
+	settingRec := assertStatus(t, handler, http.MethodPost, "/api/admin/system-settings", map[string]any{
+		"name":   "LDAP identity",
+		"type":   "identity",
+		"status": "enabled",
+		"metadata": map[string]any{
+			"ldap_enabled":                true,
+			"ldap_provider_id":            "corp-ldap",
+			"ldap_url":                    "ldap://directory.example.test:389",
+			"ldap_bind_dn":                "cn=reader,dc=example,dc=test",
+			"ldap_bind_password":          "directory-secret",
+			"ldap_base_dn":                "ou=people,dc=example,dc=test",
+			"ldap_user_filter":            "(uid={username})",
+			"ldap_username_attribute":     "uid",
+			"ldap_display_name_attribute": "cn",
+			"ldap_email_attribute":        "mail",
+			"ldap_role":                   "user",
+			"ldap_auto_create":            true,
+		},
+	}, adminCookie, http.StatusCreated)
+	var setting model.PlatformItem
+	decodeResponse(t, settingRec, &setting)
+
+	failedRec := assertStatus(t, handler, http.MethodPost, "/api/admin/system-settings/ldap/test", map[string]any{
+		"setting_id": setting.ID,
+		"username":   "ldap-probe",
+		"password":   "directory-password",
+	}, adminCookie, http.StatusBadGateway)
+	responseBody := failedRec.Body.String()
+	for _, leaked := range []string{"directory-secret", "directory-password"} {
+		if strings.Contains(responseBody, leaked) {
+			t.Fatalf("ldap test failure response leaked secret %q: %s", leaked, responseBody)
+		}
+	}
+	if !strings.Contains(responseBody, "[redacted]") {
+		t.Fatalf("ldap test failure response did not contain redaction marker: %s", responseBody)
+	}
+
+	logsRec := assertStatus(t, handler, http.MethodGet, "/api/admin/audit/operation-logs", nil, adminCookie, http.StatusOK)
+	logsBody := logsRec.Body.String()
+	for _, leaked := range []string{"directory-secret", "directory-password"} {
+		if strings.Contains(logsBody, leaked) {
+			t.Fatalf("ldap test failure operation log leaked secret %q: %s", leaked, logsBody)
+		}
+	}
+	if !strings.Contains(logsBody, "system_settings.ldap_test.failed") || !strings.Contains(logsBody, "[redacted]") {
+		t.Fatalf("ldap test failure operation log missing redacted failure entry: %s", logsBody)
 	}
 }
 
@@ -7327,6 +7439,7 @@ type fakeLDAPUser struct {
 
 type fakeLDAPAuthenticator struct {
 	users        map[string]fakeLDAPUser
+	err          error
 	calls        int
 	lastProvider externalLDAPProvider
 }
@@ -7339,6 +7452,9 @@ func (f *fakeLDAPAuthenticator) Authenticate(ctx context.Context, provider exter
 	f.lastProvider = provider
 	if provider.BindDN == "" || provider.BindPassword == "" || provider.BaseDN == "" {
 		return externalLDAPClaims{}, false, errors.New("ldap provider missing required bind/search settings")
+	}
+	if f.err != nil {
+		return externalLDAPClaims{}, false, f.err
 	}
 	user, ok := f.users[username]
 	if !ok || user.password != password {

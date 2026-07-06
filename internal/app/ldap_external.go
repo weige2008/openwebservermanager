@@ -74,7 +74,7 @@ func (s *Server) authenticateExternalLDAP(ctx context.Context, username, passwor
 		claims, ok, err := s.ldap.Authenticate(ctx, provider, username, password)
 		if err != nil {
 			if firstErr == nil {
-				firstErr = err
+				firstErr = sanitizedLDAPProviderError(provider, password, err)
 				firstProviderID = provider.ID
 			}
 			continue
@@ -89,6 +89,40 @@ func (s *Server) authenticateExternalLDAP(ctx context.Context, username, passwor
 		return store.AdminPublic{}, firstProviderID, false, firstErr
 	}
 	return store.AdminPublic{}, "", false, nil
+}
+
+func sanitizedLDAPProviderError(provider externalLDAPProvider, password string, err error) error {
+	if err == nil {
+		return nil
+	}
+	return errors.New(sanitizeLDAPText(provider, password, err.Error()))
+}
+
+func sanitizeLDAPText(provider externalLDAPProvider, password, text string) string {
+	if text == "" {
+		return text
+	}
+	replacements := []string{}
+	seen := map[string]bool{}
+	addSecret := func(secret string) {
+		secret = strings.TrimSpace(secret)
+		if secret == "" || seen[secret] {
+			return
+		}
+		seen[secret] = true
+		replacements = append(replacements, secret, "[redacted]")
+		escaped := url.QueryEscape(secret)
+		if escaped != secret && !seen[escaped] {
+			seen[escaped] = true
+			replacements = append(replacements, escaped, "[redacted]")
+		}
+	}
+	addSecret(provider.BindPassword)
+	addSecret(password)
+	if len(replacements) == 0 {
+		return text
+	}
+	return strings.NewReplacer(replacements...).Replace(text)
 }
 
 func (realLDAPAuthenticator) Authenticate(ctx context.Context, provider externalLDAPProvider, username, password string) (externalLDAPClaims, bool, error) {

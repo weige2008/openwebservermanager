@@ -36,19 +36,21 @@ type Message struct {
 }
 
 type ExecResult struct {
-	SessionID  string `json:"session_id"`
-	Command    string `json:"command"`
-	Stdout     string `json:"stdout"`
-	Stderr     string `json:"stderr"`
-	ExitCode   int    `json:"exit_code"`
-	Status     string `json:"status"`
-	DurationMs int64  `json:"duration_ms"`
-	Action     string `json:"action"`
-	Risk       string `json:"risk"`
-	RuleID     string `json:"rule_id,omitempty"`
-	RuleName   string `json:"rule_name,omitempty"`
-	Blocked    bool   `json:"blocked"`
-	Error      string `json:"error,omitempty"`
+	SessionID         string `json:"session_id"`
+	Command           string `json:"command"`
+	Stdout            string `json:"stdout"`
+	Stderr            string `json:"stderr"`
+	ExitCode          int    `json:"exit_code"`
+	Status            string `json:"status"`
+	DurationMs        int64  `json:"duration_ms"`
+	Action            string `json:"action"`
+	Risk              string `json:"risk"`
+	RuleID            string `json:"rule_id,omitempty"`
+	RuleName          string `json:"rule_name,omitempty"`
+	ApprovalID        string `json:"approval_id,omitempty"`
+	ApprovedExecution bool   `json:"approved_execution,omitempty"`
+	Blocked           bool   `json:"blocked"`
+	Error             string `json:"error,omitempty"`
 }
 
 type Runner struct {
@@ -194,6 +196,14 @@ func (r Runner) copyOutput(conn *ws.Conn, sessionID, typ string, reader io.Reade
 }
 
 func (r Runner) RunCommand(session model.ConnectionSession, server model.Server, credential model.Credential, secret store.CredentialSecret, command string, timeout time.Duration) (ExecResult, error) {
+	return r.runCommand(session, server, credential, secret, command, timeout, "")
+}
+
+func (r Runner) RunApprovedCommand(session model.ConnectionSession, server model.Server, credential model.Credential, secret store.CredentialSecret, command string, timeout time.Duration, approvalID string) (ExecResult, error) {
+	return r.runCommand(session, server, credential, secret, command, timeout, strings.TrimSpace(approvalID))
+}
+
+func (r Runner) runCommand(session model.ConnectionSession, server model.Server, credential model.Credential, secret store.CredentialSecret, command string, timeout time.Duration, approvalID string) (ExecResult, error) {
 	command = strings.TrimSpace(command)
 	if timeout <= 0 {
 		timeout = 30 * time.Second
@@ -201,27 +211,47 @@ func (r Runner) RunCommand(session model.ConnectionSession, server model.Server,
 	started := time.Now()
 	interceptor := newCommandInterceptor(r.Store, session)
 	decision := interceptor.evaluate(command)
+	approvedExecution := approvalID != "" && commandDecisionStatus(decision.Action, decision.Blocked) == "approval_required"
+	if approvedExecution {
+		decision.Action = "approved"
+		decision.Status = "submitted"
+		decision.Blocked = false
+	}
 	result := ExecResult{
-		SessionID: session.ID,
-		Command:   command,
-		ExitCode:  -1,
-		Status:    "running",
-		Action:    decision.Action,
-		Risk:      decision.Risk,
-		RuleID:    decision.RuleID,
-		RuleName:  decision.RuleName,
-		Blocked:   decision.Blocked,
+		SessionID:         session.ID,
+		Command:           command,
+		ExitCode:          -1,
+		Status:            "running",
+		Action:            decision.Action,
+		Risk:              decision.Risk,
+		RuleID:            decision.RuleID,
+		RuleName:          decision.RuleName,
+		ApprovalID:        approvalID,
+		ApprovedExecution: approvedExecution,
+		Blocked:           decision.Blocked,
 	}
 	if decision.Blocked {
 		result.Status = decision.Status
-		result.Error = commandBlockNotice(command, decision)
+		if commandDecisionStatus(decision.Action, decision.Blocked) == "approval_required" {
+			approval, approvalErr := interceptor.createCommandApproval(command, decision, false, map[string]any{"source": "ssh_exec"})
+			if approvalErr == nil && approval.ID != "" {
+				result.ApprovalID = approval.ID
+			} else if approvalErr != nil {
+				result.Error = approvalErr.Error()
+			}
+		}
+		if result.Error == "" {
+			result.Error = commandBlockNotice(command, decision, result.ApprovalID)
+		}
 		result.DurationMs = time.Since(started).Milliseconds()
 		interceptor.recordExec(command, decision, "ssh exec command "+decision.Status, map[string]any{
-			"exit_code":   result.ExitCode,
-			"duration_ms": result.DurationMs,
-			"stdout":      "",
-			"stderr":      result.Error,
-			"error":       result.Error,
+			"exit_code":       result.ExitCode,
+			"duration_ms":     result.DurationMs,
+			"stdout":          "",
+			"stderr":          result.Error,
+			"error":           result.Error,
+			"approval_id":     result.ApprovalID,
+			"approval_status": "pending",
 		})
 		r.finishExecSession(session.ID, model.SessionFailed, result.Error)
 		return result, ErrCommandBlocked
@@ -310,13 +340,18 @@ func (r Runner) finishExecSession(sessionID string, status model.SessionStatus, 
 }
 
 func (r ExecResult) execMetadata() map[string]any {
-	return map[string]any{
+	metadata := map[string]any{
 		"exit_code":   r.ExitCode,
 		"duration_ms": r.DurationMs,
 		"stdout":      r.Stdout,
 		"stderr":      r.Stderr,
 		"error":       r.Error,
 	}
+	if r.ApprovalID != "" {
+		metadata["approval_id"] = r.ApprovalID
+		metadata["approved_execution"] = r.ApprovedExecution
+	}
+	return metadata
 }
 
 func limitExecOutput(value string) string {

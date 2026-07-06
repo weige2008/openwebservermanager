@@ -6,6 +6,7 @@ import {
   Boxes,
   BriefcaseBusiness,
   CalendarClock,
+  ClipboardCheck,
   ClipboardList,
   Clock3,
   Code2,
@@ -101,6 +102,7 @@ const identityItems: PlatformPageConfig[] = [
 
 const authzItems: PlatformPageConfig[] = [
   page('/app/command-filters', 'command_filters', '命令拦截器', 'Command filters', '命令匹配、风险等级和允许/拒绝/审批动作。', 'Command matching, risk level, and allow/deny/approval action.', ShieldCheck, '/api/admin/command-filters'),
+  page('/app/command-approvals', 'command_approvals', '命令审批', 'Command approvals', '审批由命令拦截器提交的高风险 SSH 命令，并在批准后执行。', 'Review high-risk SSH commands submitted by command filters and execute them after approval.', ClipboardCheck, '/api/admin/command-approvals'),
   page('/app/authorization-strategies', 'authorization_strategies', '授权策略', 'Authorization strategies', '上传、下载、编辑、删除、重命名、复制和粘贴权限矩阵。', 'Upload, download, edit, delete, rename, copy, and paste permission matrix.', BookText, '/api/admin/strategies'),
   page('/app/authorized-assets', 'authorized_assets', '授权资产', 'Authorized assets', '按用户、部门、资产组和资产授权，支持失效时间。', 'Authorize by user, department, asset group, and asset with expiry.', Server, '/api/admin/authorizations/assets'),
   page('/app/authorized-web-assets', 'authorized_web_assets', '授权Web资产', 'Authorized Web assets', '按用户、部门、Web 资产组和 Web 资产授权。', 'Authorize Web assets by user, department, and group.', Globe2, '/api/admin/authorizations/websites'),

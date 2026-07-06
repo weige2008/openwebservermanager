@@ -286,6 +286,18 @@ func (s *Server) handleResourceOperation(w http.ResponseWriter, r *http.Request,
 		id := pathSegmentFromTrimmed(path, 2)
 		s.handleSQLWorkOrderDecision(w, r, id, "rejected")
 		return true
+	case strings.HasPrefix(path, "admin/command-approvals/") && strings.HasSuffix(path, "/execute"):
+		id := pathSegmentFromTrimmed(path, 2)
+		s.handleCommandApprovalExecute(w, r, id)
+		return true
+	case strings.HasPrefix(path, "admin/command-approvals/") && strings.HasSuffix(path, "/approve"):
+		id := pathSegmentFromTrimmed(path, 2)
+		s.handleCommandApprovalDecision(w, r, id, "approved")
+		return true
+	case strings.HasPrefix(path, "admin/command-approvals/") && strings.HasSuffix(path, "/reject"):
+		id := pathSegmentFromTrimmed(path, 2)
+		s.handleCommandApprovalDecision(w, r, id, "rejected")
+		return true
 	case strings.HasPrefix(path, "admin/audit/online-sessions/") && strings.HasSuffix(path, "/disconnect"):
 		id := pathSegmentFromTrimmed(path, 3)
 		s.handleAuditSessionDisconnect(w, r, id)

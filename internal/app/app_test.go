@@ -1189,16 +1189,56 @@ func TestSSHExecAccessRunsCommandAndLogs(t *testing.T) {
 		t.Fatalf("unexpected denied ssh exec result: %#v", deniedResult)
 	}
 
+	assertStatus(t, handler, http.MethodPost, "/api/admin/command-filters", map[string]any{
+		"name":      "approve service restart",
+		"type":      "approval",
+		"status":    "enabled",
+		"protocol":  "ssh",
+		"owner_id":  user.ID,
+		"target_id": asset.ID,
+		"metadata":  map[string]any{"pattern": "systemctl restart", "risk": "critical"},
+	}, adminCookie, http.StatusCreated)
+	approvalRequiredRec := assertStatus(t, handler, http.MethodPost, "/api/access/ssh/"+asset.ID+"/exec", map[string]any{
+		"command":         "systemctl restart nginx",
+		"credential_id":   credential.ID,
+		"timeout_seconds": 5,
+	}, userCookie, http.StatusForbidden)
+	var approvalRequiredResult map[string]any
+	decodeResponse(t, approvalRequiredRec, &approvalRequiredResult)
+	approvalID, _ := approvalRequiredResult["approval_id"].(string)
+	if approvalRequiredResult["blocked"] != true || approvalRequiredResult["status"] != "approval_required" || approvalRequiredResult["risk"] != "critical" || approvalID == "" {
+		t.Fatalf("unexpected approval-required ssh exec result: %#v", approvalRequiredResult)
+	}
+	commandApprovalsRec := assertStatus(t, handler, http.MethodGet, "/api/admin/command-approvals", nil, adminCookie, http.StatusOK)
+	if !strings.Contains(commandApprovalsRec.Body.String(), approvalID) || !strings.Contains(commandApprovalsRec.Body.String(), "systemctl restart nginx") || !strings.Contains(commandApprovalsRec.Body.String(), `"status":"pending"`) {
+		t.Fatalf("command approval was not listed as pending: %s", commandApprovalsRec.Body.String())
+	}
+	assertStatus(t, handler, http.MethodPost, "/api/admin/command-approvals/"+approvalID+"/execute", map[string]any{}, adminCookie, http.StatusConflict)
+	approvedRec := assertStatus(t, handler, http.MethodPost, "/api/admin/command-approvals/"+approvalID+"/approve", map[string]any{"note": "maintenance window approved"}, adminCookie, http.StatusOK)
+	if !strings.Contains(approvedRec.Body.String(), `"status":"approved"`) || !strings.Contains(approvedRec.Body.String(), "maintenance window approved") {
+		t.Fatalf("command approval response did not include approved state: %s", approvedRec.Body.String())
+	}
+	approvedExecRec := assertStatus(t, handler, http.MethodPost, "/api/admin/command-approvals/"+approvalID+"/execute", map[string]any{"timeout_seconds": 5}, adminCookie, http.StatusOK)
+	var approvedExecResult map[string]any
+	decodeResponse(t, approvedExecRec, &approvedExecResult)
+	if approvedExecResult["status"] != "success" || approvedExecResult["approved_execution"] != true || approvedExecResult["approval_id"] != approvalID || !strings.Contains(approvedExecResult["stdout"].(string), "ran: systemctl restart nginx") {
+		t.Fatalf("unexpected approved command execution result: %#v", approvedExecResult)
+	}
+	executedApprovalRec := assertStatus(t, handler, http.MethodGet, "/api/admin/command-approvals/"+approvalID, nil, adminCookie, http.StatusOK)
+	if !strings.Contains(executedApprovalRec.Body.String(), `"status":"executed"`) || !strings.Contains(executedApprovalRec.Body.String(), `"execution_status":"success"`) {
+		t.Fatalf("executed command approval did not persist execution metadata: %s", executedApprovalRec.Body.String())
+	}
+
 	logsRec := assertStatus(t, handler, http.MethodGet, "/api/admin/audit/exec-command-logs", nil, adminCookie, http.StatusOK)
 	logsBody := logsRec.Body.String()
-	for _, want := range []string{"printf ok", "rm -rf /tmp/test", `"exit_code":0`, `"risk":"high"`, `"interactive":false`} {
+	for _, want := range []string{"printf ok", "rm -rf /tmp/test", "systemctl restart nginx", `"exit_code":0`, `"risk":"high"`, `"risk":"critical"`, `"interactive":false`, approvalID, `"approved_execution":true`} {
 		if !strings.Contains(logsBody, want) {
 			t.Fatalf("exec command logs missing %s in %s", want, logsBody)
 		}
 	}
 	operationRec := assertStatus(t, handler, http.MethodGet, "/api/admin/audit/operation-logs", nil, adminCookie, http.StatusOK)
 	operationBody := operationRec.Body.String()
-	if !strings.Contains(operationBody, "connection.ssh.exec") || !strings.Contains(operationBody, "connection.ssh.exec.denied") {
+	if !strings.Contains(operationBody, "connection.ssh.exec") || !strings.Contains(operationBody, "connection.ssh.exec.denied") || !strings.Contains(operationBody, "command_approval.approved") || !strings.Contains(operationBody, "command_approval.execute") {
 		t.Fatalf("operation logs missing ssh exec audit: %s", operationBody)
 	}
 }

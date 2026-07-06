@@ -455,6 +455,7 @@ var platformCollections = []string{
 	"sql_logs",
 	"scheduled_tasks",
 	"command_filters",
+	"command_approvals",
 	"authorization_strategies",
 	"authorized_assets",
 	"authorized_web_assets",

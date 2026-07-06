@@ -97,6 +97,8 @@ type ResourceOperation =
   | { type: 'task-logs'; item: PlatformItem }
   | { type: 'sql-execute'; item: PlatformItem }
   | { type: 'sql-decision'; item: PlatformItem; decision: 'approve' | 'reject' }
+  | { type: 'command-execute'; item: PlatformItem }
+  | { type: 'command-decision'; item: PlatformItem; decision: 'approve' | 'reject' }
 
 interface StorageEntry {
   name: string
@@ -374,6 +376,25 @@ export function PlatformTablePage({ config }: { config: PlatformPageConfig }) {
         {
           header: 'Execution',
           cell: ({ row }) => <SQLWorkOrderExecutionSummary item={row.original} />,
+        },
+      ] satisfies ColumnDef<PlatformItem>[] : []),
+      ...(config.collection === 'command_approvals' ? [
+        {
+          header: '命令 / 规则',
+          cell: ({ row }) => (
+            <div className='grid max-w-96 gap-1'>
+              <span className='truncate font-mono text-xs'>{metadataText(row.original.metadata?.command) || row.original.name || '-'}</span>
+              <span className='truncate text-xs text-muted-foreground'>{metadataText(row.original.metadata?.rule_name) || row.original.description || '-'}</span>
+            </div>
+          ),
+        },
+        {
+          header: '审批',
+          cell: ({ row }) => <CommandApprovalDecisionSummary item={row.original} />,
+        },
+        {
+          header: '执行',
+          cell: ({ row }) => <CommandApprovalExecutionSummary item={row.original} />,
         },
       ] satisfies ColumnDef<PlatformItem>[] : []),
       ...(config.collection === 'certificates' ? [
@@ -1261,6 +1282,31 @@ function ResourceRowActions({ config, item, onOperation }: { config: PlatformPag
     )
   }
 
+  if (config.collection === 'command_approvals') {
+    const status = (item.status || '').toLowerCase()
+    if (status === 'pending' || status === 'submitted' || status === 'requested') {
+      return (
+        <>
+          <Button size='sm' variant='outline' onClick={() => onOperation({ type: 'command-decision', item, decision: 'approve' })}>
+            <Save className='size-3.5' />
+            批准
+          </Button>
+          <Button size='sm' variant='destructive' onClick={() => onOperation({ type: 'command-decision', item, decision: 'reject' })}>
+            <Trash2 className='size-3.5' />
+            拒绝
+          </Button>
+        </>
+      )
+    }
+    if (status !== 'approved') return null
+    return (
+      <Button size='sm' variant='outline' onClick={() => onOperation({ type: 'command-execute', item })}>
+        <Play className='size-3.5' />
+        执行
+      </Button>
+    )
+  }
+
   return null
 }
 
@@ -1287,7 +1333,10 @@ function ResourceOperationDialog({
   if (operation.type === 'storage-files') return <StorageFilesDialog item={operation.item} onClose={() => onOpenChange(null)} />
   if (operation.type === 'task-logs') return <TaskLogsDialog item={operation.item} onClose={() => onOpenChange(null)} />
   if (operation.type === 'sql-decision') return <SQLWorkOrderDecisionDialog item={operation.item} decision={operation.decision} onClose={() => onOpenChange(null)} />
-  return <SQLExecuteDialog item={operation.item} onClose={() => onOpenChange(null)} requestAccessMFACode={requestAccessMFACode} />
+  if (operation.type === 'sql-execute') return <SQLExecuteDialog item={operation.item} onClose={() => onOpenChange(null)} requestAccessMFACode={requestAccessMFACode} />
+  if (operation.type === 'command-decision') return <CommandApprovalDecisionDialog item={operation.item} decision={operation.decision} onClose={() => onOpenChange(null)} />
+  if (operation.type === 'command-execute') return <CommandApprovalExecuteDialog item={operation.item} onClose={() => onOpenChange(null)} requestAccessMFACode={requestAccessMFACode} />
+  return null
 }
 
 function AssetImportDialog({ onClose }: { onClose: () => void }) {
@@ -2550,6 +2599,201 @@ function SQLWorkOrderExecutionSummary({ item }: { item: PlatformItem }) {
     )
   }
   return <span className='text-xs text-muted-foreground'>未执行</span>
+}
+
+function CommandApprovalDecisionDialog({
+  item,
+  decision,
+  onClose,
+}: {
+  item: PlatformItem
+  decision: 'approve' | 'reject'
+  onClose: () => void
+}) {
+  const app = useApp()
+  const [note, setNote] = useState('')
+  const [saving, setSaving] = useState(false)
+  const approving = decision === 'approve'
+
+  const submit = async () => {
+    setSaving(true)
+    try {
+      await apiRequest(`/api/admin/command-approvals/${item.id}/${approving ? 'approve' : 'reject'}`, {
+        method: 'POST',
+        body: JSON.stringify({ note }),
+      })
+      await app.refresh(true)
+      app.showToast(approving ? '命令审批已批准' : '命令审批已拒绝')
+      onClose()
+    } catch (error) {
+      app.handleApiError(error)
+    } finally {
+      setSaving(false)
+    }
+  }
+
+  return (
+    <DialogShell
+      open
+      onOpenChange={(open) => !open && onClose()}
+      title={`${approving ? '批准' : '拒绝'} ${item.name || item.id}`}
+      description='审批意见会写入命令审批记录，并保留在操作审计中。'
+      compact
+    >
+      <div className='grid gap-4'>
+        <div className='rounded-lg border border-border bg-muted/20 p-3 text-xs'>
+          <div className='font-medium text-foreground'>命令</div>
+          <pre className='mt-2 max-h-36 overflow-auto whitespace-pre-wrap rounded-md bg-background p-2 font-mono'>{metadataText(item.metadata?.command) || '-'}</pre>
+          <p className='mt-2 text-muted-foreground'>
+            规则：{metadataText(item.metadata?.rule_name) || '-'} / 风险：{metadataText(item.metadata?.risk) || '-'}
+          </p>
+        </div>
+        <Field label={approving ? '审批意见' : '拒绝原因'}>
+          <Textarea
+            autoFocus
+            className='min-h-28'
+            value={note}
+            onChange={(event) => setNote(event.currentTarget.value)}
+            placeholder={approving ? '已确认维护窗口和命令影响范围。' : '缺少回滚方案或影响范围不明确。'}
+          />
+        </Field>
+        <div className='flex justify-end gap-2'>
+          <Button variant='outline' onClick={onClose}>取消</Button>
+          <Button variant={approving ? 'primary' : 'destructive'} onClick={() => void submit()} disabled={saving}>
+            {saving ? '提交中' : approving ? '批准' : '拒绝'}
+          </Button>
+        </div>
+      </div>
+    </DialogShell>
+  )
+}
+
+function CommandApprovalDecisionSummary({ item }: { item: PlatformItem }) {
+  const approvedBy = metadataText(item.metadata?.approved_by)
+  const rejectedBy = metadataText(item.metadata?.rejected_by)
+  const approvalNote = metadataText(item.metadata?.approval_note)
+  const rejectionNote = metadataText(item.metadata?.rejection_note)
+  if (approvedBy) {
+    return (
+      <div className='grid max-w-56 gap-1 text-xs'>
+        <span>批准：{approvedBy}</span>
+        <span className='text-muted-foreground'>{formatDate(metadataText(item.metadata?.approved_at))}</span>
+        {approvalNote ? <span className='truncate text-muted-foreground'>{approvalNote}</span> : null}
+      </div>
+    )
+  }
+  if (rejectedBy) {
+    return (
+      <div className='grid max-w-56 gap-1 text-xs'>
+        <span>拒绝：{rejectedBy}</span>
+        <span className='text-muted-foreground'>{formatDate(metadataText(item.metadata?.rejected_at))}</span>
+        {rejectionNote ? <span className='truncate text-muted-foreground'>{rejectionNote}</span> : null}
+      </div>
+    )
+  }
+  return <span className='text-xs text-muted-foreground'>待审批</span>
+}
+
+function CommandApprovalExecutionSummary({ item }: { item: PlatformItem }) {
+  const executedBy = metadataText(item.metadata?.executed_by)
+  const error = metadataText(item.metadata?.execution_error) || metadataText(item.metadata?.error)
+  if (error) {
+    return <span className='block max-w-56 truncate text-xs text-destructive'>{error}</span>
+  }
+  if (executedBy) {
+    return (
+      <div className='grid max-w-56 gap-1 text-xs'>
+        <span>执行：{executedBy}</span>
+        <span className='text-muted-foreground'>{formatDate(metadataText(item.metadata?.executed_at))}</span>
+        <span className='text-muted-foreground'>
+          退出码 {formatNumberValue(item.metadata?.exit_code)} / {formatNumberValue(item.metadata?.duration_ms)} ms
+        </span>
+      </div>
+    )
+  }
+  return <span className='text-xs text-muted-foreground'>未执行</span>
+}
+
+function CommandApprovalExecuteDialog({
+  item,
+  onClose,
+  requestAccessMFACode,
+}: {
+  item: PlatformItem
+  onClose: () => void
+  requestAccessMFACode: RequestAccessMFACode
+}) {
+  const app = useApp()
+  const [timeoutSeconds, setTimeoutSeconds] = useState('30')
+  const [result, setResult] = useState<Record<string, unknown> | null>(null)
+  const [running, setRunning] = useState(false)
+
+  const execute = async () => {
+    setRunning(true)
+    try {
+      const run = (mfaCode = '') => apiRequest<Record<string, unknown>>(`/api/admin/command-approvals/${item.id}/execute`, {
+        method: 'POST',
+        body: JSON.stringify(mfaCode ? { timeout_seconds: Number(timeoutSeconds) || 30, mfa_code: mfaCode } : { timeout_seconds: Number(timeoutSeconds) || 30 }),
+      })
+      let data: Record<string, unknown>
+      try {
+        data = await run()
+      } catch (error) {
+        if (!isAccessMFARequiredError(error)) throw error
+        const mfaCode = await requestAccessMFACode()
+        if (!mfaCode) return
+        data = await run(mfaCode)
+      }
+      setResult(data)
+      await app.refresh(true)
+      app.showToast('已执行批准命令')
+    } catch (error) {
+      app.handleApiError(error)
+    } finally {
+      setRunning(false)
+    }
+  }
+
+  return (
+    <DialogShell open onOpenChange={(open) => !open && onClose()} title={`${item.name} 执行`} description='批准后的 SSH 命令会使用原始资产和凭据上下文执行。'>
+      <div className='grid gap-4'>
+        <div className='rounded-lg border border-border bg-muted/20 p-3 text-xs'>
+          <div className='font-medium text-foreground'>命令</div>
+          <pre className='mt-2 max-h-36 overflow-auto whitespace-pre-wrap rounded-md bg-background p-2 font-mono'>{metadataText(item.metadata?.command) || '-'}</pre>
+        </div>
+        <Field label='超时时间（秒）'>
+          <Input type='number' min={1} max={600} value={timeoutSeconds} onChange={(event) => setTimeoutSeconds(event.currentTarget.value)} />
+        </Field>
+        {result ? <CommandApprovalResultPanel result={result} /> : null}
+        <div className='flex justify-end gap-2'>
+          <Button variant='outline' onClick={onClose}>关闭</Button>
+          <Button variant='primary' onClick={() => void execute()} disabled={running}>
+            <Play className='size-4' />
+            {running ? '执行中' : '执行'}
+          </Button>
+        </div>
+      </div>
+    </DialogShell>
+  )
+}
+
+function CommandApprovalResultPanel({ result }: { result: Record<string, unknown> }) {
+  const stdout = metadataText(result.stdout)
+  const stderr = metadataText(result.stderr) || metadataText(result.error)
+  return (
+    <div className='rounded-xl border border-border bg-background/60 p-3'>
+      <div className='flex items-center justify-between gap-3 text-sm'>
+        <strong>{metadataText(result.command) || '命令结果'}</strong>
+        <Badge tone={statusTone(metadataText(result.status))}>{metadataText(result.status) || '-'}</Badge>
+      </div>
+      <div className='mt-2 grid grid-cols-2 gap-2 text-xs text-muted-foreground'>
+        <span>退出码：{formatNumberValue(result.exit_code)}</span>
+        <span>耗时：{formatNumberValue(result.duration_ms)} ms</span>
+      </div>
+      {stdout ? <pre className='mt-3 max-h-56 overflow-auto rounded-lg bg-muted p-2 text-xs'>{stdout}</pre> : null}
+      {stderr ? <pre className='mt-3 max-h-56 overflow-auto rounded-lg bg-destructive/10 p-2 text-xs text-destructive'>{stderr}</pre> : null}
+    </div>
+  )
 }
 
 function SQLExecuteDialog({

@@ -18,9 +18,10 @@ type commandInterceptor struct {
 }
 
 type commandEvent struct {
-	Command string
-	Blocked bool
-	Notice  string
+	Command    string
+	Blocked    bool
+	ApprovalID string
+	Notice     string
 }
 
 type commandDecision struct {
@@ -56,13 +57,14 @@ func (i *commandInterceptor) Process(raw []byte) ([]byte, []commandEvent) {
 				continue
 			}
 			decision := i.evaluate(command)
-			i.record(command, decision)
+			approvalID := i.record(command, decision)
 			if decision.Blocked {
 				filtered = append(filtered, clearCurrentLine)
 				events = append(events, commandEvent{
-					Command: command,
-					Blocked: true,
-					Notice:  commandBlockNotice(command, decision),
+					Command:    command,
+					Blocked:    true,
+					ApprovalID: approvalID,
+					Notice:     commandBlockNotice(command, decision, approvalID),
 				})
 				continue
 			}
@@ -122,8 +124,21 @@ func (i *commandInterceptor) evaluate(command string) commandDecision {
 	return decision
 }
 
-func (i *commandInterceptor) record(command string, decision commandDecision) {
-	i.recordCommand(command, decision, true, "interactive ssh command "+decision.Status, nil)
+func (i *commandInterceptor) record(command string, decision commandDecision) string {
+	metadata := map[string]any{}
+	approvalID := ""
+	if commandDecisionStatus(decision.Action, decision.Blocked) == "approval_required" {
+		approval, err := i.createCommandApproval(command, decision, true, nil)
+		if err == nil && approval.ID != "" {
+			approvalID = approval.ID
+			metadata["approval_id"] = approval.ID
+			metadata["approval_status"] = approval.Status
+		} else if err != nil {
+			metadata["approval_error"] = err.Error()
+		}
+	}
+	i.recordCommand(command, decision, true, "interactive ssh command "+decision.Status, metadata)
+	return approvalID
 }
 
 func (i *commandInterceptor) recordExec(command string, decision commandDecision, description string, metadata map[string]any) {
@@ -160,6 +175,51 @@ func (i *commandInterceptor) recordCommand(command string, decision commandDecis
 		Description: description,
 		Metadata:    metadata,
 	})
+}
+
+func (i *commandInterceptor) createCommandApproval(command string, decision commandDecision, interactive bool, metadata map[string]any) (model.PlatformItem, error) {
+	if i.store == nil {
+		return model.PlatformItem{}, nil
+	}
+	nextMetadata := map[string]any{}
+	for key, value := range metadata {
+		nextMetadata[key] = value
+	}
+	nextMetadata["session_id"] = i.session.ID
+	nextMetadata["server_id"] = i.session.ServerID
+	nextMetadata["credential_id"] = i.session.CredentialID
+	nextMetadata["client_ip"] = i.session.ClientIP
+	nextMetadata["command"] = command
+	nextMetadata["action"] = decision.Action
+	nextMetadata["risk"] = decision.Risk
+	nextMetadata["rule_id"] = decision.RuleID
+	nextMetadata["rule_name"] = decision.RuleName
+	nextMetadata["pattern"] = decision.Pattern
+	nextMetadata["interactive"] = interactive
+	nextMetadata["requested_by"] = i.session.UserID
+	nextMetadata["requested_at"] = time.Now().UTC()
+	return i.store.CreatePlatformItem("command_approvals", model.PlatformItemRequest{
+		Name:        commandApprovalName(command),
+		Type:        "ssh_command",
+		Status:      "pending",
+		Protocol:    model.ProtocolSSH,
+		OwnerID:     i.session.UserID,
+		TargetID:    i.session.ServerID,
+		Description: "approval required by " + decision.RuleName,
+		Metadata:    nextMetadata,
+	})
+}
+
+func commandApprovalName(command string) string {
+	command = strings.TrimSpace(command)
+	if command == "" {
+		return "SSH command approval"
+	}
+	const max = 120
+	if len(command) <= max {
+		return command
+	}
+	return command[:max] + "..."
 }
 
 func commandFilterEnabled(item model.PlatformItem) bool {
@@ -326,9 +386,12 @@ func commandDecisionStatus(action string, blocked bool) string {
 	}
 }
 
-func commandBlockNotice(command string, decision commandDecision) string {
+func commandBlockNotice(command string, decision commandDecision, approvalID string) string {
 	switch commandDecisionStatus(decision.Action, decision.Blocked) {
 	case "approval_required":
+		if approvalID != "" {
+			return "\r\n[openwebservermanager] command requires approval by " + decision.RuleName + " (" + decision.Risk + "), approval " + approvalID + ": " + command + "\r\n"
+		}
 		return "\r\n[openwebservermanager] command requires approval by " + decision.RuleName + " (" + decision.Risk + "): " + command + "\r\n"
 	default:
 		return "\r\n[openwebservermanager] command blocked by " + decision.RuleName + " (" + decision.Risk + "): " + command + "\r\n"

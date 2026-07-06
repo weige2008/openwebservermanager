@@ -63,6 +63,7 @@ type rdpProxyRuntime interface {
 type PublicConfig struct {
 	SiteName  string          `json:"site_name"`
 	Version   string          `json:"version"`
+	Commit    string          `json:"commit,omitempty"`
 	GitHubURL string          `json:"github_url"`
 	Copyright string          `json:"copyright"`
 	NavLinks  []PublicNavLink `json:"nav_links"`

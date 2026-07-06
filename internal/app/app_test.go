@@ -139,6 +139,66 @@ func TestPlatformCollectionEndpoints(t *testing.T) {
 	}
 }
 
+func TestAdminLicenseEndpoint(t *testing.T) {
+	handler, adminCookie := newTestHandler(t)
+
+	getRec := assertStatus(t, handler, http.MethodGet, "/api/admin/license", nil, adminCookie, http.StatusOK)
+	var initial localLicenseInfo
+	decodeResponse(t, getRec, &initial)
+	if initial.Edition != "Community" || initial.Enforcement != "none" || initial.Status != "active" {
+		t.Fatalf("unexpected initial license status: %+v", initial)
+	}
+	if len(initial.InstallationFingerprint) != 32 {
+		t.Fatalf("expected stable 32-char installation fingerprint, got %q", initial.InstallationFingerprint)
+	}
+	if _, ok := initial.Usage["users"]; initial.Limits["users"] != "unlimited" || !ok {
+		t.Fatalf("expected unlimited local license with user usage: %+v", initial)
+	}
+
+	putRec := assertStatus(t, handler, http.MethodPut, "/api/admin/license", map[string]any{
+		"licensee":   "QA Lab",
+		"contact":    "ops@example.test",
+		"serial":     "LOCAL-COMMUNITY-001",
+		"issued_at":  "2026-07-06",
+		"expires_at": "never",
+		"notes":      "local validation license",
+		"features":   []string{"ssh", "rdp", "audit", "gateway"},
+	}, adminCookie, http.StatusOK)
+	var updated localLicenseInfo
+	decodeResponse(t, putRec, &updated)
+	if updated.Licensee != "QA Lab" || updated.Serial != "LOCAL-COMMUNITY-001" || updated.SettingID == "" {
+		t.Fatalf("license update did not persist local fields: %+v", updated)
+	}
+	if updated.Enforcement != "none" || updated.Limits["assets"] != "unlimited" {
+		t.Fatalf("local license must not introduce commercial enforcement: %+v", updated)
+	}
+
+	logRec := assertStatus(t, handler, http.MethodGet, "/api/admin/audit/operation-logs", nil, adminCookie, http.StatusOK)
+	if !strings.Contains(logRec.Body.String(), "license.update") {
+		t.Fatalf("license update was not written to operation audit logs: %s", logRec.Body.String())
+	}
+}
+
+func TestAdminLicenseRequiresAdminPermission(t *testing.T) {
+	handler, adminCookie := newTestHandler(t)
+
+	userRec := assertStatus(t, handler, http.MethodPost, "/api/admin/users", map[string]any{
+		"name":     "license-viewer",
+		"type":     "local",
+		"status":   "enabled",
+		"password": "password123",
+		"metadata": map[string]any{"role": "user"},
+	}, adminCookie, http.StatusCreated)
+	if !strings.Contains(userRec.Body.String(), "license-viewer") {
+		t.Fatalf("expected created user response, got %s", userRec.Body.String())
+	}
+	loginRec := assertStatus(t, handler, http.MethodPost, "/api/auth/login", map[string]any{"username": "license-viewer", "password": "password123"}, nil, http.StatusOK)
+	userCookie := loginRec.Result().Cookies()[0]
+
+	assertStatus(t, handler, http.MethodGet, "/api/admin/license", nil, userCookie, http.StatusForbidden)
+	assertStatus(t, handler, http.MethodPut, "/api/admin/license", map[string]any{"licensee": "denied"}, userCookie, http.StatusForbidden)
+}
+
 func TestPlatformCollectionDetailRedactsSensitiveMetadata(t *testing.T) {
 	handler, cookie := newTestHandler(t)
 

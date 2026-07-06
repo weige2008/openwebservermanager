@@ -202,6 +202,7 @@ func publicConfig() app.PublicConfig {
 	return app.PublicConfig{
 		SiteName:  env("OPENWEBSERVERMANAGER_SITE_NAME", "Open Web Server Manager"),
 		Version:   env("OPENWEBSERVERMANAGER_VERSION", version),
+		Commit:    env("OPENWEBSERVERMANAGER_COMMIT", commit),
 		GitHubURL: env("OPENWEBSERVERMANAGER_GITHUB_URL", "https://github.com/weige2008/openwebservermanager"),
 		Copyright: env("OPENWEBSERVERMANAGER_COPYRIGHT", "Copyright (c) 2026 weige2008. All rights reserved."),
 		NavLinks: []app.PublicNavLink{

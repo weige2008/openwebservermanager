@@ -113,6 +113,9 @@ func (s *Server) handlePlatformAPI(w http.ResponseWriter, r *http.Request) bool 
 		}
 		s.handleCollection(w, r, collection, tailID(parts))
 		return true
+	case path == "admin/license":
+		s.handleAdminLicense(w, r)
+		return true
 	case strings.HasPrefix(path, "admin/"):
 		rest := strings.TrimPrefix(path, "admin/")
 		parts := splitPath(rest)

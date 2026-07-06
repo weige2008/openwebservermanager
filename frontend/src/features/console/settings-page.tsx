@@ -1,4 +1,4 @@
-import { Fingerprint, Globe2, KeyRound, MessageCircle, Monitor, Moon, Network, RotateCcw, ShieldCheck, Sun, Trash2, UserCircle } from 'lucide-react'
+import { BadgeCheck, Fingerprint, Globe2, KeyRound, MessageCircle, Monitor, Moon, Network, RotateCcw, ShieldCheck, Sun, Trash2, UserCircle } from 'lucide-react'
 import { useEffect, useState } from 'react'
 import { useTranslation } from 'react-i18next'
 
@@ -7,7 +7,7 @@ import { CardStaggerContainer, CardStaggerItem, StaggerContainer, StaggerItem } 
 import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
 import { useConfirmDialog } from '@/components/ui/confirm-dialog'
-import { Field, Input, Select } from '@/components/ui/field'
+import { Field, Input, Select, Textarea } from '@/components/ui/field'
 import { AboutContent } from '@/features/about/about-page'
 import { INTERFACE_LANGUAGE_OPTIONS } from '@/i18n/languages'
 import { apiRequest } from '@/lib/api'
@@ -139,6 +139,44 @@ interface PasskeyItem {
   updated_at: string
 }
 
+interface LocalLicenseModule {
+  key: string
+  name: string
+  enabled: boolean
+}
+
+interface LocalLicenseInfo {
+  edition: string
+  status: string
+  enforcement: string
+  licensee?: string
+  contact?: string
+  serial?: string
+  issued_at?: string
+  expires_at?: string
+  notes?: string
+  updated_at?: string
+  setting_id?: string
+  version: string
+  commit?: string
+  installation_fingerprint: string
+  runtime: Record<string, string>
+  limits: Record<string, string>
+  usage: Record<string, number>
+  features?: string[]
+  modules: LocalLicenseModule[]
+}
+
+interface LocalLicenseFormState {
+  licensee: string
+  contact: string
+  serial: string
+  issued_at: string
+  expires_at: string
+  notes: string
+  features: string
+}
+
 const loginSecurityTypes = ['security', 'identity', 'login', 'password', 'captcha', 'mfa']
 const captchaKeys = ['captcha_enabled', 'login_captcha', 'enable_captcha', 'captcha', 'require_captcha']
 const disablePasswordKeys = ['disable_password_login', 'password_login_disabled', 'disablePasswordLogin', 'passwordLoginDisabled', 'no_password_login']
@@ -194,6 +232,9 @@ export function SettingsPage() {
   const [wecomTestBusy, setWeComTestBusy] = useState(false)
   const [passwordForm, setPasswordForm] = useState({ currentPassword: '', newPassword: '', confirmPassword: '' })
   const [passwordBusy, setPasswordBusy] = useState(false)
+  const [licenseInfo, setLicenseInfo] = useState<LocalLicenseInfo | null>(null)
+  const [licenseForm, setLicenseForm] = useState<LocalLicenseFormState>(() => defaultLocalLicenseForm())
+  const [licenseBusy, setLicenseBusy] = useState(false)
 
   const loadMFAStatus = async () => {
     setMFAStatus(await apiRequest<MFAStatus>('/api/auth/mfa/status'))
@@ -222,12 +263,19 @@ export function SettingsPage() {
     setLoginLocks(result.items || [])
   }
 
+  const loadLocalLicense = async () => {
+    const result = await apiRequest<LocalLicenseInfo>('/api/admin/license')
+    setLicenseInfo(result)
+    setLicenseForm(localLicenseFormFromInfo(result))
+  }
+
   useEffect(() => {
     void loadMFAStatus().catch(() => undefined)
     void loadPasskeys().catch(() => undefined)
     void loadLoginSecurity().catch(() => undefined)
     void loadLoginPolicies().catch(() => undefined)
     void loadLoginLocks().catch(() => undefined)
+    void loadLocalLicense().catch(() => undefined)
   }, [])
 
   useEffect(() => {
@@ -718,6 +766,33 @@ export function SettingsPage() {
       app.handleApiError(error)
     } finally {
       setWeComTestBusy(false)
+    }
+  }
+
+  const patchLicenseForm = (next: Partial<LocalLicenseFormState>) => setLicenseForm((current) => ({ ...current, ...next }))
+
+  const saveLocalLicense = async () => {
+    setLicenseBusy(true)
+    try {
+      const result = await apiRequest<LocalLicenseInfo>('/api/admin/license', {
+        method: 'PUT',
+        body: JSON.stringify({
+          licensee: licenseForm.licensee.trim(),
+          contact: licenseForm.contact.trim(),
+          serial: licenseForm.serial.trim(),
+          issued_at: licenseForm.issued_at.trim(),
+          expires_at: licenseForm.expires_at.trim(),
+          notes: licenseForm.notes.trim(),
+          features: splitLicenseFeatures(licenseForm.features),
+        }),
+      })
+      setLicenseInfo(result)
+      setLicenseForm(localLicenseFormFromInfo(result))
+      app.showToast(t('settingsPage.licenseSaved', { defaultValue: 'License information saved' }))
+    } catch (error) {
+      app.handleApiError(error)
+    } finally {
+      setLicenseBusy(false)
     }
   }
 
@@ -1492,6 +1567,80 @@ export function SettingsPage() {
         </div>
       </CardStaggerItem>
 
+      <CardStaggerItem className='grid gap-4 rounded-xl border border-border bg-card p-5 shadow-sm lg:grid-cols-[0.85fr_1.15fr]'>
+        <div className='flex min-w-0 items-start gap-3'>
+          <span className='grid size-12 shrink-0 place-items-center rounded-full bg-primary text-primary-foreground'>
+            <BadgeCheck className='size-5' />
+          </span>
+          <div className='min-w-0'>
+            <div className='flex flex-wrap items-center gap-2'>
+              <h2 className='truncate text-base font-semibold'>{t('settingsPage.licenseTitle', { defaultValue: 'Local license' })}</h2>
+              <Badge tone={licenseInfo?.status === 'expired' ? 'danger' : 'success'}>
+                {licenseInfo?.status || t('loadingConsole')}
+              </Badge>
+              <Badge tone='neutral'>{licenseInfo?.edition || 'Community'}</Badge>
+              <Badge tone='info'>{t('settingsPage.licenseNoEnforcement', { defaultValue: 'No commercial enforcement' })}</Badge>
+            </div>
+            <p className='mt-1 max-w-lg text-sm leading-6 text-muted-foreground'>
+              {t('settingsPage.licenseDescription', { defaultValue: 'Record local license, deployment fingerprint, enabled modules, and resource usage without adding any commercial restriction.' })}
+            </p>
+          </div>
+        </div>
+        <div className='grid gap-3'>
+          <StaggerContainer className='grid gap-3 md:grid-cols-2'>
+            <StaggerItem>
+              <InfoTile label={t('version')} value={licenseInfo?.commit ? `${licenseInfo.version} (${licenseInfo.commit})` : licenseInfo?.version || app.publicConfig.version || 'dev'} />
+            </StaggerItem>
+            <StaggerItem>
+              <InfoTile label={t('settingsPage.licenseFingerprint', { defaultValue: 'Installation fingerprint' })} value={licenseInfo?.installation_fingerprint || '-'} />
+            </StaggerItem>
+            <StaggerItem>
+              <InfoTile label={t('settingsPage.licenseRuntime', { defaultValue: 'Runtime' })} value={licenseInfo ? `${licenseInfo.runtime.os || '-'} / ${licenseInfo.runtime.arch || '-'}` : '-'} />
+            </StaggerItem>
+            <StaggerItem>
+              <InfoTile label={t('settingsPage.licenseUsage', { defaultValue: 'Usage' })} value={licenseUsageSummary(licenseInfo)} />
+            </StaggerItem>
+          </StaggerContainer>
+          <div className='rounded-lg border border-border bg-background/70 p-3'>
+            <div className='mb-2 text-sm font-medium'>{t('settingsPage.licenseModules', { defaultValue: 'Enabled modules' })}</div>
+            <div className='flex flex-wrap gap-2'>
+              {(licenseInfo?.modules || []).map((module) => (
+                <Badge key={module.key} tone={module.enabled ? 'success' : 'neutral'}>{module.name}</Badge>
+              ))}
+              {!licenseInfo?.modules?.length ? <span className='text-sm text-muted-foreground'>{t('loadingConsole')}</span> : null}
+            </div>
+          </div>
+          <div className='grid gap-3 md:grid-cols-2'>
+            <Field label={t('settingsPage.licensee', { defaultValue: 'Licensee' })}>
+              <Input value={licenseForm.licensee} onChange={(event) => patchLicenseForm({ licensee: event.currentTarget.value })} placeholder='Open Web Server Manager' />
+            </Field>
+            <Field label={t('settingsPage.licenseContact', { defaultValue: 'Contact' })}>
+              <Input value={licenseForm.contact} onChange={(event) => patchLicenseForm({ contact: event.currentTarget.value })} placeholder='ops@example.com' />
+            </Field>
+            <Field label={t('settingsPage.licenseSerial', { defaultValue: 'Serial' })}>
+              <Input value={licenseForm.serial} onChange={(event) => patchLicenseForm({ serial: event.currentTarget.value })} placeholder='LOCAL-COMMUNITY' />
+            </Field>
+            <Field label={t('settingsPage.licenseExpiresAt', { defaultValue: 'Expires at' })}>
+              <Input value={licenseForm.expires_at} onChange={(event) => patchLicenseForm({ expires_at: event.currentTarget.value })} placeholder='never or 2027-12-31' />
+            </Field>
+            <Field label={t('settingsPage.licenseIssuedAt', { defaultValue: 'Issued at' })}>
+              <Input value={licenseForm.issued_at} onChange={(event) => patchLicenseForm({ issued_at: event.currentTarget.value })} placeholder='2026-07-06' />
+            </Field>
+            <Field label={t('settingsPage.licenseFeatures', { defaultValue: 'Feature keys' })}>
+              <Input value={licenseForm.features} onChange={(event) => patchLicenseForm({ features: event.currentTarget.value })} placeholder='ssh, rdp, audit, gateway' />
+            </Field>
+          </div>
+          <Field label={t('settingsPage.licenseNotes', { defaultValue: 'Notes' })}>
+            <Textarea value={licenseForm.notes} onChange={(event) => patchLicenseForm({ notes: event.currentTarget.value })} placeholder={t('settingsPage.licenseNotesPlaceholder', { defaultValue: 'Local deployment, approval, or procurement notes.' })} />
+          </Field>
+          <div className='flex justify-end'>
+            <Button variant='primary' onClick={() => void saveLocalLicense()} disabled={licenseBusy}>
+              {licenseBusy ? t('saving') : t('save')}
+            </Button>
+          </div>
+        </div>
+      </CardStaggerItem>
+
       <CardStaggerItem className='grid gap-4 rounded-xl border border-border bg-card p-5 shadow-sm lg:grid-cols-[1.1fr_0.9fr]'>
         <div className='lg:col-span-2'>
           <h2 className='text-base font-semibold'>{t('settingsPage.appearanceTitle')}</h2>
@@ -1618,6 +1767,43 @@ function InfoTile({ label, value }: { label: string; value: string }) {
       <div className='mt-1 truncate font-mono text-sm'>{value}</div>
     </div>
   )
+}
+
+function defaultLocalLicenseForm(): LocalLicenseFormState {
+  return {
+    licensee: '',
+    contact: '',
+    serial: '',
+    issued_at: '',
+    expires_at: 'never',
+    notes: '',
+    features: 'ssh, rdp, vnc, web, database, audit, gateway, identity, backup',
+  }
+}
+
+function localLicenseFormFromInfo(info: LocalLicenseInfo): LocalLicenseFormState {
+  const features = info.features?.length ? info.features : (info.modules || []).filter((module) => module.enabled).map((module) => module.key)
+  return {
+    licensee: info.licensee || '',
+    contact: info.contact || '',
+    serial: info.serial || '',
+    issued_at: info.issued_at || '',
+    expires_at: info.expires_at || 'never',
+    notes: info.notes || '',
+    features: features.join(', '),
+  }
+}
+
+function splitLicenseFeatures(value: string) {
+  return value.split(/[,;\n]+/).map((item) => item.trim()).filter(Boolean)
+}
+
+function licenseUsageSummary(info: LocalLicenseInfo | null) {
+  if (!info) return '-'
+  const usage = info.usage || {}
+  const assets = (usage.assets || 0) + (usage.web_assets || 0) + (usage.database_assets || 0)
+  const gateways = (usage.agent_gateways || 0) + (usage.ssh_gateways || 0)
+  return `${usage.users || 0} users / ${assets} assets / ${gateways} gateways`
 }
 
 function loginSecurityFromSettings(items: PlatformItem[], fallbackCaptcha: boolean, fallbackPasswordDisabled: boolean): LoginSecurityState {

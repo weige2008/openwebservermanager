@@ -1,7 +1,7 @@
 import { FitAddon } from '@xterm/addon-fit'
 import { useQuery } from '@tanstack/react-query'
 import { Terminal } from '@xterm/xterm'
-import { Clipboard, Code2, Power, Upload } from 'lucide-react'
+import { ArrowUp, Clipboard, Code2, Download, FileDown, FolderOpen, Power, RefreshCw, Trash2, Upload } from 'lucide-react'
 import { useEffect, useMemo, useRef, useState } from 'react'
 import { useTranslation } from 'react-i18next'
 
@@ -10,13 +10,26 @@ import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
 import { DialogShell } from '@/components/ui/dialog'
 import { Field, Select, Textarea } from '@/components/ui/field'
-import { apiRequest } from '@/lib/api'
+import { ApiError, apiRequest } from '@/lib/api'
 import { base64ToText, textToBase64 } from '@/lib/codec'
-import { statusLabel } from '@/lib/utils'
+import { formatDate, statusLabel } from '@/lib/utils'
 import type { ConnectionSession, PlatformItem } from '@/types'
 
 interface AccessCommandSnippetsResponse {
   items?: PlatformItem[]
+}
+
+interface DesktopDriveEntry {
+  name: string
+  path: string
+  is_dir: boolean
+  size: number
+  modified: string
+}
+
+interface DesktopDriveResponse {
+  path: string
+  entries: DesktopDriveEntry[]
 }
 
 export function WorkspaceView() {
@@ -45,6 +58,19 @@ export function WorkspaceView() {
       cancel: t('cancel'),
       clipboardSent: t('workspace.clipboardSent'),
       fileSent: t('workspace.fileSent'),
+      sessionFiles: t('workspace.sessionFiles', { defaultValue: 'Session files' }),
+      sessionFilesDescription: t('workspace.sessionFilesDescription', { defaultValue: 'Browse files exposed through the session drive for this desktop connection.' }),
+      refreshFiles: t('workspace.refreshFiles', { defaultValue: 'Refresh' }),
+      parentFolder: t('workspace.parentFolder', { defaultValue: 'Parent' }),
+      emptyFiles: t('workspace.emptyFiles', { defaultValue: 'No files in this folder.' }),
+      openFolder: t('workspace.openFolder', { defaultValue: 'Open' }),
+      downloadFile: t('workspace.downloadFile', { defaultValue: 'Download' }),
+      deleteFile: t('workspace.deleteFile', { defaultValue: 'Delete' }),
+      fileDeleted: t('workspace.fileDeleted', { defaultValue: 'File deleted.' }),
+      fileListFailed: t('workspace.fileListFailed', { defaultValue: 'Unable to load session files.' }),
+      pathLabel: t('workspace.pathLabel', { defaultValue: 'Path' }),
+      modifiedLabel: t('workspace.modifiedLabel', { defaultValue: 'Modified' }),
+      sizeLabel: t('workspace.sizeLabel', { defaultValue: 'Size' }),
     }),
     [t]
   )
@@ -123,7 +149,10 @@ export function WorkspaceView() {
                 <Button variant='outline' onClick={() => window.dispatchEvent(new Event('openwebservermanager:desktop-clipboard'))}><Clipboard className='size-4' />{t('workspace.clipboard')}</Button>
               ) : null}
               {fileTransferEnabled ? (
-                <Button variant='outline' onClick={() => window.dispatchEvent(new Event('openwebservermanager:desktop-upload'))}><Upload className='size-4' />{t('workspace.uploadFile')}</Button>
+                <>
+                  <Button variant='outline' onClick={() => window.dispatchEvent(new Event('openwebservermanager:desktop-files'))}><FolderOpen className='size-4' />{t('workspace.sessionFiles', { defaultValue: 'Session files' })}</Button>
+                  <Button variant='outline' onClick={() => window.dispatchEvent(new Event('openwebservermanager:desktop-upload'))}><Upload className='size-4' />{t('workspace.uploadFile')}</Button>
+                </>
               ) : null}
             </>
           ) : null}
@@ -282,12 +311,34 @@ function RDPWorkspace({
     cancel: string
     clipboardSent: string
     fileSent: string
+    sessionFiles: string
+    sessionFilesDescription: string
+    refreshFiles: string
+    parentFolder: string
+    emptyFiles: string
+    openFolder: string
+    downloadFile: string
+    deleteFile: string
+    fileDeleted: string
+    fileListFailed: string
+    pathLabel: string
+    modifiedLabel: string
+    sizeLabel: string
   }
 }) {
+  const app = useApp()
   const containerRef = useRef<HTMLDivElement | null>(null)
   const clientRef = useRef<any>(null)
   const [clipboardDialogOpen, setClipboardDialogOpen] = useState(false)
   const [clipboardText, setClipboardText] = useState('')
+  const [driveDialogOpen, setDriveDialogOpen] = useState(false)
+  const [drivePath, setDrivePath] = useState('')
+  const driveQuery = useQuery({
+    queryKey: ['desktop-drive', session.id, drivePath],
+    queryFn: () => apiRequest<DesktopDriveResponse>(`/api/connections/${session.id}/drive?path=${encodeURIComponent(drivePath)}`),
+    enabled: fileTransferEnabled && driveDialogOpen,
+    staleTime: 2_000,
+  })
 
   const sendClipboardText = () => {
     const client = clientRef.current
@@ -304,6 +355,44 @@ function RDPWorkspace({
     setClipboardText('')
     showToast(messages.clipboardSent)
   }
+
+  const openDriveEntry = (entry: DesktopDriveEntry) => {
+    if (!entry.is_dir) return
+    setDrivePath(entry.path === '.' ? '' : entry.path)
+  }
+
+  const goParentDriveFolder = () => {
+    const normalized = drivePath.replaceAll('\\', '/').replace(/^\/+|\/+$/g, '')
+    if (!normalized) return
+    const parts = normalized.split('/').filter(Boolean)
+    parts.pop()
+    setDrivePath(parts.join('/'))
+  }
+
+  const downloadDriveEntry = async (entry: DesktopDriveEntry) => {
+    try {
+      await downloadDesktopDriveFile(session.id, entry)
+    } catch (error) {
+      app.handleApiError(error)
+    }
+  }
+
+  const deleteDriveEntry = async (entry: DesktopDriveEntry) => {
+    try {
+      await apiRequest(`/api/connections/${session.id}/drive?path=${encodeURIComponent(entry.path)}`, { method: 'DELETE' })
+      showToast(messages.fileDeleted)
+      await driveQuery.refetch()
+    } catch (error) {
+      app.handleApiError(error)
+    }
+  }
+
+  useEffect(() => {
+    if (!fileTransferEnabled) return
+    const onFiles = () => setDriveDialogOpen(true)
+    window.addEventListener('openwebservermanager:desktop-files', onFiles)
+    return () => window.removeEventListener('openwebservermanager:desktop-files', onFiles)
+  }, [fileTransferEnabled])
 
   useEffect(() => {
     const container = containerRef.current
@@ -509,6 +598,108 @@ function RDPWorkspace({
           </div>
         </form>
       </DialogShell>
+      <DialogShell
+        open={driveDialogOpen}
+        onOpenChange={setDriveDialogOpen}
+        title={messages.sessionFiles}
+        description={messages.sessionFilesDescription}
+      >
+        <div className='grid gap-3'>
+          <div className='flex flex-wrap items-center justify-between gap-2 rounded-lg border border-border bg-muted/30 px-3 py-2'>
+            <div className='min-w-0 text-xs text-muted-foreground'>
+              <span className='font-medium text-foreground'>{messages.pathLabel}: </span>
+              <span className='break-all'>{driveQuery.data?.path && driveQuery.data.path !== '.' ? driveQuery.data.path : '/'}</span>
+            </div>
+            <div className='flex gap-2'>
+              <Button size='sm' variant='outline' onClick={goParentDriveFolder} disabled={!drivePath}>
+                <ArrowUp className='size-3.5' />
+                {messages.parentFolder}
+              </Button>
+              <Button size='sm' variant='outline' onClick={() => void driveQuery.refetch()}>
+                <RefreshCw className='size-3.5' />
+                {messages.refreshFiles}
+              </Button>
+            </div>
+          </div>
+          {driveQuery.isError ? (
+            <div className='rounded-lg border border-destructive/20 bg-destructive/10 px-3 py-2 text-sm text-destructive'>{messages.fileListFailed}</div>
+          ) : null}
+          <div className='max-h-[50vh] overflow-auto rounded-lg border border-border'>
+            <div className='grid grid-cols-[minmax(0,1fr)_7rem_10rem_10rem] items-center gap-2 border-b border-border bg-muted/40 px-3 py-2 text-xs font-medium text-muted-foreground max-md:grid-cols-[minmax(0,1fr)_7rem]'>
+              <span>{messages.sessionFiles}</span>
+              <span>{messages.sizeLabel}</span>
+              <span className='max-md:hidden'>{messages.modifiedLabel}</span>
+              <span className='text-right'>{messages.openFolder}</span>
+            </div>
+            {driveQuery.isLoading ? (
+              <div className='px-3 py-8 text-center text-sm text-muted-foreground'>{messages.refreshFiles}...</div>
+            ) : driveQuery.data?.entries?.length ? (
+              driveQuery.data.entries.map((entry) => (
+                <div key={entry.path} className='grid grid-cols-[minmax(0,1fr)_7rem_10rem_10rem] items-center gap-2 border-b border-border/60 px-3 py-2 text-sm last:border-0 max-md:grid-cols-[minmax(0,1fr)_7rem]'>
+                  <button
+                    type='button'
+                    className='min-w-0 truncate text-left font-medium hover:text-primary disabled:hover:text-foreground'
+                    disabled={!entry.is_dir}
+                    onClick={() => openDriveEntry(entry)}
+                  >
+                    {entry.is_dir ? <FolderOpen className='mr-2 inline size-4 align-[-2px]' /> : <FileDown className='mr-2 inline size-4 align-[-2px]' />}
+                    {entry.name}
+                  </button>
+                  <span className='text-xs text-muted-foreground'>{entry.is_dir ? '-' : formatBytes(entry.size)}</span>
+                  <span className='truncate text-xs text-muted-foreground max-md:hidden'>{formatDate(entry.modified)}</span>
+                  <span className='flex justify-end gap-1'>
+                    {entry.is_dir ? (
+                      <Button size='icon-sm' variant='ghost' onClick={() => openDriveEntry(entry)} aria-label={messages.openFolder}>
+                        <FolderOpen className='size-4' />
+                      </Button>
+                    ) : (
+                      <Button size='icon-sm' variant='ghost' onClick={() => void downloadDriveEntry(entry)} aria-label={messages.downloadFile}>
+                        <Download className='size-4' />
+                      </Button>
+                    )}
+                    <Button size='icon-sm' variant='ghost' onClick={() => void deleteDriveEntry(entry)} aria-label={messages.deleteFile}>
+                      <Trash2 className='size-4 text-destructive' />
+                    </Button>
+                  </span>
+                </div>
+              ))
+            ) : (
+              <div className='px-3 py-8 text-center text-sm text-muted-foreground'>{messages.emptyFiles}</div>
+            )}
+          </div>
+        </div>
+      </DialogShell>
     </>
   )
+}
+
+async function downloadDesktopDriveFile(sessionID: string, entry: DesktopDriveEntry) {
+  const response = await fetch(`/api/connections/${sessionID}/drive/download?path=${encodeURIComponent(entry.path)}`, {
+    credentials: 'same-origin',
+  })
+  if (!response.ok) {
+    const payload = await response.json().catch(() => ({})) as { error?: string }
+    throw new ApiError(payload.error || response.statusText, response.status, false, payload)
+  }
+  const blob = await response.blob()
+  const url = URL.createObjectURL(blob)
+  const anchor = document.createElement('a')
+  anchor.href = url
+  anchor.download = entry.name || 'download'
+  document.body.appendChild(anchor)
+  anchor.click()
+  anchor.remove()
+  URL.revokeObjectURL(url)
+}
+
+function formatBytes(value: number) {
+  if (!Number.isFinite(value) || value <= 0) return '0 B'
+  if (value < 1024) return `${value} B`
+  const units = ['KB', 'MB', 'GB', 'TB']
+  let current = value / 1024
+  for (const unit of units) {
+    if (current < 1024) return `${current.toFixed(current >= 10 ? 0 : 1)} ${unit}`
+    current /= 1024
+  }
+  return `${current.toFixed(0)} PB`
 }

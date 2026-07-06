@@ -7661,6 +7661,90 @@ func TestAuditSessionOperations(t *testing.T) {
 	}
 }
 
+func TestDesktopSessionDriveFiles(t *testing.T) {
+	srv, adminCookie := newTestServer(t, nil)
+	handler := http.Handler(srv)
+
+	windowsRec := assertStatus(t, handler, http.MethodPost, "/api/servers", map[string]any{
+		"name":     "windows-drive",
+		"host":     "127.0.0.1",
+		"os":       "windows",
+		"rdp_port": 3389,
+	}, adminCookie, http.StatusCreated)
+	var windows model.Server
+	decodeResponse(t, windowsRec, &windows)
+	rdpCredRec := assertStatus(t, handler, http.MethodPost, "/api/credentials", map[string]any{
+		"name":      "rdp-drive-admin",
+		"server_id": windows.ID,
+		"type":      "rdp_password",
+		"username":  "Administrator",
+		"password":  "secret",
+	}, adminCookie, http.StatusCreated)
+	var rdpCred model.CredentialPublic
+	decodeResponse(t, rdpCredRec, &rdpCred)
+	sessionRec := assertStatus(t, handler, http.MethodPost, "/api/connections/rdp", map[string]any{
+		"server_id":     windows.ID,
+		"credential_id": rdpCred.ID,
+	}, adminCookie, http.StatusCreated)
+	var session model.ConnectionSession
+	decodeResponse(t, sessionRec, &session)
+
+	driveRoot := filepath.Join(srv.cfg.DataDir, "drives", session.ID, "reports")
+	if err := os.MkdirAll(driveRoot, 0o770); err != nil {
+		t.Fatalf("create session drive: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(driveRoot, "download.txt"), []byte("desktop file"), 0o660); err != nil {
+		t.Fatalf("write drive download file: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(driveRoot, "remove.txt"), []byte("delete me"), 0o660); err != nil {
+		t.Fatalf("write drive delete file: %v", err)
+	}
+
+	rootList := assertStatus(t, handler, http.MethodGet, "/api/connections/"+session.ID+"/drive", nil, adminCookie, http.StatusOK)
+	if !strings.Contains(rootList.Body.String(), `"name":"reports"`) {
+		t.Fatalf("drive root did not list reports directory: %s", rootList.Body.String())
+	}
+	reportsList := assertStatus(t, handler, http.MethodGet, "/api/connections/"+session.ID+"/drive?path=reports", nil, adminCookie, http.StatusOK)
+	if !strings.Contains(reportsList.Body.String(), `"name":"download.txt"`) || !strings.Contains(reportsList.Body.String(), `"name":"remove.txt"`) {
+		t.Fatalf("drive reports did not list files: %s", reportsList.Body.String())
+	}
+	downloadRec := assertStatus(t, handler, http.MethodGet, "/api/connections/"+session.ID+"/drive/download?path=reports/download.txt", nil, adminCookie, http.StatusOK)
+	if strings.TrimSpace(downloadRec.Body.String()) != "desktop file" {
+		t.Fatalf("drive download body = %q", downloadRec.Body.String())
+	}
+	assertStatus(t, handler, http.MethodGet, "/api/connections/"+session.ID+"/drive/download?path=../secret.txt", nil, adminCookie, http.StatusForbidden)
+	assertStatus(t, handler, http.MethodDelete, "/api/connections/"+session.ID+"/drive?path=reports/remove.txt", nil, adminCookie, http.StatusOK)
+	if _, err := os.Stat(filepath.Join(driveRoot, "remove.txt")); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("drive delete did not remove file: %v", err)
+	}
+
+	assertStatus(t, handler, http.MethodPost, "/api/admin/users", map[string]any{
+		"name":     "drive-other-user",
+		"type":     "local",
+		"status":   "enabled",
+		"password": "password123",
+		"metadata": map[string]any{"role": "user"},
+	}, adminCookie, http.StatusCreated)
+	otherLogin := assertStatus(t, handler, http.MethodPost, "/api/auth/login", map[string]any{"username": "drive-other-user", "password": "password123"}, nil, http.StatusOK)
+	otherCookie := otherLogin.Result().Cookies()[0]
+	assertStatus(t, handler, http.MethodGet, "/api/connections/"+session.ID+"/drive", nil, otherCookie, http.StatusForbidden)
+
+	disabled := false
+	if _, err := srv.cfg.Store.UpdateSession(session.ID, func(item *model.ConnectionSession) {
+		item.FileTransferEnabled = &disabled
+	}); err != nil {
+		t.Fatalf("disable file transfer: %v", err)
+	}
+	assertStatus(t, handler, http.MethodGet, "/api/connections/"+session.ID+"/drive", nil, adminCookie, http.StatusForbidden)
+
+	fileLogs := assertStatus(t, handler, http.MethodGet, "/api/admin/audit/file-logs", nil, adminCookie, http.StatusOK)
+	for _, want := range []string{session.ID, "download", "delete"} {
+		if !strings.Contains(fileLogs.Body.String(), want) {
+			t.Fatalf("drive file log missing %q: %s", want, fileLogs.Body.String())
+		}
+	}
+}
+
 func startFakeSSHExecServer(t *testing.T, username, password string) (string, func()) {
 	t.Helper()
 	listener, err := net.Listen("tcp", "127.0.0.1:0")

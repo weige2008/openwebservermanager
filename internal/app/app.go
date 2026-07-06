@@ -233,6 +233,8 @@ func (s *Server) serveAPI(w http.ResponseWriter, r *http.Request) {
 		s.handleVNCTunnel(w, r)
 	case r.Method == http.MethodGet && strings.HasPrefix(r.URL.Path, "/api/connections/") && strings.HasSuffix(r.URL.Path, "/recording.zip"):
 		s.handleRecordingDownload(w, r)
+	case strings.HasPrefix(r.URL.Path, "/api/connections/") && strings.Contains(r.URL.Path, "/drive"):
+		s.handleDesktopDrive(w, r)
 	case r.Method == http.MethodPost && strings.HasPrefix(r.URL.Path, "/api/connections/") && strings.HasSuffix(r.URL.Path, "/close"):
 		s.handleClose(w, r)
 	default:

@@ -50,12 +50,20 @@ export function WorkspaceView() {
     () => ({
       missingGuacamole: t('workspace.missingGuacamole'),
       rdpFailed: t('workspace.rdpFailed'),
+      clipboardTitle: t('workspace.clipboard'),
       clipboardPrompt: t('workspace.clipboardPrompt'),
       clipboardDialogDescription: t('workspace.clipboardDialogDescription'),
       clipboardTextLabel: t('workspace.clipboardTextLabel'),
       clipboardTextPlaceholder: t('workspace.clipboardTextPlaceholder'),
       sendClipboard: t('workspace.sendClipboard'),
       cancel: t('cancel'),
+      remoteClipboard: t('workspace.remoteClipboard', { defaultValue: 'Remote clipboard' }),
+      remoteClipboardDescription: t('workspace.remoteClipboardDescription', { defaultValue: 'The latest text copied inside the remote desktop.' }),
+      remoteClipboardEmpty: t('workspace.remoteClipboardEmpty', { defaultValue: 'No remote clipboard text received yet.' }),
+      copyRemoteClipboard: t('workspace.copyRemoteClipboard', { defaultValue: 'Copy locally' }),
+      remoteClipboardReceived: t('workspace.remoteClipboardReceived', { defaultValue: 'Remote clipboard received.' }),
+      remoteClipboardCopied: t('workspace.remoteClipboardCopied', { defaultValue: 'Remote clipboard copied.' }),
+      remoteClipboardCopyFailed: t('workspace.remoteClipboardCopyFailed', { defaultValue: 'Unable to copy clipboard text in this browser.' }),
       clipboardSent: t('workspace.clipboardSent'),
       fileSent: t('workspace.fileSent'),
       sessionFiles: t('workspace.sessionFiles', { defaultValue: 'Session files' }),
@@ -303,12 +311,20 @@ function RDPWorkspace({
   messages: {
     missingGuacamole: string
     rdpFailed: string
+    clipboardTitle: string
     clipboardPrompt: string
     clipboardDialogDescription: string
     clipboardTextLabel: string
     clipboardTextPlaceholder: string
     sendClipboard: string
     cancel: string
+    remoteClipboard: string
+    remoteClipboardDescription: string
+    remoteClipboardEmpty: string
+    copyRemoteClipboard: string
+    remoteClipboardReceived: string
+    remoteClipboardCopied: string
+    remoteClipboardCopyFailed: string
     clipboardSent: string
     fileSent: string
     sessionFiles: string
@@ -331,6 +347,9 @@ function RDPWorkspace({
   const clientRef = useRef<any>(null)
   const [clipboardDialogOpen, setClipboardDialogOpen] = useState(false)
   const [clipboardText, setClipboardText] = useState('')
+  const [remoteClipboardText, setRemoteClipboardText] = useState('')
+  const [remoteClipboardMimeType, setRemoteClipboardMimeType] = useState('')
+  const [remoteClipboardUpdatedAt, setRemoteClipboardUpdatedAt] = useState('')
   const [driveDialogOpen, setDriveDialogOpen] = useState(false)
   const [drivePath, setDrivePath] = useState('')
   const driveQuery = useQuery({
@@ -354,6 +373,16 @@ function RDPWorkspace({
     setClipboardDialogOpen(false)
     setClipboardText('')
     showToast(messages.clipboardSent)
+  }
+
+  const copyRemoteClipboard = async () => {
+    if (!remoteClipboardText) return
+    try {
+      await copyTextToClipboard(remoteClipboardText)
+      showToast(messages.remoteClipboardCopied)
+    } catch {
+      showToast(messages.remoteClipboardCopyFailed)
+    }
   }
 
   const openDriveEntry = (entry: DesktopDriveEntry) => {
@@ -463,6 +492,27 @@ function RDPWorkspace({
       setStatus('disconnected')
       showToast(err.message || messages.rdpFailed)
     }
+    if (clipboardEnabled) {
+      client.onclipboard = (stream: unknown, mimeType: string) => {
+        const normalizedType = String(mimeType || '').toLowerCase()
+        if (normalizedType && !normalizedType.startsWith('text/')) {
+          new Guacamole.BlobReader(stream, mimeType || 'application/octet-stream')
+          return
+        }
+        const reader = new Guacamole.StringReader(stream)
+        let text = ''
+        reader.ontext = (chunk: string) => {
+          text += chunk
+        }
+        reader.onend = () => {
+          setRemoteClipboardText(text)
+          setRemoteClipboardMimeType(mimeType || 'text/plain')
+          setRemoteClipboardUpdatedAt(new Date().toISOString())
+          setClipboardDialogOpen(true)
+          showToast(messages.remoteClipboardReceived)
+        }
+      }
+    }
 
     const onClipboard = () => {
       setClipboardText('')
@@ -540,6 +590,7 @@ function RDPWorkspace({
       document.removeEventListener('visibilitychange', releaseInputState)
       window.removeEventListener('beforeunload', onBeforeUnload)
       releaseInputState()
+      client.onclipboard = null
       client.disconnect()
       clientRef.current = null
       container.innerHTML = ''
@@ -567,36 +618,60 @@ function RDPWorkspace({
       <DialogShell
         open={clipboardDialogOpen}
         onOpenChange={setClipboardDialogOpen}
-        compact
-        title={messages.clipboardPrompt}
+        title={messages.clipboardTitle}
         description={messages.clipboardDialogDescription}
       >
-        <form
-          className='grid gap-4'
-          onSubmit={(event) => {
-            event.preventDefault()
-            sendClipboardText()
-          }}
-        >
-          <Field label={messages.clipboardTextLabel}>
-            <Textarea
-              autoFocus
-              className='min-h-36'
-              value={clipboardText}
-              onChange={(event) => setClipboardText(event.currentTarget.value)}
-              placeholder={messages.clipboardTextPlaceholder}
-            />
-          </Field>
-          <div className='flex justify-end gap-2'>
-            <Button type='button' variant='outline' onClick={() => setClipboardDialogOpen(false)}>
-              {messages.cancel}
-            </Button>
-            <Button type='submit' variant='primary'>
-              <Clipboard className='size-4' />
-              {messages.sendClipboard}
-            </Button>
-          </div>
-        </form>
+        <div className='grid gap-5'>
+          <section className='grid gap-2 rounded-lg border border-border bg-muted/20 p-3'>
+            <div className='flex flex-wrap items-center justify-between gap-2'>
+              <div>
+                <div className='text-sm font-medium'>{messages.remoteClipboard}</div>
+                <div className='text-xs text-muted-foreground'>{messages.remoteClipboardDescription}</div>
+              </div>
+              <Button size='sm' variant='outline' onClick={() => void copyRemoteClipboard()} disabled={!remoteClipboardText}>
+                <Clipboard className='size-3.5' />
+                {messages.copyRemoteClipboard}
+              </Button>
+            </div>
+            {remoteClipboardText ? (
+              <>
+                <Textarea className='min-h-28 text-xs' value={remoteClipboardText} readOnly />
+                <div className='text-xs text-muted-foreground'>
+                  {remoteClipboardMimeType || 'text/plain'}
+                  {remoteClipboardUpdatedAt ? ` - ${formatDate(remoteClipboardUpdatedAt)}` : ''}
+                </div>
+              </>
+            ) : (
+              <div className='rounded-md border border-dashed border-border px-3 py-6 text-center text-sm text-muted-foreground'>{messages.remoteClipboardEmpty}</div>
+            )}
+          </section>
+          <form
+            className='grid gap-4'
+            onSubmit={(event) => {
+              event.preventDefault()
+              sendClipboardText()
+            }}
+          >
+            <Field label={messages.clipboardPrompt}>
+              <Textarea
+                autoFocus
+                className='min-h-36'
+                value={clipboardText}
+                onChange={(event) => setClipboardText(event.currentTarget.value)}
+                placeholder={messages.clipboardTextPlaceholder}
+              />
+            </Field>
+            <div className='flex justify-end gap-2'>
+              <Button type='button' variant='outline' onClick={() => setClipboardDialogOpen(false)}>
+                {messages.cancel}
+              </Button>
+              <Button type='submit' variant='primary'>
+                <Clipboard className='size-4' />
+                {messages.sendClipboard}
+              </Button>
+            </div>
+          </form>
+        </div>
       </DialogShell>
       <DialogShell
         open={driveDialogOpen}
@@ -702,4 +777,22 @@ function formatBytes(value: number) {
     current /= 1024
   }
   return `${current.toFixed(0)} PB`
+}
+
+async function copyTextToClipboard(text: string) {
+  if (navigator.clipboard?.writeText && window.isSecureContext) {
+    await navigator.clipboard.writeText(text)
+    return
+  }
+  const textarea = document.createElement('textarea')
+  textarea.value = text
+  textarea.setAttribute('readonly', 'true')
+  textarea.style.position = 'fixed'
+  textarea.style.top = '-1000px'
+  textarea.style.opacity = '0'
+  document.body.appendChild(textarea)
+  textarea.select()
+  const copied = document.execCommand('copy')
+  textarea.remove()
+  if (!copied) throw new Error('copy failed')
 }

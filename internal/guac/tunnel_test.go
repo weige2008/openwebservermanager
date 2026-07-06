@@ -111,3 +111,61 @@ func TestDesktopInstructionFilterAuditsFileTransfers(t *testing.T) {
 		}
 	}
 }
+
+func TestDesktopInstructionFilterAuditsClipboardTransfers(t *testing.T) {
+	key := make([]byte, 32)
+	cipher, err := security.NewCipher(key)
+	if err != nil {
+		t.Fatalf("cipher: %v", err)
+	}
+	st, err := store.Open(filepath.Join(t.TempDir(), "store.json"), cipher)
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	defer st.Close()
+
+	filter := newDesktopInstructionFilter(Tunnel{Store: st}, DesktopConfig{
+		Protocol:         model.ProtocolRDP,
+		Session:          model.ConnectionSession{ID: "sess_clipboard", UserID: "user_1", ServerID: "asset_1"},
+		ClipboardEnabled: true,
+		EnableDrive:      true,
+	})
+	for _, tc := range []struct {
+		direction guacDirection
+		streamID  string
+	}{
+		{direction: directionBrowser, streamID: "10"},
+		{direction: directionGuacd, streamID: "11"},
+	} {
+		payload := append([]byte{}, Encode("clipboard", tc.streamID, "text/plain")...)
+		payload = append(payload, Encode("blob", tc.streamID, "payload")...)
+		payload = append(payload, Encode("end", tc.streamID)...)
+		if _, err := filter.filterPayload(tc.direction, payload, nil); err != nil {
+			t.Fatalf("filter %s clipboard payload: %v", tc.direction, err)
+		}
+	}
+
+	items, err := st.ListPlatformItems("operation_logs")
+	if err != nil {
+		t.Fatalf("list operation logs: %v", err)
+	}
+	body := ""
+	for _, item := range items {
+		if item.Type != "clipboard" {
+			continue
+		}
+		direction, _ := item.Metadata["direction"].(string)
+		sessionID, _ := item.Metadata["session_id"].(string)
+		body += item.Name + ":" + item.Status + ":" + direction + ":" + sessionID + "\n"
+	}
+	for _, expected := range []string{
+		"desktop.clipboard.started:started:browser:sess_clipboard",
+		"desktop.clipboard.completed:completed:browser:sess_clipboard",
+		"desktop.clipboard.started:started:guacd:sess_clipboard",
+		"desktop.clipboard.completed:completed:guacd:sess_clipboard",
+	} {
+		if !strings.Contains(body, expected) {
+			t.Fatalf("clipboard audit missing %q in %s", expected, body)
+		}
+	}
+}

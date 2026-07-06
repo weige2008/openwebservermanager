@@ -461,6 +461,7 @@ var platformCollections = []string{
 	"authorized_web_assets",
 	"authorized_database_assets",
 	"system_settings",
+	"notification_reads",
 }
 
 func openPlatformDB(jsonPath string) (*sql.DB, error) {
@@ -687,6 +688,9 @@ func defaultPlatformItems() map[string][]model.PlatformItem {
 func (s *Store) PlatformBootstrap() (map[string][]model.PlatformItem, error) {
 	result := map[string][]model.PlatformItem{}
 	for _, collection := range platformCollections {
+		if privatePlatformCollection(collection) {
+			continue
+		}
 		result[collection] = []model.PlatformItem{}
 	}
 	rows, err := s.db.Query(`SELECT collection, payload FROM platform_records ORDER BY created_at DESC`)
@@ -699,6 +703,9 @@ func (s *Store) PlatformBootstrap() (map[string][]model.PlatformItem, error) {
 		var payload string
 		if err := rows.Scan(&collection, &payload); err != nil {
 			return nil, err
+		}
+		if privatePlatformCollection(collection) {
+			continue
 		}
 		var item model.PlatformItem
 		if err := json.Unmarshal([]byte(payload), &item); err != nil {
@@ -1357,6 +1364,10 @@ func platformCollectionSet() map[string]bool {
 		result[collection] = true
 	}
 	return result
+}
+
+func privatePlatformCollection(collection string) bool {
+	return collection == "notification_reads"
 }
 
 func collectionPrefix(collection string) string {

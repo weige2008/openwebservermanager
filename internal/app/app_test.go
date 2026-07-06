@@ -5113,6 +5113,7 @@ func TestNotificationsReflectRuntimeAndFilterByUser(t *testing.T) {
 	handler, adminCookie := newTestHandler(t)
 
 	assertStatus(t, handler, http.MethodGet, "/api/notifications", nil, nil, http.StatusUnauthorized)
+	assertStatus(t, handler, http.MethodPost, "/api/notifications/read", map[string]any{"keys": []string{"notice:connection-workspace"}}, nil, http.StatusUnauthorized)
 	assertStatus(t, handler, http.MethodPost, "/api/admin/audit/online-sessions", map[string]any{
 		"name":     "admin ssh",
 		"type":     "ssh",
@@ -5145,9 +5146,35 @@ func TestNotificationsReflectRuntimeAndFilterByUser(t *testing.T) {
 			t.Fatalf("admin notifications missing %q: %s", want, adminBody)
 		}
 	}
+	var adminPayload struct {
+		Items    []notificationItem `json:"items"`
+		ReadKeys []string           `json:"read_keys"`
+	}
+	decodeResponse(t, adminRec, &adminPayload)
+	if len(adminPayload.Items) == 0 {
+		t.Fatalf("admin notifications did not return timeline items: %s", adminBody)
+	}
+	if len(adminPayload.ReadKeys) != 0 {
+		t.Fatalf("new admin notification read state should be empty: %#v", adminPayload.ReadKeys)
+	}
+	readKey := "timeline:" + adminPayload.Items[0].ID
+	readRec := assertStatus(t, handler, http.MethodPost, "/api/notifications/read", map[string]any{
+		"keys": []string{"notice:connection-workspace", readKey, readKey, "bad\nkey", strings.Repeat("x", 201)},
+	}, adminCookie, http.StatusOK)
+	readBody := readRec.Body.String()
+	if !strings.Contains(readBody, "notice:connection-workspace") || !strings.Contains(readBody, readKey) || strings.Contains(readBody, "bad\\nkey") || strings.Contains(readBody, strings.Repeat("x", 201)) {
+		t.Fatalf("notification read response did not persist sanitized keys: %s", readBody)
+	}
+	readBackRec := assertStatus(t, handler, http.MethodGet, "/api/notifications", nil, adminCookie, http.StatusOK)
+	if !strings.Contains(readBackRec.Body.String(), readKey) {
+		t.Fatalf("notification read keys were not returned on next fetch: %s", readBackRec.Body.String())
+	}
 	adminBootstrapRec := assertStatus(t, handler, http.MethodGet, "/api/bootstrap", nil, adminCookie, http.StatusOK)
 	if !strings.Contains(adminBootstrapRec.Body.String(), `"guacd"`) {
 		t.Fatalf("admin bootstrap missing runtime guacd state: %s", adminBootstrapRec.Body.String())
+	}
+	if strings.Contains(adminBootstrapRec.Body.String(), "notification_reads") || strings.Contains(adminBootstrapRec.Body.String(), readKey) {
+		t.Fatalf("bootstrap leaked private notification read state: %s", adminBootstrapRec.Body.String())
 	}
 
 	userRec := assertStatus(t, handler, http.MethodPost, "/api/admin/users", map[string]any{
@@ -5183,9 +5210,20 @@ func TestNotificationsReflectRuntimeAndFilterByUser(t *testing.T) {
 	if strings.Contains(limitedBody, "other-user") || strings.Contains(limitedBody, "notification.taskFailed") || strings.Contains(limitedBody, "rdpGatewayOffline") || strings.Contains(limitedBody, `"category":"runtime"`) {
 		t.Fatalf("limited user received another user's/system notification: %s", limitedBody)
 	}
+	limitedReadRec := assertStatus(t, handler, http.MethodPost, "/api/notifications/read", map[string]any{"keys": []string{"timeline:limited-only"}}, userCookie, http.StatusOK)
+	if !strings.Contains(limitedReadRec.Body.String(), "timeline:limited-only") {
+		t.Fatalf("limited user's notification read state was not saved: %s", limitedReadRec.Body.String())
+	}
+	adminReadBackRec := assertStatus(t, handler, http.MethodGet, "/api/notifications", nil, adminCookie, http.StatusOK)
+	if strings.Contains(adminReadBackRec.Body.String(), "timeline:limited-only") {
+		t.Fatalf("admin notification read state included another user's key: %s", adminReadBackRec.Body.String())
+	}
 	limitedBootstrapRec := assertStatus(t, handler, http.MethodGet, "/api/bootstrap", nil, userCookie, http.StatusOK)
 	if strings.Contains(limitedBootstrapRec.Body.String(), `"guacd"`) {
 		t.Fatalf("limited user bootstrap leaked runtime guacd state: %s", limitedBootstrapRec.Body.String())
+	}
+	if strings.Contains(limitedBootstrapRec.Body.String(), "notification_reads") || strings.Contains(limitedBootstrapRec.Body.String(), "timeline:limited-only") {
+		t.Fatalf("limited bootstrap leaked private notification read state: %s", limitedBootstrapRec.Body.String())
 	}
 }
 

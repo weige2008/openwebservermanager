@@ -12,6 +12,8 @@ import (
 )
 
 const maxNotificationItems = 20
+const maxNotificationReadKeys = 200
+const notificationReadCollection = "notification_reads"
 
 type notificationItem struct {
 	ID        string         `json:"id"`
@@ -25,6 +27,10 @@ type notificationItem struct {
 	Action    string         `json:"action,omitempty"`
 	TargetID  string         `json:"target_id,omitempty"`
 	CreatedAt time.Time      `json:"created_at"`
+}
+
+type notificationReadRequest struct {
+	Keys []string `json:"keys"`
 }
 
 func (s *Server) handleNotifications(w http.ResponseWriter, r *http.Request) {
@@ -42,7 +48,34 @@ func (s *Server) handleNotifications(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"items": items, "generated_at": time.Now().UTC()})
+	readKeys, err := s.notificationReadKeys(session.UserID)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"items": items, "read_keys": readKeys, "generated_at": time.Now().UTC()})
+}
+
+func (s *Server) handleNotificationRead(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		writeError(w, http.StatusMethodNotAllowed, "method not allowed")
+		return
+	}
+	_, session, ok := s.authSession(r)
+	if !ok {
+		writeError(w, http.StatusUnauthorized, "authentication required")
+		return
+	}
+	var req notificationReadRequest
+	if !decodeJSON(w, r, &req) {
+		return
+	}
+	readKeys, err := s.saveNotificationReadKeys(session, req.Keys, s.clientIP(r))
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"read_keys": readKeys, "updated_at": time.Now().UTC()})
 }
 
 func (s *Server) buildNotifications(session authSession) ([]notificationItem, error) {
@@ -74,6 +107,110 @@ func (s *Server) buildNotifications(session authSession) ([]notificationItem, er
 		items = items[:maxNotificationItems]
 	}
 	return items, nil
+}
+
+func (s *Server) notificationReadKeys(userID string) ([]string, error) {
+	userID = strings.TrimSpace(userID)
+	if userID == "" {
+		return []string{}, nil
+	}
+	item, ok, err := s.cfg.Store.GetPlatformItem(notificationReadCollection, userID)
+	if err != nil || !ok {
+		return []string{}, err
+	}
+	return notificationReadKeysFromMetadata(item.Metadata), nil
+}
+
+func (s *Server) saveNotificationReadKeys(session authSession, keys []string, clientIP string) ([]string, error) {
+	existing, err := s.notificationReadKeys(session.UserID)
+	if err != nil {
+		return nil, err
+	}
+	readKeys := mergeNotificationReadKeys(existing, keys)
+	now := time.Now().UTC()
+	item := model.PlatformItem{
+		ID:        session.UserID,
+		Module:    notificationReadCollection,
+		Name:      session.Username,
+		Type:      "user",
+		Status:    "active",
+		OwnerID:   session.UserID,
+		CreatedAt: now,
+		UpdatedAt: now,
+		Metadata: map[string]any{
+			"read_keys":    readKeys,
+			"read_count":   len(readKeys),
+			"last_read_at": now.Format(time.RFC3339Nano),
+			"client_ip":    strings.TrimSpace(clientIP),
+		},
+	}
+	if existingItem, ok, err := s.cfg.Store.GetPlatformItem(notificationReadCollection, session.UserID); err != nil {
+		return nil, err
+	} else if ok && !existingItem.CreatedAt.IsZero() {
+		item.CreatedAt = existingItem.CreatedAt
+	}
+	if _, err := s.cfg.Store.SavePlatformItem(notificationReadCollection, item); err != nil {
+		return nil, err
+	}
+	return readKeys, nil
+}
+
+func notificationReadKeysFromMetadata(metadata map[string]any) []string {
+	if metadata == nil {
+		return []string{}
+	}
+	switch value := metadata["read_keys"].(type) {
+	case []string:
+		return mergeNotificationReadKeys(nil, value)
+	case []any:
+		keys := make([]string, 0, len(value))
+		for _, item := range value {
+			if text, ok := item.(string); ok {
+				keys = append(keys, text)
+			}
+		}
+		return mergeNotificationReadKeys(nil, keys)
+	case string:
+		parts := strings.FieldsFunc(value, func(r rune) bool {
+			return r == ',' || r == ';' || r == '\n'
+		})
+		return mergeNotificationReadKeys(nil, parts)
+	default:
+		return []string{}
+	}
+}
+
+func mergeNotificationReadKeys(existing, incoming []string) []string {
+	result := make([]string, 0, len(existing)+len(incoming))
+	seen := map[string]bool{}
+	for _, key := range append(existing, incoming...) {
+		normalized := normalizeNotificationReadKey(key)
+		if normalized == "" {
+			continue
+		}
+		if seen[normalized] {
+			continue
+		}
+		seen[normalized] = true
+		result = append(result, normalized)
+	}
+	if len(result) > maxNotificationReadKeys {
+		result = result[len(result)-maxNotificationReadKeys:]
+	}
+	return result
+}
+
+func normalizeNotificationReadKey(key string) string {
+	key = strings.TrimSpace(key)
+	if key == "" || len(key) > 200 {
+		return ""
+	}
+	for _, r := range key {
+		if r < 32 || r == 127 {
+			return ""
+		}
+	}
+	return key
 }
 
 func (s *Server) runtimeNotifications(now time.Time) []notificationItem {

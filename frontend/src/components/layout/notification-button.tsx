@@ -1,5 +1,5 @@
 import { Menu as BaseMenu } from '@base-ui/react/menu'
-import { useQuery } from '@tanstack/react-query'
+import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { Bell, RadioTower } from 'lucide-react'
 import { useMemo, useState } from 'react'
 import { useTranslation } from 'react-i18next'
@@ -25,6 +25,12 @@ interface NotificationItem {
   created_at?: string
 }
 
+interface NotificationResponse {
+  items: NotificationItem[]
+  read_keys?: string[]
+  generated_at: string
+}
+
 export function NotificationButton({
   className,
   size = 'icon',
@@ -39,14 +45,29 @@ export function NotificationButton({
   const productName = t('productName')
   const canSeeRuntime = Boolean(auth && (isAdminRole(auth.role) || isAuditorRole(auth.role)))
   const [activeTab, setActiveTab] = useState<'notice' | 'timeline'>('notice')
+  const queryClient = useQueryClient()
   const readKeys = useNotificationStore((state) => state.readKeys)
   const markRead = useNotificationStore((state) => state.markRead)
   const notificationQuery = useQuery({
     queryKey: ['notifications'],
-    queryFn: () => apiRequest<{ items: NotificationItem[]; generated_at: string }>('/api/notifications'),
+    queryFn: () => apiRequest<NotificationResponse>('/api/notifications'),
     enabled: Boolean(auth),
     refetchInterval: 30000,
     retry: false,
+  })
+  const markReadMutation = useMutation({
+    mutationFn: (keys: string[]) =>
+      apiRequest<{ read_keys: string[]; updated_at: string }>('/api/notifications/read', {
+        method: 'POST',
+        body: JSON.stringify({ keys }),
+      }),
+    onSuccess: (data) => {
+      const serverKeys = data.read_keys || []
+      markRead(serverKeys)
+      queryClient.setQueryData<NotificationResponse>(['notifications'], (current) =>
+        current ? { ...current, read_keys: serverKeys } : current
+      )
+    },
   })
 
   const fallbackNotifications = useMemo<NotificationItem[]>(() => {
@@ -76,12 +97,20 @@ export function NotificationButton({
 
   const noticeKey = 'notice:connection-workspace'
   const notificationKeys = useMemo(() => [noticeKey, ...notifications.map((item) => `timeline:${item.id}`)], [notifications])
-  const unreadCount = notificationKeys.filter((key) => !readKeys.includes(key)).length
+  const effectiveReadKeys = useMemo(() => new Set([...(notificationQuery.data?.read_keys || []), ...readKeys]), [notificationQuery.data?.read_keys, readKeys])
+  const unreadCount = notificationKeys.filter((key) => !effectiveReadKeys.has(key)).length
   const renderNotificationText = (key: string | undefined, fallback = '', metadata?: Record<string, unknown>) =>
     key ? t(key, { defaultValue: fallback || key, ...(metadata || {}) }) : fallback
+  const handleOpenChange = (open: boolean) => {
+    if (!open) return
+    markRead(notificationKeys)
+    if (auth && notificationKeys.length > 0) {
+      markReadMutation.mutate(notificationKeys)
+    }
+  }
 
   return (
-    <BaseMenu.Root modal={false} onOpenChange={(open) => open && markRead(notificationKeys)}>
+    <BaseMenu.Root modal={false} onOpenChange={handleOpenChange}>
       <BaseMenu.Trigger className={cn(buttonVariants({ variant, size }), 'relative p-0', className)} aria-label={t('notifications')} title={t('notifications')}>
         <Bell className='size-[1.05rem]' />
         {unreadCount > 0 ? (

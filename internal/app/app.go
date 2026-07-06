@@ -669,12 +669,20 @@ func (s *Server) platformSSHConnectionParts(w http.ResponseWriter, session model
 		writeError(w, http.StatusNotFound, "server not found")
 		return model.PlatformItem{}, model.PlatformItem{}, store.CredentialSecret{}, false
 	}
+	if !platformItemEnabled(asset) {
+		writeError(w, http.StatusNotFound, "server not found")
+		return model.PlatformItem{}, model.PlatformItem{}, store.CredentialSecret{}, false
+	}
 	credential, secret, ok, err := s.cfg.Store.GetPlatformCredentialSecret(session.CredentialID)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, err.Error())
 		return model.PlatformItem{}, model.PlatformItem{}, store.CredentialSecret{}, false
 	}
 	if !ok {
+		writeError(w, http.StatusNotFound, "credential not found")
+		return model.PlatformItem{}, model.PlatformItem{}, store.CredentialSecret{}, false
+	}
+	if !platformCredentialEnabled(credential) {
 		writeError(w, http.StatusNotFound, "credential not found")
 		return model.PlatformItem{}, model.PlatformItem{}, store.CredentialSecret{}, false
 	}

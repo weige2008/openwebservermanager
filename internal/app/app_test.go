@@ -1043,6 +1043,162 @@ func TestVNCPlatformAccessCreatesDesktopSession(t *testing.T) {
 	}
 }
 
+func TestPlatformConnectionsRejectDisabledAssetsAndCredentialsAtOpen(t *testing.T) {
+	handler, adminCookie := newTestHandler(t)
+	srv := handler.(*Server)
+
+	userRec := assertStatus(t, handler, http.MethodPost, "/api/admin/users", map[string]any{
+		"name":     "connection-toggle-user",
+		"type":     "local",
+		"status":   "enabled",
+		"password": "password123",
+		"metadata": map[string]any{"role": "user"},
+	}, adminCookie, http.StatusCreated)
+	var user model.PlatformItem
+	decodeResponse(t, userRec, &user)
+
+	sshAssetRec := assertStatus(t, handler, http.MethodPost, "/api/admin/assets", map[string]any{
+		"name":     "toggle-ssh",
+		"type":     "linux",
+		"status":   "active",
+		"protocol": "ssh",
+		"host":     "127.0.0.1",
+		"port":     22,
+	}, adminCookie, http.StatusCreated)
+	var sshAsset model.PlatformItem
+	decodeResponse(t, sshAssetRec, &sshAsset)
+	sshCredentialRec := assertStatus(t, handler, http.MethodPost, "/api/admin/credentials", map[string]any{
+		"name":      "toggle-ssh-root",
+		"type":      "ssh_password",
+		"status":    "encrypted",
+		"username":  "root",
+		"password":  "secret",
+		"target_id": sshAsset.ID,
+	}, adminCookie, http.StatusCreated)
+	var sshCredential model.PlatformItem
+	decodeResponse(t, sshCredentialRec, &sshCredential)
+	assertStatus(t, handler, http.MethodPost, "/api/admin/authorizations/assets", map[string]any{
+		"name":      "connection-toggle-user ssh",
+		"owner_id":  user.ID,
+		"target_id": sshAsset.ID,
+		"status":    "enabled",
+	}, adminCookie, http.StatusCreated)
+	loginRec := assertStatus(t, handler, http.MethodPost, "/api/auth/login", map[string]any{
+		"username": "connection-toggle-user",
+		"password": "password123",
+	}, nil, http.StatusOK)
+	userCookie := loginRec.Result().Cookies()[0]
+	sshSessionRec := assertStatus(t, handler, http.MethodPost, "/api/access/ssh/"+sshAsset.ID, map[string]any{
+		"cols": 100,
+		"rows": 30,
+	}, userCookie, http.StatusAccepted)
+	var sshSession model.ConnectionSession
+	decodeResponse(t, sshSessionRec, &sshSession)
+	sshReq := httptest.NewRequest(http.MethodGet, "/api/connections/ssh/"+sshSession.ID+"/ws", nil)
+	sshReq.AddCookie(userCookie)
+	_, _, _, _, ok := srv.connectionParts(httptest.NewRecorder(), sshReq, sshSession.ID, model.ProtocolSSH)
+	if !ok {
+		t.Fatal("expected ssh session to resolve before disabling asset")
+	}
+	assertStatus(t, handler, http.MethodPatch, "/api/admin/assets/"+sshAsset.ID, map[string]any{"status": "disabled"}, adminCookie, http.StatusOK)
+	disabledAssetRec := httptest.NewRecorder()
+	_, _, _, _, ok = srv.connectionParts(disabledAssetRec, sshReq, sshSession.ID, model.ProtocolSSH)
+	if ok || disabledAssetRec.Code != http.StatusNotFound {
+		t.Fatalf("disabled ssh asset resolved: ok=%v status=%d body=%s", ok, disabledAssetRec.Code, disabledAssetRec.Body.String())
+	}
+	assertStatus(t, handler, http.MethodPatch, "/api/admin/assets/"+sshAsset.ID, map[string]any{"status": "active"}, adminCookie, http.StatusOK)
+	assertStatus(t, handler, http.MethodPatch, "/api/admin/credentials/"+sshCredential.ID, map[string]any{"status": "disabled"}, adminCookie, http.StatusOK)
+	disabledCredentialRec := httptest.NewRecorder()
+	_, _, _, _, ok = srv.connectionParts(disabledCredentialRec, sshReq, sshSession.ID, model.ProtocolSSH)
+	if ok || disabledCredentialRec.Code != http.StatusNotFound {
+		t.Fatalf("disabled ssh credential resolved: ok=%v status=%d body=%s", ok, disabledCredentialRec.Code, disabledCredentialRec.Body.String())
+	}
+
+	vncAssetRec := assertStatus(t, handler, http.MethodPost, "/api/admin/assets", map[string]any{
+		"name":     "toggle-vnc",
+		"type":     "linux-desktop",
+		"status":   "enabled",
+		"protocol": "vnc",
+		"host":     "127.0.0.1",
+		"port":     5900,
+	}, adminCookie, http.StatusCreated)
+	var vncAsset model.PlatformItem
+	decodeResponse(t, vncAssetRec, &vncAsset)
+	disabledVNCRec := assertStatus(t, handler, http.MethodPost, "/api/admin/credentials", map[string]any{
+		"name":      "toggle-vnc-disabled",
+		"type":      "vnc_password",
+		"status":    "disabled",
+		"username":  "vnc",
+		"password":  "disabled-secret",
+		"target_id": vncAsset.ID,
+	}, adminCookie, http.StatusCreated)
+	var disabledVNC model.PlatformItem
+	decodeResponse(t, disabledVNCRec, &disabledVNC)
+	enabledVNCRec := assertStatus(t, handler, http.MethodPost, "/api/admin/credentials", map[string]any{
+		"name":      "toggle-vnc-enabled",
+		"type":      "vnc_password",
+		"status":    "encrypted",
+		"username":  "vnc",
+		"password":  "enabled-secret",
+		"target_id": vncAsset.ID,
+	}, adminCookie, http.StatusCreated)
+	var enabledVNC model.PlatformItem
+	decodeResponse(t, enabledVNCRec, &enabledVNC)
+	assertStatus(t, handler, http.MethodPost, "/api/connections/vnc", map[string]any{
+		"asset_id":      vncAsset.ID,
+		"credential_id": disabledVNC.ID,
+	}, adminCookie, http.StatusBadRequest)
+	vncSessionRec := assertStatus(t, handler, http.MethodPost, "/api/connections/vnc", map[string]any{
+		"asset_id": vncAsset.ID,
+	}, adminCookie, http.StatusCreated)
+	var vncSession model.ConnectionSession
+	decodeResponse(t, vncSessionRec, &vncSession)
+	if vncSession.CredentialID != enabledVNC.ID {
+		t.Fatalf("vnc session used credential %q, want enabled credential %q", vncSession.CredentialID, enabledVNC.ID)
+	}
+	vncReq := httptest.NewRequest(http.MethodGet, "/api/connections/vnc/"+vncSession.ID+"/tunnel", nil)
+	vncReq.AddCookie(adminCookie)
+	if _, ok := srv.desktopTunnelConfig(httptest.NewRecorder(), vncReq, vncSession.ID, model.ProtocolVNC); !ok {
+		t.Fatal("expected vnc session to resolve before disabling asset")
+	}
+	assertStatus(t, handler, http.MethodPatch, "/api/admin/assets/"+vncAsset.ID, map[string]any{"status": "disabled"}, adminCookie, http.StatusOK)
+	disabledVNCAssetRec := httptest.NewRecorder()
+	if _, ok := srv.desktopTunnelConfig(disabledVNCAssetRec, vncReq, vncSession.ID, model.ProtocolVNC); ok || disabledVNCAssetRec.Code != http.StatusNotFound {
+		t.Fatalf("disabled vnc asset resolved: ok=%v status=%d body=%s", ok, disabledVNCAssetRec.Code, disabledVNCAssetRec.Body.String())
+	}
+	assertStatus(t, handler, http.MethodPatch, "/api/admin/assets/"+vncAsset.ID, map[string]any{"status": "enabled"}, adminCookie, http.StatusOK)
+	assertStatus(t, handler, http.MethodPatch, "/api/admin/credentials/"+enabledVNC.ID, map[string]any{"status": "disabled"}, adminCookie, http.StatusOK)
+	disabledVNCCredentialRec := httptest.NewRecorder()
+	if _, ok := srv.desktopTunnelConfig(disabledVNCCredentialRec, vncReq, vncSession.ID, model.ProtocolVNC); ok || disabledVNCCredentialRec.Code != http.StatusNotFound {
+		t.Fatalf("disabled vnc credential resolved: ok=%v status=%d body=%s", ok, disabledVNCCredentialRec.Code, disabledVNCCredentialRec.Body.String())
+	}
+
+	databaseCredentialRec := assertStatus(t, handler, http.MethodPost, "/api/admin/credentials", map[string]any{
+		"name":     "toggle-db-disabled",
+		"type":     "database_password",
+		"status":   "disabled",
+		"username": "db",
+		"password": "db-secret",
+	}, adminCookie, http.StatusCreated)
+	var databaseCredential model.PlatformItem
+	decodeResponse(t, databaseCredentialRec, &databaseCredential)
+	databaseAssetRec := assertStatus(t, handler, http.MethodPost, "/api/admin/database-assets", map[string]any{
+		"name":     "toggle-db",
+		"type":     "sqlite",
+		"status":   "enabled",
+		"protocol": "database",
+		"metadata": map[string]any{"sqlite_path": "toggle-disabled-credential.db", "credential_id": databaseCredential.ID},
+	}, adminCookie, http.StatusCreated)
+	var databaseAsset model.PlatformItem
+	decodeResponse(t, databaseAssetRec, &databaseAsset)
+	dbRec := assertStatus(t, handler, http.MethodPost, "/api/access/database/"+databaseAsset.ID+"/query", map[string]any{
+		"sql": "SELECT 1",
+	}, adminCookie, http.StatusBadRequest)
+	if !strings.Contains(dbRec.Body.String(), "is disabled") {
+		t.Fatalf("disabled database credential response did not explain state: %s", dbRec.Body.String())
+	}
+}
+
 func TestDesktopAccessSettingsApplyToRDPAndVNC(t *testing.T) {
 	handler, adminCookie := newTestHandler(t)
 

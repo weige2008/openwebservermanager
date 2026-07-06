@@ -288,6 +288,9 @@ func (s *Server) databaseAssetSecret(asset model.PlatformItem) (databaseAssetSec
 	if !ok {
 		return databaseAssetSecret{}, fmt.Errorf("database credential %s not found", credentialID)
 	}
+	if !platformCredentialEnabled(credential) {
+		return databaseAssetSecret{}, fmt.Errorf("database credential %s is disabled", credentialID)
+	}
 	if credential.Username != "" {
 		secret.Username = credential.Username
 	}

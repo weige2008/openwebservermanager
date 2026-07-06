@@ -149,12 +149,20 @@ func (s *Server) platformDesktopParts(w http.ResponseWriter, session model.Conne
 		writeError(w, http.StatusNotFound, "desktop asset not found")
 		return model.PlatformItem{}, model.PlatformItem{}, store.CredentialSecret{}, false
 	}
+	if !platformItemEnabled(asset) {
+		writeError(w, http.StatusNotFound, "desktop asset not found")
+		return model.PlatformItem{}, model.PlatformItem{}, store.CredentialSecret{}, false
+	}
 	credential, secret, ok, err := s.cfg.Store.GetPlatformCredentialSecret(session.CredentialID)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, err.Error())
 		return model.PlatformItem{}, model.PlatformItem{}, store.CredentialSecret{}, false
 	}
 	if !ok {
+		writeError(w, http.StatusNotFound, "credential not found")
+		return model.PlatformItem{}, model.PlatformItem{}, store.CredentialSecret{}, false
+	}
+	if !platformCredentialEnabled(credential) {
 		writeError(w, http.StatusNotFound, "credential not found")
 		return model.PlatformItem{}, model.PlatformItem{}, store.CredentialSecret{}, false
 	}
@@ -311,7 +319,7 @@ func (s *Server) resolvePlatformCredential(asset model.PlatformItem, protocol mo
 		if err != nil || !ok {
 			return model.PlatformItem{}, store.CredentialSecret{}, false, err
 		}
-		if platformCredentialCompatible(credential, protocol) && credentialTargetsAsset(credential, asset, true) {
+		if platformCredentialEnabled(credential) && platformCredentialCompatible(credential, protocol) && credentialTargetsAsset(credential, asset, true) {
 			return credential, secret, true, nil
 		}
 		return model.PlatformItem{}, store.CredentialSecret{}, false, nil
@@ -329,7 +337,7 @@ func (s *Server) resolvePlatformCredential(asset model.PlatformItem, protocol mo
 		if err != nil || !ok {
 			return model.PlatformItem{}, store.CredentialSecret{}, false, err
 		}
-		if platformCredentialCompatible(credential, protocol) && credentialTargetsAsset(credential, asset, false) {
+		if platformCredentialEnabled(credential) && platformCredentialCompatible(credential, protocol) && credentialTargetsAsset(credential, asset, false) {
 			return credential, secret, true, nil
 		}
 	}
@@ -338,7 +346,7 @@ func (s *Server) resolvePlatformCredential(asset model.PlatformItem, protocol mo
 		return model.PlatformItem{}, store.CredentialSecret{}, false, err
 	}
 	for _, credential := range credentials {
-		if !platformCredentialCompatible(credential, protocol) || !credentialTargetsAsset(credential, asset, false) {
+		if !platformCredentialEnabled(credential) || !platformCredentialCompatible(credential, protocol) || !credentialTargetsAsset(credential, asset, false) {
 			continue
 		}
 		raw, secret, ok, err := s.cfg.Store.GetPlatformCredentialSecret(credential.ID)
@@ -359,6 +367,16 @@ func platformCredentialCompatible(credential model.PlatformItem, protocol model.
 		return credentialType == string(model.CredentialRDPPassword)
 	case model.ProtocolVNC:
 		return credentialType == string(model.CredentialVNCPassword)
+	default:
+		return false
+	}
+}
+
+func platformCredentialEnabled(credential model.PlatformItem) bool {
+	status := strings.ToLower(strings.TrimSpace(credential.Status))
+	switch status {
+	case "", "enabled", "active", "encrypted", "locked":
+		return true
 	default:
 		return false
 	}

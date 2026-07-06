@@ -693,20 +693,29 @@ func (s *Server) handleStorageList(w http.ResponseWriter, r *http.Request, root 
 	if !ok {
 		return
 	}
+	if !s.requireStorageListPermission(w, r, storage.ID, rel) {
+		return
+	}
 	entries, err := os.ReadDir(dirPath)
 	if err != nil {
 		writeError(w, http.StatusNotFound, "path not found")
 		return
 	}
 	result := []map[string]any{}
+	userID := s.currentUserID(r)
+	isAdmin := s.isAdminRequest(r)
 	for _, entry := range entries {
+		entryRel := filepath.ToSlash(filepath.Join(rel, entry.Name()))
+		if !s.storageListEntryVisible(storage.ID, entryRel, userID, isAdmin) {
+			continue
+		}
 		info, err := entry.Info()
 		if err != nil {
 			continue
 		}
 		result = append(result, map[string]any{
 			"name":     entry.Name(),
-			"path":     filepath.ToSlash(filepath.Join(rel, entry.Name())),
+			"path":     entryRel,
 			"is_dir":   entry.IsDir(),
 			"size":     info.Size(),
 			"modified": info.ModTime().UTC(),
@@ -1349,6 +1358,45 @@ func (s *Server) requireStoragePermission(w http.ResponseWriter, r *http.Request
 	_ = s.audit(r, "storage.files."+action+".denied", storageID, "", "blocked "+action+" on "+path)
 	writeError(w, http.StatusForbidden, "file permission denied: "+action)
 	return false
+}
+
+func (s *Server) requireStorageListPermission(w http.ResponseWriter, r *http.Request, storageID, path string) bool {
+	if s.isAdminRequest(r) {
+		return true
+	}
+	allowed, matched := s.storageListPermissionAllowed(storageID, path, s.currentUserID(r))
+	if !matched || allowed {
+		return true
+	}
+	_, _ = s.cfg.Store.CreatePlatformItem("file_logs", model.PlatformItemRequest{
+		Name:        path,
+		Type:        "list",
+		Status:      "denied",
+		TargetID:    storageID,
+		OwnerID:     s.currentUserID(r),
+		Description: "blocked by authorization strategy",
+	})
+	_ = s.audit(r, "storage.files.list.denied", storageID, "", "blocked list on "+path)
+	writeError(w, http.StatusForbidden, "file permission denied: list")
+	return false
+}
+
+func (s *Server) storageListEntryVisible(storageID, path, userID string, isAdmin bool) bool {
+	if isAdmin {
+		return true
+	}
+	allowed, matched := s.storageListPermissionAllowed(storageID, path, userID)
+	return !matched || allowed
+}
+
+func (s *Server) storageListPermissionAllowed(storageID, path, userID string) (bool, bool) {
+	if allowed, matched := s.storagePermissionAllowed(storageID, "list", path, userID); matched {
+		return allowed, true
+	}
+	if allowed, matched := s.storagePermissionAllowed(storageID, "download", path, userID); matched && !allowed {
+		return false, true
+	}
+	return true, false
 }
 
 func (s *Server) requireStorageTreePermission(w http.ResponseWriter, r *http.Request, storageID, action, rootPath, rootRel string) bool {

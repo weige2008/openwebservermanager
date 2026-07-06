@@ -6435,6 +6435,71 @@ func TestStorageFileOperationsRejectDisabledStorage(t *testing.T) {
 	}
 }
 
+func TestStorageListFiltersDeniedDownloadPaths(t *testing.T) {
+	handler, adminCookie := newTestHandler(t)
+
+	storageRec := assertStatus(t, handler, http.MethodPost, "/api/admin/storages", map[string]any{
+		"name":   "list-filter-drive",
+		"type":   "local",
+		"status": "enabled",
+	}, adminCookie, http.StatusCreated)
+	var storage model.PlatformItem
+	decodeResponse(t, storageRec, &storage)
+
+	assertStatus(t, handler, http.MethodPost, "/api/admin/storages/"+storage.ID+"/files-write", map[string]any{"path": "safe/secret.txt", "content": "secret"}, adminCookie, http.StatusCreated)
+	assertStatus(t, handler, http.MethodPost, "/api/admin/storages/"+storage.ID+"/files-write", map[string]any{"path": "open/readme.txt", "content": "open"}, adminCookie, http.StatusCreated)
+	assertStatus(t, handler, http.MethodPost, "/api/admin/roles", map[string]any{
+		"name":   "storage-list-operator",
+		"type":   "custom",
+		"status": "enabled",
+		"metadata": map[string]any{
+			"api_permissions": []string{
+				"GET /api/admin/storages/*",
+				"GET /api/admin/audit/file-logs",
+			},
+		},
+	}, adminCookie, http.StatusCreated)
+	userRec := assertStatus(t, handler, http.MethodPost, "/api/admin/users", map[string]any{
+		"name":     "storage-list-user",
+		"type":     "local",
+		"status":   "enabled",
+		"password": "password123",
+		"metadata": map[string]any{"role": "storage-list-operator"},
+	}, adminCookie, http.StatusCreated)
+	var user model.PlatformItem
+	decodeResponse(t, userRec, &user)
+	assertStatus(t, handler, http.MethodPost, "/api/admin/strategies", map[string]any{
+		"name":        "deny list-filter safe download",
+		"type":        "file",
+		"status":      "enabled",
+		"target_id":   storage.ID,
+		"owner_id":    user.ID,
+		"permissions": map[string]bool{"download": false},
+		"metadata":    map[string]any{"path_prefix": "safe"},
+	}, adminCookie, http.StatusCreated)
+
+	loginRec := assertStatus(t, handler, http.MethodPost, "/api/auth/login", map[string]any{"username": "storage-list-user", "password": "password123"}, nil, http.StatusOK)
+	userCookie := loginRec.Result().Cookies()[0]
+
+	userListRec := assertStatus(t, handler, http.MethodGet, "/api/admin/storages/"+storage.ID+"/files", nil, userCookie, http.StatusOK)
+	userListBody := userListRec.Body.String()
+	if !strings.Contains(userListBody, `"name":"open"`) || strings.Contains(userListBody, `"name":"safe"`) {
+		t.Fatalf("filtered storage list body = %s", userListBody)
+	}
+	assertStatus(t, handler, http.MethodGet, "/api/admin/storages/"+storage.ID+"/files?path=safe", nil, userCookie, http.StatusForbidden)
+	assertStatus(t, handler, http.MethodGet, "/api/admin/storages/"+storage.ID+"/files-download?path=safe/secret.txt", nil, userCookie, http.StatusForbidden)
+
+	adminListRec := assertStatus(t, handler, http.MethodGet, "/api/admin/storages/"+storage.ID+"/files", nil, adminCookie, http.StatusOK)
+	if !strings.Contains(adminListRec.Body.String(), `"name":"safe"`) {
+		t.Fatalf("admin storage list should include denied user path: %s", adminListRec.Body.String())
+	}
+	logsRec := assertStatus(t, handler, http.MethodGet, "/api/admin/audit/file-logs", nil, userCookie, http.StatusOK)
+	logsBody := logsRec.Body.String()
+	if !strings.Contains(logsBody, "safe") || !strings.Contains(logsBody, "denied") || !strings.Contains(logsBody, "list") {
+		t.Fatalf("storage list denial was not logged: %s", logsBody)
+	}
+}
+
 func TestStorageAuthorizationStrategySubjectAndPathScope(t *testing.T) {
 	handler, adminCookie := newTestHandler(t)
 

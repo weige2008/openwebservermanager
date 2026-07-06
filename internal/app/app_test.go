@@ -3403,6 +3403,84 @@ func TestProxyServiceSettingsReloadSSHGatewayRuntime(t *testing.T) {
 	}
 }
 
+func TestDatabaseProxyRuntimeForwardsAllowedTarget(t *testing.T) {
+	upstreamAddress, received, closeUpstream := startEchoTCPServer(t)
+	defer closeUpstream()
+	listenAddress := freeLocalTCPAddress(t)
+	var databaseProxy *DatabaseProxyManager
+	handler, cookie := newTestServer(t, func(cfg *Config) {
+		ctx, cancel := context.WithCancel(context.Background())
+		t.Cleanup(cancel)
+		databaseProxy = NewDatabaseProxyManager(ctx, cfg.Store, slog.Default())
+		t.Cleanup(func() { _ = databaseProxy.Close() })
+		cfg.DatabaseProxy = databaseProxy
+	})
+
+	saveRec := assertStatus(t, handler, http.MethodPost, "/api/admin/proxy-services", map[string]any{
+		"database_enabled":           true,
+		"database_listen_address":    listenAddress,
+		"database_forward_allowlist": []string{upstreamAddress},
+	}, cookie, http.StatusOK)
+	saveBody := saveRec.Body.String()
+	for _, want := range []string{`"state":"running"`, `"live_address":"` + listenAddress + `"`, `"target":"` + upstreamAddress + `"`} {
+		if !strings.Contains(saveBody, want) {
+			t.Fatalf("database proxy runtime response missing %s: %s", want, saveBody)
+		}
+	}
+
+	conn, err := net.DialTimeout("tcp", databaseProxy.Address(), 2*time.Second)
+	if err != nil {
+		t.Fatalf("dial database proxy: %v", err)
+	}
+	if _, err := conn.Write([]byte("select 1\n")); err != nil {
+		t.Fatalf("write database proxy: %v", err)
+	}
+	line, err := bufio.NewReader(conn).ReadString('\n')
+	if err != nil {
+		t.Fatalf("read database proxy response: %v", err)
+	}
+	if err := conn.Close(); err != nil {
+		t.Fatalf("close database proxy conn: %v", err)
+	}
+	if line != "echo:select 1\n" {
+		t.Fatalf("database proxy response = %q", line)
+	}
+	select {
+	case got := <-received:
+		if got != "select 1\n" {
+			t.Fatalf("upstream received %q", got)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("upstream did not receive database proxy payload")
+	}
+
+	var logsBody string
+	for i := 0; i < 20; i++ {
+		logsRec := assertStatus(t, handler, http.MethodGet, "/api/admin/audit/operation-logs", nil, cookie, http.StatusOK)
+		logsBody = logsRec.Body.String()
+		if strings.Contains(logsBody, "database_proxy.connect") && strings.Contains(logsBody, upstreamAddress) {
+			break
+		}
+		time.Sleep(25 * time.Millisecond)
+	}
+	if !strings.Contains(logsBody, "database_proxy.connect") || !strings.Contains(logsBody, upstreamAddress) {
+		t.Fatalf("database proxy connection was not audited: %s", logsBody)
+	}
+
+	assertStatus(t, handler, http.MethodPost, "/api/admin/proxy-services", map[string]any{
+		"database_enabled":           false,
+		"database_listen_address":    listenAddress,
+		"database_forward_allowlist": []string{upstreamAddress},
+	}, cookie, http.StatusOK)
+	if databaseProxy.Address() != "" {
+		t.Fatalf("database proxy address still active after disable: %s", databaseProxy.Address())
+	}
+	if disabledConn, err := net.DialTimeout("tcp", listenAddress, 100*time.Millisecond); err == nil {
+		_ = disabledConn.Close()
+		t.Fatal("database proxy listener still accepts connections after disable")
+	}
+}
+
 func TestBackupListDownloadAndRestore(t *testing.T) {
 	handler, cookie := newTestHandler(t)
 
@@ -4423,6 +4501,39 @@ func startAppTestTCPListener(t *testing.T) (net.Listener, func()) {
 		}
 	}()
 	return listener, func() {
+		_ = listener.Close()
+		<-done
+	}
+}
+
+func startEchoTCPServer(t *testing.T) (string, <-chan string, func()) {
+	t.Helper()
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("listen echo tcp server: %v", err)
+	}
+	received := make(chan string, 10)
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		for {
+			conn, err := listener.Accept()
+			if err != nil {
+				return
+			}
+			go func(conn net.Conn) {
+				defer conn.Close()
+				_ = conn.SetDeadline(time.Now().Add(2 * time.Second))
+				line, err := bufio.NewReader(conn).ReadString('\n')
+				if err != nil {
+					return
+				}
+				received <- line
+				_, _ = conn.Write([]byte("echo:" + line))
+			}(conn)
+		}
+	}()
+	return listener.Addr().String(), received, func() {
 		_ = listener.Close()
 		<-done
 	}

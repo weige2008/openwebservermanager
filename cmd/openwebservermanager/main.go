@@ -87,7 +87,16 @@ func run() error {
 		slog.Info("ssh gateway ready", "addr", sshGateway.Address())
 	}
 
-	appServer := app.NewServer(app.Config{Store: st, Guacd: guacd, SSHGateway: sshGateway, StaticFS: staticFS, DataDir: dataDir, Public: publicConfig(), TrustProxyHeaders: envBool("OPENWEBSERVERMANAGER_TRUST_PROXY_HEADERS")})
+	databaseProxy := app.NewDatabaseProxyManager(rootCtx, st, slog.Default())
+	if err := databaseProxy.Reload(); err != nil {
+		slog.Warn("database proxy unavailable", "error", err)
+	}
+	defer databaseProxy.Close()
+	if databaseProxy.Address() != "" {
+		slog.Info("database proxy ready", "addr", databaseProxy.Address(), "target", databaseProxy.Target())
+	}
+
+	appServer := app.NewServer(app.Config{Store: st, Guacd: guacd, SSHGateway: sshGateway, DatabaseProxy: databaseProxy, StaticFS: staticFS, DataDir: dataDir, Public: publicConfig(), TrustProxyHeaders: envBool("OPENWEBSERVERMANAGER_TRUST_PROXY_HEADERS")})
 	scheduler := appServer.StartScheduler(rootCtx, app.SchedulerConfig{
 		PollInterval: schedulerPollInterval(),
 		Logger:       slog.Default(),

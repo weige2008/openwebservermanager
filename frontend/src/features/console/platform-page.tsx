@@ -2852,6 +2852,9 @@ export function PlatformSettingsPage({ config }: { config: PlatformPageConfig })
                   <div className='rounded-lg border border-border bg-background/60 p-3 text-xs text-muted-foreground'>
                     <div>{app.t('state', 'State')}: {metadataText(proxyStatus.database_proxy?.state) || '-'}</div>
                     <div>{app.t('listenAddress', 'Listen address')}: {metadataText(proxyStatus.database_proxy?.listen_address) || '-'}</div>
+                    <div>{app.t('liveAddress', 'Live address')}: {metadataText(proxyStatus.database_proxy?.live_address) || '-'}</div>
+                    <div>{app.t('target', 'Target')}: {metadataText(proxyStatus.database_proxy?.target) || '-'}</div>
+                    <div>{app.t('activeConnections', 'Active connections')}: {metadataText(proxyStatus.database_proxy?.active) || '0'}</div>
                     <div>{app.t('forwardAllowlist', 'Forward allowlist')}: {metadataText(proxyStatus.database_proxy?.allowlist_count) || '0'}</div>
                     {metadataText(proxyStatus.database_proxy?.last_error) ? <div className='text-destructive'>{metadataText(proxyStatus.database_proxy?.last_error)}</div> : null}
                   </div>

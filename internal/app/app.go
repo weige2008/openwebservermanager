@@ -29,6 +29,7 @@ type Config struct {
 	Guacd             *guac.Manager
 	SSHGatewayAddress string
 	SSHGateway        sshGatewayRuntime
+	DatabaseProxy     databaseProxyRuntime
 	StaticFS          fs.FS
 	DataDir           string
 	Public            PublicConfig
@@ -40,6 +41,14 @@ type sshGatewayRuntime interface {
 	Address() string
 	Reload() error
 	LastError() string
+}
+
+type databaseProxyRuntime interface {
+	Address() string
+	Target() string
+	Reload() error
+	LastError() string
+	ActiveConnections() int
 }
 
 type PublicConfig struct {

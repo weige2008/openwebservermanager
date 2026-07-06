@@ -85,6 +85,9 @@ func (s *Server) saveProxyServices(req proxyServicesRequest) (model.PlatformItem
 	if err := s.reloadSSHGatewayRuntime(); err != nil {
 		return model.PlatformItem{}, err
 	}
+	if err := s.reloadDatabaseProxyRuntime(); err != nil {
+		return model.PlatformItem{}, err
+	}
 	return setting, nil
 }
 
@@ -179,6 +182,11 @@ func (s *Server) proxyServicesResponse(item model.PlatformItem) map[string]any {
 	}
 	sshLiveAddress := s.sshGatewayAddress()
 	sshLastError := s.sshGatewayLastError()
+	databaseListen := firstMetadataString(metadata, "database_listen_address")
+	databaseAllowlist := metadataStrings(metadata["database_forward_allowlist"])
+	databaseLiveAddress := s.databaseProxyAddress()
+	databaseTarget := firstNonEmpty(s.databaseProxyTarget(), firstString(databaseAllowlist))
+	databaseLastError := s.databaseProxyLastError()
 	return map[string]any{
 		"settings": item,
 		"status": map[string]any{
@@ -197,10 +205,13 @@ func (s *Server) proxyServicesResponse(item model.PlatformItem) map[string]any {
 			},
 			"database_proxy": map[string]any{
 				"enabled":         databaseEnabled,
-				"listen_address":  firstMetadataString(metadata, "database_listen_address"),
-				"allowlist_count": len(metadataStrings(metadata["database_forward_allowlist"])),
-				"state":           databaseProxyRuntimeState(databaseEnabled, firstMetadataString(metadata, "database_listen_address"), metadataStrings(metadata["database_forward_allowlist"])),
-				"last_error":      databaseProxyRuntimeError(databaseEnabled, firstMetadataString(metadata, "database_listen_address"), metadataStrings(metadata["database_forward_allowlist"])),
+				"listen_address":  databaseListen,
+				"live_address":    databaseLiveAddress,
+				"target":          databaseTarget,
+				"active":          s.databaseProxyActiveConnections(),
+				"allowlist_count": len(databaseAllowlist),
+				"state":           databaseProxyRuntimeState(databaseEnabled, databaseListen, databaseAllowlist, databaseLiveAddress, databaseLastError),
+				"last_error":      databaseProxyRuntimeError(databaseEnabled, databaseListen, databaseAllowlist, databaseLiveAddress, databaseLastError),
 			},
 		},
 	}
@@ -211,6 +222,13 @@ func (s *Server) reloadSSHGatewayRuntime() error {
 		return nil
 	}
 	return s.cfg.SSHGateway.Reload()
+}
+
+func (s *Server) reloadDatabaseProxyRuntime() error {
+	if s.cfg.DatabaseProxy == nil {
+		return nil
+	}
+	return s.cfg.DatabaseProxy.Reload()
 }
 
 func (s *Server) sshGatewayAddress() string {
@@ -225,6 +243,34 @@ func (s *Server) sshGatewayLastError() string {
 		return s.cfg.SSHGateway.LastError()
 	}
 	return ""
+}
+
+func (s *Server) databaseProxyAddress() string {
+	if s.cfg.DatabaseProxy != nil {
+		return s.cfg.DatabaseProxy.Address()
+	}
+	return ""
+}
+
+func (s *Server) databaseProxyTarget() string {
+	if s.cfg.DatabaseProxy != nil {
+		return s.cfg.DatabaseProxy.Target()
+	}
+	return ""
+}
+
+func (s *Server) databaseProxyLastError() string {
+	if s.cfg.DatabaseProxy != nil {
+		return s.cfg.DatabaseProxy.LastError()
+	}
+	return ""
+}
+
+func (s *Server) databaseProxyActiveConnections() int {
+	if s.cfg.DatabaseProxy != nil {
+		return s.cfg.DatabaseProxy.ActiveConnections()
+	}
+	return 0
 }
 
 func (s *Server) rawSystemSettingByType(settingType string) (model.PlatformItem, bool, error) {
@@ -341,12 +387,18 @@ func rdpProxyRuntimeState(enabled bool, guacdAddress string) string {
 	return "guacd_unavailable"
 }
 
-func databaseProxyRuntimeState(enabled bool, listenAddress string, allowlist []string) string {
+func databaseProxyRuntimeState(enabled bool, listenAddress string, allowlist []string, liveAddress, lastError string) string {
 	if !enabled {
 		return "disabled"
 	}
 	if err := validateDatabaseProxyConfig(listenAddress, allowlist); err != nil {
 		return "invalid_config"
+	}
+	if strings.TrimSpace(lastError) != "" {
+		return "error"
+	}
+	if strings.TrimSpace(liveAddress) != "" {
+		return "running"
 	}
 	if err := probeTCPListenAddress(listenAddress); err != nil {
 		return "port_unavailable"
@@ -354,12 +406,18 @@ func databaseProxyRuntimeState(enabled bool, listenAddress string, allowlist []s
 	return "ready"
 }
 
-func databaseProxyRuntimeError(enabled bool, listenAddress string, allowlist []string) string {
+func databaseProxyRuntimeError(enabled bool, listenAddress string, allowlist []string, liveAddress, lastError string) string {
 	if !enabled {
 		return ""
 	}
 	if err := validateDatabaseProxyConfig(listenAddress, allowlist); err != nil {
 		return err.Error()
+	}
+	if strings.TrimSpace(lastError) != "" {
+		return lastError
+	}
+	if strings.TrimSpace(liveAddress) != "" {
+		return ""
 	}
 	if err := probeTCPListenAddress(listenAddress); err != nil {
 		return err.Error()
@@ -407,6 +465,13 @@ func validateHostPort(value string) error {
 		return errors.New("port must be between 1 and 65535")
 	}
 	return nil
+}
+
+func firstString(items []string) string {
+	if len(items) == 0 {
+		return ""
+	}
+	return strings.TrimSpace(items[0])
 }
 
 func probeTCPListenAddress(value string) error {

@@ -5717,6 +5717,7 @@ func TestBackupDeleteAndRetention(t *testing.T) {
 
 func TestScheduledTaskRunners(t *testing.T) {
 	handler, cookie := newTestHandler(t)
+	srv := handler.(*Server)
 
 	backupTaskRec := assertStatus(t, handler, http.MethodPost, "/api/admin/scheduled-tasks", map[string]any{
 		"name":   "Backup now",
@@ -5734,6 +5735,18 @@ func TestScheduledTaskRunners(t *testing.T) {
 	}
 	if info, err := os.Stat(filepath.FromSlash(backupPath)); err != nil || info.Size() == 0 {
 		t.Fatalf("backup file missing or empty: %v", err)
+	}
+
+	disabledTaskRec := assertStatus(t, handler, http.MethodPost, "/api/admin/scheduled-tasks", map[string]any{
+		"name":   "Disabled manual backup",
+		"type":   "backup",
+		"status": "disabled",
+	}, cookie, http.StatusCreated)
+	var disabledTask model.PlatformItem
+	decodeResponse(t, disabledTaskRec, &disabledTask)
+	assertStatus(t, handler, http.MethodPost, "/api/admin/scheduled-tasks/"+disabledTask.ID+"/run", nil, cookie, http.StatusConflict)
+	if logs := scheduledTaskLogsForTest(t, srv, disabledTask.ID); len(logs) != 0 {
+		t.Fatalf("disabled manual scheduled task should not run, got logs: %#v", logs)
 	}
 
 	oldAccessRec := assertStatus(t, handler, http.MethodPost, "/api/admin/audit/access-logs", map[string]any{

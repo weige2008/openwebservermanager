@@ -2408,6 +2408,10 @@ func (s *Server) handleScheduledTaskRun(w http.ResponseWriter, r *http.Request, 
 		writeError(w, http.StatusNotFound, "task not found")
 		return
 	}
+	if !scheduledTaskEnabled(task) {
+		writeError(w, http.StatusConflict, "scheduled task is disabled")
+		return
+	}
 	logItem, err := s.executeScheduledTask(r, task, "manual")
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, err.Error())

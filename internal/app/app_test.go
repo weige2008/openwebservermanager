@@ -3204,6 +3204,96 @@ func TestExternalLDAPLoginCreatesUserAndSession(t *testing.T) {
 	}
 }
 
+func TestExternalLDAPLoginRejectsAutoCreateDisabledAndDisabledUsers(t *testing.T) {
+	handler, adminCookie := newTestHandler(t)
+	srv := handler.(*Server)
+	fakeLDAP := &fakeLDAPAuthenticator{
+		users: map[string]fakeLDAPUser{
+			"ldap-no-create": {
+				password: "directory-password",
+				claims: externalLDAPClaims{
+					Subject:     "uid=ldap-no-create,ou=people,dc=example,dc=test",
+					DN:          "uid=ldap-no-create,ou=people,dc=example,dc=test",
+					Username:    "ldap-no-create",
+					DisplayName: "LDAP No Create",
+					Email:       "ldap-no-create@example.test",
+				},
+			},
+			"ldap-disabled": {
+				password: "directory-password",
+				claims: externalLDAPClaims{
+					Subject:     "uid=ldap-disabled,ou=people,dc=example,dc=test",
+					DN:          "uid=ldap-disabled,ou=people,dc=example,dc=test",
+					Username:    "ldap-disabled",
+					DisplayName: "LDAP Disabled",
+					Email:       "ldap-disabled@example.test",
+				},
+			},
+		},
+	}
+	srv.ldap = fakeLDAP
+
+	assertStatus(t, handler, http.MethodPost, "/api/admin/system-settings", map[string]any{
+		"name":   "LDAP identity no auto create",
+		"type":   "identity",
+		"status": "enabled",
+		"metadata": map[string]any{
+			"ldap_enabled":                true,
+			"ldap_provider_id":            "corp-ldap",
+			"ldap_provider_name":          "Corp LDAP",
+			"ldap_url":                    "ldap://directory.example.test:389",
+			"ldap_bind_dn":                "cn=reader,dc=example,dc=test",
+			"ldap_bind_password":          "directory-secret",
+			"ldap_base_dn":                "ou=people,dc=example,dc=test",
+			"ldap_user_filter":            "(uid={username})",
+			"ldap_username_attribute":     "uid",
+			"ldap_display_name_attribute": "cn",
+			"ldap_email_attribute":        "mail",
+			"ldap_role":                   "user",
+			"ldap_auto_create":            false,
+		},
+	}, adminCookie, http.StatusCreated)
+
+	noCreateRec := assertStatus(t, handler, http.MethodPost, "/api/auth/login", map[string]any{
+		"username": "ldap-no-create",
+		"password": "directory-password",
+	}, nil, http.StatusForbidden)
+	if !strings.Contains(noCreateRec.Body.String(), "auto creation is disabled") {
+		t.Fatalf("ldap auto-create denial response missing reason: %s", noCreateRec.Body.String())
+	}
+	usersRec := assertStatus(t, handler, http.MethodGet, "/api/admin/users", nil, adminCookie, http.StatusOK)
+	if strings.Contains(usersRec.Body.String(), "ldap-no-create") {
+		t.Fatalf("ldap login created user despite ldap_auto_create=false: %s", usersRec.Body.String())
+	}
+
+	assertStatus(t, handler, http.MethodPost, "/api/admin/users", map[string]any{
+		"name":   "ldap-disabled",
+		"type":   "ldap",
+		"status": "disabled",
+		"metadata": map[string]any{
+			"role":                 "user",
+			"external_provider":    "ldap",
+			"external_provider_id": "corp-ldap",
+			"external_subject":     "uid=ldap-disabled,ou=people,dc=example,dc=test",
+			"external_dn":          "uid=ldap-disabled,ou=people,dc=example,dc=test",
+		},
+	}, adminCookie, http.StatusCreated)
+	disabledRec := assertStatus(t, handler, http.MethodPost, "/api/auth/login", map[string]any{
+		"username": "ldap-disabled",
+		"password": "directory-password",
+	}, nil, http.StatusForbidden)
+	if !strings.Contains(disabledRec.Body.String(), "external ldap user is disabled") {
+		t.Fatalf("ldap disabled user denial response missing reason: %s", disabledRec.Body.String())
+	}
+	if fakeLDAP.calls != 2 {
+		t.Fatalf("ldap authenticator calls = %d, want 2", fakeLDAP.calls)
+	}
+	loginLogsRec := assertStatus(t, handler, http.MethodGet, "/api/admin/audit/login-logs", nil, adminCookie, http.StatusOK)
+	if !strings.Contains(loginLogsRec.Body.String(), `"type":"ldap"`) || !strings.Contains(loginLogsRec.Body.String(), `"status":"failed"`) || !strings.Contains(loginLogsRec.Body.String(), "auto creation is disabled") || !strings.Contains(loginLogsRec.Body.String(), "external ldap user is disabled") {
+		t.Fatalf("ldap failed login logs missing denial reasons: %s", loginLogsRec.Body.String())
+	}
+}
+
 func TestLDAPIntegrationTestLogin(t *testing.T) {
 	handler, adminCookie := newTestHandler(t)
 	srv := handler.(*Server)

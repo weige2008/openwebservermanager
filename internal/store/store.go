@@ -797,6 +797,9 @@ func (s *Store) createPlatformItem(collection string, item model.PlatformItem) (
 	if item.Metadata == nil {
 		item.Metadata = map[string]any{}
 	}
+	if collection == "assets" {
+		stripAssetSensitiveMetadata(item.Metadata)
+	}
 	payload, err := json.Marshal(item)
 	if err != nil {
 		return model.PlatformItem{}, err
@@ -1919,6 +1922,10 @@ func sanitizeDatabaseAssetMetadata(metadata map[string]any) {
 	if dsnSet {
 		metadata["database_dsn_set"] = true
 	}
+}
+
+func stripAssetSensitiveMetadata(metadata map[string]any) {
+	sanitizeMetadataValue(metadata)
 }
 
 type externalSystemSettingSecretSpec struct {

@@ -5242,6 +5242,131 @@ func TestResourceOperationEndpoints(t *testing.T) {
 	}
 }
 
+func TestAssetSensitiveMetadataIsNotPersistedOrExported(t *testing.T) {
+	handler, cookie := newTestHandler(t)
+	server := handler.(*Server)
+
+	createRec := assertStatus(t, handler, http.MethodPost, "/api/admin/assets", map[string]any{
+		"name":     "secret-asset",
+		"type":     "linux",
+		"status":   "active",
+		"protocol": "ssh",
+		"host":     "127.0.0.1",
+		"port":     22,
+		"metadata": map[string]any{
+			"password":    "asset-secret",
+			"private_key": "asset-private-key",
+			"note":        "safe-note",
+			"nested": map[string]any{
+				"api_token": "nested-token",
+				"label":     "safe-label",
+			},
+		},
+	}, cookie, http.StatusCreated)
+	createBody := createRec.Body.String()
+	for _, leaked := range []string{"asset-secret", "asset-private-key", "nested-token"} {
+		if strings.Contains(createBody, leaked) {
+			t.Fatalf("asset create response leaked secret %q: %s", leaked, createBody)
+		}
+	}
+	var created model.PlatformItem
+	decodeResponse(t, createRec, &created)
+	rawCreated, ok, err := server.cfg.Store.GetPlatformItem("assets", created.ID)
+	if err != nil || !ok {
+		t.Fatalf("load raw created asset: ok=%v err=%v", ok, err)
+	}
+	rawCreatedJSON, _ := json.Marshal(rawCreated)
+	rawCreatedText := string(rawCreatedJSON)
+	for _, leaked := range []string{"asset-secret", "asset-private-key", "nested-token"} {
+		if strings.Contains(rawCreatedText, leaked) {
+			t.Fatalf("raw created asset persisted secret %q: %s", leaked, rawCreatedText)
+		}
+	}
+	for _, kept := range []string{"safe-note", "safe-label"} {
+		if !strings.Contains(rawCreatedText, kept) {
+			t.Fatalf("raw created asset lost non-sensitive metadata %q: %s", kept, rawCreatedText)
+		}
+	}
+
+	updateRec := assertStatus(t, handler, http.MethodPatch, "/api/admin/assets/"+created.ID, map[string]any{
+		"metadata": map[string]any{
+			"token": "update-token",
+			"items": []any{
+				map[string]any{"secret_key": "nested-secret", "label": "kept-after-update"},
+			},
+		},
+	}, cookie, http.StatusOK)
+	updateBody := updateRec.Body.String()
+	for _, leaked := range []string{"update-token", "nested-secret"} {
+		if strings.Contains(updateBody, leaked) {
+			t.Fatalf("asset update response leaked secret %q: %s", leaked, updateBody)
+		}
+	}
+	rawUpdated, ok, err := server.cfg.Store.GetPlatformItem("assets", created.ID)
+	if err != nil || !ok {
+		t.Fatalf("load raw updated asset: ok=%v err=%v", ok, err)
+	}
+	rawUpdatedJSON, _ := json.Marshal(rawUpdated)
+	rawUpdatedText := string(rawUpdatedJSON)
+	for _, leaked := range []string{"update-token", "nested-secret"} {
+		if strings.Contains(rawUpdatedText, leaked) {
+			t.Fatalf("raw updated asset persisted secret %q: %s", leaked, rawUpdatedText)
+		}
+	}
+	if !strings.Contains(rawUpdatedText, "kept-after-update") {
+		t.Fatalf("raw updated asset lost non-sensitive nested metadata: %s", rawUpdatedText)
+	}
+
+	importRec := assertStatus(t, handler, http.MethodPost, "/api/admin/assets/import", map[string]any{
+		"items": []map[string]any{{
+			"name":     "imported-asset",
+			"type":     "linux",
+			"status":   "active",
+			"protocol": "ssh",
+			"host":     "192.0.2.80",
+			"port":     22,
+			"metadata": map[string]any{
+				"plain_password": "asset-import-password-value",
+				"nested":         map[string]any{"privateKey": "asset-import-private-key-value", "label": "import-safe"},
+			},
+		}},
+	}, cookie, http.StatusCreated)
+	var importResponse struct {
+		Items []model.PlatformItem `json:"items"`
+	}
+	decodeResponse(t, importRec, &importResponse)
+	if len(importResponse.Items) != 1 {
+		t.Fatalf("asset import response missing imported item: %s", importRec.Body.String())
+	}
+	rawImported, ok, err := server.cfg.Store.GetPlatformItem("assets", importResponse.Items[0].ID)
+	if err != nil || !ok {
+		t.Fatalf("load raw imported asset: ok=%v err=%v", ok, err)
+	}
+	rawImportedJSON, _ := json.Marshal(rawImported)
+	rawImportedText := string(rawImportedJSON)
+	for _, leaked := range []string{"asset-import-password-value", "asset-import-private-key-value"} {
+		if strings.Contains(rawImportedText, leaked) {
+			t.Fatalf("raw imported asset persisted secret %q: %s", leaked, rawImportedText)
+		}
+	}
+	if !strings.Contains(rawImportedText, "import-safe") {
+		t.Fatalf("raw imported asset lost non-sensitive metadata: %s", rawImportedText)
+	}
+
+	exportRec := assertStatus(t, handler, http.MethodGet, "/api/admin/assets/export", nil, cookie, http.StatusOK)
+	exportBody := exportRec.Body.String()
+	for _, leaked := range []string{"asset-secret", "asset-private-key", "nested-token", "update-token", "nested-secret", "asset-import-password-value", "asset-import-private-key-value"} {
+		if strings.Contains(exportBody, leaked) {
+			t.Fatalf("asset export leaked secret %q: %s", leaked, exportBody)
+		}
+	}
+	for _, kept := range []string{"kept-after-update", "import-safe"} {
+		if !strings.Contains(exportBody, kept) {
+			t.Fatalf("asset export lost non-sensitive metadata %q: %s", kept, exportBody)
+		}
+	}
+}
+
 func TestSMTPIntegrationTestEmail(t *testing.T) {
 	handler, cookie := newTestHandler(t)
 	smtpServer := newFakeSMTPServer(t)

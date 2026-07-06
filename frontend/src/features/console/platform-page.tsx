@@ -1,4 +1,5 @@
 import type { ColumnDef } from '@tanstack/react-table'
+import { useQuery } from '@tanstack/react-query'
 import { Link } from '@tanstack/react-router'
 import { ArrowUpRight, Copy, Download, FileDown, FileSearch, FolderPlus, MoveRight, Pencil, Play, Plus, RefreshCw, Save, ShieldCheck, TerminalSquare, Trash2, Upload } from 'lucide-react'
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
@@ -37,6 +38,14 @@ interface PlatformFormState {
   permissions: Record<string, boolean>
   metadata: string
   description: string
+}
+
+interface AccessAssetsResponse {
+  text?: PlatformItem[]
+  desktop?: PlatformItem[]
+  web?: PlatformItem[]
+  database?: PlatformItem[]
+  authorized?: PlatformItem[]
 }
 
 const initialForm: PlatformFormState = {
@@ -3354,13 +3363,17 @@ async function ensureAccessMFA(path: string, requestAccessMFACode: RequestAccess
 
 export function AccessPortalPage() {
   const app = useApp()
-  const assets = app.data.platform?.assets || []
-  const webAssets = app.data.platform?.web_assets || []
-  const databaseAssets = app.data.platform?.database_assets || []
   const [databaseQueryItem, setDatabaseQueryItem] = useState<PlatformItem | null>(null)
   const { requestAccessMFACode, accessMFADialog } = useAccessMFADialog()
-  const textAssets = assets.filter((item) => item.protocol === 'ssh')
-  const desktopAssets = assets.filter((item) => item.protocol === 'rdp' || item.protocol === 'vnc')
+  const accessAssetsQuery = useQuery({
+    queryKey: ['access-assets'],
+    queryFn: () => apiRequest<AccessAssetsResponse>('/api/access/assets'),
+    staleTime: 10_000,
+  })
+  const textAssets = accessAssetsQuery.data?.text || []
+  const desktopAssets = accessAssetsQuery.data?.desktop || []
+  const webAssets = accessAssetsQuery.data?.web || []
+  const databaseAssets = accessAssetsQuery.data?.database || []
   return (
     <div className='grid gap-4'>
       <section className='rounded-2xl border border-border bg-card p-5'>
@@ -3376,10 +3389,22 @@ export function AccessPortalPage() {
           </Link>
         </div>
       </section>
-      <AccessSection title='文本协议' items={textAssets} requestAccessMFACode={requestAccessMFACode} />
-      <AccessSection title='图形协议' items={desktopAssets} requestAccessMFACode={requestAccessMFACode} />
-      <AccessSection title='Web资产' items={webAssets} protocol='http' requestAccessMFACode={requestAccessMFACode} />
-      <AccessSection title='数据库资产' items={databaseAssets} protocol='database' onDatabaseQuery={setDatabaseQueryItem} requestAccessMFACode={requestAccessMFACode} />
+      {accessAssetsQuery.isLoading ? (
+        <div className='rounded-xl border border-dashed border-border p-6 text-sm text-muted-foreground'>
+          {app.t('loading', 'Loading...')}
+        </div>
+      ) : accessAssetsQuery.isError ? (
+        <div className='rounded-xl border border-destructive/30 bg-destructive/10 p-4 text-sm text-destructive'>
+          {app.t('accessAssetsLoadFailed', 'Access assets could not be loaded.')}
+        </div>
+      ) : (
+        <>
+          <AccessSection title='文本协议' items={textAssets} requestAccessMFACode={requestAccessMFACode} />
+          <AccessSection title='图形协议' items={desktopAssets} requestAccessMFACode={requestAccessMFACode} />
+          <AccessSection title='Web资产' items={webAssets} protocol='http' requestAccessMFACode={requestAccessMFACode} />
+          <AccessSection title='数据库资产' items={databaseAssets} protocol='database' onDatabaseQuery={setDatabaseQueryItem} requestAccessMFACode={requestAccessMFACode} />
+        </>
+      )}
       {databaseQueryItem ? (
         <SQLExecuteDialog
           item={databaseQueryItem}

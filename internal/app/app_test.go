@@ -1073,6 +1073,9 @@ func TestWebAssetProxyRequiresAuthorizationAndLogs(t *testing.T) {
 		if r.Header.Get("X-OpenWebServerManager-User") == "" || r.Header.Get("X-OpenWebServerManager-Asset") == "" {
 			t.Fatal("upstream did not receive proxy identity headers")
 		}
+		if _, err := r.Cookie(authCookieName); err == nil {
+			t.Fatal("upstream received internal auth cookie")
+		}
 		if r.URL.Query().Get("from") != "asset" {
 			t.Fatalf("upstream query missing base query: %q", r.URL.RawQuery)
 		}
@@ -1081,15 +1084,27 @@ func TestWebAssetProxyRequiresAuthorizationAndLogs(t *testing.T) {
 			if r.URL.Query().Get("x") != "1" {
 				t.Fatalf("upstream hello query = %q, want x=1", r.URL.RawQuery)
 			}
+			if cookie, err := r.Cookie("upstream_theme"); err != nil || cookie.Value != "dark" {
+				t.Fatalf("upstream cookie = %v/%v, want upstream_theme=dark", cookie, err)
+			}
+			if r.Header.Get("X-Remove-Me") != "" {
+				t.Fatal("hop-by-hop header leaked to upstream")
+			}
+			if r.Header.Get("X-Forwarded-Prefix") == "" || !strings.Contains(r.Header.Get("X-Forwarded-Uri"), "/proxy/hello") {
+				t.Fatalf("forwarded headers missing proxy context: prefix=%q uri=%q", r.Header.Get("X-Forwarded-Prefix"), r.Header.Get("X-Forwarded-Uri"))
+			}
 			w.Header().Set("X-Upstream", "ok")
 			_, _ = w.Write([]byte("proxied ok"))
+		case "/root/redirect":
+			http.SetCookie(w, &http.Cookie{Name: "upstream_session", Value: "abc", Domain: "upstream.internal", Path: "/root", HttpOnly: true})
+			http.Redirect(w, r, "/root/dashboard?tab=1", http.StatusFound)
 		case "/root/fail":
 			if r.URL.Query().Get("x") != "2" {
 				t.Fatalf("upstream fail query = %q, want x=2", r.URL.RawQuery)
 			}
 			http.Error(w, "upstream failed", http.StatusInternalServerError)
 		default:
-			t.Fatalf("upstream path = %q, want /root/hello or /root/fail", r.URL.Path)
+			t.Fatalf("upstream path = %q, want /root/hello, /root/redirect or /root/fail", r.URL.Path)
 		}
 	}))
 	defer upstream.Close()
@@ -1123,11 +1138,28 @@ func TestWebAssetProxyRequiresAuthorizationAndLogs(t *testing.T) {
 		"status":    "enabled",
 	}, adminCookie, http.StatusCreated)
 	proxyRec := assertStatusWithHeaders(t, handler, http.MethodGet, "/api/access/http/"+webAsset.ID+"/proxy/hello?x=1", nil, userCookie, map[string]string{
-		"Referer":    "https://docs.example.test/start",
-		"User-Agent": "openwebservermanager-test",
+		"Connection":  "X-Remove-Me",
+		"Cookie":      "upstream_theme=dark",
+		"Referer":     "https://docs.example.test/start",
+		"User-Agent":  "openwebservermanager-test",
+		"X-Remove-Me": "secret",
 	}, http.StatusOK)
 	if proxyRec.Body.String() != "proxied ok" || proxyRec.Header().Get("X-Upstream") != "ok" {
 		t.Fatalf("proxy response body/header = %q/%q", proxyRec.Body.String(), proxyRec.Header().Get("X-Upstream"))
+	}
+	redirectRec := assertStatus(t, handler, http.MethodGet, "/api/access/http/"+webAsset.ID+"/proxy/redirect", nil, userCookie, http.StatusFound)
+	if got, want := redirectRec.Header().Get("Location"), "/api/access/http/"+webAsset.ID+"/proxy/dashboard?tab=1"; got != want {
+		t.Fatalf("proxy redirect location = %q, want %q", got, want)
+	}
+	var upstreamCookie *http.Cookie
+	for _, cookie := range redirectRec.Result().Cookies() {
+		if cookie.Name == "upstream_session" {
+			upstreamCookie = cookie
+			break
+		}
+	}
+	if upstreamCookie == nil || upstreamCookie.Path != "/api/access/http/"+webAsset.ID+"/proxy" || upstreamCookie.Domain != "" {
+		t.Fatalf("rewritten upstream cookie = %#v", upstreamCookie)
 	}
 	assertStatusWithHeaders(t, handler, http.MethodGet, "/api/access/http/"+webAsset.ID+"/proxy/fail?x=2", nil, userCookie, map[string]string{
 		"Referer":    "https://docs.example.test/error",

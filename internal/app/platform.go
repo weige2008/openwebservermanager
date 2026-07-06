@@ -1,6 +1,7 @@
 package app
 
 import (
+	"bufio"
 	"context"
 	"database/sql"
 	"errors"
@@ -314,27 +315,36 @@ func (s *Server) handleWebAssetProxy(w http.ResponseWriter, r *http.Request, ass
 		return
 	}
 	targetQuery := target.RawQuery
-	proxy := httputil.NewSingleHostReverseProxy(target)
+	proxyBasePath := webAssetProxyBasePath(r.URL.Path, proxyPath)
+	proxy := &httputil.ReverseProxy{}
 	proxy.ErrorHandler = func(rw http.ResponseWriter, req *http.Request, proxyErr error) {
 		writeError(rw, http.StatusBadGateway, proxyErr.Error())
 	}
-	proxy.Director = func(req *http.Request) {
-		requestQuery := req.URL.RawQuery
-		req.URL.Scheme = target.Scheme
-		req.URL.Host = target.Host
-		req.Host = target.Host
-		req.URL.Path = joinProxyPath(target.Path, proxyPath)
-		req.URL.RawPath = ""
+	proxy.ModifyResponse = func(resp *http.Response) error {
+		rewriteWebAssetProxyResponse(resp, target, proxyBasePath)
+		return nil
+	}
+	proxy.Rewrite = func(req *httputil.ProxyRequest) {
+		requestQuery := req.In.URL.RawQuery
+		req.Out.URL.Scheme = target.Scheme
+		req.Out.URL.Host = target.Host
+		req.Out.Host = target.Host
+		req.Out.URL.Path = joinProxyPath(target.Path, proxyPath)
+		req.Out.URL.RawPath = ""
 		switch {
 		case targetQuery == "":
-			req.URL.RawQuery = requestQuery
-		case req.URL.RawQuery == "":
-			req.URL.RawQuery = targetQuery
+			req.Out.URL.RawQuery = requestQuery
+		case requestQuery == "":
+			req.Out.URL.RawQuery = targetQuery
 		default:
-			req.URL.RawQuery = targetQuery + "&" + requestQuery
+			req.Out.URL.RawQuery = targetQuery + "&" + requestQuery
 		}
-		req.Header.Set("X-OpenWebServerManager-User", userID)
-		req.Header.Set("X-OpenWebServerManager-Asset", asset.ID)
+		req.SetXForwarded()
+		req.Out.Header.Set("X-Forwarded-Prefix", proxyBasePath)
+		req.Out.Header.Set("X-Forwarded-Uri", req.In.URL.RequestURI())
+		req.Out.Header.Set("X-OpenWebServerManager-User", userID)
+		req.Out.Header.Set("X-OpenWebServerManager-Asset", asset.ID)
+		stripProxyInternalCookies(req.Out.Header)
 	}
 	recorder := &statusCaptureWriter{ResponseWriter: w, status: http.StatusOK}
 	proxy.ServeHTTP(recorder, r)
@@ -381,6 +391,24 @@ func (w *statusCaptureWriter) Write(payload []byte) (int, error) {
 	n, err := w.ResponseWriter.Write(payload)
 	w.bytes += int64(n)
 	return n, err
+}
+
+func (w *statusCaptureWriter) Flush() {
+	if flusher, ok := w.ResponseWriter.(http.Flusher); ok {
+		flusher.Flush()
+	}
+}
+
+func (w *statusCaptureWriter) Hijack() (net.Conn, *bufio.ReadWriter, error) {
+	hijacker, ok := w.ResponseWriter.(http.Hijacker)
+	if !ok {
+		return nil, nil, http.ErrNotSupported
+	}
+	return hijacker.Hijack()
+}
+
+func (w *statusCaptureWriter) Unwrap() http.ResponseWriter {
+	return w.ResponseWriter
 }
 
 func webAssetTargetURL(asset model.PlatformItem) (*url.URL, error) {
@@ -431,6 +459,123 @@ func joinProxyPath(basePath, proxyPath string) string {
 		return "/" + proxyPath
 	}
 	return basePath + "/" + proxyPath
+}
+
+func webAssetProxyBasePath(requestPath, proxyPath string) string {
+	requestPath = "/" + strings.Trim(requestPath, "/")
+	proxyPath = strings.Trim(proxyPath, "/")
+	if proxyPath != "" {
+		suffix := "/" + proxyPath
+		if strings.HasSuffix(requestPath, suffix) {
+			base := strings.TrimSuffix(requestPath, suffix)
+			if base == "" {
+				return "/"
+			}
+			return strings.TrimRight(base, "/")
+		}
+	}
+	if requestPath == "/" {
+		return "/"
+	}
+	return strings.TrimRight(requestPath, "/")
+}
+
+func stripProxyInternalCookies(header http.Header) {
+	values := header.Values("Cookie")
+	if len(values) == 0 {
+		return
+	}
+	header.Del("Cookie")
+	for _, value := range values {
+		cookies := []string{}
+		for _, part := range strings.Split(value, ";") {
+			cookie := strings.TrimSpace(part)
+			if cookie == "" {
+				continue
+			}
+			name := cookie
+			if index := strings.Index(cookie, "="); index >= 0 {
+				name = strings.TrimSpace(cookie[:index])
+			}
+			if strings.EqualFold(name, authCookieName) {
+				continue
+			}
+			cookies = append(cookies, cookie)
+		}
+		if len(cookies) > 0 {
+			header.Add("Cookie", strings.Join(cookies, "; "))
+		}
+	}
+}
+
+func rewriteWebAssetProxyResponse(resp *http.Response, target *url.URL, proxyBasePath string) {
+	rewriteWebAssetLocation(resp, target, proxyBasePath)
+	rewriteWebAssetSetCookies(resp, proxyBasePath)
+}
+
+func rewriteWebAssetLocation(resp *http.Response, target *url.URL, proxyBasePath string) {
+	raw := strings.TrimSpace(resp.Header.Get("Location"))
+	if raw == "" {
+		return
+	}
+	location, err := url.Parse(raw)
+	if err != nil {
+		return
+	}
+	resolved := location
+	if !location.IsAbs() {
+		if resp.Request != nil && resp.Request.URL != nil {
+			resolved = resp.Request.URL.ResolveReference(location)
+		} else {
+			resolved = target.ResolveReference(location)
+		}
+	}
+	if !sameURLOrigin(resolved, target) {
+		return
+	}
+	downstreamPath := webAssetDownstreamPath(target.Path, resolved.Path)
+	rewritten := *resolved
+	rewritten.Scheme = ""
+	rewritten.Host = ""
+	rewritten.User = nil
+	rewritten.Path = joinProxyPath(proxyBasePath, downstreamPath)
+	rewritten.RawPath = ""
+	resp.Header.Set("Location", rewritten.String())
+}
+
+func rewriteWebAssetSetCookies(resp *http.Response, proxyBasePath string) {
+	cookies := resp.Cookies()
+	if len(cookies) == 0 {
+		return
+	}
+	resp.Header.Del("Set-Cookie")
+	for _, cookie := range cookies {
+		cookie.Domain = ""
+		cookie.Path = proxyBasePath
+		resp.Header.Add("Set-Cookie", cookie.String())
+	}
+}
+
+func sameURLOrigin(left, right *url.URL) bool {
+	if left == nil || right == nil {
+		return false
+	}
+	return strings.EqualFold(left.Scheme, right.Scheme) && strings.EqualFold(canonicalHost(left.Host), canonicalHost(right.Host))
+}
+
+func webAssetDownstreamPath(basePath, upstreamPath string) string {
+	base := "/" + strings.Trim(strings.TrimRight(basePath, "/"), "/")
+	if base == "/" {
+		return strings.TrimLeft(upstreamPath, "/")
+	}
+	upstream := "/" + strings.TrimLeft(upstreamPath, "/")
+	if upstream == base {
+		return ""
+	}
+	if strings.HasPrefix(upstream, base+"/") {
+		return strings.TrimLeft(strings.TrimPrefix(upstream, base), "/")
+	}
+	return strings.TrimLeft(upstream, "/")
 }
 
 func (s *Server) handleSystemMonitoring(w http.ResponseWriter, _ *http.Request) {

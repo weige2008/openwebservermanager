@@ -34,11 +34,8 @@ import (
 type importRequest struct {
 	Items          []model.PlatformItemRequest `json:"items"`
 	UpdateExisting bool                        `json:"update_existing"`
-}
-
-type userImportRequest struct {
-	Items          []model.PlatformItemRequest `json:"items"`
-	UpdateExisting bool                        `json:"update_existing"`
+	Format         string                      `json:"format"`
+	Content        string                      `json:"content"`
 }
 
 type authorizationBulkRequest struct {
@@ -366,13 +363,221 @@ func auditExportFilename(route string, exportedAt time.Time, ext string) string 
 	return "openwebservermanager-" + safeRoute + "-" + exportedAt.Format("20060102-150405") + "." + ext
 }
 
+func decodeImportRequest(w http.ResponseWriter, r *http.Request, collection string) (importRequest, bool) {
+	var req importRequest
+	if requestWantsCSVImport(r) {
+		defer r.Body.Close()
+		r.Body = http.MaxBytesReader(w, r.Body, 1<<20)
+		content, err := io.ReadAll(r.Body)
+		if err != nil {
+			writeError(w, http.StatusBadRequest, err.Error())
+			return req, false
+		}
+		req.Format = "csv"
+		req.Content = string(content)
+		req.UpdateExisting = queryBool(r.URL.Query().Get("update_existing"))
+	} else if !decodeJSON(w, r, &req) {
+		return req, false
+	}
+	if len(req.Items) == 0 && (strings.EqualFold(strings.TrimSpace(req.Format), "csv") || strings.TrimSpace(req.Content) != "") {
+		items, err := parsePlatformImportCSV(req.Content, collection)
+		if err != nil {
+			writeError(w, http.StatusBadRequest, err.Error())
+			return req, false
+		}
+		req.Items = items
+	}
+	return req, true
+}
+
+func requestWantsCSVImport(r *http.Request) bool {
+	if strings.EqualFold(strings.TrimSpace(r.URL.Query().Get("format")), "csv") {
+		return true
+	}
+	contentType := strings.ToLower(strings.TrimSpace(strings.Split(r.Header.Get("Content-Type"), ";")[0]))
+	return contentType == "text/csv" || contentType == "application/csv"
+}
+
+func parsePlatformImportCSV(content, collection string) ([]model.PlatformItemRequest, error) {
+	content = strings.TrimPrefix(content, "\ufeff")
+	if strings.TrimSpace(content) == "" {
+		return nil, errors.New("csv content is required")
+	}
+	reader := csv.NewReader(strings.NewReader(content))
+	reader.TrimLeadingSpace = true
+	reader.FieldsPerRecord = -1
+	records, err := reader.ReadAll()
+	if err != nil {
+		return nil, fmt.Errorf("parse csv: %w", err)
+	}
+	if len(records) == 0 {
+		return nil, errors.New("csv header is required")
+	}
+	headers := make([]string, len(records[0]))
+	for index, header := range records[0] {
+		headers[index] = normalizeImportHeader(header)
+	}
+	items := []model.PlatformItemRequest{}
+	for rowIndex, record := range records[1:] {
+		if csvRecordBlank(record) {
+			continue
+		}
+		item := model.PlatformItemRequest{Metadata: map[string]any{}}
+		for columnIndex, value := range record {
+			if columnIndex >= len(headers) {
+				continue
+			}
+			if err := applyImportCSVValue(&item, collection, headers[columnIndex], strings.TrimSpace(value)); err != nil {
+				return nil, fmt.Errorf("csv row %d: %w", rowIndex+2, err)
+			}
+		}
+		items = append(items, item)
+	}
+	if len(items) == 0 {
+		return nil, errors.New("csv items are required")
+	}
+	return items, nil
+}
+
+func applyImportCSVValue(item *model.PlatformItemRequest, collection, header, value string) error {
+	if header == "" || value == "" {
+		return nil
+	}
+	switch header {
+	case "name":
+		item.Name = value
+	case "type":
+		item.Type = value
+	case "status":
+		item.Status = value
+	case "protocol":
+		item.Protocol = model.Protocol(strings.ToLower(value))
+	case "host", "address":
+		item.Host = value
+	case "port":
+		port, err := strconv.Atoi(value)
+		if err != nil {
+			return fmt.Errorf("invalid port %q", value)
+		}
+		item.Port = port
+	case "username", "user":
+		item.Username = value
+	case "password":
+		item.Password = value
+	case "private_key", "privatekey":
+		item.PrivateKey = value
+	case "passphrase":
+		item.Passphrase = value
+	case "group":
+		item.Group = value
+	case "owner_id", "owner":
+		item.OwnerID = value
+	case "parent_id", "parent":
+		item.ParentID = value
+	case "target_id", "target":
+		item.TargetID = value
+	case "tags", "tag":
+		item.Tags = splitImportList(value)
+	case "description", "details", "remark", "remarks":
+		item.Description = value
+	case "metadata", "metadata_json":
+		metadata := map[string]any{}
+		if err := json.Unmarshal([]byte(value), &metadata); err != nil {
+			return fmt.Errorf("invalid metadata_json: %w", err)
+		}
+		mergeImportMetadata(item.Metadata, metadata)
+	case "permissions", "permissions_json":
+		permissions := map[string]bool{}
+		if err := json.Unmarshal([]byte(value), &permissions); err != nil {
+			return fmt.Errorf("invalid permissions_json: %w", err)
+		}
+		item.Permissions = permissions
+	case "role":
+		if collection == "users" {
+			item.Metadata["role"] = value
+		} else {
+			item.Metadata[header] = value
+		}
+	default:
+		if key, ok := importMetadataKey(header); ok {
+			item.Metadata[key] = importMetadataScalar(value)
+		}
+	}
+	return nil
+}
+
+func importMetadataKey(header string) (string, bool) {
+	for _, prefix := range []string{"metadata_", "metadata.", "meta_", "meta."} {
+		if strings.HasPrefix(header, prefix) {
+			key := strings.TrimPrefix(header, prefix)
+			return key, key != ""
+		}
+	}
+	switch header {
+	case "asset_group_id", "asset_group_ids", "credential_id", "database", "gateway_group_id", "gateway_id", "group_id", "group_ids", "icon", "row_limit", "sort", "sqlite_path", "target_url":
+		return header, true
+	default:
+		return "", false
+	}
+}
+
+func mergeImportMetadata(target, source map[string]any) {
+	for key, value := range source {
+		target[key] = value
+	}
+}
+
+func splitImportList(value string) []string {
+	fields := strings.FieldsFunc(value, func(r rune) bool {
+		return r == ',' || r == ';' || r == '\n' || r == '\r'
+	})
+	result := []string{}
+	for _, field := range fields {
+		if trimmed := strings.TrimSpace(field); trimmed != "" {
+			result = append(result, trimmed)
+		}
+	}
+	return result
+}
+
+func importMetadataScalar(value string) any {
+	if parsed, err := strconv.ParseBool(value); err == nil {
+		return parsed
+	}
+	if parsed, err := strconv.Atoi(value); err == nil {
+		return parsed
+	}
+	return value
+}
+
+func normalizeImportHeader(value string) string {
+	value = strings.TrimPrefix(strings.TrimSpace(value), "\ufeff")
+	value = strings.ToLower(value)
+	replacer := strings.NewReplacer(" ", "_", "-", "_", "/", "_")
+	return replacer.Replace(value)
+}
+
+func csvRecordBlank(record []string) bool {
+	for _, value := range record {
+		if strings.TrimSpace(value) != "" {
+			return false
+		}
+	}
+	return true
+}
+
+func queryBool(value string) bool {
+	parsed, err := strconv.ParseBool(strings.TrimSpace(value))
+	return err == nil && parsed
+}
+
 func (s *Server) handleAssetImport(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
 		writeError(w, http.StatusMethodNotAllowed, "method not allowed")
 		return
 	}
-	var req importRequest
-	if !decodeJSON(w, r, &req) {
+	req, ok := decodeImportRequest(w, r, "assets")
+	if !ok {
 		return
 	}
 	if len(req.Items) == 0 {
@@ -450,8 +655,8 @@ func (s *Server) handleUserImport(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusMethodNotAllowed, "method not allowed")
 		return
 	}
-	var req userImportRequest
-	if !decodeJSON(w, r, &req) {
+	req, ok := decodeImportRequest(w, r, "users")
+	if !ok {
 		return
 	}
 	if len(req.Items) == 0 {

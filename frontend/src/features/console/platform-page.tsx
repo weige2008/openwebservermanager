@@ -140,6 +140,46 @@ interface BackupInfo {
 
 type ImportSummary = Record<string, number>
 
+const assetImportJSONSample = JSON.stringify({
+  update_existing: false,
+  items: [
+    {
+      name: 'linux-prod-01',
+      type: 'linux',
+      status: 'active',
+      protocol: 'ssh',
+      host: '192.0.2.10',
+      port: 22,
+      group: 'production',
+      tags: ['linux', 'ssh'],
+      metadata: { credential_id: 'credential-id' },
+    },
+  ],
+}, null, 2)
+
+const assetImportCSVSample = [
+  'name,type,status,protocol,host,port,group,tags,credential_id,gateway_group_id,metadata_json',
+  'linux-prod-01,linux,active,ssh,192.0.2.10,22,production,"linux,ssh",credential-id,,"{""import_note"":""csv""}"',
+].join('\n')
+
+const userImportJSONSample = JSON.stringify({
+  update_existing: false,
+  items: [
+    {
+      name: 'operator',
+      type: 'local',
+      status: 'enabled',
+      password: 'change-me-123',
+      metadata: { role: 'user' },
+    },
+  ],
+}, null, 2)
+
+const userImportCSVSample = [
+  'name,type,status,password,role,group,tags',
+  'operator,local,enabled,change-me-123,user,ops,"operator,import"',
+].join('\n')
+
 interface SMTPIntegrationForm {
   host: string
   port: string
@@ -1189,21 +1229,32 @@ function ResourceOperationDialog({
 
 function AssetImportDialog({ onClose }: { onClose: () => void }) {
   const app = useApp()
-  const [content, setContent] = useState('{\n  "update_existing": false,\n  "items": []\n}')
+  const [format, setFormat] = useState<'json' | 'csv'>('json')
+  const [content, setContent] = useState(assetImportJSONSample)
   const [updateExisting, setUpdateExisting] = useState(false)
   const [saving, setSaving] = useState(false)
   const [summary, setSummary] = useState<ImportSummary | null>(null)
+
+  const changeFormat = (next: 'json' | 'csv') => {
+    setFormat(next)
+    setContent(next === 'csv' ? assetImportCSVSample : assetImportJSONSample)
+    setSummary(null)
+  }
 
   const submit = async () => {
     setSaving(true)
     setSummary(null)
     try {
-      const parsed = JSON.parse(content) as unknown
-      const payload = Array.isArray(parsed)
-        ? { update_existing: updateExisting, items: parsed }
-        : typeof parsed === 'object' && parsed !== null
-          ? { ...(parsed as Record<string, unknown>), update_existing: updateExisting }
-          : parsed
+      const payload = format === 'csv'
+        ? { format: 'csv', content, update_existing: updateExisting }
+        : (() => {
+          const parsed = JSON.parse(content) as unknown
+          return Array.isArray(parsed)
+            ? { update_existing: updateExisting, items: parsed }
+            : typeof parsed === 'object' && parsed !== null
+              ? { ...(parsed as Record<string, unknown>), update_existing: updateExisting }
+              : parsed
+        })()
       const data = await apiRequest<{ items?: PlatformItem[]; summary?: ImportSummary }>('/api/admin/assets/import', { method: 'POST', body: JSON.stringify(payload) })
       setSummary(data.summary || { created: data.items?.length || 0, total: data.items?.length || 0 })
       await app.refresh(true)
@@ -1216,9 +1267,24 @@ function AssetImportDialog({ onClose }: { onClose: () => void }) {
   }
 
   return (
-    <DialogShell open onOpenChange={(open) => !open && onClose()} title='导入资产' description='粘贴导出的 JSON，或使用 {"items":[...]} 格式批量导入。'>
+    <DialogShell open onOpenChange={(open) => !open && onClose()} title='导入资产' description='粘贴 JSON 或 CSV，支持按资产名称跳过或更新已有资产。'>
       <div className='grid gap-4'>
-        <Field label='资产 JSON'><Textarea className='min-h-64 font-mono text-xs' value={content} onChange={(event) => { setContent(event.currentTarget.value); setSummary(null) }} /></Field>
+        <div className='grid gap-3 sm:grid-cols-2'>
+          <Field label='格式'>
+            <Select value={format} onChange={(event) => changeFormat(event.currentTarget.value as 'json' | 'csv')}>
+              <option value='json'>JSON</option>
+              <option value='csv'>CSV</option>
+            </Select>
+          </Field>
+        </div>
+        <Field label={format === 'csv' ? '资产 CSV' : '资产 JSON'}>
+          <Textarea className='min-h-64 font-mono text-xs' value={content} onChange={(event) => { setContent(event.currentTarget.value); setSummary(null) }} />
+        </Field>
+        {format === 'csv' ? (
+          <div className='rounded-lg border border-border bg-muted/30 p-3 text-xs leading-5 text-muted-foreground'>
+            第一行必须是表头。常用列：name,type,status,protocol,host,port,group,tags,credential_id,gateway_group_id,metadata_json。
+          </div>
+        ) : null}
         <CheckboxRow
           checked={updateExisting}
           onChange={(checked) => { setUpdateExisting(checked); setSummary(null) }}
@@ -1239,27 +1305,32 @@ function AssetImportDialog({ onClose }: { onClose: () => void }) {
 
 function UserImportDialog({ onClose }: { onClose: () => void }) {
   const app = useApp()
-  const [content, setContent] = useState(JSON.stringify({
-    update_existing: false,
-    items: [
-      {
-        name: 'operator',
-        type: 'local',
-        status: 'enabled',
-        password: 'change-me-123',
-        metadata: { role: 'user' },
-      },
-    ],
-  }, null, 2))
+  const [format, setFormat] = useState<'json' | 'csv'>('json')
+  const [content, setContent] = useState(userImportJSONSample)
+  const [updateExisting, setUpdateExisting] = useState(false)
   const [saving, setSaving] = useState(false)
   const [summary, setSummary] = useState<ImportSummary | null>(null)
+
+  const changeFormat = (next: 'json' | 'csv') => {
+    setFormat(next)
+    setContent(next === 'csv' ? userImportCSVSample : userImportJSONSample)
+    setSummary(null)
+  }
 
   const submit = async () => {
     setSaving(true)
     setSummary(null)
     try {
-      const parsed = JSON.parse(content) as unknown
-      const payload = Array.isArray(parsed) ? { update_existing: false, items: parsed } : parsed
+      const payload = format === 'csv'
+        ? { format: 'csv', content, update_existing: updateExisting }
+        : (() => {
+          const parsed = JSON.parse(content) as unknown
+          return Array.isArray(parsed)
+            ? { update_existing: updateExisting, items: parsed }
+            : typeof parsed === 'object' && parsed !== null
+              ? { ...(parsed as Record<string, unknown>), update_existing: updateExisting }
+              : parsed
+        })()
       const data = await apiRequest<{ summary?: ImportSummary }>('/api/admin/users/import', { method: 'POST', body: JSON.stringify(payload) })
       setSummary(data.summary || null)
       await app.refresh(true)
@@ -1272,12 +1343,27 @@ function UserImportDialog({ onClose }: { onClose: () => void }) {
   }
 
   return (
-    <DialogShell open onOpenChange={(open) => !open && onClose()} title='导入用户' description='粘贴用户 JSON；默认跳过已存在用户名，设置 update_existing 为 true 可按用户名更新。'>
+    <DialogShell open onOpenChange={(open) => !open && onClose()} title='导入用户' description='粘贴 JSON 或 CSV，支持按用户名跳过或更新已有用户。'>
       <div className='grid gap-4'>
-        <Field label='用户 JSON'><Textarea className='min-h-64 font-mono text-xs' value={content} onChange={(event) => { setContent(event.currentTarget.value); setSummary(null) }} /></Field>
-        <div className='rounded-lg border border-border bg-muted/30 p-3 text-xs text-muted-foreground'>
-          本地用户必须提供至少 8 位密码；角色写入 metadata.role，支持 user、auditor、admin 或自定义角色名。
+        <div className='grid gap-3 sm:grid-cols-2'>
+          <Field label='格式'>
+            <Select value={format} onChange={(event) => changeFormat(event.currentTarget.value as 'json' | 'csv')}>
+              <option value='json'>JSON</option>
+              <option value='csv'>CSV</option>
+            </Select>
+          </Field>
         </div>
+        <Field label={format === 'csv' ? '用户 CSV' : '用户 JSON'}>
+          <Textarea className='min-h-64 font-mono text-xs' value={content} onChange={(event) => { setContent(event.currentTarget.value); setSummary(null) }} />
+        </Field>
+        <div className='rounded-lg border border-border bg-muted/30 p-3 text-xs leading-5 text-muted-foreground'>
+          本地用户必须提供至少 8 位密码；角色可写入 CSV 的 role 列或 JSON 的 metadata.role，支持 user、auditor、admin 或自定义角色名。
+        </div>
+        <CheckboxRow
+          checked={updateExisting}
+          onChange={(checked) => { setUpdateExisting(checked); setSummary(null) }}
+          label='更新已有同名用户；关闭时自动跳过已有用户'
+        />
         {summary ? <ImportSummaryPanel summary={summary} /> : null}
         <div className='flex justify-end gap-2'>
           <Button variant='outline' onClick={onClose}>{summary ? '关闭' : '取消'}</Button>

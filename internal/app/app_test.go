@@ -1041,6 +1041,20 @@ func TestUserImportCreatesSkipsAndUpdatesLoginUsers(t *testing.T) {
 	if !strings.Contains(updatedLoginRec.Body.String(), `"role":"admin"`) {
 		t.Fatalf("updated imported user did not login with new role: %s", updatedLoginRec.Body.String())
 	}
+	csvRec := assertStatus(t, handler, http.MethodPost, "/api/admin/users/import", map[string]any{
+		"format": "csv",
+		"content": strings.Join([]string{
+			"name,type,status,password,role,group,tags",
+			`csv-user,local,enabled,password123,auditor,ops,"csv,import"`,
+		}, "\n"),
+	}, adminCookie, http.StatusCreated)
+	if !strings.Contains(csvRec.Body.String(), `"created":1`) {
+		t.Fatalf("csv user import did not create user: %s", csvRec.Body.String())
+	}
+	csvLoginRec := assertStatus(t, handler, http.MethodPost, "/api/auth/login", map[string]any{"username": "csv-user", "password": "password123"}, nil, http.StatusOK)
+	if !strings.Contains(csvLoginRec.Body.String(), `"role":"auditor"`) {
+		t.Fatalf("csv imported user did not login with role: %s", csvLoginRec.Body.String())
+	}
 
 	usersRec := assertStatus(t, handler, http.MethodGet, "/api/admin/users", nil, adminCookie, http.StatusOK)
 	if strings.Contains(usersRec.Body.String(), "password_hash") {
@@ -5539,6 +5553,20 @@ func TestResourceOperationEndpoints(t *testing.T) {
 	if strings.Count(listAssetsRec.Body.String(), "imported-rdp") != 1 || !strings.Contains(listAssetsRec.Body.String(), "192.0.2.77") || strings.Contains(listAssetsRec.Body.String(), "192.0.2.20") {
 		t.Fatalf("asset import should update existing asset without duplicates: %s", listAssetsRec.Body.String())
 	}
+	csvAssetBody := strings.Join([]string{
+		"name,type,status,protocol,host,port,group,tags,credential_id,gateway_group_id,metadata_json",
+		`csv-ssh,linux,active,ssh,192.0.2.88,22,ops,"linux,csv",cred-csv,gw-csv,"{""import_note"":""csv-ok""}"`,
+	}, "\n")
+	csvAssetRec := assertRawStatus(t, handler, http.MethodPost, "/api/admin/assets/import?format=csv", "text/csv", csvAssetBody, cookie, http.StatusCreated)
+	if !strings.Contains(csvAssetRec.Body.String(), `"created":1`) || !strings.Contains(csvAssetRec.Body.String(), "csv-ok") {
+		t.Fatalf("csv asset import response missing created asset metadata: %s", csvAssetRec.Body.String())
+	}
+	csvAssetListRec := assertStatus(t, handler, http.MethodGet, "/api/admin/assets", nil, cookie, http.StatusOK)
+	for _, want := range []string{"csv-ssh", "192.0.2.88", "cred-csv", "gw-csv", "csv-ok"} {
+		if !strings.Contains(csvAssetListRec.Body.String(), want) {
+			t.Fatalf("csv asset import list missing %q: %s", want, csvAssetListRec.Body.String())
+		}
+	}
 	assertStatus(t, handler, http.MethodPost, "/api/admin/assets/import", map[string]any{
 		"items": []map[string]any{{
 			"name": "duplicate-in-file",
@@ -8552,6 +8580,23 @@ func handleFailingSMTPAuthConnection(conn net.Conn, failure string) {
 func assertStatus(t *testing.T, handler http.Handler, method, path string, payload any, cookie *http.Cookie, want int) *httptest.ResponseRecorder {
 	t.Helper()
 	return assertStatusWithHeaders(t, handler, method, path, payload, cookie, nil, want)
+}
+
+func assertRawStatus(t *testing.T, handler http.Handler, method, path, contentType, body string, cookie *http.Cookie, want int) *httptest.ResponseRecorder {
+	t.Helper()
+	req := httptest.NewRequest(method, path, strings.NewReader(body))
+	if contentType != "" {
+		req.Header.Set("Content-Type", contentType)
+	}
+	if cookie != nil {
+		req.AddCookie(cookie)
+	}
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+	if rec.Code != want {
+		t.Fatalf("%s %s status = %d, want %d, body: %s", method, path, rec.Code, want, rec.Body.String())
+	}
+	return rec
 }
 
 func assertStatusWithHeaders(t *testing.T, handler http.Handler, method, path string, payload any, cookie *http.Cookie, headers map[string]string, want int) *httptest.ResponseRecorder {

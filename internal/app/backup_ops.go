@@ -119,62 +119,78 @@ func (s *Server) handleBackupRestore(w http.ResponseWriter, r *http.Request) {
 	}
 	r.Body = http.MaxBytesReader(w, r.Body, maxBackupUploadBytes)
 	if err := r.ParseMultipartForm(maxBackupUploadBytes); err != nil {
-		writeError(w, http.StatusBadRequest, "invalid backup upload: "+err.Error())
+		s.writeBackupRestoreFailure(w, r, http.StatusBadRequest, "invalid backup upload: "+err.Error(), nil)
 		return
 	}
 	file, header, err := r.FormFile("file")
 	if err != nil {
-		writeError(w, http.StatusBadRequest, "backup file is required")
+		s.writeBackupRestoreFailure(w, r, http.StatusBadRequest, "backup file is required", nil)
 		return
 	}
 	defer file.Close()
 	if header.Size <= 0 {
-		writeError(w, http.StatusBadRequest, "backup file is empty")
+		s.writeBackupRestoreFailure(w, r, http.StatusBadRequest, "backup file is empty", backupRestoreUploadMetadata(header.Filename, header.Size, 0))
 		return
 	}
 	tempDir, err := os.MkdirTemp(s.cfg.DataDir, "restore-*")
 	if err != nil {
-		writeError(w, http.StatusInternalServerError, err.Error())
+		s.writeBackupRestoreFailure(w, r, http.StatusInternalServerError, err.Error(), backupRestoreUploadMetadata(header.Filename, header.Size, 0))
 		return
 	}
 	defer os.RemoveAll(tempDir)
 	uploadPath := filepath.Join(tempDir, "upload.zip")
 	output, err := os.OpenFile(uploadPath, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0o600)
 	if err != nil {
-		writeError(w, http.StatusInternalServerError, err.Error())
+		s.writeBackupRestoreFailure(w, r, http.StatusInternalServerError, err.Error(), backupRestoreUploadMetadata(header.Filename, header.Size, 0))
 		return
 	}
 	written, copyErr := io.Copy(output, file)
 	closeErr := output.Close()
 	if copyErr != nil {
-		writeError(w, http.StatusBadRequest, "write backup upload: "+copyErr.Error())
+		s.writeBackupRestoreFailure(w, r, http.StatusBadRequest, "write backup upload: "+copyErr.Error(), backupRestoreUploadMetadata(header.Filename, header.Size, written))
 		return
 	}
 	if closeErr != nil {
-		writeError(w, http.StatusInternalServerError, closeErr.Error())
+		s.writeBackupRestoreFailure(w, r, http.StatusInternalServerError, closeErr.Error(), backupRestoreUploadMetadata(header.Filename, header.Size, written))
 		return
 	}
 	if written <= 0 || written > maxBackupUploadBytes {
-		writeError(w, http.StatusBadRequest, "backup upload size is invalid")
+		s.writeBackupRestoreFailure(w, r, http.StatusBadRequest, "backup upload size is invalid", backupRestoreUploadMetadata(header.Filename, header.Size, written))
 		return
 	}
 	archive, err := readRestoreArchive(uploadPath, tempDir)
 	if err != nil {
-		writeError(w, http.StatusBadRequest, err.Error())
+		s.writeBackupRestoreFailure(w, r, http.StatusBadRequest, err.Error(), backupRestoreUploadMetadata(header.Filename, header.Size, written))
 		return
 	}
 	if isTruthy(r.URL.Query().Get("dry_run")) || isTruthy(r.FormValue("dry_run")) {
+		_, _ = s.cfg.Store.CreatePlatformItem("operation_logs", model.PlatformItemRequest{
+			Name:        "backup.restore.validate",
+			Type:        "backup",
+			Status:      "success",
+			OwnerID:     s.currentUserID(r),
+			Description: "validated backup archive",
+			Metadata: map[string]any{
+				"client_ip":         s.clientIP(r),
+				"uploaded_filename": backupRestoreUploadName(header.Filename),
+				"uploaded_size":     written,
+				"manifest":          archive.Manifest,
+				"files":             archive.Files,
+			},
+		})
 		writeJSON(w, http.StatusOK, map[string]any{"valid": true, "manifest": archive.Manifest, "files": archive.Files, "size": written})
 		return
 	}
 	preRestore, err := s.createBackupSnapshot()
 	if err != nil {
-		writeError(w, http.StatusInternalServerError, "pre-restore backup failed: "+err.Error())
+		s.writeBackupRestoreFailure(w, r, http.StatusInternalServerError, "pre-restore backup failed: "+err.Error(), backupRestoreUploadMetadata(header.Filename, header.Size, written))
 		return
 	}
 	summary, err := s.cfg.Store.RestoreSnapshot(archive.LegacyRaw, archive.SQLiteDB)
 	if err != nil {
-		writeError(w, http.StatusBadRequest, err.Error())
+		metadata := backupRestoreUploadMetadata(header.Filename, header.Size, written)
+		metadata["pre_restore_backup"] = preRestore
+		s.writeBackupRestoreFailure(w, r, http.StatusBadRequest, err.Error(), metadata)
 		return
 	}
 	_, _ = s.cfg.Store.CreatePlatformItem("operation_logs", model.PlatformItemRequest{
@@ -202,6 +218,40 @@ func (s *Server) handleBackupRestore(w http.ResponseWriter, r *http.Request) {
 		"pre_restore_backup": preRestore,
 		"login_required":     true,
 	})
+}
+
+func (s *Server) writeBackupRestoreFailure(w http.ResponseWriter, r *http.Request, status int, detail string, metadata map[string]any) {
+	if metadata == nil {
+		metadata = map[string]any{}
+	}
+	metadata["client_ip"] = s.clientIP(r)
+	metadata["http_status"] = status
+	metadata["error"] = detail
+	_, _ = s.cfg.Store.CreatePlatformItem("operation_logs", model.PlatformItemRequest{
+		Name:        "backup.restore.failed",
+		Type:        "backup",
+		Status:      "failed",
+		OwnerID:     s.currentUserID(r),
+		Description: detail,
+		Metadata:    metadata,
+	})
+	writeError(w, status, detail)
+}
+
+func backupRestoreUploadMetadata(filename string, headerSize, written int64) map[string]any {
+	return map[string]any{
+		"uploaded_filename": backupRestoreUploadName(filename),
+		"header_size":       headerSize,
+		"uploaded_size":     written,
+	}
+}
+
+func backupRestoreUploadName(filename string) string {
+	filename = strings.TrimSpace(strings.ReplaceAll(filename, "\\", "/"))
+	if filename == "" {
+		return ""
+	}
+	return filepath.Base(filename)
 }
 
 func (s *Server) listBackups() ([]backupInfo, error) {

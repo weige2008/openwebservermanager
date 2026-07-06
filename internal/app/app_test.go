@@ -5005,7 +5005,19 @@ func TestBackupListDownloadAndRestore(t *testing.T) {
 	if !strings.Contains(dryRunRec.Body.String(), `"valid":true`) || !strings.Contains(dryRunRec.Body.String(), "store.db") {
 		t.Fatal("backup dry-run restore did not validate archive")
 	}
-	assertMultipartStatus(t, handler, "/api/admin/backups/restore", nil, "not-a-backup.zip", []byte("not a zip"), cookie, http.StatusBadRequest)
+	invalidBackupPayload := []byte("not a zip with restore-secret")
+	invalidBackupRec := assertMultipartStatus(t, handler, "/api/admin/backups/restore", nil, "not-a-backup.zip", invalidBackupPayload, cookie, http.StatusBadRequest)
+	if strings.Contains(invalidBackupRec.Body.String(), "restore-secret") {
+		t.Fatalf("backup restore failure response leaked upload content: %s", invalidBackupRec.Body.String())
+	}
+	operationLogsBeforeRestore := assertStatus(t, handler, http.MethodGet, "/api/admin/audit/operation-logs", nil, cookie, http.StatusOK)
+	operationLogsBeforeRestoreBody := operationLogsBeforeRestore.Body.String()
+	if !strings.Contains(operationLogsBeforeRestoreBody, "backup.restore.validate") || !strings.Contains(operationLogsBeforeRestoreBody, "backup.restore.failed") {
+		t.Fatalf("backup restore validation/failure logs missing: %s", operationLogsBeforeRestoreBody)
+	}
+	if strings.Contains(operationLogsBeforeRestoreBody, "restore-secret") {
+		t.Fatalf("backup restore failure audit leaked upload content: %s", operationLogsBeforeRestoreBody)
+	}
 
 	restoreRec := assertMultipartStatus(t, handler, "/api/admin/backups/restore", nil, backupName, downloadRec.Body.Bytes(), cookie, http.StatusOK)
 	if !strings.Contains(restoreRec.Body.String(), `"restored":true`) || !strings.Contains(restoreRec.Body.String(), "pre_restore_backup") {

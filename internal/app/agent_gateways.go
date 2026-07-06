@@ -201,6 +201,7 @@ func (s *Server) handleAgentGatewayHeartbeat(w http.ResponseWriter, r *http.Requ
 		return
 	}
 	now := time.Now().UTC()
+	wasOnline := strings.EqualFold(item.Status, "online")
 	item.Status = "online"
 	if item.Metadata == nil {
 		item.Metadata = map[string]any{}
@@ -228,6 +229,12 @@ func (s *Server) handleAgentGatewayHeartbeat(w http.ResponseWriter, r *http.Requ
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, err.Error())
 		return
+	}
+	if !wasOnline {
+		s.recordAgentGatewayStatusEvent("agent.gateway.recovered", "success", saved, map[string]any{
+			"reason":    "valid heartbeat",
+			"client_ip": s.clientIP(r),
+		})
 	}
 	writeJSON(w, http.StatusOK, map[string]any{
 		"gateway":                    saved,
@@ -329,8 +336,37 @@ func (s *Server) refreshAgentGatewayStatuses() {
 		raw.Status = "offline"
 		raw.Metadata["last_offline_at"] = now.Format(time.RFC3339Nano)
 		raw.Metadata["offline_reason"] = "heartbeat timeout"
-		_, _ = s.cfg.Store.SavePlatformItem("agent_gateways", raw)
+		saved, err := s.cfg.Store.SavePlatformItem("agent_gateways", raw)
+		if err != nil {
+			continue
+		}
+		s.recordAgentGatewayStatusEvent("agent.gateway.timeout", "warning", saved, map[string]any{
+			"reason":                    "heartbeat timeout",
+			"last_heartbeat_at":         last.Format(time.RFC3339Nano),
+			"heartbeat_timeout_seconds": int(agentHeartbeatTimeout(raw).Seconds()),
+		})
 	}
+}
+
+func (s *Server) recordAgentGatewayStatusEvent(name, status string, item model.PlatformItem, metadata map[string]any) {
+	if metadata == nil {
+		metadata = map[string]any{}
+	}
+	metadata["gateway_id"] = item.ID
+	metadata["gateway_name"] = item.Name
+	metadata["gateway_status"] = item.Status
+	if value := firstMetadataString(item.Metadata, "last_client_ip"); value != "" {
+		metadata["last_client_ip"] = value
+	}
+	_, _ = s.cfg.Store.CreatePlatformItem("operation_logs", model.PlatformItemRequest{
+		Name:        name,
+		Type:        "agent",
+		Status:      status,
+		TargetID:    item.ID,
+		OwnerID:     "system",
+		Description: strings.TrimPrefix(strings.TrimPrefix(name, "agent.gateway."), "gateway."),
+		Metadata:    metadata,
+	})
 }
 
 func agentHeartbeatTimeout(item model.PlatformItem) time.Duration {

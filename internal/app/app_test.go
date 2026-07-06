@@ -5290,8 +5290,11 @@ func TestAgentGatewayRegistrationHeartbeatAndTimeout(t *testing.T) {
 	}
 
 	logsRec := assertStatus(t, handler, http.MethodGet, "/api/admin/audit/operation-logs", nil, adminCookie, http.StatusOK)
-	if !strings.Contains(logsRec.Body.String(), "agent.gateway.register") || !strings.Contains(logsRec.Body.String(), "agent_gateway.token") {
-		t.Fatal("agent gateway token/register operations were not audited")
+	logsBody := logsRec.Body.String()
+	for _, want := range []string{"agent.gateway.register", "agent_gateway.token", "agent.gateway.timeout", "agent.gateway.recovered"} {
+		if !strings.Contains(logsBody, want) {
+			t.Fatalf("agent gateway operation %q was not audited: %s", want, logsBody)
+		}
 	}
 }
 

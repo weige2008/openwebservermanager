@@ -2051,6 +2051,13 @@ func TestWebAssetProxyUsesMTLSCertificate(t *testing.T) {
 	if !strings.Contains(logsRec.Body.String(), cert.ID) || !strings.Contains(logsRec.Body.String(), "mtls_certificate_id") {
 		t.Fatalf("access logs missing mTLS certificate id: %s", logsRec.Body.String())
 	}
+	assertStatus(t, handler, http.MethodPatch, "/api/admin/certificates/"+cert.ID, map[string]any{
+		"status": "disabled",
+	}, adminCookie, http.StatusOK)
+	disabledProxyRec := assertStatus(t, handler, http.MethodGet, "/api/access/http/"+webAsset.ID+"/proxy/", nil, userCookie, http.StatusBadRequest)
+	if !strings.Contains(disabledProxyRec.Body.String(), "not usable") {
+		t.Fatalf("disabled mTLS certificate response did not explain state: %s", disabledProxyRec.Body.String())
+	}
 }
 
 func TestDatabaseAssetQueryRequiresAuthorizationAndLogs(t *testing.T) {
@@ -4705,6 +4712,14 @@ func TestResourceOperationEndpoints(t *testing.T) {
 	if defaultCert.ID != cert.ID || defaultCert.Metadata["default"] != true {
 		t.Fatalf("default certificate response = %#v", defaultCert)
 	}
+	assertStatus(t, handler, http.MethodPatch, "/api/admin/certificates/"+acmeCert.ID, map[string]any{
+		"status": "disabled",
+	}, cookie, http.StatusOK)
+	disabledDefaultRec := assertStatus(t, handler, http.MethodPost, "/api/admin/certificates/"+acmeCert.ID+"/default", map[string]any{}, cookie, http.StatusBadRequest)
+	if !strings.Contains(disabledDefaultRec.Body.String(), "not usable") {
+		t.Fatalf("disabled certificate default response did not explain state: %s", disabledDefaultRec.Body.String())
+	}
+	assertStatus(t, handler, http.MethodGet, "/.well-known/acme-challenge/"+token, nil, nil, http.StatusNotFound)
 	clientCAPEM, _, err := makeSelfSignedCertificate(certificateRequest{Domain: "client-ca.example.test", Days: 365})
 	if err != nil {
 		t.Fatalf("make client ca certificate: %v", err)

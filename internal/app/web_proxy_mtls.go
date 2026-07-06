@@ -27,6 +27,9 @@ func (s *Server) webAssetProxyTransport(asset model.PlatformItem, target *url.UR
 	if !ok {
 		return nil, fmt.Errorf("mTLS certificate %s not found", certificateID)
 	}
+	if err := certificateRuntimeUsable(certificate); err != nil {
+		return nil, fmt.Errorf("mTLS certificate %s is not usable: %w", certificateID, err)
+	}
 	if err := s.decryptCertificatePrivateKey(&certificate); err != nil {
 		return nil, err
 	}

@@ -86,7 +86,10 @@ type storageUsageInfo struct {
 	CheckedAt      string `json:"checked_at"`
 }
 
-var errStoragePermissionDenied = errors.New("storage permission denied")
+var (
+	errStoragePermissionDenied = errors.New("storage permission denied")
+	errCertificateNotUsable    = errors.New("certificate is not usable")
+)
 
 type certificateRequest struct {
 	Name   string   `json:"name"`
@@ -2205,6 +2208,9 @@ func (s *Server) handleACMEHTTPChallenge(w http.ResponseWriter, r *http.Request)
 		return
 	}
 	for _, item := range items {
+		if err := certificateRuntimeUsable(item); err != nil {
+			continue
+		}
 		if metadataText := firstMetadataString(item.Metadata, "acme_http_token"); metadataText != token {
 			continue
 		}
@@ -2230,6 +2236,10 @@ func (s *Server) handleCertificateDefault(w http.ResponseWriter, r *http.Request
 			writeError(w, http.StatusNotFound, "certificate not found")
 			return
 		}
+		if errors.Is(err, errCertificateNotUsable) {
+			writeError(w, http.StatusBadRequest, err.Error())
+			return
+		}
 		writeError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
@@ -2243,11 +2253,15 @@ func (s *Server) setDefaultCertificate(id string) (model.PlatformItem, error) {
 	if err != nil {
 		return model.PlatformItem{}, err
 	}
-	if _, ok, err := s.cfg.Store.GetPlatformItem("certificates", id); err != nil || !ok {
+	selectedItem, ok, err := s.cfg.Store.GetPlatformItem("certificates", id)
+	if err != nil || !ok {
 		if err != nil {
 			return model.PlatformItem{}, err
 		}
 		return model.PlatformItem{}, os.ErrNotExist
+	}
+	if err := certificateRuntimeUsable(selectedItem); err != nil {
+		return model.PlatformItem{}, err
 	}
 	var selected model.PlatformItem
 	for _, item := range items {
@@ -2277,6 +2291,19 @@ func (s *Server) setDefaultCertificate(id string) (model.PlatformItem, error) {
 		return model.PlatformItem{}, os.ErrNotExist
 	}
 	return selected, nil
+}
+
+func certificateRuntimeUsable(item model.PlatformItem) error {
+	status := strings.ToLower(strings.TrimSpace(item.Status))
+	switch status {
+	case "", "enabled", "active", "issued", "valid", "locked":
+	default:
+		return fmt.Errorf("%w: certificate status is %s", errCertificateNotUsable, valueOrDefault(status, "disabled"))
+	}
+	if expiresAt, ok := metadataTime(item.Metadata["expires_at"]); ok && !expiresAt.IsZero() && !time.Now().UTC().Before(expiresAt) {
+		return fmt.Errorf("%w: certificate is expired", errCertificateNotUsable)
+	}
+	return nil
 }
 
 func (s *Server) handleCertificateMTLS(w http.ResponseWriter, r *http.Request, id string) {

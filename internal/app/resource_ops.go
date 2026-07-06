@@ -2890,12 +2890,16 @@ func (s *Server) handleCertificateMTLS(w http.ResponseWriter, r *http.Request, i
 		item.Metadata = map[string]any{}
 	}
 	item.Metadata["mtls_enabled"] = req.Enabled
-	if strings.TrimSpace(req.ClientCA) != "" {
+	if !req.Enabled {
+		clearCertificateMTLSCA(item.Metadata)
+	} else if strings.TrimSpace(req.ClientCA) != "" {
 		if _, err := parseFirstCertificatePEM([]byte(req.ClientCA)); err != nil {
 			writeError(w, http.StatusBadRequest, "client_ca is invalid: "+err.Error())
 			return
 		}
 		item.Metadata["mtls_client_ca"] = req.ClientCA
+		item.Metadata["mtls_client_ca_set"] = true
+	} else if firstMetadataString(item.Metadata, "mtls_client_ca", "client_ca", "mtls_ca", "tls_ca", "ca_certificate", "root_ca") != "" {
 		item.Metadata["mtls_client_ca_set"] = true
 	}
 	item.Metadata["mtls_updated_at"] = time.Now().UTC().Format(time.RFC3339Nano)
@@ -2906,6 +2910,13 @@ func (s *Server) handleCertificateMTLS(w http.ResponseWriter, r *http.Request, i
 	}
 	_ = s.audit(r, "certificate.mtls.update", id, "", "updated mTLS settings for "+item.Name)
 	writeJSON(w, http.StatusOK, saved)
+}
+
+func clearCertificateMTLSCA(metadata map[string]any) {
+	for _, key := range []string{"mtls_client_ca", "client_ca", "mtls_ca", "tls_ca", "ca_certificate", "root_ca", "mtls_client_ca_set"} {
+		delete(metadata, key)
+	}
+	metadata["mtls_client_ca_set"] = false
 }
 
 func (s *Server) handleCertificateLogs(w http.ResponseWriter, r *http.Request, id string) {

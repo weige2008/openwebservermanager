@@ -6141,6 +6141,34 @@ func TestResourceOperationEndpoints(t *testing.T) {
 	if strings.Count(certificatesAfterOpsBody, `"default":true`) != 1 || !strings.Contains(certificatesAfterOpsBody, `"mtls_client_ca_set":true`) {
 		t.Fatalf("certificate list missing default/mTLS state: %s", certificatesAfterOpsBody)
 	}
+	disableMTLSRec := assertStatus(t, handler, http.MethodPost, "/api/admin/certificates/"+cert.ID+"/mtls", map[string]any{
+		"enabled": false,
+	}, cookie, http.StatusOK)
+	var disabledMTLSCert model.PlatformItem
+	decodeResponse(t, disableMTLSRec, &disabledMTLSCert)
+	if disabledMTLSCert.Metadata["mtls_enabled"] == true || disabledMTLSCert.Metadata["mtls_client_ca_set"] == true {
+		t.Fatalf("disabled mTLS response retained enabled/CA state: %#v", disabledMTLSCert.Metadata)
+	}
+	if strings.Contains(disableMTLSRec.Body.String(), `"mtls_client_ca":`) || strings.Contains(disableMTLSRec.Body.String(), string(clientCAPEM)) {
+		t.Fatalf("disabled mTLS response leaked or retained client CA: %s", disableMTLSRec.Body.String())
+	}
+	rawDisabledMTLSCert, ok, err := server.cfg.Store.GetPlatformItem("certificates", cert.ID)
+	if err != nil || !ok {
+		t.Fatalf("load disabled mTLS certificate: ok=%v err=%v", ok, err)
+	}
+	for _, key := range []string{"mtls_client_ca", "client_ca", "mtls_ca", "tls_ca", "ca_certificate", "root_ca"} {
+		if firstMetadataString(rawDisabledMTLSCert.Metadata, key) != "" {
+			t.Fatalf("disabled mTLS certificate retained %s: %#v", key, rawDisabledMTLSCert.Metadata)
+		}
+	}
+	if rawDisabledMTLSCert.Metadata["mtls_client_ca_set"] == true {
+		t.Fatalf("disabled mTLS certificate retained CA flag: %#v", rawDisabledMTLSCert.Metadata)
+	}
+	certificatesAfterDisableMTLSRec := assertStatus(t, handler, http.MethodGet, "/api/admin/certificates", nil, cookie, http.StatusOK)
+	certificatesAfterDisableMTLSBody := certificatesAfterDisableMTLSRec.Body.String()
+	if strings.Contains(certificatesAfterDisableMTLSBody, `"mtls_client_ca_set":true`) || strings.Contains(certificatesAfterDisableMTLSBody, `"mtls_client_ca":`) {
+		t.Fatalf("certificate list retained disabled mTLS CA state: %s", certificatesAfterDisableMTLSBody)
+	}
 	certificateLogsRec := assertStatus(t, handler, http.MethodGet, "/api/admin/certificates/"+cert.ID+"/logs", nil, cookie, http.StatusOK)
 	certificateLogsBody := certificateLogsRec.Body.String()
 	for _, want := range []string{"certificate.self_signed", "certificate.bundle_download", "certificate.default", "certificate.mtls.update"} {

@@ -1171,6 +1171,13 @@ func TestPlatformConnectionsRejectDisabledAssetsAndCredentialsAtOpen(t *testing.
 	if ok || disabledCredentialRec.Code != http.StatusNotFound {
 		t.Fatalf("disabled ssh credential resolved: ok=%v status=%d body=%s", ok, disabledCredentialRec.Code, disabledCredentialRec.Body.String())
 	}
+	assertStatus(t, handler, http.MethodPatch, "/api/admin/credentials/"+sshCredential.ID, map[string]any{"status": "encrypted"}, adminCookie, http.StatusOK)
+	assertStatus(t, handler, http.MethodPatch, "/api/admin/credentials/"+sshCredential.ID, map[string]any{"status": "locked"}, adminCookie, http.StatusOK)
+	lockedCredentialRec := httptest.NewRecorder()
+	_, _, _, _, ok = srv.connectionParts(lockedCredentialRec, sshReq, sshSession.ID, model.ProtocolSSH)
+	if ok || lockedCredentialRec.Code != http.StatusNotFound {
+		t.Fatalf("locked ssh credential resolved: ok=%v status=%d body=%s", ok, lockedCredentialRec.Code, lockedCredentialRec.Body.String())
+	}
 
 	vncAssetRec := assertStatus(t, handler, http.MethodPost, "/api/admin/assets", map[string]any{
 		"name":     "toggle-vnc",
@@ -1192,6 +1199,16 @@ func TestPlatformConnectionsRejectDisabledAssetsAndCredentialsAtOpen(t *testing.
 	}, adminCookie, http.StatusCreated)
 	var disabledVNC model.PlatformItem
 	decodeResponse(t, disabledVNCRec, &disabledVNC)
+	lockedVNCRec := assertStatus(t, handler, http.MethodPost, "/api/admin/credentials", map[string]any{
+		"name":      "toggle-vnc-locked",
+		"type":      "vnc_password",
+		"status":    "locked",
+		"username":  "vnc",
+		"password":  "locked-secret",
+		"target_id": vncAsset.ID,
+	}, adminCookie, http.StatusCreated)
+	var lockedVNC model.PlatformItem
+	decodeResponse(t, lockedVNCRec, &lockedVNC)
 	enabledVNCRec := assertStatus(t, handler, http.MethodPost, "/api/admin/credentials", map[string]any{
 		"name":      "toggle-vnc-enabled",
 		"type":      "vnc_password",
@@ -1205,6 +1222,10 @@ func TestPlatformConnectionsRejectDisabledAssetsAndCredentialsAtOpen(t *testing.
 	assertStatus(t, handler, http.MethodPost, "/api/connections/vnc", map[string]any{
 		"asset_id":      vncAsset.ID,
 		"credential_id": disabledVNC.ID,
+	}, adminCookie, http.StatusBadRequest)
+	assertStatus(t, handler, http.MethodPost, "/api/connections/vnc", map[string]any{
+		"asset_id":      vncAsset.ID,
+		"credential_id": lockedVNC.ID,
 	}, adminCookie, http.StatusBadRequest)
 	vncSessionRec := assertStatus(t, handler, http.MethodPost, "/api/connections/vnc", map[string]any{
 		"asset_id": vncAsset.ID,
@@ -1236,6 +1257,12 @@ func TestPlatformConnectionsRejectDisabledAssetsAndCredentialsAtOpen(t *testing.
 	if _, ok := srv.desktopTunnelConfig(disabledVNCCredentialRec, vncReq, vncSession.ID, model.ProtocolVNC); ok || disabledVNCCredentialRec.Code != http.StatusNotFound {
 		t.Fatalf("disabled vnc credential resolved: ok=%v status=%d body=%s", ok, disabledVNCCredentialRec.Code, disabledVNCCredentialRec.Body.String())
 	}
+	assertStatus(t, handler, http.MethodPatch, "/api/admin/credentials/"+enabledVNC.ID, map[string]any{"status": "encrypted"}, adminCookie, http.StatusOK)
+	assertStatus(t, handler, http.MethodPatch, "/api/admin/credentials/"+enabledVNC.ID, map[string]any{"status": "locked"}, adminCookie, http.StatusOK)
+	lockedVNCCredentialRec := httptest.NewRecorder()
+	if _, ok := srv.desktopTunnelConfig(lockedVNCCredentialRec, vncReq, vncSession.ID, model.ProtocolVNC); ok || lockedVNCCredentialRec.Code != http.StatusNotFound {
+		t.Fatalf("locked vnc credential resolved: ok=%v status=%d body=%s", ok, lockedVNCCredentialRec.Code, lockedVNCCredentialRec.Body.String())
+	}
 
 	databaseCredentialRec := assertStatus(t, handler, http.MethodPost, "/api/admin/credentials", map[string]any{
 		"name":     "toggle-db-disabled",
@@ -1260,6 +1287,30 @@ func TestPlatformConnectionsRejectDisabledAssetsAndCredentialsAtOpen(t *testing.
 	}, adminCookie, http.StatusBadRequest)
 	if !strings.Contains(dbRec.Body.String(), "is disabled") {
 		t.Fatalf("disabled database credential response did not explain state: %s", dbRec.Body.String())
+	}
+	lockedDatabaseCredentialRec := assertStatus(t, handler, http.MethodPost, "/api/admin/credentials", map[string]any{
+		"name":     "toggle-db-locked",
+		"type":     "database_password",
+		"status":   "locked",
+		"username": "db",
+		"password": "db-secret",
+	}, adminCookie, http.StatusCreated)
+	var lockedDatabaseCredential model.PlatformItem
+	decodeResponse(t, lockedDatabaseCredentialRec, &lockedDatabaseCredential)
+	lockedDatabaseAssetRec := assertStatus(t, handler, http.MethodPost, "/api/admin/database-assets", map[string]any{
+		"name":     "toggle-db-locked",
+		"type":     "sqlite",
+		"status":   "enabled",
+		"protocol": "database",
+		"metadata": map[string]any{"sqlite_path": "toggle-locked-credential.db", "credential_id": lockedDatabaseCredential.ID},
+	}, adminCookie, http.StatusCreated)
+	var lockedDatabaseAsset model.PlatformItem
+	decodeResponse(t, lockedDatabaseAssetRec, &lockedDatabaseAsset)
+	lockedDBRec := assertStatus(t, handler, http.MethodPost, "/api/access/database/"+lockedDatabaseAsset.ID+"/query", map[string]any{
+		"sql": "SELECT 1",
+	}, adminCookie, http.StatusBadRequest)
+	if !strings.Contains(lockedDBRec.Body.String(), "is disabled") {
+		t.Fatalf("locked database credential response did not explain state: %s", lockedDBRec.Body.String())
 	}
 }
 

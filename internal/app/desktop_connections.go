@@ -375,7 +375,7 @@ func platformCredentialCompatible(credential model.PlatformItem, protocol model.
 func platformCredentialEnabled(credential model.PlatformItem) bool {
 	status := strings.ToLower(strings.TrimSpace(credential.Status))
 	switch status {
-	case "", "enabled", "active", "encrypted", "locked":
+	case "", "enabled", "active", "encrypted":
 		return true
 	default:
 		return false

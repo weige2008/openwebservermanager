@@ -168,4 +168,8 @@ export type WorkspaceState =
 export interface ApiErrorPayload {
   error?: string
   setup_required?: boolean
+  mfa_required?: boolean
+  mfa_scope?: string
+  mfa_setup_required?: boolean
+  expires_in?: number
 }

@@ -232,6 +232,9 @@ func (s *Server) handleAccessAction(w http.ResponseWriter, r *http.Request) {
 			writeError(w, http.StatusBadRequest, "proxy access is only supported for web assets")
 			return
 		}
+		if !s.requireAccessMFA(w, r, accessMFAInputFromRequest(r)) {
+			return
+		}
 		s.handleWebAssetProxy(w, r, asset, userID, strings.Join(parts[3:], "/"))
 		return
 	}
@@ -269,6 +272,9 @@ func (s *Server) handleAccessAction(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		req.AssetID = assetID
+		if !s.requireAccessMFA(w, r, accessMFAInput{MFACode: req.MFACode, RecoveryCode: req.RecoveryCode}) {
+			return
+		}
 		s.createPlatformSSHSession(w, r, req, http.StatusAccepted)
 		return
 	}
@@ -282,7 +288,13 @@ func (s *Server) handleAccessAction(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		req.AssetID = assetID
+		if !s.requireAccessMFA(w, r, accessMFAInput{MFACode: req.MFACode, RecoveryCode: req.RecoveryCode}) {
+			return
+		}
 		s.createPlatformDesktopSession(w, r, protocol, req, http.StatusAccepted)
+		return
+	}
+	if !s.requireAccessMFA(w, r, accessMFAInputFromRequest(r)) {
 		return
 	}
 	item, err := s.cfg.Store.CreatePlatformItem("online_sessions", model.PlatformItemRequest{

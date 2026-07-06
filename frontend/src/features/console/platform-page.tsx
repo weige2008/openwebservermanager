@@ -144,6 +144,8 @@ interface DesktopAccessForm {
   watermarkText: string
   watermarkColor: string
   watermarkFontSize: string
+  accessMfaEnabled: boolean
+  accessMfaValidMinutes: string
 }
 
 interface ProxyServicesForm {
@@ -1679,13 +1681,23 @@ function SSHExecDialog({ item, onClose }: { item: PlatformItem; onClose: () => v
   const execute = async () => {
     setRunning(true)
     try {
-      const data = await apiRequest<SSHExecResult>(`/api/access/ssh/${item.id}/exec`, {
+      const payload = {
+        command,
+        timeout_seconds: Number(timeoutSeconds) || 30,
+      }
+      const runCommand = (mfaCode = '') => apiRequest<SSHExecResult>(`/api/access/ssh/${item.id}/exec`, {
         method: 'POST',
-        body: JSON.stringify({
-          command,
-          timeout_seconds: Number(timeoutSeconds) || 30,
-        }),
+        body: JSON.stringify(mfaCode ? { ...payload, mfa_code: mfaCode } : payload),
       })
+      let data: SSHExecResult
+      try {
+        data = await runCommand()
+      } catch (error) {
+        if (!isAccessMFARequiredError(error)) throw error
+        const mfaCode = promptAccessMFACode(app.t)
+        if (!mfaCode) return
+        data = await runCommand(mfaCode)
+      }
       setResult(data)
       await app.refresh(true)
       app.showToast('SSH command executed')
@@ -1764,10 +1776,19 @@ function SQLExecuteDialog({
   const execute = async () => {
     setRunning(true)
     try {
-      const data = await apiRequest<PlatformItem>(endpoint || `/api/admin/sql-work-orders/${item.id}/execute`, {
+      const executeSQL = (mfaCode = '') => apiRequest<PlatformItem>(endpoint || `/api/admin/sql-work-orders/${item.id}/execute`, {
         method: 'POST',
-        body: JSON.stringify({ sql }),
+        body: JSON.stringify(mfaCode ? { sql, mfa_code: mfaCode } : { sql }),
       })
+      let data: PlatformItem
+      try {
+        data = await executeSQL()
+      } catch (error) {
+        if (!isAccessMFARequiredError(error)) throw error
+        const mfaCode = promptAccessMFACode(app.t)
+        if (!mfaCode) return
+        data = await executeSQL(mfaCode)
+      }
       setResult(data)
       await app.refresh(true)
       app.showToast(successMessage || 'SQL 工单已执行')
@@ -1782,10 +1803,19 @@ function SQLExecuteDialog({
     if (!workOrderEndpoint) return
     setSubmittingWorkOrder(true)
     try {
-      const data = await apiRequest<PlatformItem>(workOrderEndpoint, {
+      const createWorkOrder = (mfaCode = '') => apiRequest<PlatformItem>(workOrderEndpoint, {
         method: 'POST',
-        body: JSON.stringify({ sql, reason }),
+        body: JSON.stringify(mfaCode ? { sql, reason, mfa_code: mfaCode } : { sql, reason }),
       })
+      let data: PlatformItem
+      try {
+        data = await createWorkOrder()
+      } catch (error) {
+        if (!isAccessMFARequiredError(error)) throw error
+        const mfaCode = promptAccessMFACode(app.t)
+        if (!mfaCode) return
+        data = await createWorkOrder(mfaCode)
+      }
       setResult(data)
       setReason('')
       await app.refresh(true)
@@ -2645,6 +2675,9 @@ export function PlatformSettingsPage({ config }: { config: PlatformPageConfig })
                     <option value='none'>{app.t('none', 'None')}</option>
                   </Select>
                 </Field>
+                <Field label={app.t('accessMFAValidMinutes', 'Access MFA valid minutes')}>
+                  <Input type='number' min={1} max={1440} value={accessForm.accessMfaValidMinutes} onChange={(event) => patchAccessForm({ accessMfaValidMinutes: event.currentTarget.value })} />
+                </Field>
                 <Field label={app.t('watermarkText', 'Watermark text')}>
                   <Input value={accessForm.watermarkText} onChange={(event) => patchAccessForm({ watermarkText: event.currentTarget.value })} placeholder='{{user}} / {{asset}}' />
                 </Field>
@@ -2662,6 +2695,7 @@ export function PlatformSettingsPage({ config }: { config: PlatformPageConfig })
                 <CheckboxRow checked={accessForm.ignoreCert} onChange={(ignoreCert) => patchAccessForm({ ignoreCert })} label={app.t('ignoreCertificate', 'Ignore server certificate')} />
                 <CheckboxRow checked={accessForm.readOnly} onChange={(readOnly) => patchAccessForm({ readOnly })} label={app.t('readOnlyDesktop', 'Read-only desktop')} />
                 <CheckboxRow checked={accessForm.watermarkEnabled} onChange={(watermarkEnabled) => patchAccessForm({ watermarkEnabled })} label={app.t('workspaceWatermark', 'Workspace watermark')} />
+                <CheckboxRow checked={accessForm.accessMfaEnabled} onChange={(accessMfaEnabled) => patchAccessForm({ accessMfaEnabled })} label={app.t('accessMFA', 'Require MFA before asset access')} />
               </div>
               <div className='flex justify-end'>
                 <Button variant='outline' onClick={() => void saveAccessSettings()} disabled={savingAccess}>
@@ -2954,6 +2988,8 @@ function desktopAccessFormFromItem(item?: PlatformItem): DesktopAccessForm {
     watermarkText: metadataText(metadata.watermark_text),
     watermarkColor: metadataText(metadata.watermark_color) || 'rgba(255,255,255,0.18)',
     watermarkFontSize: metadataText(metadata.watermark_font_size) || '28',
+    accessMfaEnabled: metadataBool(metadata.access_mfa_enabled ?? metadata.access_mfa_required),
+    accessMfaValidMinutes: metadataText(metadata.access_mfa_valid_minutes) || '10',
   }
 }
 
@@ -2973,6 +3009,8 @@ function desktopAccessMetadataFromForm(form: DesktopAccessForm, existing?: Recor
   metadata.watermark_text = form.watermarkText.trim()
   metadata.watermark_color = form.watermarkColor.trim() || 'rgba(255,255,255,0.18)'
   metadata.watermark_font_size = Number(form.watermarkFontSize) || 28
+  metadata.access_mfa_enabled = form.accessMfaEnabled
+  metadata.access_mfa_valid_minutes = Number(form.accessMfaValidMinutes) || 10
   return metadata
 }
 
@@ -2993,6 +3031,16 @@ function integrationMetadataFromForm(form: SMTPIntegrationForm, existing?: Recor
   metadata.llm_model = form.llmModel.trim()
   if (form.llmApiKey.trim()) metadata.llm_api_key = form.llmApiKey.trim()
   return metadata
+}
+
+function isAccessMFARequiredError(error: unknown) {
+  if (!(error instanceof ApiError) || error.status !== 428) return false
+  const data = recordValue(error.data)
+  return data.mfa_required === true && (metadataText(data.mfa_scope) === '' || metadataText(data.mfa_scope) === 'access')
+}
+
+function promptAccessMFACode(t: (key: string, fallback?: string) => string) {
+  return window.prompt(t('accessMFAPrompt', 'Enter MFA code or recovery code'))?.trim() || ''
 }
 
 export function AccessPortalPage() {
@@ -3062,19 +3110,31 @@ function AccessSection({
       return
     }
     try {
-      const body = accessProtocol === 'rdp' || accessProtocol === 'vnc'
-        ? JSON.stringify({
+      const payload: Record<string, unknown> = accessProtocol === 'rdp' || accessProtocol === 'vnc'
+        ? {
           width: Math.max(1024, window.innerWidth),
           height: Math.max(680, window.innerHeight - 52),
           dpi: 96,
           recording_enabled: true,
-        })
-        : JSON.stringify({
+        }
+        : {
           cols: 120,
           rows: 32,
           term: 'xterm-256color',
-        })
-      const session = await apiRequest<ConnectionSession>(`/api/access/${accessProtocol}/${item.id}`, { method: 'POST', body })
+        }
+      const createSession = (mfaCode = '') => apiRequest<ConnectionSession>(`/api/access/${accessProtocol}/${item.id}`, {
+        method: 'POST',
+        body: JSON.stringify(mfaCode ? { ...payload, mfa_code: mfaCode } : payload),
+      })
+      let session: ConnectionSession
+      try {
+        session = await createSession()
+      } catch (error) {
+        if (!isAccessMFARequiredError(error)) throw error
+        const mfaCode = promptAccessMFACode(app.t)
+        if (!mfaCode) return
+        session = await createSession(mfaCode)
+      }
       if (accessProtocol === 'ssh' || accessProtocol === 'rdp' || accessProtocol === 'vnc') {
         app.setWorkspace({ type: accessProtocol, session, status: 'connecting' })
       } else {

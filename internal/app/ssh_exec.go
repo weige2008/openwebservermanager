@@ -16,6 +16,8 @@ type sshExecRequest struct {
 	Command        string `json:"command"`
 	CredentialID   string `json:"credential_id"`
 	TimeoutSeconds int    `json:"timeout_seconds"`
+	MFACode        string `json:"mfa_code"`
+	RecoveryCode   string `json:"recovery_code"`
 }
 
 func (s *Server) handleSSHExec(w http.ResponseWriter, r *http.Request, asset model.PlatformItem, userID string) {
@@ -25,6 +27,9 @@ func (s *Server) handleSSHExec(w http.ResponseWriter, r *http.Request, asset mod
 	}
 	var req sshExecRequest
 	if !decodeJSON(w, r, &req) {
+		return
+	}
+	if !s.requireAccessMFA(w, r, accessMFAInput{MFACode: req.MFACode, RecoveryCode: req.RecoveryCode}) {
 		return
 	}
 	req.Command = strings.TrimSpace(req.Command)

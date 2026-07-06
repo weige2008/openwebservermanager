@@ -21,6 +21,8 @@ type desktopCreateRequest struct {
 	Height           int    `json:"height"`
 	DPI              int    `json:"dpi"`
 	RecordingEnabled bool   `json:"recording_enabled"`
+	MFACode          string `json:"mfa_code"`
+	RecoveryCode     string `json:"recovery_code"`
 }
 
 type sshAccessCreateRequest struct {
@@ -29,6 +31,8 @@ type sshAccessCreateRequest struct {
 	Cols         int    `json:"cols"`
 	Rows         int    `json:"rows"`
 	Term         string `json:"term"`
+	MFACode      string `json:"mfa_code"`
+	RecoveryCode string `json:"recovery_code"`
 }
 
 func (s *Server) handleCreateVNC(w http.ResponseWriter, r *http.Request) {

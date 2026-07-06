@@ -122,7 +122,9 @@ type certificateMTLSRequest struct {
 }
 
 type sqlExecuteRequest struct {
-	SQL string `json:"sql"`
+	SQL          string `json:"sql"`
+	MFACode      string `json:"mfa_code"`
+	RecoveryCode string `json:"recovery_code"`
 }
 
 type workOrderDecisionRequest struct {

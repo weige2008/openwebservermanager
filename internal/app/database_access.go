@@ -30,8 +30,10 @@ type databaseSQLExecutionOptions struct {
 }
 
 type sqlWorkOrderRequest struct {
-	SQL    string `json:"sql"`
-	Reason string `json:"reason"`
+	SQL          string `json:"sql"`
+	Reason       string `json:"reason"`
+	MFACode      string `json:"mfa_code"`
+	RecoveryCode string `json:"recovery_code"`
 }
 
 type databaseAssetConnection struct {
@@ -53,6 +55,9 @@ func (s *Server) handleDatabaseAssetQuery(w http.ResponseWriter, r *http.Request
 	}
 	var req sqlExecuteRequest
 	if !decodeJSON(w, r, &req) {
+		return
+	}
+	if !s.requireAccessMFA(w, r, accessMFAInput{MFACode: req.MFACode, RecoveryCode: req.RecoveryCode}) {
 		return
 	}
 	sqlText := strings.TrimSpace(req.SQL)
@@ -79,6 +84,9 @@ func (s *Server) handleDatabaseWorkOrderCreate(w http.ResponseWriter, r *http.Re
 	}
 	var req sqlWorkOrderRequest
 	if !decodeJSON(w, r, &req) {
+		return
+	}
+	if !s.requireAccessMFA(w, r, accessMFAInput{MFACode: req.MFACode, RecoveryCode: req.RecoveryCode}) {
 		return
 	}
 	sqlText := strings.TrimSpace(req.SQL)

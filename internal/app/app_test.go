@@ -196,6 +196,141 @@ func TestPlatformUserLoginAndAccessAuthorization(t *testing.T) {
 	}
 }
 
+func TestAccessMFARequiredForPortalConnections(t *testing.T) {
+	handler, adminCookie := newTestHandler(t)
+	srv := handler.(*Server)
+
+	userRec := assertStatus(t, handler, http.MethodPost, "/api/admin/users", map[string]any{
+		"name":     "mfa-operator",
+		"type":     "local",
+		"status":   "enabled",
+		"password": "password123",
+		"metadata": map[string]any{"role": "user"},
+	}, adminCookie, http.StatusCreated)
+	var user model.PlatformItem
+	decodeResponse(t, userRec, &user)
+	secret := "JBSWY3DPEHPK3PXP"
+	if _, err := srv.cfg.Store.EnableUserMFA(user.ID, secret, []string{"ABCDE-FGHIJ"}); err != nil {
+		t.Fatalf("enable user MFA: %v", err)
+	}
+
+	assetRec := assertStatus(t, handler, http.MethodPost, "/api/admin/assets", map[string]any{
+		"name":     "mfa-linux",
+		"type":     "linux",
+		"status":   "active",
+		"protocol": "ssh",
+		"host":     "127.0.0.1",
+		"port":     22,
+	}, adminCookie, http.StatusCreated)
+	var asset model.PlatformItem
+	decodeResponse(t, assetRec, &asset)
+	assertStatus(t, handler, http.MethodPost, "/api/admin/credentials", map[string]any{
+		"name":      "mfa-linux root",
+		"type":      "ssh_password",
+		"status":    "encrypted",
+		"username":  "root",
+		"password":  "target-secret",
+		"target_id": asset.ID,
+	}, adminCookie, http.StatusCreated)
+	assertStatus(t, handler, http.MethodPost, "/api/admin/authorizations/assets", map[string]any{
+		"name":      "mfa-operator linux",
+		"owner_id":  user.ID,
+		"target_id": asset.ID,
+		"status":    "enabled",
+	}, adminCookie, http.StatusCreated)
+
+	databaseRec := assertStatus(t, handler, http.MethodPost, "/api/admin/database-assets", map[string]any{
+		"name":     "mfa-db",
+		"type":     "sqlite",
+		"status":   "enabled",
+		"protocol": "database",
+		"metadata": map[string]any{"sqlite_path": "mfa.db", "row_limit": 10},
+	}, adminCookie, http.StatusCreated)
+	var databaseAsset model.PlatformItem
+	decodeResponse(t, databaseRec, &databaseAsset)
+	assertStatus(t, handler, http.MethodPost, "/api/admin/authorizations/databases", map[string]any{
+		"name":      "mfa-operator database",
+		"owner_id":  user.ID,
+		"target_id": databaseAsset.ID,
+		"status":    "enabled",
+	}, adminCookie, http.StatusCreated)
+
+	assertStatus(t, handler, http.MethodPost, "/api/admin/system-settings", map[string]any{
+		"name":   "Access MFA",
+		"type":   "access",
+		"status": "enabled",
+		"metadata": map[string]any{
+			"access_mfa_enabled":       true,
+			"access_mfa_valid_minutes": 5,
+		},
+	}, adminCookie, http.StatusCreated)
+
+	loginWithMFA := func() *http.Cookie {
+		t.Helper()
+		loginRec := assertStatus(t, handler, http.MethodPost, "/api/auth/login", map[string]any{
+			"username": "mfa-operator",
+			"password": "password123",
+		}, nil, http.StatusAccepted)
+		var challenge map[string]any
+		decodeResponse(t, loginRec, &challenge)
+		token, _ := challenge["mfa_token"].(string)
+		if token == "" {
+			t.Fatalf("login MFA challenge missing token: %v", challenge)
+		}
+		completeRec := assertStatus(t, handler, http.MethodPost, "/api/auth/mfa/complete-login", map[string]any{
+			"token":    token,
+			"mfa_code": totpCode(secret, time.Now().UTC()),
+		}, nil, http.StatusOK)
+		cookies := completeRec.Result().Cookies()
+		if len(cookies) == 0 {
+			t.Fatal("MFA login did not return auth cookie")
+		}
+		return cookies[0]
+	}
+
+	userCookie := loginWithMFA()
+	missingRec := assertStatus(t, handler, http.MethodPost, "/api/access/ssh/"+asset.ID, map[string]any{
+		"cols": 120,
+		"rows": 32,
+	}, userCookie, http.StatusPreconditionRequired)
+	if !strings.Contains(missingRec.Body.String(), `"mfa_required":true`) || !strings.Contains(missingRec.Body.String(), `"mfa_scope":"access"`) {
+		t.Fatalf("missing access MFA response is not structured: %s", missingRec.Body.String())
+	}
+	assertStatus(t, handler, http.MethodPost, "/api/access/ssh/"+asset.ID, map[string]any{
+		"cols":     120,
+		"rows":     32,
+		"mfa_code": "000000",
+	}, userCookie, http.StatusUnauthorized)
+	sessionRec := assertStatus(t, handler, http.MethodPost, "/api/access/ssh/"+asset.ID, map[string]any{
+		"cols":     120,
+		"rows":     32,
+		"mfa_code": totpCode(secret, time.Now().UTC()),
+	}, userCookie, http.StatusAccepted)
+	var session model.ConnectionSession
+	decodeResponse(t, sessionRec, &session)
+	if session.Protocol != model.ProtocolSSH || session.ServerID != asset.ID {
+		t.Fatalf("unexpected SSH session after access MFA: %#v", session)
+	}
+	assertStatus(t, handler, http.MethodPost, "/api/access/ssh/"+asset.ID, map[string]any{
+		"cols": 100,
+		"rows": 24,
+	}, userCookie, http.StatusAccepted)
+
+	databaseCookie := loginWithMFA()
+	assertStatus(t, handler, http.MethodPost, "/api/access/database/"+databaseAsset.ID+"/query", map[string]any{
+		"sql": "CREATE TABLE access_mfa_check(id INTEGER PRIMARY KEY)",
+	}, databaseCookie, http.StatusPreconditionRequired)
+	assertStatus(t, handler, http.MethodPost, "/api/access/database/"+databaseAsset.ID+"/query", map[string]any{
+		"sql":      "CREATE TABLE access_mfa_check(id INTEGER PRIMARY KEY)",
+		"mfa_code": totpCode(secret, time.Now().UTC()),
+	}, databaseCookie, http.StatusOK)
+
+	operationRec := assertStatus(t, handler, http.MethodGet, "/api/admin/audit/operation-logs", nil, adminCookie, http.StatusOK)
+	if !strings.Contains(operationRec.Body.String(), "access.mfa.verify") || !strings.Contains(operationRec.Body.String(), "access.mfa.failed") {
+		t.Fatalf("access MFA audit entries missing: %s", operationRec.Body.String())
+	}
+}
+
 func TestPasskeyRegistrationAndLogin(t *testing.T) {
 	handler, adminCookie := newTestHandler(t)
 

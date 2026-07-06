@@ -25,6 +25,7 @@ type authManager struct {
 	failures             map[string]loginFailure
 	mfaChallenges        map[string]mfaChallenge
 	captchas             map[string]captchaChallenge
+	accessMFAGrants      map[string]accessMFAGrant
 	oidcStates           map[string]externalOIDCState
 	wecomStates          map[string]externalWeComState
 	passkeyRegistrations map[string]passkeyChallenge
@@ -63,6 +64,11 @@ type mfaChallenge struct {
 	ExpiresAt     time.Time
 }
 
+type accessMFAGrant struct {
+	UserID    string
+	ExpiresAt time.Time
+}
+
 type authStatus struct {
 	Configured            bool `json:"configured"`
 	CaptchaRequired       bool `json:"captcha_required"`
@@ -90,6 +96,7 @@ func newAuthManager() *authManager {
 		failures:             map[string]loginFailure{},
 		mfaChallenges:        map[string]mfaChallenge{},
 		captchas:             map[string]captchaChallenge{},
+		accessMFAGrants:      map[string]accessMFAGrant{},
 		oidcStates:           map[string]externalOIDCState{},
 		wecomStates:          map[string]externalWeComState{},
 		passkeyRegistrations: map[string]passkeyChallenge{},
@@ -118,6 +125,7 @@ func (m *authManager) delete(token string) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	delete(m.sessions, token)
+	delete(m.accessMFAGrants, token)
 }
 
 func (m *authManager) hasUserSession(userID string) bool {
@@ -200,10 +208,41 @@ func (m *authManager) clearSessions() {
 	m.sessions = map[string]authSession{}
 	m.mfaChallenges = map[string]mfaChallenge{}
 	m.captchas = map[string]captchaChallenge{}
+	m.accessMFAGrants = map[string]accessMFAGrant{}
 	m.oidcStates = map[string]externalOIDCState{}
 	m.wecomStates = map[string]externalWeComState{}
 	m.passkeyRegistrations = map[string]passkeyChallenge{}
 	m.passkeyLogins = map[string]passkeyChallenge{}
+}
+
+func (m *authManager) grantAccessMFA(token, userID string, ttl time.Duration) {
+	if strings.TrimSpace(token) == "" || strings.TrimSpace(userID) == "" || ttl <= 0 {
+		return
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.accessMFAGrants[token] = accessMFAGrant{
+		UserID:    userID,
+		ExpiresAt: time.Now().Add(ttl).UTC(),
+	}
+}
+
+func (m *authManager) accessMFAValid(token, userID string) bool {
+	if strings.TrimSpace(token) == "" || strings.TrimSpace(userID) == "" {
+		return false
+	}
+	now := time.Now().UTC()
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	grant, ok := m.accessMFAGrants[token]
+	if !ok {
+		return false
+	}
+	if now.After(grant.ExpiresAt) {
+		delete(m.accessMFAGrants, token)
+		return false
+	}
+	return grant.UserID == userID
 }
 
 func (m *authManager) createMFAChallenge(challenge mfaChallenge) (string, error) {

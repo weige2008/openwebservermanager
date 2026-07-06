@@ -1911,12 +1911,36 @@ func TestDatabaseAssetQueryRequiresAuthorizationAndLogs(t *testing.T) {
 	assertStatus(t, handler, http.MethodPost, "/api/admin/sql-work-orders/"+rejectedOrder.ID+"/reject", map[string]any{"note": "not allowed"}, adminCookie, http.StatusOK)
 	assertStatus(t, handler, http.MethodPost, "/api/admin/sql-work-orders/"+rejectedOrder.ID+"/execute", map[string]any{}, adminCookie, http.StatusConflict)
 
+	failingRec := assertStatus(t, handler, http.MethodPost, "/api/access/database/"+databaseAsset.ID+"/work-orders", map[string]any{
+		"sql":    "SELECT * FROM missing_work_order_table",
+		"reason": "exercise failed execution state",
+	}, userCookie, http.StatusCreated)
+	var failingOrder model.PlatformItem
+	decodeResponse(t, failingRec, &failingOrder)
+	assertStatus(t, handler, http.MethodPost, "/api/admin/sql-work-orders/"+failingOrder.ID+"/approve", map[string]any{"note": "approved failure path"}, adminCookie, http.StatusOK)
+	failingExecuteRec := assertStatus(t, handler, http.MethodPost, "/api/admin/sql-work-orders/"+failingOrder.ID+"/execute", map[string]any{}, adminCookie, http.StatusBadRequest)
+	var failingLog model.PlatformItem
+	decodeResponse(t, failingExecuteRec, &failingLog)
+	if failingLog.Status != "failed" || failingLog.ID == "" || !strings.Contains(failingLog.Description, "missing_work_order_table") {
+		t.Fatalf("failing work order log missing failure details: %#v", failingLog)
+	}
+	failingStatusRec := assertStatus(t, handler, http.MethodGet, "/api/admin/sql-work-orders/"+failingOrder.ID, nil, adminCookie, http.StatusOK)
+	var failedOrder model.PlatformItem
+	decodeResponse(t, failingStatusRec, &failedOrder)
+	if failedOrder.Status != "failed" || firstMetadataString(failedOrder.Metadata, "sql_log_id") != failingLog.ID || !strings.Contains(firstMetadataString(failedOrder.Metadata, "execution_error"), "missing_work_order_table") {
+		t.Fatalf("failed work order did not persist execution failure state: %#v", failedOrder)
+	}
+
 	logsRec := assertStatus(t, handler, http.MethodGet, "/api/admin/audit/sql-logs", nil, adminCookie, http.StatusOK)
 	logsBody := logsRec.Body.String()
-	for _, want := range []string{databaseAsset.ID, "database_access", "alpha", "missing_table", "failed", "work_order", workOrder.ID, "work_order_hosts"} {
+	for _, want := range []string{databaseAsset.ID, "database_access", "alpha", "missing_table", "failed", "work_order", workOrder.ID, "work_order_hosts", failingOrder.ID, "missing_work_order_table"} {
 		if !strings.Contains(logsBody, want) {
 			t.Fatalf("sql logs did not include %q", want)
 		}
+	}
+	operationLogsRec := assertStatus(t, handler, http.MethodGet, "/api/admin/audit/operation-logs", nil, adminCookie, http.StatusOK)
+	if !strings.Contains(operationLogsRec.Body.String(), "sql_work_order.execute.failed") {
+		t.Fatalf("failed sql work order execution was not audited: %s", operationLogsRec.Body.String())
 	}
 }
 

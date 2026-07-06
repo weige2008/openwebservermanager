@@ -827,7 +827,7 @@ function ResourceRowActions({ config, item, onOperation }: { config: PlatformPag
 
   if (config.collection === 'sql_work_orders') {
     const status = (item.status || '').toLowerCase()
-    if (status === 'pending' || status === 'submitted' || status === 'requested') {
+    if (status === 'pending' || status === 'submitted' || status === 'requested' || status === 'failed') {
       return (
         <>
           <Button size='sm' variant='outline' onClick={() => void approveSQLWorkOrder()}>

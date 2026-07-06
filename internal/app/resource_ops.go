@@ -2438,9 +2438,20 @@ func (s *Server) handleSQLWorkOrderExecute(w http.ResponseWriter, r *http.Reques
 		return
 	}
 	if statusCode != http.StatusOK {
+		nextMetadata := sqlWorkOrderExecutionMetadata(order, asset, logItem, approvedSQL, userID)
+		nextMetadata["execution_error"] = logItem.Description
+		_, _ = s.cfg.Store.UpdatePlatformItem("sql_work_orders", id, model.PlatformItemRequest{Status: "failed", Protocol: model.ProtocolDatabase, Metadata: nextMetadata})
+		_ = s.audit(r, "sql_work_order.execute.failed", id, model.ProtocolDatabase, logItem.Description)
 		writeJSON(w, statusCode, logItem)
 		return
 	}
+	nextMetadata := sqlWorkOrderExecutionMetadata(order, asset, logItem, approvedSQL, userID)
+	_, _ = s.cfg.Store.UpdatePlatformItem("sql_work_orders", id, model.PlatformItemRequest{Status: "executed", Protocol: model.ProtocolDatabase, Metadata: nextMetadata})
+	_ = s.audit(r, "sql_work_order.execute", id, model.ProtocolDatabase, "executed sql work order")
+	writeJSON(w, http.StatusOK, logItem)
+}
+
+func sqlWorkOrderExecutionMetadata(order, asset, logItem model.PlatformItem, approvedSQL, userID string) map[string]any {
 	nextMetadata := map[string]any{}
 	for key, value := range order.Metadata {
 		nextMetadata[key] = value
@@ -2452,9 +2463,8 @@ func (s *Server) handleSQLWorkOrderExecute(w http.ResponseWriter, r *http.Reques
 	nextMetadata["rows_affected"] = logItem.Metadata["rows_affected"]
 	nextMetadata["executed_at"] = time.Now().UTC()
 	nextMetadata["executed_by"] = userID
-	_, _ = s.cfg.Store.UpdatePlatformItem("sql_work_orders", id, model.PlatformItemRequest{Status: "executed", Protocol: model.ProtocolDatabase, Metadata: nextMetadata})
-	_ = s.audit(r, "sql_work_order.execute", id, model.ProtocolDatabase, "executed sql work order")
-	writeJSON(w, http.StatusOK, logItem)
+	nextMetadata["duration_ms"] = logItem.Metadata["duration_ms"]
+	return nextMetadata
 }
 
 func (s *Server) handleSQLWorkOrderDecision(w http.ResponseWriter, r *http.Request, id, nextStatus string) {

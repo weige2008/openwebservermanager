@@ -29,6 +29,7 @@ type GatewayConfig struct {
 	Enabled             bool
 	Address             string
 	DisablePasswordAuth bool
+	HostKeyPEM          string
 	DataDir             string
 	KnownHostsPath      string
 	Store               *store.Store
@@ -79,7 +80,7 @@ type directTCPIPRequest struct {
 	OriginPort uint32
 }
 
-func GatewayConfigFromStore(st *store.Store, dataDir, overrideAddress string) GatewayConfig {
+func GatewayConfigFromStore(st *store.Store, dataDir, overrideAddress string) (GatewayConfig, error) {
 	cfg := GatewayConfig{
 		Enabled:        strings.TrimSpace(overrideAddress) != "",
 		Address:        strings.TrimSpace(overrideAddress),
@@ -91,11 +92,16 @@ func GatewayConfigFromStore(st *store.Store, dataDir, overrideAddress string) Ga
 		cfg.Address = "0.0.0.0:2022"
 	}
 	if st == nil {
-		return cfg
+		return cfg, nil
+	}
+	if privateKey, _, err := st.SystemSettingProxyPrivateKey(); err != nil {
+		return cfg, err
+	} else if strings.TrimSpace(privateKey) != "" {
+		cfg.HostKeyPEM = strings.TrimSpace(privateKey)
 	}
 	items, err := st.ListPlatformItems("ssh_gateways")
 	if err != nil {
-		return cfg
+		return cfg, err
 	}
 	for _, item := range items {
 		if !platformItemEnabled(item) {
@@ -104,9 +110,9 @@ func GatewayConfigFromStore(st *store.Store, dataDir, overrideAddress string) Ga
 		cfg.Enabled = true
 		cfg.Address = gatewayListenAddress(item, cfg.Address)
 		cfg.DisablePasswordAuth = gatewayDisablePasswordAuth(item)
-		return cfg
+		return cfg, nil
 	}
-	return cfg
+	return cfg, nil
 }
 
 func StartGateway(ctx context.Context, cfg GatewayConfig) (*Gateway, error) {
@@ -128,7 +134,7 @@ func StartGateway(ctx context.Context, cfg GatewayConfig) (*Gateway, error) {
 	if cfg.Address == "" {
 		cfg.Address = "0.0.0.0:2022"
 	}
-	signer, err := loadGatewayHostSigner(filepath.Join(cfg.DataDir, "ssh_gateway_host_key"))
+	signer, err := loadGatewaySigner(cfg)
 	if err != nil {
 		return nil, err
 	}
@@ -887,6 +893,17 @@ func selectGatewayAsset(assets []model.PlatformItem, choice string) (model.Platf
 		}
 	}
 	return model.PlatformItem{}, false
+}
+
+func loadGatewaySigner(cfg GatewayConfig) (ssh.Signer, error) {
+	if strings.TrimSpace(cfg.HostKeyPEM) != "" {
+		signer, err := ssh.ParsePrivateKey([]byte(cfg.HostKeyPEM))
+		if err != nil {
+			return nil, fmt.Errorf("parse configured ssh gateway host key: %w", err)
+		}
+		return signer, nil
+	}
+	return loadGatewayHostSigner(filepath.Join(cfg.DataDir, "ssh_gateway_host_key"))
 }
 
 func loadGatewayHostSigner(path string) (ssh.Signer, error) {

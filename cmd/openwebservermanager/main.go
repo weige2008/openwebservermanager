@@ -78,9 +78,15 @@ func run() error {
 
 	rootCtx, rootCancel := context.WithCancel(context.Background())
 	defer rootCancel()
-	sshGateway, err := sshrunner.StartGateway(rootCtx, sshrunner.GatewayConfigFromStore(st, dataDir, env("OPENWEBSERVERMANAGER_SSH_GATEWAY_ADDR", "")))
+	sshGatewayConfig, err := sshrunner.GatewayConfigFromStore(st, dataDir, env("OPENWEBSERVERMANAGER_SSH_GATEWAY_ADDR", ""))
+	var sshGateway *sshrunner.Gateway
 	if err != nil {
-		slog.Warn("ssh gateway unavailable", "error", err)
+		slog.Warn("ssh gateway configuration unavailable", "error", err)
+	} else {
+		sshGateway, err = sshrunner.StartGateway(rootCtx, sshGatewayConfig)
+		if err != nil {
+			slog.Warn("ssh gateway unavailable", "error", err)
+		}
 	}
 	if sshGateway != nil {
 		defer sshGateway.Close()

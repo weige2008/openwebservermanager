@@ -1275,6 +1275,43 @@ func (s *Store) SystemSettingSMTPPassword(id string) (string, bool, error) {
 	return secret, true, nil
 }
 
+func (s *Store) SystemSettingProxyPrivateKey() (string, bool, error) {
+	rows, err := s.db.Query(`SELECT payload FROM platform_records WHERE collection = ?`, "system_settings")
+	if err != nil {
+		return "", false, fmt.Errorf("read proxy private key setting: %w", err)
+	}
+	defer rows.Close()
+
+	foundProxySetting := false
+	for rows.Next() {
+		var payload string
+		if err := rows.Scan(&payload); err != nil {
+			return "", false, err
+		}
+		var item model.PlatformItem
+		if err := json.Unmarshal([]byte(payload), &item); err != nil {
+			return "", false, err
+		}
+		if !strings.EqualFold(strings.TrimSpace(item.Type), "proxy") {
+			continue
+		}
+		foundProxySetting = true
+		encrypted, _ := item.Metadata["proxy_private_key_encrypted"].(string)
+		if encrypted == "" {
+			continue
+		}
+		secret, err := s.cipher.DecryptString(encrypted)
+		if err != nil {
+			return "", true, err
+		}
+		return secret, true, nil
+	}
+	if err := rows.Err(); err != nil {
+		return "", false, err
+	}
+	return "", foundProxySetting, nil
+}
+
 func (s *Store) DecryptPlatformSecret(encrypted string) (string, error) {
 	return s.cipher.DecryptString(encrypted)
 }

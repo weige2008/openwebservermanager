@@ -5,6 +5,8 @@ import (
 	"context"
 	"crypto/ed25519"
 	"crypto/rand"
+	"crypto/x509"
+	"encoding/pem"
 	"errors"
 	"io"
 	"net"
@@ -327,9 +329,91 @@ func TestGatewayConfigFromEnabledStoreItem(t *testing.T) {
 	}); err != nil {
 		t.Fatalf("create gateway item: %v", err)
 	}
-	cfg := GatewayConfigFromStore(st, t.TempDir(), "")
+	cfg, err := GatewayConfigFromStore(st, t.TempDir(), "")
+	if err != nil {
+		t.Fatalf("gateway config: %v", err)
+	}
 	if !cfg.Enabled || cfg.Address != "127.0.0.1:22022" || !cfg.DisablePasswordAuth {
 		t.Fatalf("gateway config = %#v", cfg)
+	}
+}
+
+func TestGatewayConfigUsesProxyServicePrivateKeyAsHostKey(t *testing.T) {
+	st := newGatewayTestStore(t)
+	hostKeyPEM, expectedSigner := testSSHHostKeyPEM(t)
+
+	settings, err := st.ListPlatformItems("system_settings")
+	if err != nil {
+		t.Fatalf("list system settings: %v", err)
+	}
+	proxySettingID := ""
+	for _, item := range settings {
+		if strings.EqualFold(item.Type, "proxy") {
+			proxySettingID = item.ID
+			break
+		}
+	}
+	if proxySettingID == "" {
+		t.Fatal("proxy system setting was not seeded")
+	}
+	if _, err := st.UpdatePlatformItem("system_settings", proxySettingID, model.PlatformItemRequest{
+		Name:   "Proxy service settings",
+		Type:   "proxy",
+		Status: "enabled",
+		Metadata: map[string]any{
+			"proxy_private_key": hostKeyPEM,
+		},
+	}); err != nil {
+		t.Fatalf("save proxy private key: %v", err)
+	}
+	if _, err := st.CreatePlatformItem("ssh_gateways", model.PlatformItemRequest{
+		Name:   "builtin",
+		Status: "enabled",
+		Metadata: map[string]any{
+			"listen_address": "127.0.0.1:0",
+		},
+	}); err != nil {
+		t.Fatalf("create gateway item: %v", err)
+	}
+
+	cfg, err := GatewayConfigFromStore(st, t.TempDir(), "")
+	if err != nil {
+		t.Fatalf("gateway config: %v", err)
+	}
+	if strings.TrimSpace(cfg.HostKeyPEM) == "" {
+		t.Fatal("gateway config did not load proxy private key")
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	gateway, err := StartGateway(ctx, cfg)
+	if err != nil {
+		t.Fatalf("start gateway: %v", err)
+	}
+	defer gateway.Close()
+
+	observed := make(chan string, 1)
+	client, err := ssh.Dial("tcp", gateway.Address(), &ssh.ClientConfig{
+		User: "nobody",
+		Auth: []ssh.AuthMethod{ssh.Password("wrong-password")},
+		HostKeyCallback: func(_ string, _ net.Addr, key ssh.PublicKey) error {
+			observed <- ssh.FingerprintSHA256(key)
+			return nil
+		},
+		Timeout: 3 * time.Second,
+	})
+	if err == nil {
+		_ = client.Close()
+		t.Fatal("expected authentication failure")
+	}
+
+	select {
+	case fingerprint := <-observed:
+		expected := ssh.FingerprintSHA256(expectedSigner.PublicKey())
+		if fingerprint != expected {
+			t.Fatalf("gateway host key fingerprint = %s, want %s", fingerprint, expected)
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("ssh client did not observe gateway host key")
 	}
 }
 
@@ -523,6 +607,23 @@ func testSSHSigner(t *testing.T) ssh.Signer {
 		t.Fatalf("signer: %v", err)
 	}
 	return signer
+}
+
+func testSSHHostKeyPEM(t *testing.T) (string, ssh.Signer) {
+	t.Helper()
+	_, privateKey, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatalf("generate host key: %v", err)
+	}
+	der, err := x509.MarshalPKCS8PrivateKey(privateKey)
+	if err != nil {
+		t.Fatalf("marshal host key: %v", err)
+	}
+	signer, err := ssh.NewSignerFromKey(privateKey)
+	if err != nil {
+		t.Fatalf("signer: %v", err)
+	}
+	return string(pem.EncodeToMemory(&pem.Block{Type: "PRIVATE KEY", Bytes: der})), signer
 }
 
 func readUntilContains(t *testing.T, reader io.Reader, needle string, timeout time.Duration) string {

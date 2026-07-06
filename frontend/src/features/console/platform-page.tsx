@@ -2649,7 +2649,7 @@ export function PlatformSettingsPage({ config }: { config: PlatformPageConfig })
               </div>
               <div className='grid gap-3 md:grid-cols-[1fr_auto] md:items-end'>
                 <Field label={app.t('proxyPrivateKey', 'Proxy private key')}>
-                  <Input type='password' value={proxyForm.proxyPrivateKey} onChange={(event) => patchProxyForm({ proxyPrivateKey: event.currentTarget.value })} placeholder={proxyForm.proxyPrivateKeySet ? app.t('leaveBlankToKeepSecret', 'Leave blank to keep current secret') : ''} autoComplete='new-password' />
+                  <Textarea className='min-h-28 font-mono text-xs' value={proxyForm.proxyPrivateKey} onChange={(event) => patchProxyForm({ proxyPrivateKey: event.currentTarget.value })} placeholder={proxyForm.proxyPrivateKeySet ? app.t('leaveBlankToKeepSecret', 'Leave blank to keep current secret') : '-----BEGIN OPENSSH PRIVATE KEY-----'} autoComplete='off' />
                 </Field>
                 <Badge tone={proxyForm.proxyPrivateKeySet ? 'success' : 'neutral'}>{proxyForm.proxyPrivateKeySet ? app.t('privateKeySaved', 'Private key saved') : app.t('notConfigured', 'Not configured')}</Badge>
               </div>

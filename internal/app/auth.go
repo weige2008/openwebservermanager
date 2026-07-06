@@ -165,7 +165,7 @@ func (m *authManager) session(r *http.Request) (string, authSession, bool) {
 	return token, session, true
 }
 
-func (m *authManager) checkLoginAllowed(key string) (time.Duration, bool) {
+func (m *authManager) checkLoginAllowed(key string, policy loginFailurePolicy) (time.Duration, bool) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	failure := m.failures[key]
@@ -173,24 +173,24 @@ func (m *authManager) checkLoginAllowed(key string) (time.Duration, bool) {
 	if !failure.LockedUntil.IsZero() && now.Before(failure.LockedUntil) {
 		return time.Until(failure.LockedUntil).Round(time.Second), false
 	}
-	if !failure.LastFailure.IsZero() && now.Sub(failure.LastFailure) > 15*time.Minute {
+	if !failure.LastFailure.IsZero() && now.Sub(failure.LastFailure) > policy.Window {
 		delete(m.failures, key)
 	}
 	return 0, true
 }
 
-func (m *authManager) recordLoginFailure(key string) loginFailure {
+func (m *authManager) recordLoginFailure(key string, policy loginFailurePolicy) loginFailure {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	now := time.Now().UTC()
 	failure := m.failures[key]
-	if !failure.LastFailure.IsZero() && now.Sub(failure.LastFailure) > 15*time.Minute {
+	if !failure.LastFailure.IsZero() && now.Sub(failure.LastFailure) > policy.Window {
 		failure = loginFailure{}
 	}
 	failure.Count++
 	failure.LastFailure = now
-	if failure.Count >= 5 {
-		failure.LockedUntil = now.Add(5 * time.Minute)
+	if failure.Count >= policy.Threshold {
+		failure.LockedUntil = now.Add(policy.LockDuration)
 	}
 	m.failures[key] = failure
 	return failure
@@ -484,7 +484,8 @@ func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	failureKey := clientIP + ":" + strings.ToLower(username)
-	if retryAfter, ok := s.auth.checkLoginAllowed(failureKey); !ok {
+	failurePolicy := s.loginFailurePolicy()
+	if retryAfter, ok := s.auth.checkLoginAllowed(failureKey, failurePolicy); !ok {
 		w.Header().Set("Retry-After", strconv.Itoa(int(retryAfter.Seconds())))
 		writeError(w, http.StatusTooManyRequests, "too many failed login attempts; try again later")
 		return
@@ -531,7 +532,7 @@ func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	if !ok {
-		failure := s.auth.recordLoginFailure(failureKey)
+		failure := s.auth.recordLoginFailure(failureKey, failurePolicy)
 		if !failure.LockedUntil.IsZero() {
 			s.createLoginLock(username, clientIP, failure)
 		}

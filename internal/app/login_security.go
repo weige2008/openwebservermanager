@@ -8,6 +8,50 @@ import (
 	"openwebservermanager/internal/model"
 )
 
+const (
+	defaultLoginFailureThreshold = 5
+	defaultLoginFailureWindow    = 15 * time.Minute
+	defaultLoginLockDuration     = 5 * time.Minute
+)
+
+type loginFailurePolicy struct {
+	Threshold    int
+	Window       time.Duration
+	LockDuration time.Duration
+}
+
+func (s *Server) loginFailurePolicy() loginFailurePolicy {
+	policy := loginFailurePolicy{
+		Threshold:    defaultLoginFailureThreshold,
+		Window:       defaultLoginFailureWindow,
+		LockDuration: defaultLoginLockDuration,
+	}
+	items, err := s.cfg.Store.ListPlatformItems("system_settings")
+	if err != nil {
+		return policy
+	}
+	for _, item := range items {
+		if !platformItemEnabled(item) {
+			continue
+		}
+		itemType := strings.ToLower(strings.TrimSpace(item.Type))
+		if itemType != "security" && itemType != "identity" && itemType != "login" && itemType != "password" && itemType != "mfa" {
+			continue
+		}
+		metadata := item.Metadata
+		if value, ok := metadataIntByKeys(metadata, "login_failure_threshold", "failure_threshold", "max_login_failures", "login_lock_threshold", "lock_threshold"); ok {
+			policy.Threshold = clampInt(value, 1, 50, defaultLoginFailureThreshold)
+		}
+		if value, ok := metadataIntByKeys(metadata, "login_failure_window_minutes", "failure_window_minutes", "login_lock_window_minutes", "lock_window_minutes"); ok {
+			policy.Window = time.Duration(clampInt(value, 1, 1440, int(defaultLoginFailureWindow.Minutes()))) * time.Minute
+		}
+		if value, ok := metadataIntByKeys(metadata, "login_lock_minutes", "lock_minutes", "login_lock_duration_minutes", "lock_duration_minutes"); ok {
+			policy.LockDuration = time.Duration(clampInt(value, 1, 1440, int(defaultLoginLockDuration.Minutes()))) * time.Minute
+		}
+	}
+	return policy
+}
+
 func (s *Server) loginPolicyAllows(username, clientIP string) (bool, string) {
 	policies, err := s.cfg.Store.ListPlatformItems("login_policies")
 	if err != nil {

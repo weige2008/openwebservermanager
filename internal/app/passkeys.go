@@ -390,7 +390,8 @@ func (s *Server) handlePasskeyLoginOptions(w http.ResponseWriter, r *http.Reques
 		return
 	}
 	failureKey := clientIP + ":" + strings.ToLower(username)
-	if retryAfter, ok := s.auth.checkLoginAllowed(failureKey); !ok {
+	failurePolicy := s.loginFailurePolicy()
+	if retryAfter, ok := s.auth.checkLoginAllowed(failureKey, failurePolicy); !ok {
 		w.Header().Set("Retry-After", strconv.Itoa(int(retryAfter.Seconds())))
 		writeError(w, http.StatusTooManyRequests, "too many failed login attempts; try again later")
 		return
@@ -546,7 +547,7 @@ func (s *Server) handlePasskeyLoginVerify(w http.ResponseWriter, r *http.Request
 }
 
 func (s *Server) recordPasskeyLoginFailure(w http.ResponseWriter, r *http.Request, username, clientIP, failureKey, detail string) {
-	failure := s.auth.recordLoginFailure(failureKey)
+	failure := s.auth.recordLoginFailure(failureKey, s.loginFailurePolicy())
 	if !failure.LockedUntil.IsZero() {
 		s.createLoginLock(username, clientIP, failure)
 	}

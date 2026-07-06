@@ -70,6 +70,10 @@ interface MFASetup {
 interface LoginSecurityState {
   captchaEnabled: boolean
   passwordLoginDisabled: boolean
+  forceMFARequired: boolean
+  loginFailureThreshold: number
+  loginFailureWindowMinutes: number
+  loginLockMinutes: number
   setting?: PlatformItem
 }
 
@@ -127,10 +131,14 @@ interface PasskeyItem {
   updated_at: string
 }
 
-const loginSecurityTypes = ['security', 'identity', 'login', 'password', 'captcha']
+const loginSecurityTypes = ['security', 'identity', 'login', 'password', 'captcha', 'mfa']
 const captchaKeys = ['captcha_enabled', 'login_captcha', 'enable_captcha', 'captcha', 'require_captcha']
 const disablePasswordKeys = ['disable_password_login', 'password_login_disabled', 'disablePasswordLogin', 'passwordLoginDisabled', 'no_password_login']
 const passwordLoginKeys = ['password_login', 'enable_password_login', 'password_auth', 'local_password_login']
+const forceMFAKeys = ['force_mfa', 'forceMFA', 'mfa_required', 'require_mfa']
+const loginFailureThresholdKeys = ['login_failure_threshold', 'failure_threshold', 'max_login_failures', 'login_lock_threshold', 'lock_threshold']
+const loginFailureWindowKeys = ['login_failure_window_minutes', 'failure_window_minutes', 'login_lock_window_minutes', 'lock_window_minutes']
+const loginLockMinutesKeys = ['login_lock_minutes', 'lock_minutes', 'login_lock_duration_minutes', 'lock_duration_minutes']
 const oidcSettingKeys = ['oidc_login_enabled', 'external_oidc_enabled', 'oidc_authorization_endpoint', 'oidc_token_endpoint', 'oidc_client_id', 'oidc_provider_id']
 const ldapSettingKeys = ['ldap_enabled', 'ldap_url', 'ldap_base_dn', 'ldap_bind_dn', 'ldap_user_filter', 'ldap_provider_id', 'ldap_provider_name']
 const wecomSettingKeys = ['wecom_enabled', 'wecom_corp_id', 'wecom_agent_id', 'wecom_provider_id', 'wecom_provider_name']
@@ -151,6 +159,10 @@ export function SettingsPage() {
   const [loginSecurity, setLoginSecurity] = useState<LoginSecurityState>({
     captchaEnabled: app.captchaRequired,
     passwordLoginDisabled: app.passwordLoginDisabled,
+    forceMFARequired: false,
+    loginFailureThreshold: 5,
+    loginFailureWindowMinutes: 15,
+    loginLockMinutes: 5,
   })
   const [loginSecurityBusy, setLoginSecurityBusy] = useState(false)
   const [oidcSettings, setOIDCSettings] = useState<OIDCSettingsState>(() => defaultOIDCSettings())
@@ -296,7 +308,13 @@ export function SettingsPage() {
   const updateLoginSecurity = async (next: Partial<LoginSecurityState>) => {
     setLoginSecurityBusy(true)
     try {
-      const merged = { ...loginSecurity, ...next }
+      const merged = {
+        ...loginSecurity,
+        ...next,
+        loginFailureThreshold: clampSettingNumber(next.loginFailureThreshold ?? loginSecurity.loginFailureThreshold, 1, 50, 5),
+        loginFailureWindowMinutes: clampSettingNumber(next.loginFailureWindowMinutes ?? loginSecurity.loginFailureWindowMinutes, 1, 1440, 15),
+        loginLockMinutes: clampSettingNumber(next.loginLockMinutes ?? loginSecurity.loginLockMinutes, 1, 1440, 5),
+      }
       const result = await apiRequest<{ items: PlatformItem[] }>('/api/admin/system-settings')
       const current = loginSecurityFromSettings(result.items, app.captchaRequired, app.passwordLoginDisabled)
       const target = current.setting
@@ -305,6 +323,10 @@ export function SettingsPage() {
         captcha_enabled: merged.captchaEnabled,
         disable_password_login: merged.passwordLoginDisabled,
         password_login: !merged.passwordLoginDisabled,
+        force_mfa: merged.forceMFARequired,
+        login_failure_threshold: merged.loginFailureThreshold,
+        login_failure_window_minutes: merged.loginFailureWindowMinutes,
+        login_lock_minutes: merged.loginLockMinutes,
       }
       const payload = {
         name: target?.name || 'Login security',
@@ -325,6 +347,7 @@ export function SettingsPage() {
       }
       await app.refresh(true)
       await loadLoginSecurity()
+      await loadMFAStatus()
       app.showToast(t('saved'))
     } catch (error) {
       app.handleApiError(error)
@@ -789,6 +812,9 @@ export function SettingsPage() {
               <Badge tone={loginSecurity.passwordLoginDisabled ? 'danger' : 'success'}>
                 {loginSecurity.passwordLoginDisabled ? t('settingsPage.passwordLoginDisabled') : t('settingsPage.passwordLoginEnabled')}
               </Badge>
+              <Badge tone={loginSecurity.forceMFARequired ? 'danger' : 'neutral'}>
+                {loginSecurity.forceMFARequired ? t('settingsPage.forceMFAEnabled') : t('settingsPage.forceMFADisabled')}
+              </Badge>
             </div>
             <p className='mt-1 max-w-lg text-sm leading-6 text-muted-foreground'>{t('settingsPage.loginSecurityDescription')}</p>
             {loginSecurity.passwordLoginDisabled ? (
@@ -822,6 +848,78 @@ export function SettingsPage() {
             >
               {loginSecurity.passwordLoginDisabled ? t('settingsPage.enablePasswordLogin') : t('settingsPage.disablePasswordLogin')}
             </Button>
+          </div>
+          <div className='flex flex-wrap items-center justify-between gap-3 rounded-lg border border-border bg-background/70 p-3'>
+            <div className='min-w-0'>
+              <div className='text-sm font-medium'>{t('settingsPage.forceMFATitle')}</div>
+              <p className='mt-1 text-xs leading-5 text-muted-foreground'>{t('settingsPage.forceMFADescription')}</p>
+            </div>
+            <Button
+              variant={loginSecurity.forceMFARequired ? 'outline' : 'primary'}
+              onClick={() => void updateLoginSecurity({ forceMFARequired: !loginSecurity.forceMFARequired })}
+              disabled={loginSecurityBusy}
+            >
+              {loginSecurity.forceMFARequired ? t('settingsPage.disableForceMFA') : t('settingsPage.enableForceMFA')}
+            </Button>
+          </div>
+          <div className='grid gap-3 rounded-lg border border-border bg-background/70 p-3'>
+            <div>
+              <div className='text-sm font-medium'>{t('settingsPage.lockoutPolicyTitle')}</div>
+              <p className='mt-1 text-xs leading-5 text-muted-foreground'>{t('settingsPage.lockoutPolicyDescription')}</p>
+            </div>
+            <div className='grid gap-3 sm:grid-cols-3'>
+              <Field label={t('settingsPage.failureThreshold')}>
+                <Input
+                  type='number'
+                  min={1}
+                  max={50}
+                  value={loginSecurity.loginFailureThreshold}
+                  onChange={(event) =>
+                    setLoginSecurity((current) => ({
+                      ...current,
+                      loginFailureThreshold: numberInputValue(event.currentTarget.value, current.loginFailureThreshold),
+                    }))
+                  }
+                />
+              </Field>
+              <Field label={t('settingsPage.failureWindowMinutes')}>
+                <Input
+                  type='number'
+                  min={1}
+                  max={1440}
+                  value={loginSecurity.loginFailureWindowMinutes}
+                  onChange={(event) =>
+                    setLoginSecurity((current) => ({
+                      ...current,
+                      loginFailureWindowMinutes: numberInputValue(event.currentTarget.value, current.loginFailureWindowMinutes),
+                    }))
+                  }
+                />
+              </Field>
+              <Field label={t('settingsPage.lockDurationMinutes')}>
+                <Input
+                  type='number'
+                  min={1}
+                  max={1440}
+                  value={loginSecurity.loginLockMinutes}
+                  onChange={(event) =>
+                    setLoginSecurity((current) => ({
+                      ...current,
+                      loginLockMinutes: numberInputValue(event.currentTarget.value, current.loginLockMinutes),
+                    }))
+                  }
+                />
+              </Field>
+            </div>
+            <div className='flex justify-end'>
+              <Button
+                variant='primary'
+                onClick={() => void updateLoginSecurity({})}
+                disabled={loginSecurityBusy}
+              >
+                {t('settingsPage.saveLoginSecurityPolicy')}
+              </Button>
+            </div>
           </div>
         </div>
       </CardStaggerItem>
@@ -1145,6 +1243,10 @@ function InfoTile({ label, value }: { label: string; value: string }) {
 function loginSecurityFromSettings(items: PlatformItem[], fallbackCaptcha: boolean, fallbackPasswordDisabled: boolean): LoginSecurityState {
   let captchaEnabled = fallbackCaptcha
   let passwordLoginDisabled = fallbackPasswordDisabled
+  let forceMFARequired = false
+  let loginFailureThreshold = 5
+  let loginFailureWindowMinutes = 15
+  let loginLockMinutes = 5
   const candidates = items.filter((item) => platformItemEnabled(item) && loginSecurityTypes.includes((item.type || '').trim().toLowerCase()))
   for (const item of candidates) {
     const metadata = item.metadata ?? {}
@@ -1160,12 +1262,18 @@ function loginSecurityFromSettings(items: PlatformItem[], fallbackCaptcha: boole
         passwordLoginDisabled = true
       }
     }
+    if (forceMFAKeys.some((key) => metadataTruthy(metadata[key]))) {
+      forceMFARequired = true
+    }
+    loginFailureThreshold = metadataNumberByKeys(metadata, loginFailureThresholdKeys, loginFailureThreshold, 1, 50)
+    loginFailureWindowMinutes = metadataNumberByKeys(metadata, loginFailureWindowKeys, loginFailureWindowMinutes, 1, 1440)
+    loginLockMinutes = metadataNumberByKeys(metadata, loginLockMinutesKeys, loginLockMinutes, 1, 1440)
   }
   const setting =
     candidates.find((item) => item.name === 'Login security') ||
     candidates.find((item) => hasLoginSecurityMetadata(item)) ||
     candidates[0]
-  return { captchaEnabled, passwordLoginDisabled, setting }
+  return { captchaEnabled, passwordLoginDisabled, forceMFARequired, loginFailureThreshold, loginFailureWindowMinutes, loginLockMinutes, setting }
 }
 
 function defaultOIDCSettings(): OIDCSettingsState {
@@ -1303,7 +1411,15 @@ function hasWeComMetadata(item: PlatformItem) {
 
 function hasLoginSecurityMetadata(item: PlatformItem) {
   const metadata = item.metadata ?? {}
-  return [...captchaKeys, ...disablePasswordKeys, ...passwordLoginKeys].some((key) => Object.prototype.hasOwnProperty.call(metadata, key))
+  return [
+    ...captchaKeys,
+    ...disablePasswordKeys,
+    ...passwordLoginKeys,
+    ...forceMFAKeys,
+    ...loginFailureThresholdKeys,
+    ...loginFailureWindowKeys,
+    ...loginLockMinutesKeys,
+  ].some((key) => Object.prototype.hasOwnProperty.call(metadata, key))
 }
 
 function platformItemEnabled(item: PlatformItem) {
@@ -1323,6 +1439,31 @@ function metadataBoolValue(value: unknown): boolean | null {
   if (['true', '1', 'yes', 'enabled', 'required', 'on'].includes(normalized)) return true
   if (['false', '0', 'no', 'disabled', 'off'].includes(normalized)) return false
   return null
+}
+
+function metadataNumberByKeys(metadata: Record<string, unknown>, keys: string[], fallback: number, min: number, max: number) {
+  for (const key of keys) {
+    const parsed = metadataNumberValue(metadata[key])
+    if (parsed !== null) return clampSettingNumber(parsed, min, max, fallback)
+  }
+  return fallback
+}
+
+function metadataNumberValue(value: unknown): number | null {
+  if (typeof value === 'number' && Number.isFinite(value)) return value
+  if (typeof value !== 'string') return null
+  const parsed = Number.parseInt(value.trim(), 10)
+  return Number.isFinite(parsed) ? parsed : null
+}
+
+function numberInputValue(value: string, fallback: number) {
+  const parsed = Number.parseInt(value, 10)
+  return Number.isFinite(parsed) ? parsed : fallback
+}
+
+function clampSettingNumber(value: number, min: number, max: number, fallback: number) {
+  if (!Number.isFinite(value)) return fallback
+  return Math.min(max, Math.max(min, Math.trunc(value)))
 }
 
 function metadataText(value: unknown): string {

@@ -1937,6 +1937,54 @@ func TestLoginSecurityPoliciesAndLocks(t *testing.T) {
 	}
 }
 
+func TestConfigurableLoginFailureLockPolicy(t *testing.T) {
+	handler, adminCookie := newTestHandler(t)
+
+	assertStatus(t, handler, http.MethodPost, "/api/admin/system-settings", map[string]any{
+		"name":   "Login security",
+		"type":   "security",
+		"status": "enabled",
+		"metadata": map[string]any{
+			"login_failure_threshold":      2,
+			"login_failure_window_minutes": 30,
+			"login_lock_minutes":           1,
+		},
+	}, adminCookie, http.StatusCreated)
+	assertStatus(t, handler, http.MethodPost, "/api/admin/users", map[string]any{
+		"name":     "custom-lock-user",
+		"type":     "local",
+		"status":   "enabled",
+		"password": "password123",
+		"metadata": map[string]any{"role": "user"},
+	}, adminCookie, http.StatusCreated)
+
+	assertStatus(t, handler, http.MethodPost, "/api/auth/login", map[string]any{"username": "custom-lock-user", "password": "wrong-password"}, nil, http.StatusUnauthorized)
+	assertStatus(t, handler, http.MethodPost, "/api/auth/login", map[string]any{"username": "custom-lock-user", "password": "wrong-password"}, nil, http.StatusUnauthorized)
+	lockedRec := assertStatus(t, handler, http.MethodPost, "/api/auth/login", map[string]any{"username": "custom-lock-user", "password": "password123"}, nil, http.StatusTooManyRequests)
+	if lockedRec.Result().Header.Get("Retry-After") == "" {
+		t.Fatal("locked login response did not include Retry-After")
+	}
+
+	locksRec := assertStatus(t, handler, http.MethodGet, "/api/admin/login-locked", nil, adminCookie, http.StatusOK)
+	var locks struct {
+		Items []model.PlatformItem `json:"items"`
+	}
+	decodeResponse(t, locksRec, &locks)
+	for _, lock := range locks.Items {
+		if lock.Name != "custom-lock-user" {
+			continue
+		}
+		if loginCountFromAny(lock.Metadata["failure_count"]) != 2 {
+			t.Fatalf("failure_count = %v, want 2", lock.Metadata["failure_count"])
+		}
+		if stringValueFromAny(lock.Metadata["locked_until"]) == "" {
+			t.Fatal("locked_until was not recorded")
+		}
+		return
+	}
+	t.Fatalf("custom-lock-user lock was not created: %#v", locks.Items)
+}
+
 func TestLoginCaptchaRequirement(t *testing.T) {
 	handler, adminCookie := newTestHandler(t)
 

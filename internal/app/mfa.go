@@ -298,7 +298,7 @@ func (s *Server) verifyMFAInput(userID string, profile store.MFAProfile, code, r
 }
 
 func (s *Server) recordMFAFailure(w http.ResponseWriter, r *http.Request, username, clientIP, failureKey, detail string) {
-	failure := s.auth.recordLoginFailure(failureKey)
+	failure := s.auth.recordLoginFailure(failureKey, s.loginFailurePolicy())
 	if !failure.LockedUntil.IsZero() {
 		s.createLoginLock(username, clientIP, failure)
 	}

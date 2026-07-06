@@ -3159,6 +3159,95 @@ func TestOIDCProviderAuthorizationCodeFlow(t *testing.T) {
 	assertFormStatus(t, handler, "/api/oidc/userinfo", url.Values{"access_token": {"invalid"}}, nil, nil, http.StatusUnauthorized)
 }
 
+func TestOIDCUserInfoRejectsDisabledClientAndUser(t *testing.T) {
+	handler, adminCookie := newTestHandler(t)
+
+	clientRec := assertStatus(t, handler, http.MethodPost, "/api/admin/oidc-clients", map[string]any{
+		"name":     "userinfo-client",
+		"type":     "confidential",
+		"status":   "enabled",
+		"password": "client-secret",
+		"metadata": map[string]any{
+			"client_id":     "userinfo-client",
+			"redirect_uris": []string{"https://client.example/callback"},
+			"scopes":        []string{"openid", "profile"},
+		},
+	}, adminCookie, http.StatusCreated)
+	var client model.PlatformItem
+	decodeResponse(t, clientRec, &client)
+
+	userRec := assertStatus(t, handler, http.MethodPost, "/api/admin/users", map[string]any{
+		"name":     "oidc-userinfo-user",
+		"type":     "local",
+		"status":   "enabled",
+		"password": "password123",
+		"metadata": map[string]any{"role": "user"},
+	}, adminCookie, http.StatusCreated)
+	var user model.PlatformItem
+	decodeResponse(t, userRec, &user)
+	loginRec := assertStatus(t, handler, http.MethodPost, "/api/auth/login", map[string]any{
+		"username": "oidc-userinfo-user",
+		"password": "password123",
+	}, nil, http.StatusOK)
+	userCookie := loginRec.Result().Cookies()[0]
+
+	redirectURI := "https://client.example/callback"
+	issueToken := func() string {
+		authorizePath := "/api/oidc/authorize?" + url.Values{
+			"response_type": {"code"},
+			"client_id":     {"userinfo-client"},
+			"redirect_uri":  {redirectURI},
+			"scope":         {"openid profile"},
+			"state":         {"state-userinfo"},
+		}.Encode()
+		authorizeRec := assertStatus(t, handler, http.MethodGet, authorizePath, nil, userCookie, http.StatusFound)
+		location, err := url.Parse(authorizeRec.Header().Get("Location"))
+		if err != nil {
+			t.Fatalf("parse authorize redirect: %v", err)
+		}
+		code := location.Query().Get("code")
+		if code == "" {
+			t.Fatal("authorize redirect did not include code")
+		}
+		tokenRec := assertFormStatus(t, handler, "/api/oidc/token", url.Values{
+			"grant_type":   {"authorization_code"},
+			"code":         {code},
+			"redirect_uri": {redirectURI},
+		}, nil, map[string]string{
+			"Authorization": "Basic " + base64.StdEncoding.EncodeToString([]byte("userinfo-client:client-secret")),
+		}, http.StatusOK)
+		var tokenResponse map[string]any
+		decodeResponse(t, tokenRec, &tokenResponse)
+		accessToken, _ := tokenResponse["access_token"].(string)
+		if accessToken == "" {
+			t.Fatalf("token response missing access token: %v", tokenResponse)
+		}
+		return accessToken
+	}
+
+	clientToken := issueToken()
+	assertStatusWithHeaders(t, handler, http.MethodGet, "/api/oidc/userinfo", nil, nil, map[string]string{
+		"Authorization": "Bearer " + clientToken,
+	}, http.StatusOK)
+	assertStatus(t, handler, http.MethodPatch, "/api/admin/oidc-clients/"+client.ID, map[string]any{
+		"status": "disabled",
+	}, adminCookie, http.StatusOK)
+	assertStatusWithHeaders(t, handler, http.MethodGet, "/api/oidc/userinfo", nil, nil, map[string]string{
+		"Authorization": "Bearer " + clientToken,
+	}, http.StatusUnauthorized)
+
+	assertStatus(t, handler, http.MethodPatch, "/api/admin/oidc-clients/"+client.ID, map[string]any{
+		"status": "enabled",
+	}, adminCookie, http.StatusOK)
+	userToken := issueToken()
+	assertStatus(t, handler, http.MethodPatch, "/api/admin/users/"+user.ID, map[string]any{
+		"status": "disabled",
+	}, adminCookie, http.StatusOK)
+	assertStatusWithHeaders(t, handler, http.MethodGet, "/api/oidc/userinfo", nil, nil, map[string]string{
+		"Authorization": "Bearer " + userToken,
+	}, http.StatusUnauthorized)
+}
+
 func TestExternalOIDCLoginCreatesUserAndSession(t *testing.T) {
 	handler, adminCookie := newTestHandler(t)
 	var authorizeState string

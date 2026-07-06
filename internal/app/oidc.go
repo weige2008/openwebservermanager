@@ -263,11 +263,24 @@ func (s *Server) handleOIDCUserInfo(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusUnauthorized, "invalid bearer token")
 		return
 	}
+	if _, err := s.oidcClientByID(accessToken.ClientID); err != nil {
+		writeError(w, http.StatusUnauthorized, "invalid bearer token")
+		return
+	}
+	user, ok, err := s.authUserByID(accessToken.UserID)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	if !ok {
+		writeError(w, http.StatusUnauthorized, "invalid bearer token")
+		return
+	}
 	writeJSON(w, http.StatusOK, map[string]any{
-		"sub":                accessToken.UserID,
-		"name":               accessToken.Username,
-		"preferred_username": accessToken.Username,
-		"role":               accessToken.Role,
+		"sub":                user.UserID,
+		"name":               user.Username,
+		"preferred_username": user.Username,
+		"role":               user.Role,
 	})
 }
 

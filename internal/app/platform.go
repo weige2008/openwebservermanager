@@ -1,12 +1,14 @@
 package app
 
 import (
+	"context"
 	"errors"
 	"net"
 	"net/http"
 	"net/http/httputil"
 	"net/url"
 	"os"
+	"os/exec"
 	"runtime"
 	"sort"
 	"strconv"
@@ -489,6 +491,17 @@ type pingRequest struct {
 	Mode   string `json:"mode"`
 }
 
+type pingToolResult struct {
+	Seq       int    `json:"seq"`
+	Mode      string `json:"mode"`
+	Target    string `json:"target"`
+	Address   string `json:"address,omitempty"`
+	Status    string `json:"status"`
+	Latency   int64  `json:"latency"`
+	LatencyMS int64  `json:"latency_ms"`
+	Detail    string `json:"detail"`
+}
+
 func (s *Server) handlePingTool(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
 		writeError(w, http.StatusMethodNotAllowed, "method not allowed")
@@ -504,37 +517,235 @@ func (s *Server) handlePingTool(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	count := clampInt(req.Count, 1, 10, 4)
-	results := make([]map[string]any, 0, count)
-	for i := 0; i < count; i++ {
-		start := time.Now()
-		status := "ok"
-		detail := ""
-		if strings.Contains(target, ":") || strings.EqualFold(req.Mode, "tcp") {
-			conn, err := net.DialTimeout("tcp", target, 2*time.Second)
-			if err != nil {
-				status = "failed"
-				detail = err.Error()
-			} else {
-				_ = conn.Close()
-			}
-		} else {
-			addrs, err := net.LookupHost(target)
-			if err != nil {
-				status = "failed"
-				detail = err.Error()
-			} else {
-				detail = strings.Join(addrs, ", ")
-			}
+	mode := normalizePingMode(req.Mode, target)
+	host := target
+	port := 0
+	var err error
+	if mode == "tcp" {
+		host, port, err = parsePingTCPTarget(target)
+		if err != nil {
+			writeError(w, http.StatusBadRequest, err.Error())
+			return
 		}
-		results = append(results, map[string]any{
-			"seq":     i + 1,
-			"status":  status,
-			"latency": time.Since(start).Milliseconds(),
-			"detail":  detail,
-		})
+		target = net.JoinHostPort(host, strconv.Itoa(port))
+	} else {
+		host, err = parsePingHost(target)
+		if err != nil {
+			writeError(w, http.StatusBadRequest, err.Error())
+			return
+		}
+		target = host
 	}
-	_ = s.audit(r, "tool.ping", target, "", "ran "+strconv.Itoa(count)+" checks")
-	writeJSON(w, http.StatusOK, map[string]any{"target": target, "results": results})
+	results := make([]pingToolResult, 0, count)
+	okCount := 0
+	for i := 0; i < count; i++ {
+		var result pingToolResult
+		if mode == "tcp" {
+			result = runTCPPing(i+1, host, port, 2*time.Second)
+		} else {
+			result = runICMPPing(i+1, host, 2*time.Second)
+		}
+		if result.Status == "ok" {
+			okCount++
+		}
+		results = append(results, result)
+	}
+	_ = s.audit(r, "tool.ping", target, "", "ran "+mode+" "+strconv.Itoa(count)+" checks")
+	writeJSON(w, http.StatusOK, map[string]any{
+		"target":  target,
+		"mode":    mode,
+		"count":   count,
+		"results": results,
+		"summary": map[string]int{"ok": okCount, "failed": count - okCount},
+	})
+}
+
+func normalizePingMode(mode, target string) string {
+	value := strings.ToLower(strings.TrimSpace(mode))
+	switch value {
+	case "tcp", "tcp_ping", "tcp-ping":
+		return "tcp"
+	default:
+		if value == "" && looksLikeHostPort(target) {
+			return "tcp"
+		}
+		return "icmp"
+	}
+}
+
+func looksLikeHostPort(target string) bool {
+	if _, _, err := net.SplitHostPort(strings.TrimSpace(target)); err == nil {
+		return true
+	}
+	value := strings.Trim(strings.TrimSpace(target), "[]")
+	index := strings.LastIndex(value, ":")
+	return index > 0 && index < len(value)-1 && !strings.Contains(value[:index], ":")
+}
+
+func parsePingTCPTarget(target string) (string, int, error) {
+	target = strings.TrimSpace(target)
+	host, portText, err := net.SplitHostPort(target)
+	if err != nil {
+		if !looksLikeHostPort(target) {
+			return "", 0, errors.New("tcp ping target must be host:port")
+		}
+		index := strings.LastIndex(target, ":")
+		host = strings.TrimSpace(target[:index])
+		portText = strings.TrimSpace(target[index+1:])
+	}
+	host, err = parsePingHost(host)
+	if err != nil {
+		return "", 0, err
+	}
+	port, err := strconv.Atoi(portText)
+	if err != nil || port <= 0 || port > 65535 {
+		return "", 0, errors.New("tcp ping port must be between 1 and 65535")
+	}
+	return host, port, nil
+}
+
+func parsePingHost(target string) (string, error) {
+	target = strings.Trim(strings.TrimSpace(target), "[]")
+	if host, _, err := net.SplitHostPort(target); err == nil {
+		target = strings.Trim(host, "[]")
+	}
+	if target == "" {
+		return "", errors.New("target host is required")
+	}
+	if len(target) > 255 || strings.ContainsAny(target, "/\\\x00\r\n\t ") {
+		return "", errors.New("target host is invalid")
+	}
+	return target, nil
+}
+
+func runTCPPing(seq int, host string, port int, timeout time.Duration) pingToolResult {
+	target := net.JoinHostPort(host, strconv.Itoa(port))
+	start := time.Now()
+	conn, err := net.DialTimeout("tcp", target, timeout)
+	latency := time.Since(start).Milliseconds()
+	result := pingToolResult{Seq: seq, Mode: "tcp", Target: target, Address: target, Latency: latency, LatencyMS: latency}
+	if err != nil {
+		result.Status = "failed"
+		result.Detail = err.Error()
+		return result
+	}
+	_ = conn.Close()
+	result.Status = "ok"
+	result.Detail = "tcp connection established"
+	return result
+}
+
+func runICMPPing(seq int, host string, timeout time.Duration) pingToolResult {
+	start := time.Now()
+	output, err := executeSystemPing(host, timeout)
+	latency := time.Since(start).Milliseconds()
+	if parsedLatency, ok := parsePingLatency(output); ok {
+		latency = parsedLatency
+	}
+	result := pingToolResult{
+		Seq:       seq,
+		Mode:      "icmp",
+		Target:    host,
+		Address:   firstResolvedAddress(host),
+		Latency:   latency,
+		LatencyMS: latency,
+		Detail:    pingOutputDetail(output),
+	}
+	if err != nil {
+		result.Status = "failed"
+		if result.Detail == "" {
+			result.Detail = err.Error()
+		}
+		return result
+	}
+	result.Status = "ok"
+	return result
+}
+
+func executeSystemPing(host string, timeout time.Duration) (string, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), timeout+time.Second)
+	defer cancel()
+	args := pingCommandArgs(host, timeout)
+	cmd := exec.CommandContext(ctx, "ping", args...)
+	output, err := cmd.CombinedOutput()
+	text := strings.TrimSpace(string(output))
+	if ctx.Err() == context.DeadlineExceeded {
+		return text, ctx.Err()
+	}
+	return text, err
+}
+
+func pingCommandArgs(host string, timeout time.Duration) []string {
+	timeoutMS := int(timeout / time.Millisecond)
+	if timeoutMS <= 0 {
+		timeoutMS = 2000
+	}
+	switch runtime.GOOS {
+	case "windows":
+		return []string{"-n", "1", "-w", strconv.Itoa(timeoutMS), host}
+	case "darwin":
+		return []string{"-c", "1", "-W", strconv.Itoa(timeoutMS), host}
+	default:
+		seconds := int((timeout + time.Second - time.Nanosecond) / time.Second)
+		if seconds <= 0 {
+			seconds = 2
+		}
+		return []string{"-c", "1", "-W", strconv.Itoa(seconds), host}
+	}
+}
+
+func parsePingLatency(output string) (int64, bool) {
+	lower := strings.ToLower(output)
+	for _, marker := range []string{"time=", "time<"} {
+		index := strings.Index(lower, marker)
+		if index < 0 {
+			continue
+		}
+		valueStart := index + len(marker)
+		valueEnd := valueStart
+		for valueEnd < len(lower) {
+			ch := lower[valueEnd]
+			if (ch >= '0' && ch <= '9') || ch == '.' {
+				valueEnd++
+				continue
+			}
+			break
+		}
+		if valueEnd == valueStart {
+			continue
+		}
+		value, err := strconv.ParseFloat(lower[valueStart:valueEnd], 64)
+		if err == nil {
+			if value < 1 {
+				return 1, true
+			}
+			return int64(value + 0.5), true
+		}
+	}
+	return 0, false
+}
+
+func pingOutputDetail(output string) string {
+	lines := strings.Split(strings.TrimSpace(output), "\n")
+	for i := len(lines) - 1; i >= 0; i-- {
+		line := strings.TrimSpace(lines[i])
+		if line == "" {
+			continue
+		}
+		if len(line) > 512 {
+			return line[:512]
+		}
+		return line
+	}
+	return ""
+}
+
+func firstResolvedAddress(host string) string {
+	addrs, err := net.LookupHost(host)
+	if err != nil || len(addrs) == 0 {
+		return ""
+	}
+	return addrs[0]
 }
 
 func splitPath(value string) []string {

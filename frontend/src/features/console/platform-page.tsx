@@ -169,6 +169,28 @@ interface SSHExecResult {
   error?: string
 }
 
+interface PingToolResult {
+  seq: number
+  mode: string
+  target: string
+  address?: string
+  status: string
+  latency?: number
+  latency_ms?: number
+  detail?: string
+}
+
+interface PingToolResponse {
+  target: string
+  mode: string
+  count: number
+  results: PingToolResult[]
+  summary?: {
+    ok?: number
+    failed?: number
+  }
+}
+
 export function PlatformPage({ config }: { config: PlatformPageConfig }) {
   if (config.kind === 'tools') return <ToolsPage config={config} />
   if (config.kind === 'monitor') return <MonitoringPage config={config} />
@@ -3049,17 +3071,22 @@ function AccessSection({
 function ToolsPage({ config }: { config: PlatformPageConfig }) {
   const app = useApp()
   const [target, setTarget] = useState('')
-  const [mode, setMode] = useState('dns')
-  const [result, setResult] = useState<Array<Record<string, unknown>>>([])
+  const [mode, setMode] = useState<'icmp' | 'tcp'>('icmp')
+  const [count, setCount] = useState('4')
+  const [loading, setLoading] = useState(false)
+  const [result, setResult] = useState<PingToolResponse | null>(null)
   const run = async () => {
+    setLoading(true)
     try {
-      const data = await apiRequest<{ results: Array<Record<string, unknown>> }>(config.apiPath || '/api/tools/ping', {
+      const data = await apiRequest<PingToolResponse>(config.apiPath || '/api/tools/ping', {
         method: 'POST',
-        body: JSON.stringify({ target, count: 4, mode }),
+        body: JSON.stringify({ target, count: Number(count) || 4, mode }),
       })
-      setResult(data.results || [])
+      setResult(data)
     } catch (error) {
       app.handleApiError(error)
+    } finally {
+      setLoading(false)
     }
   }
   return (
@@ -3071,17 +3098,43 @@ function ToolsPage({ config }: { config: PlatformPageConfig }) {
         </div>
       </CardHeader>
       <CardContent className='grid gap-4'>
-        <div className='grid gap-3 md:grid-cols-[minmax(0,1fr)_10rem_auto]'>
-          <Input placeholder='请输入 IP、域名或 host:port' value={target} onChange={(event) => setTarget(event.currentTarget.value)} />
-          <Select value={mode} onChange={(event) => setMode(event.currentTarget.value)}>
-            <option value='dns'>Ping</option>
+        <div className='grid gap-3 md:grid-cols-[minmax(0,1fr)_10rem_7rem_auto]'>
+          <Input placeholder={mode === 'tcp' ? 'host:port' : 'IP / domain'} value={target} onChange={(event) => setTarget(event.currentTarget.value)} />
+          <Select value={mode} onChange={(event) => setMode(event.currentTarget.value as 'icmp' | 'tcp')}>
+            <option value='icmp'>Ping</option>
             <option value='tcp'>TCP Ping</option>
           </Select>
-          <Button variant='primary' onClick={() => void run()} disabled={!target.trim()}><Play className='size-4' />开始检测</Button>
+          <Input type='number' min={1} max={10} value={count} onChange={(event) => setCount(event.currentTarget.value)} aria-label='count' />
+          <Button variant='primary' onClick={() => void run()} disabled={!target.trim() || loading}>
+            <Play className={cn('size-4', loading && 'animate-pulse')} />
+            {loading ? '检测中' : '开始检测'}
+          </Button>
         </div>
-        <div className='rounded-xl border border-border bg-background/60 p-3 font-mono text-xs'>
-          {result.length ? result.map((row, index) => <div key={index}>{JSON.stringify(row)}</div>) : '暂无检测结果'}
-        </div>
+        {result ? (
+          <div className='grid gap-3'>
+            <div className='flex flex-wrap items-center gap-2 text-sm'>
+              <Badge tone='neutral'>{result.mode}</Badge>
+              <Badge tone='success'>OK {numberValue(result.summary?.ok)}</Badge>
+              <Badge tone={numberValue(result.summary?.failed) > 0 ? 'danger' : 'neutral'}>Failed {numberValue(result.summary?.failed)}</Badge>
+              <span className='font-mono text-xs text-muted-foreground'>{result.target}</span>
+            </div>
+            <div className='overflow-hidden rounded-xl border border-border bg-background/60'>
+              {result.results.map((row) => (
+                <div key={row.seq} className='grid gap-2 border-b border-border px-3 py-2 text-sm last:border-b-0 md:grid-cols-[3rem_5rem_7rem_minmax(0,1fr)] md:items-center'>
+                  <span className='font-mono text-xs text-muted-foreground'>#{row.seq}</span>
+                  <Badge tone={row.status === 'ok' ? 'success' : 'danger'}>{row.status}</Badge>
+                  <span className='font-mono text-xs'>{numberValue(row.latency_ms ?? row.latency)} ms</span>
+                  <div className='min-w-0'>
+                    <div className='truncate font-mono text-xs'>{row.address || row.target}</div>
+                    <div className='truncate text-xs text-muted-foreground'>{row.detail || '-'}</div>
+                  </div>
+                </div>
+              ))}
+            </div>
+          </div>
+        ) : (
+          <div className='rounded-xl border border-dashed border-border p-6 text-sm text-muted-foreground'>暂无检测结果</div>
+        )}
       </CardContent>
     </Card>
   )

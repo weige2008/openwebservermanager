@@ -2283,8 +2283,23 @@ func TestExternalWeComLoginCreatesUserAndSession(t *testing.T) {
 func TestToolsAndMonitoringEndpoints(t *testing.T) {
 	handler, cookie := newTestHandler(t)
 	assertStatus(t, handler, http.MethodGet, "/api/system/monitoring", nil, cookie, http.StatusOK)
-	assertStatus(t, handler, http.MethodPost, "/api/tools/ping", map[string]any{"target": "localhost", "count": 1}, cookie, http.StatusOK)
+	assertStatus(t, handler, http.MethodPost, "/api/tools/ping", map[string]any{"target": "localhost", "count": 1, "mode": "icmp"}, cookie, http.StatusOK)
+	listener, closeListener := startAppTestTCPListener(t)
+	defer closeListener()
+	tcpRec := assertStatus(t, handler, http.MethodPost, "/api/tools/ping", map[string]any{"target": listener.Addr().String(), "count": 2, "mode": "tcp"}, cookie, http.StatusOK)
+	tcpBody := tcpRec.Body.String()
+	if !strings.Contains(tcpBody, `"mode":"tcp"`) || !strings.Contains(tcpBody, `"status":"ok"`) || !strings.Contains(tcpBody, "tcp connection established") {
+		t.Fatalf("tcp ping did not report successful connection: %s", tcpBody)
+	}
+	badTCPRec := assertStatus(t, handler, http.MethodPost, "/api/tools/ping", map[string]any{"target": "localhost", "count": 1, "mode": "tcp"}, cookie, http.StatusBadRequest)
+	if !strings.Contains(badTCPRec.Body.String(), "host:port") {
+		t.Fatalf("invalid tcp ping target did not return clear error: %s", badTCPRec.Body.String())
+	}
 	assertStatus(t, handler, http.MethodPost, "/api/tools/ping", map[string]any{"target": "", "count": 1}, cookie, http.StatusBadRequest)
+	logsRec := assertStatus(t, handler, http.MethodGet, "/api/admin/audit/operation-logs", nil, cookie, http.StatusOK)
+	if !strings.Contains(logsRec.Body.String(), "tool.ping") {
+		t.Fatalf("ping tool did not write operation log: %s", logsRec.Body.String())
+	}
 }
 
 func TestAgentGatewayRegistrationHeartbeatAndTimeout(t *testing.T) {
@@ -3635,6 +3650,29 @@ func (f *fakeSSHGatewayRuntime) Reload() error {
 
 func (f *fakeSSHGatewayRuntime) LastError() string {
 	return f.errText
+}
+
+func startAppTestTCPListener(t *testing.T) (net.Listener, func()) {
+	t.Helper()
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("listen tcp test server: %v", err)
+	}
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		for {
+			conn, err := listener.Accept()
+			if err != nil {
+				return
+			}
+			_ = conn.Close()
+		}
+	}()
+	return listener, func() {
+		_ = listener.Close()
+		<-done
+	}
 }
 
 func waitForCondition(t *testing.T, timeout time.Duration, condition func() bool) {

@@ -414,6 +414,10 @@ func TestPlatformUserLoginAndAccessAuthorization(t *testing.T) {
 	userCookie := loginRec.Result().Cookies()[0]
 
 	assertStatus(t, handler, http.MethodPost, "/api/access/ssh/"+asset.ID, nil, userCookie, http.StatusForbidden)
+	deniedLogsRec := assertStatus(t, handler, http.MethodGet, "/api/admin/audit/operation-logs", nil, adminCookie, http.StatusOK)
+	if !strings.Contains(deniedLogsRec.Body.String(), "access.ssh.denied") || !strings.Contains(deniedLogsRec.Body.String(), asset.ID) {
+		t.Fatalf("denied access portal attempt was not audited: %s", deniedLogsRec.Body.String())
+	}
 
 	assertStatus(t, handler, http.MethodPost, "/api/admin/authorizations/assets", map[string]any{
 		"name":      "operator linux-1",

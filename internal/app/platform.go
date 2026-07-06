@@ -305,6 +305,7 @@ func (s *Server) handleAccessAction(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if !isAccessAuthorized(platform, protocol, assetID, userID, isAdmin) {
+		_ = s.audit(r, "access."+string(protocol)+".denied", assetID, protocol, "asset access denied")
 		writeError(w, http.StatusForbidden, "asset access denied")
 		return
 	}

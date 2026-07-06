@@ -1937,6 +1937,50 @@ func TestLoginSecurityPoliciesAndLocks(t *testing.T) {
 	}
 }
 
+func TestLoginPolicyAllowListRequiresMatchingClient(t *testing.T) {
+	handler, adminCookie := newTestHandler(t)
+
+	assertStatus(t, handler, http.MethodPost, "/api/admin/users", map[string]any{
+		"name":     "allow-user",
+		"type":     "local",
+		"status":   "enabled",
+		"password": "password123",
+		"metadata": map[string]any{"role": "user"},
+	}, adminCookie, http.StatusCreated)
+	createRec := assertStatus(t, handler, http.MethodPost, "/api/admin/login-policies", map[string]any{
+		"name":     "allow different network",
+		"type":     "allow",
+		"status":   "enabled",
+		"username": "allow-user",
+		"host":     "198.51.100.0/24",
+		"metadata": map[string]any{"action": "allow", "account": "allow-user", "cidr": "198.51.100.0/24"},
+	}, adminCookie, http.StatusCreated)
+	var policy model.PlatformItem
+	decodeResponse(t, createRec, &policy)
+
+	assertStatus(t, handler, http.MethodPost, "/api/auth/login", map[string]any{
+		"username": "allow-user",
+		"password": "password123",
+	}, nil, http.StatusForbidden)
+	logsRec := assertStatus(t, handler, http.MethodGet, "/api/admin/audit/login-logs", nil, adminCookie, http.StatusOK)
+	if !strings.Contains(logsRec.Body.String(), "no allow login policy matched") {
+		t.Fatal("allowlist miss was not written to login logs")
+	}
+
+	assertStatus(t, handler, http.MethodPatch, "/api/admin/login-policies/"+policy.ID, map[string]any{
+		"name":     "allow httptest network",
+		"type":     "allow",
+		"status":   "enabled",
+		"username": "allow-user",
+		"host":     "192.0.2.0/24",
+		"metadata": map[string]any{"action": "allow", "account": "allow-user", "cidr": "192.0.2.0/24"},
+	}, adminCookie, http.StatusOK)
+	assertStatus(t, handler, http.MethodPost, "/api/auth/login", map[string]any{
+		"username": "allow-user",
+		"password": "password123",
+	}, nil, http.StatusOK)
+}
+
 func TestConfigurableLoginFailureLockPolicy(t *testing.T) {
 	handler, adminCookie := newTestHandler(t)
 

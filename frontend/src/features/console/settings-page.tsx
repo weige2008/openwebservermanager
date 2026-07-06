@@ -77,6 +77,13 @@ interface LoginSecurityState {
   setting?: PlatformItem
 }
 
+interface LoginPolicyFormState {
+  name: string
+  action: 'allow' | 'deny'
+  account: string
+  cidr: string
+}
+
 interface OIDCSettingsState {
   enabled: boolean
   providerName: string
@@ -139,6 +146,7 @@ const forceMFAKeys = ['force_mfa', 'forceMFA', 'mfa_required', 'require_mfa']
 const loginFailureThresholdKeys = ['login_failure_threshold', 'failure_threshold', 'max_login_failures', 'login_lock_threshold', 'lock_threshold']
 const loginFailureWindowKeys = ['login_failure_window_minutes', 'failure_window_minutes', 'login_lock_window_minutes', 'lock_window_minutes']
 const loginLockMinutesKeys = ['login_lock_minutes', 'lock_minutes', 'login_lock_duration_minutes', 'lock_duration_minutes']
+const defaultLoginPolicyForm: LoginPolicyFormState = { name: '', action: 'deny', account: '*', cidr: '' }
 const oidcSettingKeys = ['oidc_login_enabled', 'external_oidc_enabled', 'oidc_authorization_endpoint', 'oidc_token_endpoint', 'oidc_client_id', 'oidc_provider_id']
 const ldapSettingKeys = ['ldap_enabled', 'ldap_url', 'ldap_base_dn', 'ldap_bind_dn', 'ldap_user_filter', 'ldap_provider_id', 'ldap_provider_name']
 const wecomSettingKeys = ['wecom_enabled', 'wecom_corp_id', 'wecom_agent_id', 'wecom_provider_id', 'wecom_provider_name']
@@ -165,6 +173,9 @@ export function SettingsPage() {
     loginLockMinutes: 5,
   })
   const [loginSecurityBusy, setLoginSecurityBusy] = useState(false)
+  const [loginPolicies, setLoginPolicies] = useState<PlatformItem[]>([])
+  const [loginPolicyForm, setLoginPolicyForm] = useState<LoginPolicyFormState>(defaultLoginPolicyForm)
+  const [loginPolicyBusy, setLoginPolicyBusy] = useState(false)
   const [oidcSettings, setOIDCSettings] = useState<OIDCSettingsState>(() => defaultOIDCSettings())
   const [oidcBusy, setOIDCBusy] = useState(false)
   const [oidcTestBusy, setOIDCTestBusy] = useState(false)
@@ -194,10 +205,16 @@ export function SettingsPage() {
     setWeComSettings(wecomSettingsFromSettings(result.items))
   }
 
+  const loadLoginPolicies = async () => {
+    const result = await apiRequest<{ items: PlatformItem[] }>('/api/admin/login-policies')
+    setLoginPolicies(result.items || [])
+  }
+
   useEffect(() => {
     void loadMFAStatus().catch(() => undefined)
     void loadPasskeys().catch(() => undefined)
     void loadLoginSecurity().catch(() => undefined)
+    void loadLoginPolicies().catch(() => undefined)
   }, [])
 
   useEffect(() => {
@@ -353,6 +370,84 @@ export function SettingsPage() {
       app.handleApiError(error)
     } finally {
       setLoginSecurityBusy(false)
+    }
+  }
+
+  const createLoginPolicy = async () => {
+    const cidr = loginPolicyForm.cidr.trim()
+    if (!cidr) {
+      app.showToast(t('settingsPage.loginPolicyCidrRequired', { defaultValue: 'IP or CIDR is required.' }))
+      return
+    }
+    setLoginPolicyBusy(true)
+    try {
+      const action = loginPolicyForm.action === 'allow' ? 'allow' : 'deny'
+      const account = loginPolicyForm.account.trim() || '*'
+      await apiRequest<PlatformItem>('/api/admin/login-policies', {
+        method: 'POST',
+        body: JSON.stringify({
+          name: loginPolicyForm.name.trim() || `${action.toUpperCase()} ${cidr}`,
+          type: action,
+          status: 'enabled',
+          username: account,
+          host: cidr,
+          description: action === 'allow' ? 'allow login from matched clients' : 'deny login from matched clients',
+          metadata: {
+            action,
+            account,
+            cidr,
+          },
+        }),
+      })
+      setLoginPolicyForm(defaultLoginPolicyForm)
+      await loadLoginPolicies()
+      app.showToast(t('saved'))
+    } catch (error) {
+      app.handleApiError(error)
+    } finally {
+      setLoginPolicyBusy(false)
+    }
+  }
+
+  const toggleLoginPolicy = async (policy: PlatformItem) => {
+    setLoginPolicyBusy(true)
+    try {
+      await apiRequest<PlatformItem>(`/api/admin/login-policies/${policy.id}`, {
+        method: 'PATCH',
+        body: JSON.stringify({
+          name: policy.name,
+          type: loginPolicyAction(policy),
+          status: platformItemEnabled(policy) ? 'disabled' : 'enabled',
+          username: policy.username || loginPolicyAccount(policy),
+          host: policy.host || loginPolicyCIDR(policy),
+          description: policy.description || '',
+          metadata: {
+            ...(policy.metadata ?? {}),
+            action: loginPolicyAction(policy),
+            account: loginPolicyAccount(policy),
+            cidr: loginPolicyCIDR(policy),
+          },
+        }),
+      })
+      await loadLoginPolicies()
+      app.showToast(t('saved'))
+    } catch (error) {
+      app.handleApiError(error)
+    } finally {
+      setLoginPolicyBusy(false)
+    }
+  }
+
+  const deleteLoginPolicy = async (policy: PlatformItem) => {
+    setLoginPolicyBusy(true)
+    try {
+      await apiRequest(`/api/admin/login-policies/${policy.id}`, { method: 'DELETE' })
+      await loadLoginPolicies()
+      app.showToast(t('settingsPage.loginPolicyDeleted'))
+    } catch (error) {
+      app.handleApiError(error)
+    } finally {
+      setLoginPolicyBusy(false)
     }
   }
 
@@ -927,6 +1022,104 @@ export function SettingsPage() {
       <CardStaggerItem className='grid gap-4 rounded-xl border border-border bg-card p-5 shadow-sm lg:grid-cols-[0.85fr_1.15fr]'>
         <div className='flex min-w-0 items-start gap-3'>
           <span className='grid size-12 shrink-0 place-items-center rounded-full bg-primary text-primary-foreground'>
+            <ShieldCheck className='size-5' />
+          </span>
+          <div className='min-w-0'>
+            <div className='flex flex-wrap items-center gap-2'>
+              <h2 className='truncate text-base font-semibold'>{t('settingsPage.loginPoliciesTitle')}</h2>
+              <Badge tone={loginPolicies.some(platformItemEnabled) ? 'success' : 'neutral'}>
+                {t('settingsPage.loginPoliciesCount', { count: loginPolicies.filter(platformItemEnabled).length })}
+              </Badge>
+            </div>
+            <p className='mt-1 max-w-lg text-sm leading-6 text-muted-foreground'>{t('settingsPage.loginPoliciesDescription')}</p>
+          </div>
+        </div>
+        <div className='grid gap-3'>
+          <div className='grid gap-3 rounded-lg border border-border bg-background/70 p-3'>
+            <div className='grid gap-3 sm:grid-cols-[1fr_0.7fr]'>
+              <Field label={t('settingsPage.loginPolicyName')}>
+                <Input
+                  value={loginPolicyForm.name}
+                  onChange={(event) => setLoginPolicyForm((current) => ({ ...current, name: event.currentTarget.value }))}
+                  placeholder={t('settingsPage.loginPolicyNamePlaceholder')}
+                />
+              </Field>
+              <Field label={t('settingsPage.loginPolicyAction')}>
+                <Select
+                  value={loginPolicyForm.action}
+                  onChange={(event) => setLoginPolicyForm((current) => ({ ...current, action: event.currentTarget.value === 'allow' ? 'allow' : 'deny' }))}
+                >
+                  <option value='deny'>{t('settingsPage.loginPolicyDeny')}</option>
+                  <option value='allow'>{t('settingsPage.loginPolicyAllow')}</option>
+                </Select>
+              </Field>
+            </div>
+            <div className='grid gap-3 sm:grid-cols-[0.7fr_1fr_auto] sm:items-end'>
+              <Field label={t('settingsPage.loginPolicyAccount')}>
+                <Input
+                  value={loginPolicyForm.account}
+                  onChange={(event) => setLoginPolicyForm((current) => ({ ...current, account: event.currentTarget.value }))}
+                  placeholder='*'
+                />
+              </Field>
+              <Field label={t('settingsPage.loginPolicyCIDR')}>
+                <Input
+                  value={loginPolicyForm.cidr}
+                  onChange={(event) => setLoginPolicyForm((current) => ({ ...current, cidr: event.currentTarget.value }))}
+                  placeholder='192.0.2.0/24'
+                />
+              </Field>
+              <Button variant='primary' onClick={() => void createLoginPolicy()} disabled={loginPolicyBusy || !loginPolicyForm.cidr.trim()}>
+                {t('settingsPage.createLoginPolicy')}
+              </Button>
+            </div>
+          </div>
+          <div className='overflow-hidden rounded-lg border border-border bg-background/70'>
+            {loginPolicies.length === 0 ? (
+              <div className='p-4 text-sm text-muted-foreground'>{t('settingsPage.loginPoliciesEmpty')}</div>
+            ) : (
+              <div className='divide-y divide-border'>
+                {loginPolicies.map((policy) => {
+                  const action = loginPolicyAction(policy)
+                  const enabled = platformItemEnabled(policy)
+                  return (
+                    <div key={policy.id} className='grid gap-3 p-3 sm:grid-cols-[1fr_auto] sm:items-center'>
+                      <div className='min-w-0'>
+                        <div className='flex flex-wrap items-center gap-2'>
+                          <span className='truncate text-sm font-medium'>{policy.name}</span>
+                          <Badge tone={action === 'allow' ? 'success' : 'danger'}>
+                            {action === 'allow' ? t('settingsPage.loginPolicyAllow') : t('settingsPage.loginPolicyDeny')}
+                          </Badge>
+                          <Badge tone={enabled ? 'success' : 'neutral'}>
+                            {enabled ? t('settingsPage.loginPolicyEnabled') : t('settingsPage.loginPolicyDisabled')}
+                          </Badge>
+                        </div>
+                        <div className='mt-1 flex flex-wrap gap-x-4 gap-y-1 text-xs text-muted-foreground'>
+                          <span>{t('settingsPage.loginPolicyAccount')}: {loginPolicyAccount(policy)}</span>
+                          <span>{t('settingsPage.loginPolicyCIDR')}: {loginPolicyCIDR(policy)}</span>
+                        </div>
+                      </div>
+                      <div className='flex flex-wrap gap-2 sm:justify-end'>
+                        <Button variant='outline' size='sm' onClick={() => void toggleLoginPolicy(policy)} disabled={loginPolicyBusy}>
+                          {enabled ? t('settingsPage.disableLoginPolicy') : t('settingsPage.enableLoginPolicy')}
+                        </Button>
+                        <Button variant='destructive' size='sm' onClick={() => void deleteLoginPolicy(policy)} disabled={loginPolicyBusy}>
+                          <Trash2 className='size-4' />
+                          {t('settingsPage.deleteLoginPolicy')}
+                        </Button>
+                      </div>
+                    </div>
+                  )
+                })}
+              </div>
+            )}
+          </div>
+        </div>
+      </CardStaggerItem>
+
+      <CardStaggerItem className='grid gap-4 rounded-xl border border-border bg-card p-5 shadow-sm lg:grid-cols-[0.85fr_1.15fr]'>
+        <div className='flex min-w-0 items-start gap-3'>
+          <span className='grid size-12 shrink-0 place-items-center rounded-full bg-primary text-primary-foreground'>
             <Network className='size-5' />
           </span>
           <div className='min-w-0'>
@@ -1425,6 +1618,19 @@ function hasLoginSecurityMetadata(item: PlatformItem) {
 function platformItemEnabled(item: PlatformItem) {
   const status = (item.status || '').trim().toLowerCase()
   return status === '' || status === 'enabled' || status === 'active' || status === 'locked'
+}
+
+function loginPolicyAction(policy: PlatformItem): 'allow' | 'deny' {
+  const action = (metadataText(policy.metadata?.action) || policy.type || '').trim().toLowerCase()
+  return action === 'allow' ? 'allow' : 'deny'
+}
+
+function loginPolicyAccount(policy: PlatformItem) {
+  return metadataText(policy.metadata?.account) || metadataText(policy.metadata?.username) || policy.username || '*'
+}
+
+function loginPolicyCIDR(policy: PlatformItem) {
+  return metadataText(policy.metadata?.cidr) || metadataText(policy.metadata?.client_ip) || policy.host || policy.target_id || '*'
 }
 
 function metadataTruthy(value: unknown) {

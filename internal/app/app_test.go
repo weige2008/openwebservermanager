@@ -3001,6 +3001,60 @@ func TestBackupListDownloadAndRestore(t *testing.T) {
 	}
 }
 
+func TestBackupDeleteAndRetention(t *testing.T) {
+	srv, cookie := newTestServer(t, nil)
+	handler := http.Handler(srv)
+
+	createBackupRec := assertStatus(t, handler, http.MethodPost, "/api/admin/backups", nil, cookie, http.StatusCreated)
+	var backupMetadata map[string]any
+	decodeResponse(t, createBackupRec, &backupMetadata)
+	backupPath, _ := backupMetadata["backup_path"].(string)
+	backupName := filepath.Base(filepath.FromSlash(backupPath))
+	if backupName == "." || backupName == "" {
+		t.Fatalf("backup path missing from metadata: %v", backupMetadata)
+	}
+	assertStatus(t, handler, http.MethodDelete, "/api/admin/backups/"+backupName, nil, cookie, http.StatusOK)
+	if _, err := os.Stat(filepath.FromSlash(backupPath)); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("deleted backup still exists or stat failed unexpectedly: %v", err)
+	}
+	assertStatus(t, handler, http.MethodDelete, "/api/admin/backups/not-a-zip.txt", nil, cookie, http.StatusBadRequest)
+	logsRec := assertStatus(t, handler, http.MethodGet, "/api/admin/audit/operation-logs", nil, cookie, http.StatusOK)
+	if !strings.Contains(logsRec.Body.String(), "backup.delete") {
+		t.Fatal("backup delete did not write operation log")
+	}
+
+	backupDir := filepath.Join(srv.cfg.DataDir, "backups")
+	if err := os.MkdirAll(backupDir, 0o770); err != nil {
+		t.Fatalf("create backup dir: %v", err)
+	}
+	oldName := "backup-20000101-000000-000000000.zip"
+	oldPath := filepath.Join(backupDir, oldName)
+	if err := os.WriteFile(oldPath, []byte("old backup"), 0o660); err != nil {
+		t.Fatalf("write old backup: %v", err)
+	}
+	oldTime := time.Now().UTC().AddDate(0, 0, -3)
+	if err := os.Chtimes(oldPath, oldTime, oldTime); err != nil {
+		t.Fatalf("age old backup: %v", err)
+	}
+	assertStatus(t, handler, http.MethodPost, "/api/admin/scheduled-tasks", map[string]any{
+		"name":     "Retained backup",
+		"type":     "backup",
+		"status":   "enabled",
+		"metadata": map[string]any{"retention_days": 1},
+	}, cookie, http.StatusCreated)
+	retainedRec := assertStatus(t, handler, http.MethodPost, "/api/admin/backups", nil, cookie, http.StatusCreated)
+	if !strings.Contains(retainedRec.Body.String(), `"retention_deleted":1`) {
+		t.Fatalf("backup creation did not report retained deletion: %s", retainedRec.Body.String())
+	}
+	if _, err := os.Stat(oldPath); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("expired backup was not deleted: %v", err)
+	}
+	listRec := assertStatus(t, handler, http.MethodGet, "/api/admin/backups", nil, cookie, http.StatusOK)
+	if strings.Contains(listRec.Body.String(), oldName) {
+		t.Fatal("expired backup still appears in backup list")
+	}
+}
+
 func TestScheduledTaskRunners(t *testing.T) {
 	handler, cookie := newTestHandler(t)
 

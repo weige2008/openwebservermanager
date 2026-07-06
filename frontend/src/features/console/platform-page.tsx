@@ -3349,6 +3349,17 @@ function BackupsPage({ config }: { config: PlatformPageConfig }) {
     }
   }
 
+  const deleteBackup = async (item: BackupInfo) => {
+    if (!window.confirm(`删除备份 ${item.name}?`)) return
+    try {
+      await apiRequest(`/api/admin/backups/${encodeURIComponent(item.name)}`, { method: 'DELETE' })
+      await load()
+      app.showToast('备份已删除')
+    } catch (error) {
+      app.handleApiError(error)
+    }
+  }
+
   return (
     <CardStaggerContainer>
       <CardStaggerItem>
@@ -3406,10 +3417,16 @@ function BackupsPage({ config }: { config: PlatformPageConfig }) {
                     </div>
                     <p className='mt-1 text-xs text-muted-foreground'>{formatDate(item.modified_at)} · {(item.files || []).join(', ') || 'manifest only'}</p>
                   </div>
-                  <Button variant='outline' onClick={() => void downloadResponse(`/api/admin/backups/${encodeURIComponent(item.name)}/download`, item.name)}>
-                    <Download className='size-4' />
-                    下载
-                  </Button>
+                  <div className='flex flex-wrap justify-end gap-2 md:flex-nowrap'>
+                    <Button variant='outline' onClick={() => void downloadResponse(`/api/admin/backups/${encodeURIComponent(item.name)}/download`, item.name)}>
+                      <Download className='size-4' />
+                      下载
+                    </Button>
+                    <Button variant='destructive' onClick={() => void deleteBackup(item)}>
+                      <Trash2 className='size-4' />
+                      删除
+                    </Button>
+                  </div>
                 </article>
               )) : (
                 <div className='rounded-xl border border-dashed border-border p-6 text-sm text-muted-foreground'>暂无备份。点击“立即备份”生成第一份快照。</div>

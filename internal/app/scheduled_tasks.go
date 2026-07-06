@@ -164,10 +164,16 @@ func (s *Server) createBackupSnapshot() (map[string]any, error) {
 	if err != nil {
 		return nil, err
 	}
+	retention, err := s.cleanupExpiredBackups(time.Now().UTC())
+	if err != nil {
+		return nil, err
+	}
 	return map[string]any{
-		"backup_path": filepath.ToSlash(target),
-		"backup_size": info.Size(),
-		"files":       files,
+		"backup_path":       filepath.ToSlash(target),
+		"backup_size":       info.Size(),
+		"files":             files,
+		"retention":         retention,
+		"retention_deleted": retention.DeletedCount,
 	}, nil
 }
 

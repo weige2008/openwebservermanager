@@ -26,6 +26,12 @@ type backupInfo struct {
 	Files    []string       `json:"files,omitempty"`
 }
 
+type backupRetentionResult struct {
+	RetentionDays int      `json:"retention_days"`
+	Deleted       []string `json:"deleted,omitempty"`
+	DeletedCount  int      `json:"deleted_count"`
+}
+
 type restoreArchive struct {
 	LegacyRaw []byte
 	SQLiteDB  string
@@ -73,6 +79,37 @@ func (s *Server) handleBackupDownload(w http.ResponseWriter, r *http.Request, na
 	w.Header().Set("Content-Type", "application/zip")
 	w.Header().Set("Content-Disposition", "attachment; filename=\""+filepath.Base(path)+"\"")
 	http.ServeFile(w, r, path)
+}
+
+func (s *Server) handleBackupDelete(w http.ResponseWriter, r *http.Request, name string) {
+	if r.Method != http.MethodDelete {
+		writeError(w, http.StatusMethodNotAllowed, "method not allowed")
+		return
+	}
+	path, err := s.backupFilePath(name)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	info, err := os.Stat(path)
+	if err != nil || info.IsDir() {
+		writeError(w, http.StatusNotFound, "backup not found")
+		return
+	}
+	if err := os.Remove(path); err != nil {
+		writeError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	_, _ = s.cfg.Store.CreatePlatformItem("operation_logs", model.PlatformItemRequest{
+		Name:        "backup.delete",
+		Type:        "backup",
+		Status:      "success",
+		OwnerID:     s.currentUserID(r),
+		Description: "deleted backup archive",
+		Metadata:    map[string]any{"backup": name, "size": info.Size(), "client_ip": s.clientIP(r)},
+	})
+	_ = s.audit(r, "backup.delete", name, "", "deleted backup")
+	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "deleted": name})
 }
 
 func (s *Server) handleBackupRestore(w http.ResponseWriter, r *http.Request) {
@@ -208,6 +245,65 @@ func (s *Server) backupFilePath(name string) (string, error) {
 		return "", err
 	}
 	return path, nil
+}
+
+func (s *Server) cleanupExpiredBackups(now time.Time) (backupRetentionResult, error) {
+	days := s.backupRetentionDays()
+	result := backupRetentionResult{RetentionDays: days}
+	if days <= 0 {
+		return result, nil
+	}
+	dir := filepath.Join(s.cfg.DataDir, "backups")
+	entries, err := os.ReadDir(dir)
+	if errors.Is(err, os.ErrNotExist) {
+		return result, nil
+	}
+	if err != nil {
+		return result, err
+	}
+	cutoff := now.AddDate(0, 0, -days)
+	for _, entry := range entries {
+		if entry.IsDir() || !strings.HasSuffix(strings.ToLower(entry.Name()), ".zip") {
+			continue
+		}
+		info, err := entry.Info()
+		if err != nil || info.ModTime().After(cutoff) {
+			continue
+		}
+		path := filepath.Join(dir, entry.Name())
+		if err := ensureChildPath(dir, path); err != nil {
+			return result, err
+		}
+		if err := os.Remove(path); err != nil {
+			return result, err
+		}
+		result.Deleted = append(result.Deleted, entry.Name())
+		result.DeletedCount++
+	}
+	return result, nil
+}
+
+func (s *Server) backupRetentionDays() int {
+	items, err := s.cfg.Store.ListPlatformItems("scheduled_tasks")
+	if err == nil {
+		for _, item := range items {
+			if !strings.EqualFold(normalizeScheduledTaskType(item.Type), "backup") {
+				continue
+			}
+			for _, key := range []string{"backup_retention_days", "retention_days", "keep_days", "days"} {
+				if value, ok := metadataInt(item.Metadata[key]); ok {
+					return maxInt(value, 0)
+				}
+			}
+		}
+	}
+	settings := s.retentionSettings()
+	for _, key := range []string{"backup_retention_days", "backups_days", "backup_days", "retention_days", "days"} {
+		if value, ok := metadataInt(settings[key]); ok {
+			return maxInt(value, 0)
+		}
+	}
+	return 0
 }
 
 func backupManifest(path string) (map[string]any, []string) {

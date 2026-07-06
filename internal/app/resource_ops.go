@@ -177,6 +177,10 @@ func (s *Server) handleResourceOperation(w http.ResponseWriter, r *http.Request,
 		id := pathSegmentFromTrimmed(path, 2)
 		s.handleBackupDownload(w, r, id)
 		return true
+	case strings.HasPrefix(path, "admin/backups/"):
+		id := pathSegmentFromTrimmed(path, 2)
+		s.handleBackupDelete(w, r, id)
+		return true
 	case strings.HasPrefix(path, "admin/certificates/") && strings.HasSuffix(path, "/download"):
 		id := pathSegmentFromTrimmed(path, 2)
 		s.handleCertificateDownload(w, r, id)

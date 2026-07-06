@@ -6637,9 +6637,25 @@ func TestStorageAuthorizationStrategyPermissions(t *testing.T) {
 	}
 	assertStatus(t, handler, http.MethodDelete, "/api/admin/storages/"+storage.ID+"/files?path=docs/c.txt", nil, userCookie, http.StatusForbidden)
 	logsRec := assertStatus(t, handler, http.MethodGet, "/api/admin/audit/file-logs", nil, userCookie, http.StatusOK)
-	for _, want := range []string{"copy", "rename", "denied"} {
-		if !strings.Contains(logsRec.Body.String(), want) {
+	logsBody := logsRec.Body.String()
+	for _, want := range []string{"copy", "rename", "download", "denied"} {
+		if !strings.Contains(logsBody, want) {
 			t.Fatalf("file logs did not include %q operation", want)
+		}
+	}
+	for _, want := range []string{
+		`"source_path":"docs/a.txt"`,
+		`"destination_path":"docs/b.txt"`,
+		`"source_path":"docs/b.txt"`,
+		`"destination_path":"docs/c.txt"`,
+		`"path":"docs/c.txt"`,
+		`"size":5`,
+		`"storage_id":"` + storage.ID + `"`,
+		`"client_ip":"192.0.2.1"`,
+		`"reason":"authorization_strategy"`,
+	} {
+		if !strings.Contains(logsBody, want) {
+			t.Fatalf("file logs missing audit metadata %s: %s", want, logsBody)
 		}
 	}
 

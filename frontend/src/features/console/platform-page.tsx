@@ -117,6 +117,11 @@ interface StorageUsage {
   checked_at?: string
 }
 
+interface DepartmentTreeNode {
+  item: PlatformItem
+  children: DepartmentTreeNode[]
+}
+
 interface BackupInfo {
   name: string
   size: number
@@ -258,6 +263,7 @@ export function PlatformTablePage({ config }: { config: PlatformPageConfig }) {
   const [editing, setEditing] = useState<PlatformItem | null>(null)
   const [form, setForm] = useState<PlatformFormState>(initialForm)
   const [operation, setOperation] = useState<ResourceOperation | null>(null)
+  const [departmentView, setDepartmentView] = useState<'table' | 'tree'>('table')
   const { requestAccessMFACode, accessMFADialog } = useAccessMFADialog()
   const { confirm, confirmDialog } = useConfirmDialog()
 
@@ -581,14 +587,32 @@ export function PlatformTablePage({ config }: { config: PlatformPageConfig }) {
             </div>
           </CardHeader>
           <CardContent>
-            <DataTable
-              columns={columns}
-              data={rows}
-              emptyTitle={app.t('empty', '暂无数据')}
-              emptyBody={description}
-              searchPlaceholder={app.t('filter', '关键词搜索')}
-              getSearchText={(item) => [item.name, item.type, item.status, item.protocol, item.host, item.group, item.username, item.description, metadataText(item.metadata?.target_url), metadataText(item.metadata?.certificate_id), metadataText(item.metadata?.mtls_certificate_id), metadataText(item.metadata?.tls_server_name), metadataText(item.metadata?.database), metadataText(item.metadata?.sqlite_path), metadataText(item.metadata?.credential_id), metadataText(item.metadata?.gateway_group_id), metadataText(item.metadata?.gateway_id), metadataText(item.metadata?.pattern), metadataText(item.metadata?.command), metadataText(item.metadata?.risk), metadataText(item.metadata?.path_prefix), permissionSummary(item.permissions), metadataText(item.metadata?.last_login_at), metadataText(item.metadata?.last_login_ip), item.tags?.join(' ')].filter(Boolean).join(' ')}
-            />
+            {config.collection === 'departments' ? (
+              <div className='mb-4 flex flex-wrap gap-2'>
+                <Button size='sm' variant={departmentView === 'table' ? 'primary' : 'outline'} onClick={() => setDepartmentView('table')}>
+                  {app.t('tableView', '表格视图')}
+                </Button>
+                <Button size='sm' variant={departmentView === 'tree' ? 'primary' : 'outline'} onClick={() => setDepartmentView('tree')}>
+                  {app.t('treeView', '树形视图')}
+                </Button>
+              </div>
+            ) : null}
+            {config.collection === 'departments' && departmentView === 'tree' ? (
+              <DepartmentTreeView
+                items={rows}
+                onEdit={startEdit}
+                onDelete={(item) => void remove(item)}
+              />
+            ) : (
+              <DataTable
+                columns={columns}
+                data={rows}
+                emptyTitle={app.t('empty', '暂无数据')}
+                emptyBody={description}
+                searchPlaceholder={app.t('filter', '关键词搜索')}
+                getSearchText={(item) => [item.name, item.type, item.status, item.protocol, item.host, item.group, item.username, item.description, metadataText(item.metadata?.target_url), metadataText(item.metadata?.certificate_id), metadataText(item.metadata?.mtls_certificate_id), metadataText(item.metadata?.tls_server_name), metadataText(item.metadata?.database), metadataText(item.metadata?.sqlite_path), metadataText(item.metadata?.credential_id), metadataText(item.metadata?.gateway_group_id), metadataText(item.metadata?.gateway_id), metadataText(item.metadata?.pattern), metadataText(item.metadata?.command), metadataText(item.metadata?.risk), metadataText(item.metadata?.path_prefix), permissionSummary(item.permissions), metadataText(item.metadata?.last_login_at), metadataText(item.metadata?.last_login_ip), item.tags?.join(' ')].filter(Boolean).join(' ')}
+              />
+            )}
           </CardContent>
         </Card>
       </CardStaggerItem>
@@ -612,6 +636,82 @@ export function PlatformTablePage({ config }: { config: PlatformPageConfig }) {
       {accessMFADialog}
       {confirmDialog}
     </CardStaggerContainer>
+  )
+}
+
+function DepartmentTreeView({ items, onEdit, onDelete }: { items: PlatformItem[]; onEdit: (item: PlatformItem) => void; onDelete: (item: PlatformItem) => void }) {
+  const app = useApp()
+  const tree = useMemo(() => buildDepartmentTree(items), [items])
+
+  if (!items.length) {
+    return (
+      <div className='rounded-xl border border-dashed border-border p-6 text-sm text-muted-foreground'>
+        {app.t('empty', '暂无数据')}
+      </div>
+    )
+  }
+
+  return (
+    <div className='overflow-hidden rounded-xl border border-border bg-background/60'>
+      <div className='flex flex-wrap items-center justify-between gap-2 border-b border-border px-3 py-2 text-sm'>
+        <div className='font-medium'>{app.t('departmentTree', '部门树')}</div>
+        <div className='text-xs text-muted-foreground'>
+          {formatNumberValue(items.length)} {app.t('departments', '部门')}
+        </div>
+      </div>
+      <div className='divide-y divide-border'>
+        {tree.map((node) => (
+          <DepartmentTreeBranch key={node.item.id} node={node} depth={0} onEdit={onEdit} onDelete={onDelete} />
+        ))}
+      </div>
+    </div>
+  )
+}
+
+function DepartmentTreeBranch({ node, depth, onEdit, onDelete }: { node: DepartmentTreeNode; depth: number; onEdit: (item: PlatformItem) => void; onDelete: (item: PlatformItem) => void }) {
+  const app = useApp()
+  const item = node.item
+  const directMembers = metadataNumber(item.metadata?.member_count)
+  const totalMembers = metadataNumber(item.metadata?.total_member_count)
+  const childCount = metadataNumber(item.metadata?.direct_child_count) || node.children.length
+
+  return (
+    <div>
+      <div className='grid gap-3 px-3 py-3 text-sm md:grid-cols-[minmax(0,1fr)_auto] md:items-center'>
+        <div className='min-w-0' style={{ paddingLeft: `${depth * 18}px` }}>
+          <div className='flex min-w-0 flex-wrap items-center gap-2'>
+            <strong className='truncate'>{item.name}</strong>
+            <Badge tone={statusTone(item.status)}>{item.status || '-'}</Badge>
+            <Badge tone='neutral'>{item.type || 'department'}</Badge>
+          </div>
+          <div className='mt-1 truncate text-xs text-muted-foreground'>
+            {metadataText(item.metadata?.path) || item.description || item.id}
+          </div>
+          <div className='mt-2 flex flex-wrap gap-1.5 text-xs'>
+            <Badge tone='neutral'>{app.t('members', '成员')}: {formatNumberValue(directMembers)} / {formatNumberValue(totalMembers)}</Badge>
+            <Badge tone='neutral'>{app.t('children', '子级')}: {formatNumberValue(childCount)}</Badge>
+            <Badge tone='neutral'>{app.t('sort', '排序')}: {formatNumberValue(metadataNumber(item.metadata?.sort))}</Badge>
+          </div>
+        </div>
+        <div className='flex flex-wrap justify-end gap-1.5'>
+          <Button size='sm' variant='outline' onClick={() => onEdit(item)}>
+            <Pencil className='size-3.5' />
+            {app.t('edit', '编辑')}
+          </Button>
+          <Button size='sm' variant='destructive' onClick={() => onDelete(item)}>
+            <Trash2 className='size-3.5' />
+            {app.t('delete', '删除')}
+          </Button>
+        </div>
+      </div>
+      {node.children.length ? (
+        <div className='border-t border-border/60'>
+          {node.children.map((child) => (
+            <DepartmentTreeBranch key={child.item.id} node={child} depth={depth + 1} onEdit={onEdit} onDelete={onDelete} />
+          ))}
+        </div>
+      ) : null}
+    </div>
   )
 }
 
@@ -4447,6 +4547,63 @@ function metadataNumber(value: unknown) {
 
 function departmentLevel(item: PlatformItem) {
   return Math.max(0, metadataNumber(item.metadata?.level))
+}
+
+function buildDepartmentTree(items: PlatformItem[]): DepartmentTreeNode[] {
+  const idByKey = new Map<string, string>()
+  const byParent = new Map<string, PlatformItem[]>()
+  const visited = new Set<string>()
+
+  for (const item of items) {
+    for (const value of [item.id, item.name]) {
+      const key = departmentTreeKey(value)
+      if (key && !idByKey.has(key)) idByKey.set(key, item.id)
+    }
+  }
+
+  for (const item of items) {
+    const parentKey = departmentTreeKey(item.parent_id)
+    const parentID = parentKey ? idByKey.get(parentKey) || item.parent_id : ''
+    const safeParentID = parentID && parentID !== item.id ? parentID : ''
+    const siblings = byParent.get(safeParentID) || []
+    siblings.push(item)
+    byParent.set(safeParentID, siblings)
+  }
+
+  for (const siblings of byParent.values()) {
+    siblings.sort(departmentTreeSort)
+  }
+
+  const build = (parentID: string): DepartmentTreeNode[] => {
+    const siblings = byParent.get(parentID) || []
+    return siblings
+      .filter((item) => {
+        if (visited.has(item.id)) return false
+        visited.add(item.id)
+        return true
+      })
+      .map((item) => ({ item, children: build(item.id) }))
+  }
+
+  const roots = build('')
+  for (const item of [...items].sort(departmentTreeSort)) {
+    if (!visited.has(item.id)) {
+      visited.add(item.id)
+      roots.push({ item, children: build(item.id) })
+    }
+  }
+  return roots
+}
+
+function departmentTreeKey(value: unknown) {
+  return metadataText(value).trim().toLowerCase()
+}
+
+function departmentTreeSort(left: PlatformItem, right: PlatformItem) {
+  const leftSort = metadataNumber(left.metadata?.sort)
+  const rightSort = metadataNumber(right.metadata?.sort)
+  if (leftSort !== rightSort) return leftSort - rightSort
+  return left.name.localeCompare(right.name, undefined, { numeric: true, sensitivity: 'base' })
 }
 
 function assetGroupParentName(item: PlatformItem, groups: PlatformItem[]) {

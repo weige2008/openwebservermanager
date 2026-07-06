@@ -2467,6 +2467,10 @@ func TestWebAssetProxyRequiresAuthorizationAndLogs(t *testing.T) {
 	if err != nil {
 		t.Fatalf("parse upstream url: %v", err)
 	}
+	upstreamTarget := *upstreamURL
+	upstreamTarget.User = url.UserPassword("proxy-user", "proxy-secret")
+	upstreamTarget.Path = "/root"
+	upstreamTarget.RawQuery = "from=asset"
 
 	handler, adminCookie := newTestHandler(t)
 	userRec := assertStatus(t, handler, http.MethodPost, "/api/admin/users", map[string]any{
@@ -2482,7 +2486,7 @@ func TestWebAssetProxyRequiresAuthorizationAndLogs(t *testing.T) {
 		"name":     "internal app",
 		"type":     "http",
 		"status":   "enabled",
-		"metadata": map[string]any{"target_url": upstream.URL + "/root?from=asset"},
+		"metadata": map[string]any{"target_url": upstreamTarget.String()},
 	}, adminCookie, http.StatusCreated)
 	var webAsset model.PlatformItem
 	decodeResponse(t, webRec, &webAsset)
@@ -2576,6 +2580,13 @@ func TestWebAssetProxyRequiresAuthorizationAndLogs(t *testing.T) {
 	}
 	if _, ok := metadataInt(helloLog.Metadata["duration_ms"]); !ok {
 		t.Fatalf("access log missing duration_ms: %#v", helloLog.Metadata)
+	}
+	upstreamLogURL := firstMetadataString(helloLog.Metadata, "upstream")
+	if !strings.Contains(upstreamLogURL, upstreamURL.Host) || strings.Contains(upstreamLogURL, "proxy-user") || strings.Contains(upstreamLogURL, "proxy-secret") || strings.Contains(upstreamLogURL, "@") {
+		t.Fatalf("access log upstream url was not redacted: %q", upstreamLogURL)
+	}
+	if strings.Contains(logsBody, "proxy-user") || strings.Contains(logsBody, "proxy-secret") {
+		t.Fatalf("access logs leaked upstream userinfo: %s", logsBody)
 	}
 	if requestHost := firstMetadataString(helloLog.Metadata, "request_host"); requestHost == "" {
 		t.Fatalf("access log missing request_host: %#v", helloLog.Metadata)

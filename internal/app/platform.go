@@ -526,7 +526,7 @@ func (s *Server) handleWebAssetProxy(w http.ResponseWriter, r *http.Request, ass
 		"duration_ms":   duration.Milliseconds(),
 		"user_agent":    r.UserAgent(),
 		"referer":       r.Referer(),
-		"upstream":      target.String(),
+		"upstream":      redactedURLString(target),
 	}
 	applyGatewayRouteMetadata(metadata, gatewayRoute)
 	if certificateID := webAssetMTLSCertificateID(asset); certificateID != "" {
@@ -753,6 +753,15 @@ func rewriteWebAssetSetCookies(resp *http.Response, proxyBasePath string) {
 
 func webAssetProxyReservedCookie(name string) bool {
 	return strings.EqualFold(strings.TrimSpace(name), authCookieName)
+}
+
+func redactedURLString(target *url.URL) string {
+	if target == nil {
+		return ""
+	}
+	redacted := *target
+	redacted.User = nil
+	return redacted.String()
 }
 
 func sameURLOrigin(left, right *url.URL) bool {

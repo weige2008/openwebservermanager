@@ -4937,6 +4937,128 @@ func TestAgentGatewayRegistrationHeartbeatAndTimeout(t *testing.T) {
 	}
 }
 
+func TestGatewayGroupStatusResolvesMembers(t *testing.T) {
+	handler, adminCookie := newTestHandler(t)
+
+	onlineAgentRec := assertStatus(t, handler, http.MethodPost, "/api/admin/agent-gateways", map[string]any{
+		"name":   "prod-edge-online",
+		"type":   "agent",
+		"status": "online",
+		"tags":   []string{"prod", "edge"},
+		"metadata": map[string]any{
+			"capabilities":    []string{"ssh", "rdp"},
+			"latency_ms":      25,
+			"active_sessions": 2,
+		},
+	}, adminCookie, http.StatusCreated)
+	var onlineAgent model.PlatformItem
+	decodeResponse(t, onlineAgentRec, &onlineAgent)
+
+	offlineAgentRec := assertStatus(t, handler, http.MethodPost, "/api/admin/agent-gateways", map[string]any{
+		"name":   "prod-edge-offline",
+		"type":   "agent",
+		"status": "offline",
+		"tags":   []string{"prod", "edge"},
+		"metadata": map[string]any{
+			"capabilities":    []string{"ssh"},
+			"latency_ms":      5,
+			"offline_reason":  "test offline",
+			"active_sessions": 0,
+		},
+	}, adminCookie, http.StatusCreated)
+	var offlineAgent model.PlatformItem
+	decodeResponse(t, offlineAgentRec, &offlineAgent)
+
+	devAgentRec := assertStatus(t, handler, http.MethodPost, "/api/admin/agent-gateways", map[string]any{
+		"name":     "dev-edge-online",
+		"type":     "agent",
+		"status":   "online",
+		"tags":     []string{"dev"},
+		"metadata": map[string]any{"capabilities": []string{"ssh"}},
+	}, adminCookie, http.StatusCreated)
+	var devAgent model.PlatformItem
+	decodeResponse(t, devAgentRec, &devAgent)
+
+	sshGatewayRec := assertStatus(t, handler, http.MethodPost, "/api/admin/ssh-gateways", map[string]any{
+		"name":   "native-ssh-gateway",
+		"type":   "builtin",
+		"status": "enabled",
+		"host":   "127.0.0.1",
+		"port":   2022,
+	}, adminCookie, http.StatusCreated)
+	var sshGateway model.PlatformItem
+	decodeResponse(t, sshGatewayRec, &sshGateway)
+
+	manualGroupRec := assertStatus(t, handler, http.MethodPost, "/api/admin/gateway-groups", map[string]any{
+		"name":   "manual failover",
+		"type":   "manual",
+		"status": "enabled",
+		"metadata": map[string]any{
+			"gateway_ids": []string{offlineAgent.ID, sshGateway.ID, onlineAgent.ID},
+		},
+	}, adminCookie, http.StatusCreated)
+	var manualGroup model.PlatformItem
+	decodeResponse(t, manualGroupRec, &manualGroup)
+
+	autoGroupRec := assertStatus(t, handler, http.MethodPost, "/api/admin/gateway-groups", map[string]any{
+		"name":   "auto prod ssh",
+		"type":   "auto",
+		"status": "enabled",
+		"metadata": map[string]any{
+			"labels":       []string{"prod", "edge"},
+			"capabilities": []string{"ssh"},
+		},
+	}, adminCookie, http.StatusCreated)
+	var autoGroup model.PlatformItem
+	decodeResponse(t, autoGroupRec, &autoGroup)
+
+	statusRec := assertStatus(t, handler, http.MethodGet, "/api/admin/gateway-groups/status", nil, adminCookie, http.StatusOK)
+	var statusPayload struct {
+		Items []gatewayGroupStatus `json:"items"`
+	}
+	decodeResponse(t, statusRec, &statusPayload)
+	manualStatus := gatewayGroupStatusByID(statusPayload.Items, manualGroup.ID)
+	if manualStatus == nil {
+		t.Fatalf("manual gateway group missing from status payload: %s", statusRec.Body.String())
+	}
+	if len(manualStatus.Members) != 3 || manualStatus.Online != 2 || manualStatus.Offline != 1 || manualStatus.SelectedGatewayID != sshGateway.ID {
+		t.Fatalf("manual gateway group status = %#v", manualStatus)
+	}
+	if manualStatus.Members[0].ID != offlineAgent.ID || manualStatus.Members[1].ID != sshGateway.ID || manualStatus.Members[2].ID != onlineAgent.ID {
+		t.Fatalf("manual gateway group did not preserve configured order: %#v", manualStatus.Members)
+	}
+
+	autoStatus := gatewayGroupStatusByID(statusPayload.Items, autoGroup.ID)
+	if autoStatus == nil {
+		t.Fatalf("auto gateway group missing from status payload: %s", statusRec.Body.String())
+	}
+	if len(autoStatus.Members) != 2 || autoStatus.Online != 1 || autoStatus.Offline != 1 || autoStatus.SelectedGatewayID != onlineAgent.ID {
+		t.Fatalf("auto gateway group status = %#v", autoStatus)
+	}
+	for _, member := range autoStatus.Members {
+		if member.ID == devAgent.ID || member.ID == sshGateway.ID {
+			t.Fatalf("auto gateway group included non-matching gateway: %#v", autoStatus.Members)
+		}
+	}
+
+	listRec := assertStatus(t, handler, http.MethodGet, "/api/admin/gateway-groups", nil, adminCookie, http.StatusOK)
+	listBody := listRec.Body.String()
+	for _, want := range []string{"member_count", "online_count", "offline_count", "selected_gateway_id", sshGateway.ID, onlineAgent.ID} {
+		if !strings.Contains(listBody, want) {
+			t.Fatalf("gateway group list missing %q: %s", want, listBody)
+		}
+	}
+}
+
+func gatewayGroupStatusByID(items []gatewayGroupStatus, id string) *gatewayGroupStatus {
+	for index := range items {
+		if items[index].ID == id {
+			return &items[index]
+		}
+	}
+	return nil
+}
+
 func TestResourceOperationEndpoints(t *testing.T) {
 	handler, cookie := newTestHandler(t)
 	server := handler.(*Server)

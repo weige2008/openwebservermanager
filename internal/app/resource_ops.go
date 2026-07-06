@@ -240,6 +240,9 @@ func (s *Server) handleResourceOperation(w http.ResponseWriter, r *http.Request,
 	case path == "admin/agent-gateways/status":
 		s.handleAgentGatewayStatus(w, r)
 		return true
+	case path == "admin/gateway-groups/status":
+		s.handleGatewayGroupStatus(w, r)
+		return true
 	case strings.HasPrefix(path, "admin/agent-gateways/") && strings.HasSuffix(path, "/token"):
 		id := pathSegmentFromTrimmed(path, 2)
 		s.handleAgentGatewayToken(w, r, id)

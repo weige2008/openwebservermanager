@@ -149,6 +149,9 @@ func (s *Server) handleCollection(w http.ResponseWriter, r *http.Request, collec
 			}
 			items = departmentTreeItems(platform)
 		}
+		if collection == "gateway_groups" {
+			items = s.gatewayGroupsWithStatus(items)
+		}
 		writeJSON(w, http.StatusOK, map[string]any{"items": items})
 	case id != "" && r.Method == http.MethodGet:
 		if collection == "agent_gateways" {

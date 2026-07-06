@@ -415,6 +415,27 @@ export function PlatformTablePage({ config }: { config: PlatformPageConfig }) {
           ),
         },
       ] satisfies ColumnDef<PlatformItem>[] : []),
+      ...(config.collection === 'gateway_groups' ? [
+        {
+          header: app.t('members', '成员'),
+          cell: ({ row }) => <span className='font-mono text-xs'>{formatNumberValue(row.original.metadata?.member_count)}</span>,
+        },
+        {
+          header: app.t('online', '在线'),
+          cell: ({ row }) => (
+            <span className='font-mono text-xs'>
+              {formatNumberValue(row.original.metadata?.online_count)} / {formatNumberValue(row.original.metadata?.offline_count)}
+            </span>
+          ),
+        },
+        {
+          header: app.t('selectedGateway', '当前网关'),
+          cell: ({ row }) => {
+            const selected = metadataText(row.original.metadata?.selected_gateway_id)
+            return selected ? <Badge tone='success'>{selected}</Badge> : <Badge tone='warning'>{app.t('none', '无')}</Badge>
+          },
+        },
+      ] satisfies ColumnDef<PlatformItem>[] : []),
       { header: app.t('group'), accessorFn: (row) => row.group || row.owner_id || row.target_id || '-' },
       { header: app.t('createdAt'), cell: ({ row }) => formatDate(row.original.created_at) },
       {

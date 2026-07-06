@@ -4864,20 +4864,21 @@ function AccessStatsPage({ config }: { config: PlatformPageConfig }) {
   const metrics = [
     { label: 'PV', value: formatNumberValue(summaryMetadata.pv) },
     { label: 'UV', value: formatNumberValue(summaryMetadata.uv) },
-    { label: '独立 IP', value: formatNumberValue(summaryMetadata.unique_ips) },
-    { label: '请求数', value: formatNumberValue(summaryMetadata.request_count) },
-    { label: '流量', value: formatBytesValue(summaryMetadata.traffic_bytes) },
-    { label: '平均耗时', value: `${formatNumberValue(summaryMetadata.average_duration_ms)} ms` },
-    { label: '错误率', value: formatPercentValue(summaryMetadata.error_rate) },
-    { label: '错误数', value: formatNumberValue(summaryMetadata.error_count) },
+    { label: app.t('accessStats.uniqueIPs', 'Unique IPs'), value: formatNumberValue(summaryMetadata.unique_ips) },
+    { label: app.t('accessStats.requestCount', 'Requests'), value: formatNumberValue(summaryMetadata.request_count) },
+    { label: app.t('accessStats.traffic', 'Traffic'), value: formatBytesValue(summaryMetadata.traffic_bytes) },
+    { label: app.t('accessStats.averageDuration', 'Avg duration'), value: `${formatNumberValue(summaryMetadata.average_duration_ms)} ms` },
+    { label: app.t('accessStats.errorRate', 'Error rate'), value: formatPercentValue(summaryMetadata.error_rate) },
+    { label: app.t('accessStats.errorCount', 'Errors'), value: formatNumberValue(summaryMetadata.error_count) },
   ]
   const sections = [
-    { type: 'top_pages', title: '热门页面' },
-    { type: 'referrers', title: '来源统计' },
-    { type: 'assets', title: '资产排行' },
-    { type: 'status_codes', title: '状态码' },
-    { type: 'methods', title: '请求方法' },
+    { type: 'top_pages', title: app.t('accessStats.topPages', 'Top pages') },
+    { type: 'referrers', title: app.t('accessStats.referrers', 'Referrers') },
+    { type: 'assets', title: app.t('accessStats.assets', 'Assets') },
+    { type: 'status_codes', title: app.t('accessStats.statusCodes', 'Status codes') },
+    { type: 'methods', title: app.t('accessStats.methods', 'Methods') },
   ]
+  const emptyStatsLabel = app.t('accessStats.noData', 'No access statistics yet.')
 
   return (
     <CardStaggerContainer>
@@ -4893,7 +4894,7 @@ function AccessStatsPage({ config }: { config: PlatformPageConfig }) {
             </div>
             <Button variant='outline' onClick={() => void load()} disabled={loading}>
               <RefreshCw className={cn('size-4', loading && 'animate-spin')} />
-              刷新
+              {app.t('refresh', 'Refresh')}
             </Button>
           </CardHeader>
           <CardContent className='grid gap-5'>
@@ -4907,7 +4908,7 @@ function AccessStatsPage({ config }: { config: PlatformPageConfig }) {
             </div>
             <div className='grid gap-3 lg:grid-cols-2'>
               {sections.map((section) => (
-                <AccessStatsRank key={section.type} title={section.title} item={items.find((entry) => entry.type === section.type)} />
+                <AccessStatsRank key={section.type} title={section.title} item={items.find((entry) => entry.type === section.type)} emptyLabel={emptyStatsLabel} />
               ))}
             </div>
           </CardContent>
@@ -4917,7 +4918,7 @@ function AccessStatsPage({ config }: { config: PlatformPageConfig }) {
   )
 }
 
-function AccessStatsRank({ title, item }: { title: string; item?: PlatformItem }) {
+function AccessStatsRank({ title, item, emptyLabel }: { title: string; item?: PlatformItem; emptyLabel: string }) {
   const entries = objectArrayValue(item?.metadata?.entries)
   return (
     <section className='rounded-xl border border-border bg-background/60 p-4'>
@@ -4932,7 +4933,7 @@ function AccessStatsRank({ title, item }: { title: string; item?: PlatformItem }
             <strong className='font-mono text-xs'>{formatNumberValue(entry.value)}</strong>
           </div>
         )) : (
-          <div className='rounded-lg border border-dashed border-border p-4 text-sm text-muted-foreground'>暂无统计数据。</div>
+          <div className='rounded-lg border border-dashed border-border p-4 text-sm text-muted-foreground'>{emptyLabel}</div>
         )}
       </div>
     </section>

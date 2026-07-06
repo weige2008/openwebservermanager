@@ -333,6 +333,12 @@ func (s *Server) handleWebAssetProxy(w http.ResponseWriter, r *http.Request, ass
 	targetQuery := target.RawQuery
 	proxyBasePath := webAssetProxyBasePath(r.URL.Path, proxyPath)
 	proxy := &httputil.ReverseProxy{}
+	if transport, err := s.webAssetProxyTransport(asset, target); err != nil {
+		writeError(w, http.StatusBadRequest, err.Error())
+		return
+	} else if transport != nil {
+		proxy.Transport = transport
+	}
 	proxy.ErrorHandler = func(rw http.ResponseWriter, req *http.Request, proxyErr error) {
 		writeError(rw, http.StatusBadGateway, proxyErr.Error())
 	}
@@ -365,6 +371,21 @@ func (s *Server) handleWebAssetProxy(w http.ResponseWriter, r *http.Request, ass
 	recorder := &statusCaptureWriter{ResponseWriter: w, status: http.StatusOK}
 	proxy.ServeHTTP(recorder, r)
 	duration := time.Since(started)
+	metadata := map[string]any{
+		"asset_name":    asset.Name,
+		"client_ip":     s.clientIP(r),
+		"method":        r.Method,
+		"uri":           r.URL.RequestURI(),
+		"status_code":   recorder.status,
+		"response_size": recorder.bytes,
+		"duration_ms":   duration.Milliseconds(),
+		"user_agent":    r.UserAgent(),
+		"referer":       r.Referer(),
+		"upstream":      target.String(),
+	}
+	if certificateID := webAssetMTLSCertificateID(asset); certificateID != "" {
+		metadata["mtls_certificate_id"] = certificateID
+	}
 	_, _ = s.cfg.Store.CreatePlatformItem("access_logs", model.PlatformItemRequest{
 		Name:        r.Method + " " + r.URL.RequestURI(),
 		Type:        r.Method,
@@ -373,18 +394,7 @@ func (s *Server) handleWebAssetProxy(w http.ResponseWriter, r *http.Request, ass
 		OwnerID:     userID,
 		TargetID:    asset.ID,
 		Description: "proxied web asset request",
-		Metadata: map[string]any{
-			"asset_name":    asset.Name,
-			"client_ip":     s.clientIP(r),
-			"method":        r.Method,
-			"uri":           r.URL.RequestURI(),
-			"status_code":   recorder.status,
-			"response_size": recorder.bytes,
-			"duration_ms":   duration.Milliseconds(),
-			"user_agent":    r.UserAgent(),
-			"referer":       r.Referer(),
-			"upstream":      target.String(),
-		},
+		Metadata:    metadata,
 	})
 	_ = s.audit(r, "access.web.proxy", asset.ID, model.ProtocolHTTP, "proxied web asset request")
 }

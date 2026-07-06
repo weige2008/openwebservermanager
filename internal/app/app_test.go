@@ -9,13 +9,19 @@ import (
 	"crypto/ed25519"
 	"crypto/elliptic"
 	"crypto/rand"
+	"crypto/rsa"
 	"crypto/sha256"
+	"crypto/tls"
+	"crypto/x509"
+	"crypto/x509/pkix"
 	"encoding/base64"
 	"encoding/binary"
 	"encoding/json"
+	"encoding/pem"
 	"errors"
 	"io"
 	"log/slog"
+	"math/big"
 	"mime/multipart"
 	"net"
 	"net/http"
@@ -1386,6 +1392,87 @@ func TestWebAssetProxyRequiresAuthorizationAndLogs(t *testing.T) {
 		if !strings.Contains(statsBody, want) {
 			t.Fatalf("access stats did not include %q", want)
 		}
+	}
+}
+
+func TestWebAssetProxyUsesMTLSCertificate(t *testing.T) {
+	caPEM, clientCertPEM, clientKeyPEM, serverCert := testMTLSMaterials(t)
+	clientCAPool := x509.NewCertPool()
+	if !clientCAPool.AppendCertsFromPEM(caPEM) {
+		t.Fatal("failed to build client CA pool")
+	}
+	upstream := httptest.NewUnstartedServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.TLS == nil || len(r.TLS.PeerCertificates) == 0 {
+			t.Fatal("upstream did not receive a client certificate")
+		}
+		if got := r.TLS.PeerCertificates[0].Subject.CommonName; got != "owm-mtls-client" {
+			t.Fatalf("client certificate CN = %q, want owm-mtls-client", got)
+		}
+		_, _ = w.Write([]byte("mtls web ok"))
+	}))
+	upstream.TLS = &tls.Config{
+		Certificates: []tls.Certificate{serverCert},
+		ClientAuth:   tls.RequireAndVerifyClientCert,
+		ClientCAs:    clientCAPool,
+		MinVersion:   tls.VersionTLS12,
+	}
+	upstream.StartTLS()
+	defer upstream.Close()
+
+	handler, adminCookie := newTestHandler(t)
+	srv := handler.(*Server)
+	cert, err := srv.cfg.Store.CreatePlatformItem("certificates", model.PlatformItemRequest{
+		Name:   "web client certificate",
+		Type:   "uploaded",
+		Status: "issued",
+		Metadata: map[string]any{
+			"certificate":        string(clientCertPEM),
+			"private_key":        string(clientKeyPEM),
+			"has_private_key":    true,
+			"mtls_enabled":       true,
+			"mtls_client_ca":     string(caPEM),
+			"mtls_client_ca_set": true,
+		},
+	})
+	if err != nil {
+		t.Fatalf("create mTLS certificate: %v", err)
+	}
+	userRec := assertStatus(t, handler, http.MethodPost, "/api/admin/users", map[string]any{
+		"name":     "web-mtls-user",
+		"type":     "local",
+		"status":   "enabled",
+		"password": "password123",
+		"metadata": map[string]any{"role": "user"},
+	}, adminCookie, http.StatusCreated)
+	var user model.PlatformItem
+	decodeResponse(t, userRec, &user)
+	webRec := assertStatus(t, handler, http.MethodPost, "/api/admin/websites", map[string]any{
+		"name":   "mTLS upstream",
+		"type":   "https",
+		"status": "enabled",
+		"metadata": map[string]any{
+			"target_url":     upstream.URL,
+			"certificate_id": cert.ID,
+		},
+	}, adminCookie, http.StatusCreated)
+	var webAsset model.PlatformItem
+	decodeResponse(t, webRec, &webAsset)
+	assertStatus(t, handler, http.MethodPost, "/api/admin/authorizations/websites", map[string]any{
+		"name":      "web-mtls-user upstream",
+		"owner_id":  user.ID,
+		"target_id": webAsset.ID,
+		"status":    "enabled",
+	}, adminCookie, http.StatusCreated)
+	loginRec := assertStatus(t, handler, http.MethodPost, "/api/auth/login", map[string]any{"username": "web-mtls-user", "password": "password123"}, nil, http.StatusOK)
+	userCookie := loginRec.Result().Cookies()[0]
+
+	proxyRec := assertStatus(t, handler, http.MethodGet, "/api/access/http/"+webAsset.ID+"/proxy/", nil, userCookie, http.StatusOK)
+	if proxyRec.Body.String() != "mtls web ok" {
+		t.Fatalf("mTLS proxy body = %q, want mtls web ok", proxyRec.Body.String())
+	}
+	logsRec := assertStatus(t, handler, http.MethodGet, "/api/admin/audit/access-logs", nil, adminCookie, http.StatusOK)
+	if !strings.Contains(logsRec.Body.String(), cert.ID) || !strings.Contains(logsRec.Body.String(), "mtls_certificate_id") {
+		t.Fatalf("access logs missing mTLS certificate id: %s", logsRec.Body.String())
 	}
 }
 
@@ -4096,6 +4183,86 @@ func testPasskeyAssertionAuthData(t *testing.T, rpID string, signCount uint32) [
 	binary.BigEndian.PutUint32(counter, signCount)
 	authData = append(authData, counter...)
 	return authData
+}
+
+func testMTLSMaterials(t *testing.T) ([]byte, []byte, []byte, tls.Certificate) {
+	t.Helper()
+	caKey, err := rsa.GenerateKey(rand.Reader, 2048)
+	if err != nil {
+		t.Fatalf("generate CA key: %v", err)
+	}
+	caTemplate := &x509.Certificate{
+		SerialNumber:          testSerialNumber(t),
+		Subject:               pkix.Name{CommonName: "owm-test-ca"},
+		NotBefore:             time.Now().Add(-time.Hour),
+		NotAfter:              time.Now().Add(24 * time.Hour),
+		KeyUsage:              x509.KeyUsageCertSign | x509.KeyUsageDigitalSignature,
+		BasicConstraintsValid: true,
+		IsCA:                  true,
+	}
+	caDER, err := x509.CreateCertificate(rand.Reader, caTemplate, caTemplate, &caKey.PublicKey, caKey)
+	if err != nil {
+		t.Fatalf("create CA certificate: %v", err)
+	}
+	caCert, err := x509.ParseCertificate(caDER)
+	if err != nil {
+		t.Fatalf("parse CA certificate: %v", err)
+	}
+
+	serverKey, err := rsa.GenerateKey(rand.Reader, 2048)
+	if err != nil {
+		t.Fatalf("generate server key: %v", err)
+	}
+	serverTemplate := &x509.Certificate{
+		SerialNumber: testSerialNumber(t),
+		Subject:      pkix.Name{CommonName: "127.0.0.1"},
+		NotBefore:    time.Now().Add(-time.Hour),
+		NotAfter:     time.Now().Add(24 * time.Hour),
+		KeyUsage:     x509.KeyUsageDigitalSignature | x509.KeyUsageKeyEncipherment,
+		ExtKeyUsage:  []x509.ExtKeyUsage{x509.ExtKeyUsageServerAuth},
+		IPAddresses:  []net.IP{net.ParseIP("127.0.0.1"), net.ParseIP("::1")},
+		DNSNames:     []string{"localhost"},
+	}
+	serverDER, err := x509.CreateCertificate(rand.Reader, serverTemplate, caCert, &serverKey.PublicKey, caKey)
+	if err != nil {
+		t.Fatalf("create server certificate: %v", err)
+	}
+	serverCertPEM := pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: serverDER})
+	serverKeyPEM := pem.EncodeToMemory(&pem.Block{Type: "RSA PRIVATE KEY", Bytes: x509.MarshalPKCS1PrivateKey(serverKey)})
+	serverCert, err := tls.X509KeyPair(serverCertPEM, serverKeyPEM)
+	if err != nil {
+		t.Fatalf("parse server key pair: %v", err)
+	}
+
+	clientKey, err := rsa.GenerateKey(rand.Reader, 2048)
+	if err != nil {
+		t.Fatalf("generate client key: %v", err)
+	}
+	clientTemplate := &x509.Certificate{
+		SerialNumber: testSerialNumber(t),
+		Subject:      pkix.Name{CommonName: "owm-mtls-client"},
+		NotBefore:    time.Now().Add(-time.Hour),
+		NotAfter:     time.Now().Add(24 * time.Hour),
+		KeyUsage:     x509.KeyUsageDigitalSignature,
+		ExtKeyUsage:  []x509.ExtKeyUsage{x509.ExtKeyUsageClientAuth},
+	}
+	clientDER, err := x509.CreateCertificate(rand.Reader, clientTemplate, caCert, &clientKey.PublicKey, caKey)
+	if err != nil {
+		t.Fatalf("create client certificate: %v", err)
+	}
+	caPEM := pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: caDER})
+	clientCertPEM := pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: clientDER})
+	clientKeyPEM := pem.EncodeToMemory(&pem.Block{Type: "RSA PRIVATE KEY", Bytes: x509.MarshalPKCS1PrivateKey(clientKey)})
+	return caPEM, clientCertPEM, clientKeyPEM, serverCert
+}
+
+func testSerialNumber(t *testing.T) *big.Int {
+	t.Helper()
+	serial, err := rand.Int(rand.Reader, new(big.Int).Lsh(big.NewInt(1), 128))
+	if err != nil {
+		t.Fatalf("generate serial: %v", err)
+	}
+	return serial
 }
 
 func newTestHandler(t *testing.T) (http.Handler, *http.Cookie) {

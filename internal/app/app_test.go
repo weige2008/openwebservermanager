@@ -2464,6 +2464,21 @@ func TestWebAssetProxyRequiresAuthorizationAndLogs(t *testing.T) {
 			}
 			w.Header().Set("X-Upstream", "ok")
 			_, _ = w.Write([]byte("proxied ok"))
+		case "/root/page":
+			if r.Header.Get("Accept-Encoding") != "identity" {
+				t.Fatalf("upstream compressed response control = %q, want identity", r.Header.Get("Accept-Encoding"))
+			}
+			w.Header().Set("Content-Type", "text/html; charset=utf-8")
+			body := `<html><head>` +
+				`<script src="/static/app.js"></script>` +
+				`<style>.hero{background:url('/root/assets/bg.png')}.external{background:url("https://cdn.example.test/bg.png")}</style>` +
+				`</head><body>` +
+				`<a href="/root/dashboard?tab=1">Dashboard</a>` +
+				`<a href="http://` + r.Host + `/root/reports">Reports</a>` +
+				`<a href="mailto:ops@example.test">Mail</a>` +
+				`<form action="http://` + r.Host + `/root/login?next=/root/dashboard"></form>` +
+				`</body></html>`
+			_, _ = w.Write([]byte(body))
 		case "/root/redirect":
 			http.SetCookie(w, &http.Cookie{Name: "upstream_session", Value: "abc", Domain: "upstream.internal", Path: "/root", HttpOnly: true})
 			http.SetCookie(w, &http.Cookie{Name: authCookieName, Value: "upstream", Domain: "upstream.internal", Path: "/", HttpOnly: true})
@@ -2478,7 +2493,7 @@ func TestWebAssetProxyRequiresAuthorizationAndLogs(t *testing.T) {
 		case "/root/noauth":
 			_, _ = w.Write([]byte("cleared credentials ok"))
 		default:
-			t.Fatalf("upstream path = %q, want /root/hello, /root/redirect, /root/fail, /root/newauth or /root/noauth", r.URL.Path)
+			t.Fatalf("upstream path = %q, want /root/hello, /root/page, /root/redirect, /root/fail, /root/newauth or /root/noauth", r.URL.Path)
 		}
 	}))
 	defer upstream.Close()
@@ -2584,6 +2599,30 @@ func TestWebAssetProxyRequiresAuthorizationAndLogs(t *testing.T) {
 	}, http.StatusOK)
 	if proxyRec.Body.String() != "proxied ok" || proxyRec.Header().Get("X-Upstream") != "ok" {
 		t.Fatalf("proxy response body/header = %q/%q", proxyRec.Body.String(), proxyRec.Header().Get("X-Upstream"))
+	}
+	pageRec := assertStatusWithHeaders(t, handler, http.MethodGet, "/api/access/http/"+webAsset.ID+"/proxy/page", nil, userCookie, map[string]string{
+		"Accept-Encoding": "gzip",
+		"User-Agent":      "openwebservermanager-test",
+	}, http.StatusOK)
+	pageBody := pageRec.Body.String()
+	proxyBase := "/api/access/http/" + webAsset.ID + "/proxy"
+	for _, want := range []string{
+		`src="` + proxyBase + `/static/app.js"`,
+		`href="` + proxyBase + `/dashboard?tab=1"`,
+		`href="` + proxyBase + `/reports"`,
+		`action="` + proxyBase + `/login?next=/root/dashboard"`,
+		`url('` + proxyBase + `/assets/bg.png')`,
+		`href="mailto:ops@example.test"`,
+		`url("https://cdn.example.test/bg.png")`,
+	} {
+		if !strings.Contains(pageBody, want) {
+			t.Fatalf("rewritten proxy page missing %q: %s", want, pageBody)
+		}
+	}
+	for _, leaked := range []string{`href="/root/dashboard`, `src="/static/app.js"`, upstreamURL.Host + `/root/reports`, upstreamURL.Host + `/root/login`} {
+		if strings.Contains(pageBody, leaked) {
+			t.Fatalf("rewritten proxy page retained upstream URL %q: %s", leaked, pageBody)
+		}
 	}
 	redirectRec := assertStatus(t, handler, http.MethodGet, "/api/access/http/"+webAsset.ID+"/proxy/redirect", nil, userCookie, http.StatusFound)
 	if got, want := redirectRec.Header().Get("Location"), "/api/access/http/"+webAsset.ID+"/proxy/dashboard?tab=1"; got != want {

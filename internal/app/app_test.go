@@ -7992,6 +7992,28 @@ func TestAuditSessionOperations(t *testing.T) {
 	auditorDownload := assertStatus(t, handler, http.MethodGet, "/api/admin/audit/offline-sessions/"+rdpSession.ID+"/recording", nil, auditorCookie, http.StatusOK)
 	assertZipContains(t, auditorDownload.Body.Bytes(), "recording.guac", "frames")
 	assertStatus(t, handler, http.MethodPost, "/api/admin/audit/online-sessions/"+rdpSession.ID+"/disconnect", nil, auditorCookie, http.StatusForbidden)
+	assertStatus(t, handler, http.MethodPost, "/api/admin/roles", map[string]any{
+		"name":   "recording-limited",
+		"type":   "custom",
+		"status": "enabled",
+		"metadata": map[string]any{
+			"api_permissions": []string{"GET /api/admin/audit/offline-sessions/*"},
+		},
+	}, adminCookie, http.StatusCreated)
+	assertStatus(t, handler, http.MethodPost, "/api/admin/users", map[string]any{
+		"name":     "recording-limited-user",
+		"type":     "local",
+		"status":   "enabled",
+		"password": "password123",
+		"metadata": map[string]any{"role": "recording-limited"},
+	}, adminCookie, http.StatusCreated)
+	limitedLogin := assertStatus(t, handler, http.MethodPost, "/api/auth/login", map[string]any{"username": "recording-limited-user", "password": "password123"}, nil, http.StatusOK)
+	limitedCookie := limitedLogin.Result().Cookies()[0]
+	assertStatus(t, handler, http.MethodGet, "/api/admin/audit/offline-sessions/"+rdpSession.ID+"/recording", nil, limitedCookie, http.StatusForbidden)
+	deniedRecordingLogs := assertStatus(t, handler, http.MethodGet, "/api/admin/audit/operation-logs", nil, adminCookie, http.StatusOK)
+	if !strings.Contains(deniedRecordingLogs.Body.String(), "audit.recording.access.denied") || !strings.Contains(deniedRecordingLogs.Body.String(), rdpSession.ID) {
+		t.Fatalf("denied recording access was not audited: %s", deniedRecordingLogs.Body.String())
+	}
 
 	adminDownload := assertStatus(t, handler, http.MethodGet, "/api/admin/audit/offline-sessions/"+rdpSession.ID+"/recording", nil, adminCookie, http.StatusOK)
 	assertZipContains(t, adminDownload.Body.Bytes(), "recording.guac", "frames")

@@ -3293,6 +3293,7 @@ type auditRecording struct {
 func (s *Server) auditRecordingTarget(w http.ResponseWriter, r *http.Request, id string) (auditRecording, bool) {
 	if session, ok := s.cfg.Store.GetSession(id); ok {
 		if !s.canAccessSession(r, session) {
+			_ = s.audit(r, "audit.recording.access.denied", id, session.Protocol, "recording access denied")
 			writeError(w, http.StatusForbidden, "session access denied")
 			return auditRecording{}, false
 		}
@@ -3308,6 +3309,7 @@ func (s *Server) auditRecordingTarget(w http.ResponseWriter, r *http.Request, id
 		return auditRecording{}, false
 	}
 	if !s.canAccessPlatformSession(r, item) {
+		_ = s.audit(r, "audit.recording.access.denied", id, item.Protocol, "recording access denied")
 		writeError(w, http.StatusForbidden, "session access denied")
 		return auditRecording{}, false
 	}

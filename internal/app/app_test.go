@@ -7238,9 +7238,28 @@ func TestBackupDeleteAndRetention(t *testing.T) {
 	if backupName == "." || backupName == "" {
 		t.Fatalf("backup path missing from metadata: %v", backupMetadata)
 	}
+	secondBackupRec := assertStatus(t, handler, http.MethodPost, "/api/admin/backups", nil, cookie, http.StatusCreated)
+	var secondBackupMetadata map[string]any
+	decodeResponse(t, secondBackupRec, &secondBackupMetadata)
+	secondBackupPath, _ := secondBackupMetadata["backup_path"].(string)
+	secondBackupName := filepath.Base(filepath.FromSlash(secondBackupPath))
+	if secondBackupName == "." || secondBackupName == "" || secondBackupName == backupName {
+		t.Fatalf("consecutive backups should have unique names, first=%q second=%q metadata=%v", backupName, secondBackupName, secondBackupMetadata)
+	}
+	if _, err := os.Stat(filepath.FromSlash(secondBackupPath)); err != nil {
+		t.Fatalf("second backup should exist: %v", err)
+	}
+	twoBackupListRec := assertStatus(t, handler, http.MethodGet, "/api/admin/backups", nil, cookie, http.StatusOK)
+	if !strings.Contains(twoBackupListRec.Body.String(), backupName) || !strings.Contains(twoBackupListRec.Body.String(), secondBackupName) {
+		t.Fatalf("backup list should include both consecutive backups: %s", twoBackupListRec.Body.String())
+	}
 	assertStatus(t, handler, http.MethodDelete, "/api/admin/backups/"+backupName, nil, cookie, http.StatusOK)
 	if _, err := os.Stat(filepath.FromSlash(backupPath)); !errors.Is(err, os.ErrNotExist) {
 		t.Fatalf("deleted backup still exists or stat failed unexpectedly: %v", err)
+	}
+	assertStatus(t, handler, http.MethodDelete, "/api/admin/backups/"+secondBackupName, nil, cookie, http.StatusOK)
+	if _, err := os.Stat(filepath.FromSlash(secondBackupPath)); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("deleted second backup still exists or stat failed unexpectedly: %v", err)
 	}
 	assertStatus(t, handler, http.MethodDelete, "/api/admin/backups/not-a-zip.txt", nil, cookie, http.StatusBadRequest)
 	logsRec := assertStatus(t, handler, http.MethodGet, "/api/admin/audit/operation-logs", nil, cookie, http.StatusOK)

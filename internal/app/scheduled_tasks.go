@@ -128,9 +128,7 @@ func (s *Server) createBackupSnapshot() (map[string]any, error) {
 	if err := os.MkdirAll(backupDir, 0o770); err != nil {
 		return nil, err
 	}
-	name := "backup-" + time.Now().UTC().Format("20060102-150405-000000000") + ".zip"
-	target := filepath.Join(backupDir, name)
-	output, err := os.OpenFile(target, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0o660)
+	target, output, err := createBackupSnapshotFile(backupDir, time.Now().UTC())
 	if err != nil {
 		return nil, err
 	}
@@ -182,6 +180,28 @@ func (s *Server) createBackupSnapshot() (map[string]any, error) {
 		"retention":         retention,
 		"retention_deleted": retention.DeletedCount,
 	}, nil
+}
+
+func createBackupSnapshotFile(backupDir string, now time.Time) (string, *os.File, error) {
+	for attempt := 0; attempt < 100; attempt++ {
+		name := backupSnapshotFilename(now, attempt)
+		target := filepath.Join(backupDir, name)
+		output, err := os.OpenFile(target, os.O_CREATE|os.O_WRONLY|os.O_EXCL, 0o660)
+		if errors.Is(err, os.ErrExist) {
+			continue
+		}
+		return target, output, err
+	}
+	return "", nil, fmt.Errorf("create unique backup file in %s: exhausted filename attempts", backupDir)
+}
+
+func backupSnapshotFilename(now time.Time, attempt int) string {
+	now = now.UTC()
+	stamp := fmt.Sprintf("%s-%09d", now.Format("20060102-150405"), now.Nanosecond())
+	if attempt > 0 {
+		stamp = fmt.Sprintf("%s-%02d", stamp, attempt)
+	}
+	return "backup-" + stamp + ".zip"
 }
 
 func addBackupFile(archive *zip.Writer, source, name string) error {

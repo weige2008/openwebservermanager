@@ -193,7 +193,7 @@ func addBackupFile(archive *zip.Writer, source, name string) error {
 
 func (s *Server) cleanupHistoryLogs(task model.PlatformItem) (map[string]any, error) {
 	settings := s.retentionSettings()
-	collections := []string{"login_logs", "operation_logs", "file_logs", "access_logs", "sql_logs", "exec_command_logs", "offline_sessions"}
+	collections := []string{"login_logs", "operation_logs", "file_logs", "access_logs", "sql_logs", "exec_command_logs"}
 	deletedByCollection := map[string]int{}
 	totalDeleted := 0
 	now := time.Now().UTC()
@@ -215,10 +215,151 @@ func (s *Server) cleanupHistoryLogs(task model.PlatformItem) (map[string]any, er
 			totalDeleted++
 		}
 	}
+	sessionCleanup, err := s.cleanupExpiredConnectionSessions(task.Metadata, settings, now)
+	if err != nil {
+		return nil, err
+	}
+	deletedByCollection["connection_sessions"] = sessionCleanup.DeletedSessions
+	deletedByCollection["offline_sessions"] = sessionCleanup.DeletedOfflineRecords
+	totalDeleted += sessionCleanup.DeletedSessions + sessionCleanup.DeletedOfflineRecords
 	return map[string]any{
-		"deleted_count": totalDeleted,
-		"deleted":       deletedByCollection,
+		"deleted_count":          totalDeleted,
+		"deleted":                deletedByCollection,
+		"recordings_deleted":     sessionCleanup.DeletedRecordings,
+		"recording_bytes":        sessionCleanup.DeletedRecordingBytes,
+		"session_retention_days": sessionCleanup.RetentionDays,
 	}, nil
+}
+
+type sessionCleanupResult struct {
+	RetentionDays         int
+	DeletedSessions       int
+	DeletedOfflineRecords int
+	DeletedRecordings     int
+	DeletedRecordingBytes int64
+}
+
+func (s *Server) cleanupExpiredConnectionSessions(taskMetadata, settings map[string]any, now time.Time) (sessionCleanupResult, error) {
+	days := sessionRetentionDays(taskMetadata, settings, 90)
+	cutoff := now.AddDate(0, 0, -days)
+	result := sessionCleanupResult{RetentionDays: days}
+	_, _, sessions, _ := s.cfg.Store.Bootstrap()
+	for _, session := range sessions {
+		if session.Status == model.SessionActive || session.Status == model.SessionPending {
+			continue
+		}
+		if retentionTime := connectionSessionRetentionTime(session); retentionTime.IsZero() || retentionTime.After(cutoff) {
+			continue
+		}
+		recordingDeleted, recordingBytes, err := s.deleteSessionRecordingPath(session.RecordingPath)
+		if err != nil {
+			return result, err
+		}
+		if recordingDeleted {
+			result.DeletedRecordings++
+			result.DeletedRecordingBytes += recordingBytes
+		}
+		if err := s.cfg.Store.DeleteSession(session.ID); err != nil && !errors.Is(err, os.ErrNotExist) {
+			return result, err
+		}
+		result.DeletedSessions++
+	}
+	offline, err := s.cfg.Store.ListPlatformItems("offline_sessions")
+	if err != nil {
+		return result, err
+	}
+	for _, item := range offline {
+		if retentionTime := offlineSessionRetentionTime(item); retentionTime.IsZero() || retentionTime.After(cutoff) {
+			continue
+		}
+		recordingDeleted, recordingBytes, err := s.deleteSessionRecordingPath(firstMetadataString(item.Metadata, "recording_path"))
+		if err != nil {
+			return result, err
+		}
+		if recordingDeleted {
+			result.DeletedRecordings++
+			result.DeletedRecordingBytes += recordingBytes
+		}
+		if err := s.cfg.Store.DeletePlatformItem("offline_sessions", item.ID); err != nil && !errors.Is(err, os.ErrNotExist) {
+			return result, err
+		}
+		result.DeletedOfflineRecords++
+	}
+	return result, nil
+}
+
+func sessionRetentionDays(taskMetadata, settings map[string]any, fallback int) int {
+	keys := []string{
+		"connection_sessions_days",
+		"connection_session_days",
+		"sessions_days",
+		"session_days",
+		"offline_sessions_days",
+		"offline_session_days",
+		"recordings_days",
+		"recording_days",
+		"retention_days",
+		"days",
+	}
+	for _, key := range keys {
+		if value, ok := metadataInt(taskMetadata[key]); ok {
+			return maxInt(value, 0)
+		}
+	}
+	for _, key := range keys {
+		if value, ok := metadataInt(settings[key]); ok {
+			return maxInt(value, 0)
+		}
+	}
+	return fallback
+}
+
+func connectionSessionRetentionTime(session model.ConnectionSession) time.Time {
+	if session.EndedAt != nil && !session.EndedAt.IsZero() {
+		return session.EndedAt.UTC()
+	}
+	if !session.LastActivityAt.IsZero() {
+		return session.LastActivityAt.UTC()
+	}
+	return session.StartedAt.UTC()
+}
+
+func offlineSessionRetentionTime(item model.PlatformItem) time.Time {
+	if value, ok := metadataTime(item.Metadata["ended_at"]); ok {
+		return value.UTC()
+	}
+	if !item.UpdatedAt.IsZero() {
+		return item.UpdatedAt.UTC()
+	}
+	return item.CreatedAt.UTC()
+}
+
+func (s *Server) deleteSessionRecordingPath(recordingPath string) (bool, int64, error) {
+	recordingPath = strings.TrimSpace(recordingPath)
+	if recordingPath == "" {
+		return false, 0, nil
+	}
+	if err := ensureChildPath(filepath.Join(s.cfg.DataDir, "recordings"), recordingPath); err != nil {
+		return false, 0, err
+	}
+	info, err := os.Stat(recordingPath)
+	if errors.Is(err, os.ErrNotExist) {
+		return false, 0, nil
+	}
+	if err != nil {
+		return false, 0, err
+	}
+	if !info.IsDir() {
+		return false, 0, errors.New("recording path is not a directory")
+	}
+	size := int64(0)
+	if value, ok := directoryUsage(recordingPath)["bytes"].(int64); ok {
+		size = value
+	}
+	if err := os.RemoveAll(recordingPath); err != nil {
+		return false, 0, err
+	}
+	return true, size, nil
 }
 
 func (s *Server) retentionSettings() map[string]any {

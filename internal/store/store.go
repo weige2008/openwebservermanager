@@ -2239,6 +2239,23 @@ func (s *Store) GetSession(id string) (model.ConnectionSession, bool) {
 	return session, ok
 }
 
+func (s *Store) DeleteSession(id string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	if _, ok := s.state.Sessions[id]; !ok {
+		return os.ErrNotExist
+	}
+	delete(s.state.Sessions, id)
+	if err := s.saveLocked(); err != nil {
+		return err
+	}
+	if _, err := s.db.Exec(`DELETE FROM platform_records WHERE id = ? AND collection IN (?, ?)`, id, "online_sessions", "offline_sessions"); err != nil {
+		return fmt.Errorf("delete session platform records: %w", err)
+	}
+	return nil
+}
+
 func (s *Store) UpdateSession(id string, update func(*model.ConnectionSession)) (model.ConnectionSession, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()

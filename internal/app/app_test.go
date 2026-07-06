@@ -6436,6 +6436,49 @@ func TestScheduledTaskRunners(t *testing.T) {
 	}, cookie, http.StatusCreated)
 	var oldSQL model.PlatformItem
 	decodeResponse(t, oldSQLRec, &oldSQL)
+	oldSession, err := srv.cfg.Store.CreateSession(model.ConnectionSession{
+		Protocol:     model.ProtocolRDP,
+		ServerID:     "old-rdp-asset",
+		CredentialID: "old-rdp-credential",
+		UserID:       "admin",
+		ClientIP:     "198.51.100.10",
+	})
+	if err != nil {
+		t.Fatalf("create old session: %v", err)
+	}
+	oldRecordingPath := filepath.Join(srv.cfg.DataDir, "recordings", oldSession.ID)
+	if err := os.MkdirAll(oldRecordingPath, 0o770); err != nil {
+		t.Fatalf("create old recording dir: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(oldRecordingPath, "recording.guac"), []byte("expired frames"), 0o660); err != nil {
+		t.Fatalf("write old recording: %v", err)
+	}
+	oldEndedAt := time.Now().UTC().AddDate(0, 0, -2)
+	oldStartedAt := oldEndedAt.Add(-time.Hour)
+	if _, err := srv.cfg.Store.UpdateSession(oldSession.ID, func(session *model.ConnectionSession) {
+		session.Status = model.SessionClosed
+		session.StartedAt = oldStartedAt
+		session.EndedAt = &oldEndedAt
+		session.RecordingPath = oldRecordingPath
+	}); err != nil {
+		t.Fatalf("close old session: %v", err)
+	}
+	activeSession, err := srv.cfg.Store.CreateSession(model.ConnectionSession{
+		Protocol:     model.ProtocolSSH,
+		ServerID:     "active-ssh-asset",
+		CredentialID: "active-ssh-credential",
+		UserID:       "admin",
+		ClientIP:     "198.51.100.11",
+	})
+	if err != nil {
+		t.Fatalf("create active session: %v", err)
+	}
+	if _, err := srv.cfg.Store.UpdateSession(activeSession.ID, func(session *model.ConnectionSession) {
+		session.Status = model.SessionActive
+		session.StartedAt = oldStartedAt
+	}); err != nil {
+		t.Fatalf("activate retained session: %v", err)
+	}
 	cleanupTaskRec := assertStatus(t, handler, http.MethodPost, "/api/admin/scheduled-tasks", map[string]any{
 		"name":     "Cleanup logs",
 		"type":     "log-cleanup",
@@ -6448,6 +6491,15 @@ func TestScheduledTaskRunners(t *testing.T) {
 	if !strings.Contains(cleanupRunRec.Body.String(), "deleted_count") {
 		t.Fatal("cleanup task did not report deleted count")
 	}
+	var cleanupLog model.PlatformItem
+	decodeResponse(t, cleanupRunRec, &cleanupLog)
+	deleted, _ := cleanupLog.Metadata["deleted"].(map[string]any)
+	if got, ok := metadataInt(deleted["connection_sessions"]); !ok || got != 1 {
+		t.Fatalf("cleanup deleted connection_sessions = %v/%v, want 1 in %#v", got, ok, cleanupLog.Metadata)
+	}
+	if got, ok := metadataInt(cleanupLog.Metadata["recordings_deleted"]); !ok || got != 1 {
+		t.Fatalf("cleanup recordings_deleted = %v/%v, want 1 in %#v", got, ok, cleanupLog.Metadata)
+	}
 	accessLogsRec := assertStatus(t, handler, http.MethodGet, "/api/admin/audit/access-logs", nil, cookie, http.StatusOK)
 	if strings.Contains(accessLogsRec.Body.String(), oldAccess.ID) {
 		t.Fatal("log cleanup did not delete old access log")
@@ -6455,6 +6507,19 @@ func TestScheduledTaskRunners(t *testing.T) {
 	sqlLogsRec := assertStatus(t, handler, http.MethodGet, "/api/admin/audit/sql-logs", nil, cookie, http.StatusOK)
 	if strings.Contains(sqlLogsRec.Body.String(), oldSQL.ID) {
 		t.Fatal("log cleanup did not delete old sql log")
+	}
+	if _, ok := srv.cfg.Store.GetSession(oldSession.ID); ok {
+		t.Fatal("log cleanup did not delete expired closed connection session")
+	}
+	if _, ok := srv.cfg.Store.GetSession(activeSession.ID); !ok {
+		t.Fatal("log cleanup deleted active connection session")
+	}
+	if _, err := os.Stat(oldRecordingPath); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("log cleanup did not delete expired recording directory: %v", err)
+	}
+	offlineSessionsRec := assertStatus(t, handler, http.MethodGet, "/api/admin/audit/offline-sessions", nil, cookie, http.StatusOK)
+	if strings.Contains(offlineSessionsRec.Body.String(), oldSession.ID) {
+		t.Fatal("log cleanup did not delete expired offline session index")
 	}
 
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {

@@ -189,11 +189,15 @@ func scheduledTaskInterval(metadata map[string]any) (time.Duration, bool) {
 
 func nextCronRun(expr string, after time.Time) (time.Time, bool) {
 	fields := strings.Fields(strings.TrimSpace(expr))
-	if len(fields) != 6 {
+	switch len(fields) {
+	case 5:
+		fields = append([]string{"0"}, fields...)
+	case 6:
+	default:
 		return time.Time{}, false
 	}
-	second, ok := cronSingleValue(fields[0], 0, 59)
-	if !ok {
+	seconds, ok := cronValues(fields[0], 0, 59)
+	if !ok || len(seconds) == 0 {
 		return time.Time{}, false
 	}
 	minutes, ok := cronValues(fields[1], 0, 59)
@@ -208,7 +212,7 @@ func nextCronRun(expr string, after time.Time) (time.Time, bool) {
 	if !ok || len(daysOfMonth) == 0 {
 		return time.Time{}, false
 	}
-	months, _, ok := cronValuesWithWildcard(fields[4], 1, 12)
+	months, _, ok := cronValuesWithWildcardAliases(fields[4], 1, 12, cronMonthAliases())
 	if !ok || len(months) == 0 {
 		return time.Time{}, false
 	}
@@ -218,27 +222,22 @@ func nextCronRun(expr string, after time.Time) (time.Time, bool) {
 	}
 	start := after.UTC().Add(time.Second)
 	deadline := start.AddDate(1, 0, 0)
-	for candidate := time.Date(start.Year(), start.Month(), start.Day(), start.Hour(), start.Minute(), second, 0, time.UTC); candidate.Before(deadline); candidate = candidate.Add(time.Minute) {
-		if !candidate.After(after) {
+	for candidateMinute := time.Date(start.Year(), start.Month(), start.Day(), start.Hour(), start.Minute(), 0, 0, time.UTC); candidateMinute.Before(deadline); candidateMinute = candidateMinute.Add(time.Minute) {
+		if !containsInt(hours, candidateMinute.Hour()) || !containsInt(minutes, candidateMinute.Minute()) {
 			continue
 		}
-		if !containsInt(hours, candidate.Hour()) || !containsInt(minutes, candidate.Minute()) {
+		if !cronDateMatches(candidateMinute, daysOfMonth, dayOfMonthWildcard, months, daysOfWeek, dayOfWeekWildcard) {
 			continue
 		}
-		if !cronDateMatches(candidate, daysOfMonth, dayOfMonthWildcard, months, daysOfWeek, dayOfWeekWildcard) {
-			continue
+		for _, second := range seconds {
+			candidate := time.Date(candidateMinute.Year(), candidateMinute.Month(), candidateMinute.Day(), candidateMinute.Hour(), candidateMinute.Minute(), second, 0, time.UTC)
+			if !candidate.After(after) {
+				continue
+			}
+			return candidate, true
 		}
-		return candidate, true
 	}
 	return time.Time{}, false
-}
-
-func cronSingleValue(field string, min, max int) (int, bool) {
-	value, err := strconv.Atoi(strings.TrimSpace(field))
-	if err != nil || value < min || value > max {
-		return 0, false
-	}
-	return value, true
 }
 
 func cronValues(field string, min, max int) ([]int, bool) {
@@ -247,7 +246,11 @@ func cronValues(field string, min, max int) ([]int, bool) {
 }
 
 func cronValuesWithWildcard(field string, min, max int) ([]int, bool, bool) {
-	field = strings.TrimSpace(field)
+	return cronValuesWithWildcardAliases(field, min, max, nil)
+}
+
+func cronValuesWithWildcardAliases(field string, min, max int, aliases map[string]int) ([]int, bool, bool) {
+	field = strings.ToUpper(strings.TrimSpace(field))
 	if field == "*" || field == "?" {
 		values := make([]int, 0, max-min+1)
 		for value := min; value <= max; value++ {
@@ -257,51 +260,11 @@ func cronValuesWithWildcard(field string, min, max int) ([]int, bool, bool) {
 	}
 	result := []int{}
 	for _, part := range strings.Split(field, ",") {
-		part = strings.TrimSpace(part)
-		switch {
-		case strings.Contains(part, "/"):
-			pieces := strings.Split(part, "/")
-			if len(pieces) != 2 {
-				return nil, false, false
-			}
-			step, err := strconv.Atoi(strings.TrimSpace(pieces[1]))
-			if err != nil || step <= 0 {
-				return nil, false, false
-			}
-			start := min
-			if base := strings.TrimSpace(pieces[0]); base != "*" && base != "?" {
-				parsed, err := strconv.Atoi(base)
-				if err != nil || parsed < min || parsed > max {
-					return nil, false, false
-				}
-				start = parsed
-			}
-			for value := start; value <= max; value += step {
-				result = append(result, value)
-			}
-		case strings.Contains(part, "-"):
-			pieces := strings.Split(part, "-")
-			if len(pieces) != 2 {
-				return nil, false, false
-			}
-			start, err := strconv.Atoi(strings.TrimSpace(pieces[0]))
-			if err != nil {
-				return nil, false, false
-			}
-			end, err := strconv.Atoi(strings.TrimSpace(pieces[1]))
-			if err != nil || start < min || end > max || start > end {
-				return nil, false, false
-			}
-			for value := start; value <= end; value++ {
-				result = append(result, value)
-			}
-		default:
-			value, err := strconv.Atoi(part)
-			if err != nil || value < min || value > max {
-				return nil, false, false
-			}
-			result = append(result, value)
+		values, ok := cronPartValues(part, min, max, aliases)
+		if !ok {
+			return nil, false, false
 		}
+		result = append(result, values...)
 	}
 	if len(result) == 0 {
 		return nil, false, false
@@ -309,8 +272,83 @@ func cronValuesWithWildcard(field string, min, max int) ([]int, bool, bool) {
 	return uniqueSortedInts(result), false, true
 }
 
+func cronPartValues(part string, min, max int, aliases map[string]int) ([]int, bool) {
+	part = strings.ToUpper(strings.TrimSpace(part))
+	if part == "" {
+		return nil, false
+	}
+	base := part
+	step := 1
+	hasStep := false
+	if before, after, cutHasStep := strings.Cut(part, "/"); cutHasStep {
+		base = strings.TrimSpace(before)
+		parsedStep, err := strconv.Atoi(strings.TrimSpace(after))
+		if err != nil || parsedStep <= 0 {
+			return nil, false
+		}
+		step = parsedStep
+		hasStep = true
+	}
+	start, end, ok := cronPartRange(base, min, max, aliases)
+	if !ok {
+		return nil, false
+	}
+	if hasStep && base != "*" && base != "?" && !strings.Contains(base, "-") {
+		end = max
+	}
+	values := []int{}
+	for value := start; value <= end; value += step {
+		values = append(values, value)
+	}
+	if len(values) == 0 {
+		return nil, false
+	}
+	return values, true
+}
+
+func cronPartRange(base string, min, max int, aliases map[string]int) (int, int, bool) {
+	base = strings.ToUpper(strings.TrimSpace(base))
+	if base == "*" || base == "?" {
+		return min, max, true
+	}
+	if strings.Contains(base, "-") {
+		pieces := strings.Split(base, "-")
+		if len(pieces) != 2 {
+			return 0, 0, false
+		}
+		start, ok := cronFieldValue(pieces[0], min, max, aliases)
+		if !ok {
+			return 0, 0, false
+		}
+		end, ok := cronFieldValue(pieces[1], min, max, aliases)
+		if !ok || start > end {
+			return 0, 0, false
+		}
+		return start, end, true
+	}
+	value, ok := cronFieldValue(base, min, max, aliases)
+	if !ok {
+		return 0, 0, false
+	}
+	return value, value, true
+}
+
+func cronFieldValue(value string, min, max int, aliases map[string]int) (int, bool) {
+	value = strings.ToUpper(strings.TrimSpace(value))
+	if aliases != nil {
+		if parsed, ok := aliases[value]; ok {
+			return parsed, parsed >= min && parsed <= max
+		}
+	}
+	parsed, err := strconv.Atoi(value)
+	if err != nil || parsed < min || parsed > max {
+		return 0, false
+	}
+	return parsed, true
+}
+
 func cronDayOfWeekValues(field string) ([]int, bool, bool) {
-	values, wildcard, ok := cronValuesWithWildcard(field, 0, 7)
+	values, wildcard, ok := cronValuesWithWildcardAliases(field, 0, 7, cronDayOfWeekAliases())
 	if !ok {
 		return nil, false, false
 	}
@@ -320,6 +358,35 @@ func cronDayOfWeekValues(field string) ([]int, bool, bool) {
 		}
 	}
 	return uniqueSortedInts(values), wildcard, true
+}
+
+func cronMonthAliases() map[string]int {
+	return map[string]int{
+		"JAN": 1,
+		"FEB": 2,
+		"MAR": 3,
+		"APR": 4,
+		"MAY": 5,
+		"JUN": 6,
+		"JUL": 7,
+		"AUG": 8,
+		"SEP": 9,
+		"OCT": 10,
+		"NOV": 11,
+		"DEC": 12,
+	}
+}
+
+func cronDayOfWeekAliases() map[string]int {
+	return map[string]int{
+		"SUN": 0,
+		"MON": 1,
+		"TUE": 2,
+		"WED": 3,
+		"THU": 4,
+		"FRI": 5,
+		"SAT": 6,
+	}
 }
 
 func cronDateMatches(candidate time.Time, daysOfMonth []int, dayOfMonthWildcard bool, months []int, daysOfWeek []int, dayOfWeekWildcard bool) bool {

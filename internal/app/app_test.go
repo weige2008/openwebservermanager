@@ -2859,6 +2859,7 @@ func TestExternalOIDCLoginCreatesUserAndSession(t *testing.T) {
 	handler, adminCookie := newTestHandler(t)
 	var authorizeState string
 	var authorizeNonce string
+	var tokenEndpointCalls int
 	provider := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {
 		case "/authorize":
@@ -2876,6 +2877,7 @@ func TestExternalOIDCLoginCreatesUserAndSession(t *testing.T) {
 			callback.RawQuery = values.Encode()
 			http.Redirect(w, r, callback.String(), http.StatusFound)
 		case "/token":
+			tokenEndpointCalls++
 			if err := r.ParseForm(); err != nil {
 				http.Error(w, "bad form", http.StatusBadRequest)
 				return
@@ -2975,6 +2977,13 @@ func TestExternalOIDCLoginCreatesUserAndSession(t *testing.T) {
 	cookies := callbackRec.Result().Cookies()
 	if len(cookies) == 0 {
 		t.Fatal("callback did not set auth cookie")
+	}
+	if tokenEndpointCalls != 1 {
+		t.Fatalf("oidc token endpoint calls = %d, want 1", tokenEndpointCalls)
+	}
+	assertStatus(t, handler, http.MethodGet, callbackURL.RequestURI(), nil, nil, http.StatusBadRequest)
+	if tokenEndpointCalls != 1 {
+		t.Fatalf("replayed oidc callback reached provider token endpoint again: calls = %d", tokenEndpointCalls)
 	}
 	meRec := assertStatus(t, handler, http.MethodGet, "/api/auth/me", nil, cookies[0], http.StatusOK)
 	if !strings.Contains(meRec.Body.String(), `"username":"oidc-operator"`) || !strings.Contains(meRec.Body.String(), `"role":"user"`) {

@@ -1,5 +1,5 @@
 import { useNavigate } from '@tanstack/react-router'
-import { Fingerprint, Loader2 } from 'lucide-react'
+import { Copy, Fingerprint, Loader2 } from 'lucide-react'
 import { useEffect, useState, type FormEvent } from 'react'
 import { useTranslation } from 'react-i18next'
 
@@ -51,6 +51,11 @@ interface WeComProvider {
   name: string
 }
 
+interface PendingRecoveryCodes {
+  user: AuthUser
+  codes: string[]
+}
+
 export function AuthPage() {
   const app = useApp()
   const { t } = useTranslation()
@@ -62,6 +67,7 @@ export function AuthPage() {
   const [captcha, setCaptcha] = useState<CaptchaChallenge | null>(null)
   const [oidcProviders, setOIDCProviders] = useState<OIDCProvider[]>([])
   const [wecomProviders, setWeComProviders] = useState<WeComProvider[]>([])
+  const [pendingRecoveryCodes, setPendingRecoveryCodes] = useState<PendingRecoveryCodes | null>(null)
   const passwordFormAvailable = !app.passwordLoginDisabled || app.ldapLoginEnabled
   const canUsePasskey = passkeySupported() && passkeySecureContext()
 
@@ -111,6 +117,24 @@ export function AuthPage() {
     const next = new URLSearchParams(window.location.search).get('next') || '/app'
     const params = new URLSearchParams({ provider: provider.id, next })
     window.location.assign(`/api/auth/wecom/start?${params.toString()}`)
+  }
+
+  const continueAfterRecoveryCodes = async () => {
+    if (!pendingRecoveryCodes) return
+    app.setAuthenticatedUser(pendingRecoveryCodes.user)
+    await app.refresh(true)
+    app.showToast(t('auth.signedIn'))
+    await finishSignIn()
+  }
+
+  const copyRecoveryCodes = async () => {
+    if (!pendingRecoveryCodes?.codes.length) return
+    try {
+      await copyText(pendingRecoveryCodes.codes.join('\n'))
+      app.showToast(t('auth.recoveryCodesCopied', { defaultValue: 'Recovery codes copied.' }))
+    } catch (error) {
+      app.handleApiError(error)
+    }
   }
 
   const startPasskeyLogin = async () => {
@@ -170,7 +194,8 @@ export function AuthPage() {
         })
         if (!result.user) throw new Error(t('operationFailed'))
         if (result.recovery_codes?.length) {
-          window.alert(`Recovery codes:\n\n${result.recovery_codes.join('\n')}`)
+          setPendingRecoveryCodes({ user: result.user, codes: result.recovery_codes })
+          return
         }
         app.setAuthenticatedUser(result.user)
         await app.refresh(true)
@@ -240,6 +265,30 @@ export function AuthPage() {
           {app.setupRequired ? t('auth.setupDescription') : t('auth.loginDescription')}
         </p>
       </div>
+      {pendingRecoveryCodes ? (
+        <div className='grid gap-4'>
+          <div className='rounded-lg border border-amber-500/30 bg-amber-500/10 p-3 text-sm leading-6 text-amber-800 dark:text-amber-100'>
+            <div className='font-medium'>{t('auth.recoveryCodesTitle', { defaultValue: 'Save your recovery codes' })}</div>
+            <p className='mt-1 text-xs leading-5'>{t('auth.recoveryCodesDescription', { defaultValue: 'These codes are shown once. Store them somewhere safe before entering the console.' })}</p>
+          </div>
+          <div className='grid grid-cols-1 gap-2 sm:grid-cols-2'>
+            {pendingRecoveryCodes.codes.map((code) => (
+              <code key={code} className='rounded-lg border border-border bg-muted px-3 py-2 text-center font-mono text-sm'>
+                {code}
+              </code>
+            ))}
+          </div>
+          <div className='grid gap-2 sm:grid-cols-2'>
+            <Button type='button' variant='outline' onClick={() => void copyRecoveryCodes()}>
+              <Copy className='size-4' />
+              {t('auth.copyRecoveryCodes', { defaultValue: 'Copy codes' })}
+            </Button>
+            <Button type='button' variant='primary' onClick={() => void continueAfterRecoveryCodes()}>
+              {t('auth.continueAfterRecoveryCodes', { defaultValue: 'I saved them, continue' })}
+            </Button>
+          </div>
+        </div>
+      ) : (
       <form className='grid gap-4' onSubmit={onSubmit}>
         {mfaChallenge ? (
           <>
@@ -305,7 +354,8 @@ export function AuthPage() {
           {mfaChallenge ? 'Verify MFA' : app.setupRequired ? t('auth.setupSubmit') : passwordFormAvailable ? t('auth.loginSubmit') : t('auth.passwordLoginDisabledSubmit')}
         </Button>
       </form>
-      {!app.setupRequired && !mfaChallenge ? (
+      )}
+      {!pendingRecoveryCodes && !app.setupRequired && !mfaChallenge ? (
         <div className='grid gap-2'>
           <div className='flex items-center gap-3 text-xs text-muted-foreground'>
             <span className='h-px flex-1 bg-border' />
@@ -318,7 +368,7 @@ export function AuthPage() {
           </Button>
         </div>
       ) : null}
-      {!app.setupRequired && !mfaChallenge && (oidcProviders.length || wecomProviders.length) ? (
+      {!pendingRecoveryCodes && !app.setupRequired && !mfaChallenge && (oidcProviders.length || wecomProviders.length) ? (
         <div className='grid gap-2'>
           <div className='flex items-center gap-3 text-xs text-muted-foreground'>
             <span className='h-px flex-1 bg-border' />
@@ -337,9 +387,32 @@ export function AuthPage() {
           ))}
         </div>
       ) : null}
-      <p className='text-center text-xs text-muted-foreground'>
-        {app.setupRequired ? t('auth.setupSecurityNote') : t('auth.loginSecurityNote')}
-      </p>
+      {!pendingRecoveryCodes ? (
+        <p className='text-center text-xs text-muted-foreground'>
+          {app.setupRequired ? t('auth.setupSecurityNote') : t('auth.loginSecurityNote')}
+        </p>
+      ) : null}
     </AuthLayout>
   )
+}
+
+async function copyText(text: string) {
+  if (navigator.clipboard?.writeText) {
+    await navigator.clipboard.writeText(text)
+    return
+  }
+  const textarea = document.createElement('textarea')
+  textarea.value = text
+  textarea.setAttribute('readonly', 'true')
+  textarea.style.position = 'fixed'
+  textarea.style.top = '-1000px'
+  textarea.style.left = '-1000px'
+  document.body.appendChild(textarea)
+  textarea.select()
+  try {
+    const copied = document.execCommand('copy')
+    if (!copied) throw new Error('copy command failed')
+  } finally {
+    textarea.remove()
+  }
 }

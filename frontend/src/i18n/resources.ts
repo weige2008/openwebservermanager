@@ -254,6 +254,11 @@ const en = {
     passwordMismatch: 'The two passwords do not match.',
     adminCreated: 'Administrator created.',
     signedIn: 'Signed in.',
+    recoveryCodesTitle: 'Save your recovery codes',
+    recoveryCodesDescription: 'These codes are shown once. Store them somewhere safe before entering the console.',
+    copyRecoveryCodes: 'Copy codes',
+    recoveryCodesCopied: 'Recovery codes copied.',
+    continueAfterRecoveryCodes: 'I saved them, continue',
   },
   profileDialog: {
     title: 'Profile',
@@ -867,6 +872,11 @@ const zh = {
     passwordMismatch: '两次输入的密码不一致。',
     adminCreated: '管理员已创建。',
     signedIn: '已登录。',
+    recoveryCodesTitle: '保存恢复码',
+    recoveryCodesDescription: '这些恢复码只会显示一次。进入控制台前，请先妥善保存。',
+    copyRecoveryCodes: '复制恢复码',
+    recoveryCodesCopied: '恢复码已复制。',
+    continueAfterRecoveryCodes: '我已保存，继续',
   },
   profileDialog: {
     title: '个人资料',

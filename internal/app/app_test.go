@@ -2318,6 +2318,78 @@ func TestToolsAndMonitoringEndpoints(t *testing.T) {
 	}
 }
 
+func TestNotificationsReflectRuntimeAndFilterByUser(t *testing.T) {
+	handler, adminCookie := newTestHandler(t)
+
+	assertStatus(t, handler, http.MethodGet, "/api/notifications", nil, nil, http.StatusUnauthorized)
+	assertStatus(t, handler, http.MethodPost, "/api/admin/audit/online-sessions", map[string]any{
+		"name":     "admin ssh",
+		"type":     "ssh",
+		"status":   "active",
+		"protocol": "ssh",
+	}, adminCookie, http.StatusCreated)
+	assertStatus(t, handler, http.MethodPost, "/api/admin/audit/login-logs", map[string]any{
+		"name":        "root",
+		"type":        "password",
+		"status":      "failed",
+		"description": "invalid username or password",
+		"metadata":    map[string]any{"account": "root", "client_ip": "198.51.100.10"},
+	}, adminCookie, http.StatusCreated)
+	assertStatus(t, handler, http.MethodPost, "/api/admin/audit/operation-logs", map[string]any{
+		"name":        "asset health check",
+		"type":        "scheduled_task",
+		"status":      "failed",
+		"description": "asset check failed",
+	}, adminCookie, http.StatusCreated)
+	assertStatus(t, handler, http.MethodPost, "/api/admin/agent-gateways", map[string]any{
+		"name":   "edge-offline",
+		"type":   "agent",
+		"status": "offline",
+	}, adminCookie, http.StatusCreated)
+
+	adminRec := assertStatus(t, handler, http.MethodGet, "/api/notifications", nil, adminCookie, http.StatusOK)
+	adminBody := adminRec.Body.String()
+	for _, want := range []string{"rdpGatewayOffline", "notification.activeSessions", "notification.loginFailed", "notification.taskFailed", "notification.agentGatewayOffline"} {
+		if !strings.Contains(adminBody, want) {
+			t.Fatalf("admin notifications missing %q: %s", want, adminBody)
+		}
+	}
+
+	userRec := assertStatus(t, handler, http.MethodPost, "/api/admin/users", map[string]any{
+		"name":     "limited-user",
+		"type":     "local",
+		"status":   "enabled",
+		"password": "password123",
+	}, adminCookie, http.StatusCreated)
+	var user model.PlatformItem
+	decodeResponse(t, userRec, &user)
+	assertStatus(t, handler, http.MethodPost, "/api/admin/audit/login-logs", map[string]any{
+		"name":        "limited-user",
+		"type":        "password",
+		"status":      "failed",
+		"owner_id":    user.ID,
+		"description": "invalid username or password",
+		"metadata":    map[string]any{"account": "limited-user"},
+	}, adminCookie, http.StatusCreated)
+	assertStatus(t, handler, http.MethodPost, "/api/admin/audit/login-logs", map[string]any{
+		"name":        "other-user",
+		"type":        "password",
+		"status":      "failed",
+		"description": "invalid username or password",
+		"metadata":    map[string]any{"account": "other-user"},
+	}, adminCookie, http.StatusCreated)
+	loginRec := assertStatus(t, handler, http.MethodPost, "/api/auth/login", map[string]any{"username": "limited-user", "password": "password123"}, nil, http.StatusOK)
+	userCookie := loginRec.Result().Cookies()[0]
+	limitedRec := assertStatus(t, handler, http.MethodGet, "/api/notifications", nil, userCookie, http.StatusOK)
+	limitedBody := limitedRec.Body.String()
+	if !strings.Contains(limitedBody, "limited-user") {
+		t.Fatalf("limited user did not receive own login notification: %s", limitedBody)
+	}
+	if strings.Contains(limitedBody, "other-user") || strings.Contains(limitedBody, "notification.taskFailed") {
+		t.Fatalf("limited user received another user's/system notification: %s", limitedBody)
+	}
+}
+
 func TestAgentGatewayRegistrationHeartbeatAndTimeout(t *testing.T) {
 	handler, adminCookie := newTestHandler(t)
 

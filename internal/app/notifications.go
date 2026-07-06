@@ -1,0 +1,282 @@
+package app
+
+import (
+	"fmt"
+	"net/http"
+	"sort"
+	"strconv"
+	"strings"
+	"time"
+
+	"openwebservermanager/internal/model"
+)
+
+const maxNotificationItems = 20
+
+type notificationItem struct {
+	ID        string         `json:"id"`
+	Type      string         `json:"type"`
+	Category  string         `json:"category"`
+	Title     string         `json:"title,omitempty"`
+	Body      string         `json:"body,omitempty"`
+	TitleKey  string         `json:"title_key,omitempty"`
+	BodyKey   string         `json:"body_key,omitempty"`
+	Metadata  map[string]any `json:"metadata,omitempty"`
+	Action    string         `json:"action,omitempty"`
+	TargetID  string         `json:"target_id,omitempty"`
+	CreatedAt time.Time      `json:"created_at"`
+}
+
+func (s *Server) handleNotifications(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		writeError(w, http.StatusMethodNotAllowed, "method not allowed")
+		return
+	}
+	_, session, ok := s.auth.session(r)
+	if !ok {
+		writeError(w, http.StatusUnauthorized, "authentication required")
+		return
+	}
+	items, err := s.buildNotifications(session)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"items": items, "generated_at": time.Now().UTC()})
+}
+
+func (s *Server) buildNotifications(session authSession) ([]notificationItem, error) {
+	now := time.Now().UTC()
+	s.refreshAgentGatewayStatuses()
+	platform, err := s.cfg.Store.PlatformBootstrap()
+	if err != nil {
+		return nil, err
+	}
+	_, _, sessions, _ := s.cfg.Store.Bootstrap()
+	operator := notificationCanSeeSystem(s.roleDecision(session.Role))
+	items := []notificationItem{}
+
+	items = append(items, s.runtimeNotifications(now)...)
+	items = append(items, sessionNotifications(sessions, platform["online_sessions"], session.UserID, operator, now)...)
+	items = append(items, loginNotifications(platform["login_logs"], session, operator)...)
+	if operator {
+		items = append(items, scheduledTaskNotifications(platform["operation_logs"])...)
+		items = append(items, agentGatewayNotifications(platform["agent_gateways"], now)...)
+		items = append(items, recentOperationNotifications(platform["operation_logs"])...)
+	}
+
+	sort.SliceStable(items, func(i, j int) bool {
+		return items[i].CreatedAt.After(items[j].CreatedAt)
+	})
+	if len(items) > maxNotificationItems {
+		items = items[:maxNotificationItems]
+	}
+	return items, nil
+}
+
+func (s *Server) runtimeNotifications(now time.Time) []notificationItem {
+	guacdAddress := ""
+	if s.cfg.Guacd != nil {
+		guacdAddress = strings.TrimSpace(s.cfg.Guacd.Address())
+	}
+	result := []notificationItem{}
+	if guacdAddress == "" {
+		result = append(result, notificationItem{
+			ID:        "runtime:guacd:offline",
+			Type:      "warning",
+			Category:  "runtime",
+			TitleKey:  "rdpGatewayOffline",
+			BodyKey:   "rdpGatewayOfflineBody",
+			CreatedAt: now,
+		})
+	} else {
+		result = append(result, notificationItem{
+			ID:        "runtime:guacd:online",
+			Type:      "success",
+			Category:  "runtime",
+			TitleKey:  "rdpGatewayOnline",
+			Body:      guacdAddress,
+			Metadata:  map[string]any{"address": guacdAddress},
+			CreatedAt: now,
+		})
+	}
+	if errText := strings.TrimSpace(s.sshGatewayLastError()); errText != "" {
+		result = append(result, notificationItem{
+			ID:        "runtime:ssh_gateway:error",
+			Type:      "danger",
+			Category:  "runtime",
+			Title:     "SSH gateway error",
+			Body:      errText,
+			CreatedAt: now,
+		})
+	}
+	return result
+}
+
+func sessionNotifications(sessions []model.ConnectionSession, online []model.PlatformItem, userID string, operator bool, now time.Time) []notificationItem {
+	count := 0
+	protocolCounts := map[string]int{}
+	for _, session := range sessions {
+		if session.Status != model.SessionActive && session.Status != model.SessionPending {
+			continue
+		}
+		if !operator && session.UserID != userID {
+			continue
+		}
+		count++
+		protocolCounts[string(session.Protocol)]++
+	}
+	for _, item := range online {
+		status := strings.ToLower(strings.TrimSpace(item.Status))
+		if status != string(model.SessionActive) && status != string(model.SessionPending) && status != "connected" {
+			continue
+		}
+		if !operator && item.OwnerID != userID {
+			continue
+		}
+		count++
+		protocolCounts[string(item.Protocol)]++
+	}
+	if count == 0 {
+		return nil
+	}
+	return []notificationItem{{
+		ID:        "sessions:active:" + strconv.Itoa(count),
+		Type:      "info",
+		Category:  "session",
+		TitleKey:  "notification.activeSessions",
+		BodyKey:   "notification.activeSessionsBody",
+		Metadata:  map[string]any{"count": count, "protocols": protocolCounts},
+		CreatedAt: now.Add(-1 * time.Second),
+	}}
+}
+
+func loginNotifications(logs []model.PlatformItem, session authSession, operator bool) []notificationItem {
+	result := []notificationItem{}
+	for _, item := range latestPlatformItems(logs, 8) {
+		status := strings.ToLower(strings.TrimSpace(item.Status))
+		if status != "failed" && status != "denied" {
+			continue
+		}
+		if !operator && !loginLogBelongsToSession(item, session) {
+			continue
+		}
+		account := firstNonEmpty(firstMetadataString(item.Metadata, "account", "username"), item.Name)
+		result = append(result, notificationItem{
+			ID:        "login:" + item.ID,
+			Type:      "danger",
+			Category:  "security",
+			TitleKey:  "notification.loginFailed",
+			Body:      firstNonEmpty(item.Description, "login failed"),
+			Metadata:  map[string]any{"account": account, "status": item.Status, "client_ip": firstMetadataString(item.Metadata, "client_ip")},
+			Action:    item.Type,
+			TargetID:  item.TargetID,
+			CreatedAt: item.CreatedAt,
+		})
+	}
+	return result
+}
+
+func scheduledTaskNotifications(logs []model.PlatformItem) []notificationItem {
+	result := []notificationItem{}
+	for _, item := range latestPlatformItems(logs, 10) {
+		if item.Type != "scheduled_task" || strings.EqualFold(strings.TrimSpace(item.Status), "success") {
+			continue
+		}
+		result = append(result, notificationItem{
+			ID:        "task:" + item.ID,
+			Type:      "warning",
+			Category:  "task",
+			TitleKey:  "notification.taskFailed",
+			Body:      firstNonEmpty(item.Description, item.Name),
+			Metadata:  map[string]any{"task": item.Name, "status": item.Status},
+			TargetID:  item.TargetID,
+			CreatedAt: item.CreatedAt,
+		})
+	}
+	return result
+}
+
+func agentGatewayNotifications(gateways []model.PlatformItem, now time.Time) []notificationItem {
+	result := []notificationItem{}
+	for _, gateway := range gateways {
+		if strings.EqualFold(strings.TrimSpace(gateway.Status), "offline") {
+			result = append(result, notificationItem{
+				ID:        "agent_gateway:" + gateway.ID + ":offline",
+				Type:      "warning",
+				Category:  "gateway",
+				TitleKey:  "notification.agentGatewayOffline",
+				Body:      gateway.Name,
+				Metadata:  map[string]any{"gateway": gateway.Name, "last_seen_at": firstMetadataString(gateway.Metadata, "last_seen_at")},
+				TargetID:  gateway.ID,
+				CreatedAt: latestTime(gateway.UpdatedAt, now.Add(-2*time.Second)),
+			})
+		}
+	}
+	return result
+}
+
+func recentOperationNotifications(logs []model.PlatformItem) []notificationItem {
+	result := []notificationItem{}
+	for _, item := range latestPlatformItems(logs, 6) {
+		status := strings.ToLower(strings.TrimSpace(item.Status))
+		if status == "success" || status == "" {
+			continue
+		}
+		if item.Type == "scheduled_task" {
+			continue
+		}
+		result = append(result, notificationItem{
+			ID:        "operation:" + item.ID,
+			Type:      notificationTypeForStatus(status),
+			Category:  "operation",
+			Title:     fmt.Sprintf("Operation %s", status),
+			Body:      firstNonEmpty(item.Description, item.Name),
+			Metadata:  map[string]any{"module": item.Type, "status": item.Status},
+			TargetID:  item.TargetID,
+			CreatedAt: item.CreatedAt,
+		})
+	}
+	return result
+}
+
+func notificationCanSeeSystem(decision roleDecision) bool {
+	return decision.Kind == roleSuperAdmin || decision.Kind == roleAdmin || decision.Kind == roleAuditor
+}
+
+func loginLogBelongsToSession(item model.PlatformItem, session authSession) bool {
+	if item.OwnerID != "" && item.OwnerID == session.UserID {
+		return true
+	}
+	account := strings.ToLower(strings.TrimSpace(firstNonEmpty(firstMetadataString(item.Metadata, "account", "username"), item.Name)))
+	return account != "" && account == strings.ToLower(strings.TrimSpace(session.Username))
+}
+
+func latestPlatformItems(items []model.PlatformItem, limit int) []model.PlatformItem {
+	next := append([]model.PlatformItem(nil), items...)
+	sort.SliceStable(next, func(i, j int) bool {
+		return next[i].CreatedAt.After(next[j].CreatedAt)
+	})
+	if limit > 0 && len(next) > limit {
+		next = next[:limit]
+	}
+	return next
+}
+
+func notificationTypeForStatus(status string) string {
+	switch strings.ToLower(strings.TrimSpace(status)) {
+	case "failed", "error", "denied", "blocked":
+		return "danger"
+	case "warning", "pending":
+		return "warning"
+	default:
+		return "info"
+	}
+}
+
+func latestTime(left, right time.Time) time.Time {
+	if left.After(right) {
+		return left
+	}
+	return right
+}

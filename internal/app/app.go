@@ -177,6 +177,8 @@ func (s *Server) serveAPI(w http.ResponseWriter, r *http.Request) {
 	switch {
 	case r.Method == http.MethodGet && r.URL.Path == "/api/bootstrap":
 		s.handleBootstrap(w, r)
+	case r.Method == http.MethodGet && r.URL.Path == "/api/notifications":
+		s.handleNotifications(w, r)
 	case strings.HasPrefix(r.URL.Path, "/api/auth/mfa/"):
 		s.handleAuthenticatedMFA(w, r)
 	case strings.HasPrefix(r.URL.Path, "/api/auth/passkeys"):

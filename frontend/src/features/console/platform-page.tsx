@@ -46,6 +46,9 @@ interface AccessAssetsResponse {
   web?: PlatformItem[]
   database?: PlatformItem[]
   authorized?: PlatformItem[]
+  authorized_assets?: PlatformItem[]
+  authorized_web_assets?: PlatformItem[]
+  authorized_database_assets?: PlatformItem[]
 }
 
 const initialForm: PlatformFormState = {

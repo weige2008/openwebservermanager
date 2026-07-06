@@ -1776,6 +1776,21 @@ func TestBulkAuthorizationGrantsAccessAcrossResourceTypes(t *testing.T) {
 	userCookie := loginRec.Result().Cookies()[0]
 	accessRec := assertStatus(t, handler, http.MethodGet, "/api/access/assets", nil, userCookie, http.StatusOK)
 	accessBody := accessRec.Body.String()
+	var accessPayload struct {
+		Authorized               []model.PlatformItem `json:"authorized"`
+		AuthorizedAssets         []model.PlatformItem `json:"authorized_assets"`
+		AuthorizedWebAssets      []model.PlatformItem `json:"authorized_web_assets"`
+		AuthorizedDatabaseAssets []model.PlatformItem `json:"authorized_database_assets"`
+	}
+	decodeResponse(t, accessRec, &accessPayload)
+	hasGrant := func(items []model.PlatformItem, targetID string) bool {
+		for _, item := range items {
+			if item.TargetID == targetID {
+				return true
+			}
+		}
+		return false
+	}
 	for _, want := range []string{asset.ID, webAsset.ID, databaseAsset.ID} {
 		if !strings.Contains(accessBody, want) {
 			t.Fatalf("bulk authorization did not expose %s in access portal: %s", want, accessBody)
@@ -1783,6 +1798,17 @@ func TestBulkAuthorizationGrantsAccessAcrossResourceTypes(t *testing.T) {
 	}
 	if strings.Contains(accessBody, expiredAsset.ID) {
 		t.Fatalf("expired bulk authorization exposed asset: %s", accessBody)
+	}
+	if !hasGrant(accessPayload.AuthorizedAssets, asset.ID) || !hasGrant(accessPayload.AuthorizedWebAssets, webAsset.ID) || !hasGrant(accessPayload.AuthorizedDatabaseAssets, databaseAsset.ID) {
+		t.Fatalf("access portal did not return typed authorization records: %#v", accessPayload)
+	}
+	for _, targetID := range []string{asset.ID, webAsset.ID, databaseAsset.ID} {
+		if !hasGrant(accessPayload.Authorized, targetID) {
+			t.Fatalf("access portal compatible authorized list missing target %s: %#v", targetID, accessPayload.Authorized)
+		}
+	}
+	if hasGrant(accessPayload.Authorized, expiredAsset.ID) || hasGrant(accessPayload.AuthorizedAssets, expiredAsset.ID) {
+		t.Fatalf("access portal returned expired authorization record: %#v", accessPayload)
 	}
 	renewRec := assertStatus(t, handler, http.MethodPost, "/api/admin/authorizations/assets/bulk", map[string]any{
 		"subject_ids": []string{user.ID},

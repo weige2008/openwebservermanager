@@ -18,6 +18,7 @@ type proxyServicesRequest struct {
 	SSHDisablePasswordAuth   bool           `json:"ssh_disable_password_auth"`
 	SSHForwardAllowlist      []string       `json:"ssh_forward_allowlist"`
 	SSHPrivateKey            string         `json:"ssh_private_key"`
+	SSHPrivateKeyClear       bool           `json:"ssh_private_key_clear"`
 	RDPEnabled               bool           `json:"rdp_enabled"`
 	RDPListenAddress         string         `json:"rdp_listen_address"`
 	RDPForwardAllowlist      []string       `json:"rdp_forward_allowlist"`
@@ -25,6 +26,7 @@ type proxyServicesRequest struct {
 	DatabaseListenAddress    string         `json:"database_listen_address"`
 	DatabaseForwardAllowlist []string       `json:"database_forward_allowlist"`
 	ProxyPrivateKey          string         `json:"proxy_private_key"`
+	ProxyPrivateKeyClear     bool           `json:"proxy_private_key_clear"`
 	Metadata                 map[string]any `json:"metadata"`
 }
 
@@ -76,6 +78,8 @@ func (s *Server) saveProxyServices(req proxyServicesRequest) (model.PlatformItem
 	metadata["updated_at"] = time.Now().UTC().Format(time.RFC3339Nano)
 	if secret := strings.TrimSpace(firstNonEmpty(req.ProxyPrivateKey, req.SSHPrivateKey)); secret != "" {
 		metadata["proxy_private_key"] = secret
+	} else if req.ProxyPrivateKeyClear || req.SSHPrivateKeyClear {
+		metadata["proxy_private_key_clear"] = true
 	}
 
 	setting, err := s.upsertProxyServiceSetting(metadata)

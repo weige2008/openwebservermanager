@@ -235,6 +235,7 @@ interface ProxyServicesForm {
   databaseForwardAllowlist: string
   proxyPrivateKey: string
   proxyPrivateKeySet: boolean
+  proxyPrivateKeyClear: boolean
 }
 
 interface ProxyServicesStatus {
@@ -3915,7 +3916,7 @@ export function PlatformSettingsPage({ config }: { config: PlatformPageConfig })
       if (result.settings) {
         setProxyForm(proxyServicesFormFromItem(result.settings))
       } else {
-        patchProxyForm({ proxyPrivateKey: '' })
+        patchProxyForm({ proxyPrivateKey: '', proxyPrivateKeyClear: false })
       }
       await app.refresh(true)
       app.showToast(app.t('saved', 'Saved'))
@@ -4123,10 +4124,17 @@ export function PlatformSettingsPage({ config }: { config: PlatformPageConfig })
               </div>
               <div className='grid gap-3 md:grid-cols-[1fr_auto] md:items-end'>
                 <Field label={app.t('proxyPrivateKey', 'Proxy private key')}>
-                  <Textarea className='min-h-28 font-mono text-xs' value={proxyForm.proxyPrivateKey} onChange={(event) => patchProxyForm({ proxyPrivateKey: event.currentTarget.value })} placeholder={proxyForm.proxyPrivateKeySet ? app.t('leaveBlankToKeepSecret', 'Leave blank to keep current secret') : '-----BEGIN OPENSSH PRIVATE KEY-----'} autoComplete='off' />
+                  <Textarea className='min-h-28 font-mono text-xs' value={proxyForm.proxyPrivateKey} onChange={(event) => patchProxyForm({ proxyPrivateKey: event.currentTarget.value, proxyPrivateKeyClear: false })} placeholder={proxyForm.proxyPrivateKeySet ? app.t('leaveBlankToKeepSecret', 'Leave blank to keep current secret') : '-----BEGIN OPENSSH PRIVATE KEY-----'} autoComplete='off' />
                 </Field>
                 <Badge tone={proxyForm.proxyPrivateKeySet ? 'success' : 'neutral'}>{proxyForm.proxyPrivateKeySet ? app.t('privateKeySaved', 'Private key saved') : app.t('notConfigured', 'Not configured')}</Badge>
               </div>
+              {proxyForm.proxyPrivateKeySet ? (
+                <CheckboxRow
+                  checked={proxyForm.proxyPrivateKeyClear}
+                  onChange={(proxyPrivateKeyClear) => patchProxyForm({ proxyPrivateKeyClear, proxyPrivateKey: proxyPrivateKeyClear ? '' : proxyForm.proxyPrivateKey })}
+                  label={app.t('clearProxyPrivateKey', 'Clear saved proxy private key on save')}
+                />
+              ) : null}
               <div className='flex justify-end'>
                 <Button variant='outline' onClick={() => void saveProxyServices()} disabled={savingProxy}>
                   <Save className='size-4' />
@@ -4392,6 +4400,7 @@ function proxyServicesFormFromItem(item?: PlatformItem): ProxyServicesForm {
     databaseForwardAllowlist: metadataListText(metadata.database_forward_allowlist),
     proxyPrivateKey: '',
     proxyPrivateKeySet: metadataBool(metadata.proxy_private_key_set),
+    proxyPrivateKeyClear: false,
   }
 }
 
@@ -4408,6 +4417,7 @@ function proxyServicesPayloadFromForm(form: ProxyServicesForm) {
     database_listen_address: form.databaseListenAddress.trim(),
     database_forward_allowlist: splitLines(form.databaseForwardAllowlist),
     proxy_private_key: form.proxyPrivateKey.trim() || undefined,
+    proxy_private_key_clear: form.proxyPrivateKeyClear || undefined,
   }
 }
 

@@ -1840,7 +1840,11 @@ func (s *Store) encryptSystemSettingExternalSecrets(value any, now string, creat
 	case map[string]any:
 		for _, spec := range externalSystemSettingSecretSpecs {
 			secret := firstMetadataString(typed, spec.plainKeys...)
+			clearRequested := metadataBoolByKeys(typed, spec.clearKeys...)
 			for _, key := range spec.plainKeys {
+				delete(typed, key)
+			}
+			for _, key := range spec.clearKeys {
 				delete(typed, key)
 			}
 			if secret != "" {
@@ -1854,8 +1858,10 @@ func (s *Store) encryptSystemSettingExternalSecrets(value any, now string, creat
 				typed[spec.encryptedKey] = encrypted
 				typed[spec.setKey] = true
 				typed[spec.updatedAtKey] = now
-			} else if creating {
+			} else if creating || clearRequested {
+				delete(typed, spec.encryptedKey)
 				delete(typed, spec.setKey)
+				delete(typed, spec.updatedAtKey)
 			}
 		}
 		for _, child := range typed {
@@ -2207,6 +2213,15 @@ func metadataBool(value any) bool {
 	}
 }
 
+func metadataBoolByKeys(metadata map[string]any, keys ...string) bool {
+	for _, key := range keys {
+		if metadataBool(metadata[key]) {
+			return true
+		}
+	}
+	return false
+}
+
 func metadataIntValue(value any) int {
 	switch typed := value.(type) {
 	case int:
@@ -2329,6 +2344,7 @@ func stripAssetSensitiveMetadata(metadata map[string]any) {
 
 type externalSystemSettingSecretSpec struct {
 	plainKeys    []string
+	clearKeys    []string
 	encryptedKey string
 	setKey       string
 	updatedAtKey string
@@ -2337,30 +2353,35 @@ type externalSystemSettingSecretSpec struct {
 var externalSystemSettingSecretSpecs = []externalSystemSettingSecretSpec{
 	{
 		plainKeys:    []string{"client_secret", "clientSecret", "oidc_client_secret", "oidcClientSecret", "external_oidc_client_secret", "externalOidcClientSecret"},
+		clearKeys:    []string{"oidc_client_secret_clear", "clear_oidc_client_secret", "client_secret_clear", "clear_client_secret"},
 		encryptedKey: "oidc_client_secret_encrypted",
 		setKey:       "oidc_client_secret_set",
 		updatedAtKey: "oidc_client_secret_updated_at",
 	},
 	{
 		plainKeys:    []string{"bind_password", "bindPassword", "ldap_bind_password", "ldapBindPassword", "plain_ldap_bind_password"},
+		clearKeys:    []string{"ldap_bind_password_clear", "clear_ldap_bind_password", "bind_password_clear", "clear_bind_password"},
 		encryptedKey: "ldap_bind_password_encrypted",
 		setKey:       "ldap_bind_password_set",
 		updatedAtKey: "ldap_bind_password_updated_at",
 	},
 	{
 		plainKeys:    []string{"agent_secret", "agentSecret", "wecom_agent_secret", "wecomAgentSecret", "enterprise_wechat_agent_secret", "corp_secret", "corpsecret"},
+		clearKeys:    []string{"wecom_agent_secret_clear", "clear_wecom_agent_secret", "agent_secret_clear", "clear_agent_secret"},
 		encryptedKey: "wecom_agent_secret_encrypted",
 		setKey:       "wecom_agent_secret_set",
 		updatedAtKey: "wecom_agent_secret_updated_at",
 	},
 	{
 		plainKeys:    []string{"dns_api_token", "dnsApiToken", "api_token", "apiToken", "access_key_secret", "accessKeySecret", "secret_key", "secretKey"},
+		clearKeys:    []string{"dns_api_token_clear", "clear_dns_api_token", "api_token_clear", "clear_api_token"},
 		encryptedKey: "dns_api_token_encrypted",
 		setKey:       "dns_api_token_set",
 		updatedAtKey: "dns_api_token_updated_at",
 	},
 	{
 		plainKeys:    []string{"proxy_private_key", "proxyPrivateKey", "ssh_private_key", "sshPrivateKey", "proxy_key", "proxyKey"},
+		clearKeys:    []string{"proxy_private_key_clear", "clear_proxy_private_key", "ssh_private_key_clear", "clear_ssh_private_key"},
 		encryptedKey: "proxy_private_key_encrypted",
 		setKey:       "proxy_private_key_set",
 		updatedAtKey: "proxy_private_key_updated_at",
@@ -2377,6 +2398,8 @@ var sensitiveMetadataKeys = map[string]struct{}{
 	"clientSecret":                             {},
 	"client_secret_hash":                       {},
 	"client_secret_encrypted":                  {},
+	"client_secret_clear":                      {},
+	"clear_client_secret":                      {},
 	"secret":                                   {},
 	"agent_token_hash":                         {},
 	"registration_token":                       {},
@@ -2408,22 +2431,32 @@ var sensitiveMetadataKeys = map[string]struct{}{
 	"llm_api_key_encrypted":                    {},
 	"oidc_client_secret":                       {},
 	"oidcClientSecret":                         {},
+	"oidc_client_secret_clear":                 {},
+	"clear_oidc_client_secret":                 {},
 	"external_oidc_client_secret":              {},
 	"externalOidcClientSecret":                 {},
 	"oidc_client_secret_encrypted":             {},
 	"external_oidc_client_secret_encrypted":    {},
 	"bind_password":                            {},
 	"bindPassword":                             {},
+	"bind_password_clear":                      {},
+	"clear_bind_password":                      {},
 	"bind_password_encrypted":                  {},
 	"ldap_bind_password":                       {},
 	"ldapBindPassword":                         {},
 	"plain_ldap_bind_password":                 {},
+	"ldap_bind_password_clear":                 {},
+	"clear_ldap_bind_password":                 {},
 	"ldap_bind_password_encrypted":             {},
 	"agent_secret":                             {},
 	"agentSecret":                              {},
+	"agent_secret_clear":                       {},
+	"clear_agent_secret":                       {},
 	"agent_secret_encrypted":                   {},
 	"wecom_agent_secret":                       {},
 	"wecomAgentSecret":                         {},
+	"wecom_agent_secret_clear":                 {},
+	"clear_wecom_agent_secret":                 {},
 	"wecom_agent_secret_encrypted":             {},
 	"enterprise_wechat_agent_secret":           {},
 	"enterprise_wechat_agent_secret_encrypted": {},
@@ -2431,9 +2464,13 @@ var sensitiveMetadataKeys = map[string]struct{}{
 	"corpsecret":                               {},
 	"dns_api_token":                            {},
 	"dnsApiToken":                              {},
+	"dns_api_token_clear":                      {},
+	"clear_dns_api_token":                      {},
 	"dns_api_token_encrypted":                  {},
 	"api_token":                                {},
 	"apiToken":                                 {},
+	"api_token_clear":                          {},
+	"clear_api_token":                          {},
 	"access_key_secret":                        {},
 	"accessKeySecret":                          {},
 	"secret_key":                               {},
@@ -2446,6 +2483,10 @@ var sensitiveMetadataKeys = map[string]struct{}{
 	"sshPrivateKey":                            {},
 	"proxy_key":                                {},
 	"proxyKey":                                 {},
+	"proxy_private_key_clear":                  {},
+	"clear_proxy_private_key":                  {},
+	"ssh_private_key_clear":                    {},
+	"clear_ssh_private_key":                    {},
 	"proxy_private_key_encrypted":              {},
 	"public_key_x":                             {},
 	"public_key_y":                             {},

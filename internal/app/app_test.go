@@ -6874,6 +6874,7 @@ func TestLLMIntegrationTestPrompt(t *testing.T) {
 
 func TestProxyServiceSettingsPersistStatusAndSyncSSHGateway(t *testing.T) {
 	handler, cookie := newTestHandler(t)
+	srv := handler.(*Server)
 	rdpListen := freeLocalTCPAddress(t)
 	databaseListen := freeLocalTCPAddress(t)
 
@@ -6917,6 +6918,10 @@ func TestProxyServiceSettingsPersistStatusAndSyncSSHGateway(t *testing.T) {
 			t.Fatalf("system settings leaked proxy secret %s: %s", leaked, settingsBody)
 		}
 	}
+	proxyPrivateKey, ok, err := srv.cfg.Store.SystemSettingProxyPrivateKey()
+	if err != nil || !ok || proxyPrivateKey != "proxy-secret-key" {
+		t.Fatalf("proxy private key = %q ok=%v err=%v", proxyPrivateKey, ok, err)
+	}
 
 	sshGatewayRec := assertStatus(t, handler, http.MethodGet, "/api/admin/ssh-gateways", nil, cookie, http.StatusOK)
 	sshGatewayBody := sshGatewayRec.Body.String()
@@ -6924,6 +6929,39 @@ func TestProxyServiceSettingsPersistStatusAndSyncSSHGateway(t *testing.T) {
 		if !strings.Contains(sshGatewayBody, want) {
 			t.Fatalf("ssh gateway sync missing %s: %s", want, sshGatewayBody)
 		}
+	}
+
+	clearKeyRec := assertStatus(t, handler, http.MethodPost, "/api/admin/proxy-services", map[string]any{
+		"ssh_enabled":                true,
+		"ssh_listen_address":         "127.0.0.1:22022",
+		"ssh_disable_password_auth":  true,
+		"ssh_forward_allowlist":      []string{"db.internal:5432", "10.0.0.5:22"},
+		"proxy_private_key_clear":    true,
+		"rdp_enabled":                true,
+		"rdp_listen_address":         rdpListen,
+		"rdp_forward_allowlist":      []string{"windows.internal:3389"},
+		"database_enabled":           true,
+		"database_listen_address":    databaseListen,
+		"database_forward_allowlist": []string{"db.internal:3306"},
+	}, cookie, http.StatusOK)
+	clearKeyBody := clearKeyRec.Body.String()
+	for _, leaked := range []string{"proxy-secret-key", "proxy_private_key_encrypted", "proxy_private_key_clear", `"proxy_private_key":`, `"ssh_private_key":`, "proxy_private_key_set"} {
+		if strings.Contains(clearKeyBody, leaked) {
+			t.Fatalf("proxy private key clear response leaked retained state %s: %s", leaked, clearKeyBody)
+		}
+	}
+	proxySetting, ok, err := srv.rawSystemSettingByType("proxy")
+	if err != nil || !ok {
+		t.Fatalf("load proxy setting after key clear: ok=%v err=%v", ok, err)
+	}
+	for _, key := range []string{"proxy_private_key_encrypted", "proxy_private_key_set", "proxy_private_key_updated_at", "proxy_private_key_clear"} {
+		if _, exists := proxySetting.Metadata[key]; exists {
+			t.Fatalf("proxy setting retained %s after key clear: %#v", key, proxySetting.Metadata)
+		}
+	}
+	proxyPrivateKey, ok, err = srv.cfg.Store.SystemSettingProxyPrivateKey()
+	if err != nil || !ok || proxyPrivateKey != "" {
+		t.Fatalf("cleared proxy private key = %q ok=%v err=%v", proxyPrivateKey, ok, err)
 	}
 
 	disableRec := assertStatus(t, handler, http.MethodPost, "/api/admin/proxy-services", map[string]any{

@@ -2130,6 +2130,7 @@ func TestDatabaseAssetQueryRequiresAuthorizationAndLogs(t *testing.T) {
 	}
 	assertStatus(t, handler, http.MethodPost, "/api/admin/sql-work-orders/"+workOrder.ID+"/execute", map[string]any{}, adminCookie, http.StatusConflict)
 	assertStatus(t, handler, http.MethodPost, "/api/admin/sql-work-orders/"+workOrder.ID+"/approve", map[string]any{"note": "approved for test"}, adminCookie, http.StatusOK)
+	assertStatus(t, handler, http.MethodPost, "/api/admin/sql-work-orders/"+workOrder.ID+"/reject", map[string]any{"note": "too late"}, adminCookie, http.StatusConflict)
 	assertStatus(t, handler, http.MethodPost, "/api/admin/sql-work-orders/"+workOrder.ID+"/execute", map[string]any{
 		"sql": "DROP TABLE servers",
 	}, adminCookie, http.StatusBadRequest)
@@ -2150,6 +2151,7 @@ func TestDatabaseAssetQueryRequiresAuthorizationAndLogs(t *testing.T) {
 	var rejectedOrder model.PlatformItem
 	decodeResponse(t, rejectedRec, &rejectedOrder)
 	assertStatus(t, handler, http.MethodPost, "/api/admin/sql-work-orders/"+rejectedOrder.ID+"/reject", map[string]any{"note": "not allowed"}, adminCookie, http.StatusOK)
+	assertStatus(t, handler, http.MethodPost, "/api/admin/sql-work-orders/"+rejectedOrder.ID+"/approve", map[string]any{"note": "revive rejected"}, adminCookie, http.StatusConflict)
 	assertStatus(t, handler, http.MethodPost, "/api/admin/sql-work-orders/"+rejectedOrder.ID+"/execute", map[string]any{}, adminCookie, http.StatusConflict)
 
 	failingRec := assertStatus(t, handler, http.MethodPost, "/api/access/database/"+databaseAsset.ID+"/work-orders", map[string]any{
@@ -2171,6 +2173,8 @@ func TestDatabaseAssetQueryRequiresAuthorizationAndLogs(t *testing.T) {
 	if failedOrder.Status != "failed" || firstMetadataString(failedOrder.Metadata, "sql_log_id") != failingLog.ID || !strings.Contains(firstMetadataString(failedOrder.Metadata, "execution_error"), "missing_work_order_table") {
 		t.Fatalf("failed work order did not persist execution failure state: %#v", failedOrder)
 	}
+	assertStatus(t, handler, http.MethodPost, "/api/admin/sql-work-orders/"+failingOrder.ID+"/approve", map[string]any{"note": "retry by re-approval"}, adminCookie, http.StatusConflict)
+	assertStatus(t, handler, http.MethodPost, "/api/admin/sql-work-orders/"+failingOrder.ID+"/reject", map[string]any{"note": "reject failed order"}, adminCookie, http.StatusConflict)
 
 	logsRec := assertStatus(t, handler, http.MethodGet, "/api/admin/audit/sql-logs", nil, adminCookie, http.StatusOK)
 	logsBody := logsRec.Body.String()

@@ -2536,8 +2536,12 @@ func (s *Server) handleSQLWorkOrderDecision(w http.ResponseWriter, r *http.Reque
 		writeError(w, http.StatusNotFound, "sql work order not found")
 		return
 	}
-	if strings.EqualFold(order.Status, "executed") {
-		writeError(w, http.StatusConflict, "executed sql work orders cannot be changed")
+	status := strings.ToLower(strings.TrimSpace(order.Status))
+	if status == "" {
+		status = "pending"
+	}
+	if status != "pending" {
+		writeError(w, http.StatusConflict, "sql work order decisions can only be made while pending")
 		return
 	}
 	var req workOrderDecisionRequest

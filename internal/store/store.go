@@ -1104,6 +1104,7 @@ func (s *Store) UpdatePlatformItem(collection, id string, req model.PlatformItem
 			}
 		}
 		if collection == "database_assets" {
+			clearDatabaseAssetDSN := metadataHasDatabaseAssetDSNClearRequest(item.Metadata)
 			for key, value := range existingDatabaseAssetSecrets {
 				delete(item.Metadata, key)
 				if value != "" {
@@ -1111,7 +1112,7 @@ func (s *Store) UpdatePlatformItem(collection, id string, req model.PlatformItem
 				}
 			}
 			restoreMetadataAnyValues(item.Metadata, existingDatabaseAssetSecretState)
-			if existingDatabaseAssetSecrets["database_dsn_encrypted"] == "" && existingDatabaseAssetPlainDSN != "" && firstMetadataString(item.Metadata, databaseAssetDSNPlainKeys...) == "" {
+			if !clearDatabaseAssetDSN && existingDatabaseAssetSecrets["database_dsn_encrypted"] == "" && existingDatabaseAssetPlainDSN != "" && firstMetadataString(item.Metadata, databaseAssetDSNPlainKeys...) == "" {
 				item.Metadata["dsn"] = existingDatabaseAssetPlainDSN
 			}
 		}
@@ -1633,20 +1634,21 @@ func (s *Store) applyCertificatePlatformSecret(item *model.PlatformItem, creatin
 }
 
 var databaseAssetDSNPlainKeys = []string{"dsn", "connection_string", "connectionString", "database_url", "databaseUrl", "url"}
+var databaseAssetDSNClearKeys = []string{"database_dsn_clear", "clear_database_dsn", "dsn_clear", "clear_dsn"}
 
 func (s *Store) applyDatabaseAssetPlatformSecret(item *model.PlatformItem, creating bool) error {
 	if item.Metadata == nil {
 		item.Metadata = map[string]any{}
 	}
+	clearRequested := metadataHasDatabaseAssetDSNClearRequest(item.Metadata)
 	dsn := firstMetadataString(item.Metadata, databaseAssetDSNPlainKeys...)
 	for _, key := range databaseAssetDSNPlainKeys {
 		delete(item.Metadata, key)
 	}
+	deleteDatabaseAssetDSNControlMetadata(item.Metadata)
 	if dsn == "" {
-		if creating {
-			delete(item.Metadata, "database_dsn_encrypted")
-			delete(item.Metadata, "database_dsn_set")
-			delete(item.Metadata, "database_dsn_updated_at")
+		if creating || clearRequested {
+			clearDatabaseAssetDSNSecretState(item.Metadata, true)
 		}
 		return nil
 	}
@@ -1661,6 +1663,30 @@ func (s *Store) applyDatabaseAssetPlatformSecret(item *model.PlatformItem, creat
 	item.Metadata["database_dsn_set"] = true
 	item.Metadata["database_dsn_updated_at"] = time.Now().UTC().Format(time.RFC3339Nano)
 	return nil
+}
+
+func metadataHasDatabaseAssetDSNClearRequest(metadata map[string]any) bool {
+	for _, key := range databaseAssetDSNClearKeys {
+		if metadataBool(metadata[key]) {
+			return true
+		}
+	}
+	return false
+}
+
+func deleteDatabaseAssetDSNControlMetadata(metadata map[string]any) {
+	for _, key := range databaseAssetDSNClearKeys {
+		delete(metadata, key)
+	}
+}
+
+func clearDatabaseAssetDSNSecretState(metadata map[string]any, includeEncrypted bool) {
+	if includeEncrypted {
+		delete(metadata, "database_dsn_encrypted")
+	}
+	deleteDatabaseAssetDSNControlMetadata(metadata)
+	delete(metadata, "database_dsn_set")
+	delete(metadata, "database_dsn_updated_at")
 }
 
 var webAssetUpstreamPlainKeys = []string{"target_url", "upstream", "url", "target", "address"}
@@ -2324,6 +2350,7 @@ func sanitizeDatabaseAssetMetadata(metadata map[string]any) {
 		}
 		delete(metadata, key)
 	}
+	deleteDatabaseAssetDSNControlMetadata(metadata)
 	delete(metadata, "database_dsn_encrypted")
 	if dsnSet {
 		metadata["database_dsn_set"] = true
@@ -2509,6 +2536,10 @@ var sensitiveMetadataKeys = map[string]struct{}{
 	"public_key_x":                             {},
 	"public_key_y":                             {},
 	"cose_public_key":                          {},
+	"database_dsn_clear":                       {},
+	"clear_database_dsn":                       {},
+	"dsn_clear":                                {},
+	"clear_dsn":                                {},
 	"database_dsn_encrypted":                   {},
 	"web_upstream_url_encrypted":               {},
 	"web_upstream_credentials_clear":           {},

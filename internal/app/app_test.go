@@ -3222,6 +3222,28 @@ func TestDatabaseAssetDirectDSNIsEncryptedAndRedacted(t *testing.T) {
 		t.Fatalf("database dsn secret was not preserved across metadata update: %q", connection.DSN)
 	}
 
+	clearRec := assertStatus(t, handler, http.MethodPatch, "/api/admin/database-assets/"+asset.ID, map[string]any{
+		"metadata": map[string]any{"database_dsn_clear": true, "row_limit": 75},
+	}, adminCookie, http.StatusOK)
+	clearBody := clearRec.Body.String()
+	for _, leaked := range []string{"dsn-secret", "postgres://dsn_user", `"dsn":`, "database_dsn_encrypted", "database_dsn_clear", "database_dsn_set"} {
+		if strings.Contains(clearBody, leaked) {
+			t.Fatalf("database asset clear response leaked %q: %s", leaked, clearBody)
+		}
+	}
+	rawCleared, ok, err := server.cfg.Store.GetPlatformItem("database_assets", asset.ID)
+	if err != nil || !ok {
+		t.Fatalf("load cleared database asset: ok=%v err=%v", ok, err)
+	}
+	for _, key := range []string{"dsn", "connection_string", "connectionString", "database_url", "databaseUrl", "url", "database_dsn_encrypted", "database_dsn_set", "database_dsn_updated_at", "database_dsn_clear", "clear_database_dsn", "dsn_clear", "clear_dsn"} {
+		if _, exists := rawCleared.Metadata[key]; exists {
+			t.Fatalf("database asset retained dsn metadata %q after clear: %#v", key, rawCleared.Metadata)
+		}
+	}
+	if _, err = server.databaseAssetConnection(asset); err == nil || !strings.Contains(err.Error(), "database host is required") {
+		t.Fatalf("database asset connection reused cleared dsn, err=%v", err)
+	}
+
 	listRec := assertStatus(t, handler, http.MethodGet, "/api/admin/database-assets", nil, adminCookie, http.StatusOK)
 	listBody := listRec.Body.String()
 	for _, leaked := range []string{"dsn-secret", "postgres://dsn_user", `"dsn":`, "database_dsn_encrypted"} {

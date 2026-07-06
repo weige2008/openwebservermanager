@@ -30,6 +30,8 @@ interface PlatformFormState {
   password: string
   oidcClientSecretSet: boolean
   oidcClientSecretClear: boolean
+  databaseDSNSet: boolean
+  databaseDSNClear: boolean
   private_key: string
   passphrase: string
   group: string
@@ -64,6 +66,8 @@ const initialForm: PlatformFormState = {
   password: '',
   oidcClientSecretSet: false,
   oidcClientSecretClear: false,
+  databaseDSNSet: false,
+  databaseDSNClear: false,
   private_key: '',
   passphrase: '',
   group: '',
@@ -3274,6 +3278,19 @@ function PlatformItemDialog({
               <Field label={app.t('rowLimit', '行数限制')}>
                 <Input type='number' placeholder='100' value={metadataFormText(form.metadata, 'row_limit')} onChange={(event) => onChange({ metadata: metadataWithValue(form.metadata, 'row_limit', event.currentTarget.value ? Number(event.currentTarget.value) : '') })} />
               </Field>
+              {form.databaseDSNSet ? (
+                <div className='grid gap-2 rounded-lg border border-border bg-muted/20 p-3 sm:col-span-2'>
+                  <div className='flex flex-wrap items-center justify-between gap-2'>
+                    <span className='text-sm font-medium'>{app.t('databaseDSN', 'Database DSN')}</span>
+                    <Badge tone='success'>{app.t('passwordSaved')}</Badge>
+                  </div>
+                  <CheckboxRow
+                    checked={form.databaseDSNClear}
+                    onChange={(checked) => onChange({ databaseDSNClear: checked })}
+                    label={app.t('clearDatabaseDSN', 'Clear saved database DSN on save')}
+                  />
+                </div>
+              ) : null}
               <Field label={app.t('gatewayGroup', '网关分组')}>
                 <Select value={metadataFormText(form.metadata, 'gateway_group_id')} onChange={(event) => onChange({ metadata: metadataWithValue(form.metadata, 'gateway_group_id', event.currentTarget.value) })}>
                   <option value=''>{app.t('directAccess', '直连')}</option>
@@ -3687,6 +3704,8 @@ function formFromPlatformItem(item: PlatformItem): PlatformFormState {
     password: '',
     oidcClientSecretSet: metadataBool(item.metadata?.client_secret_set),
     oidcClientSecretClear: false,
+    databaseDSNSet: metadataBool(item.metadata?.database_dsn_set),
+    databaseDSNClear: false,
     private_key: '',
     passphrase: '',
     group: item.group || '',
@@ -3707,6 +3726,9 @@ function platformRequestFromForm(form: PlatformFormState) {
   }
   if (form.oidcClientSecretClear) {
     metadata = { ...(metadata ?? {}), client_secret_clear: true }
+  }
+  if (form.databaseDSNClear) {
+    metadata = { ...(metadata ?? {}), database_dsn_clear: true }
   }
   return {
     name: form.name,

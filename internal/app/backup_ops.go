@@ -247,6 +247,10 @@ func backupRestoreUploadMetadata(filename string, headerSize, written int64) map
 }
 
 func backupRestoreUploadName(filename string) string {
+	return safeUploadedFilename(filename)
+}
+
+func safeUploadedFilename(filename string) string {
 	filename = strings.TrimSpace(strings.ReplaceAll(filename, "\\", "/"))
 	if filename == "" {
 		return ""

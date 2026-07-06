@@ -7506,9 +7506,16 @@ func TestStorageAuthorizationStrategyPermissions(t *testing.T) {
 	assertStatus(t, handler, http.MethodGet, "/api/admin/storages/"+storage.ID+"/files", nil, userCookie, http.StatusOK)
 	assertStatus(t, handler, http.MethodPost, "/api/admin/storages/"+storage.ID+"/files-mkdir", map[string]any{"path": "docs"}, userCookie, http.StatusCreated)
 	assertStatus(t, handler, http.MethodPost, "/api/admin/storages/"+storage.ID+"/files-write", map[string]any{"path": "docs/a.txt", "content": "alpha"}, userCookie, http.StatusCreated)
-	assertMultipartStatus(t, handler, "/api/admin/storages/"+storage.ID+"/files-upload", map[string]string{"path": "docs"}, "uploaded.txt", []byte("uploaded"), userCookie, http.StatusCreated)
+	uploadRec := assertMultipartStatus(t, handler, "/api/admin/storages/"+storage.ID+"/files-upload", map[string]string{"path": "docs"}, `C:\Users\ops\Downloads\uploaded.txt`, []byte("uploaded"), userCookie, http.StatusCreated)
+	if !strings.Contains(uploadRec.Body.String(), `"name":"uploaded.txt"`) || strings.Contains(uploadRec.Body.String(), `C:\Users\ops`) {
+		t.Fatalf("storage upload response did not sanitize filename: %s", uploadRec.Body.String())
+	}
 	assertStatus(t, handler, http.MethodPost, "/api/admin/storages/"+storage.ID+"/files-copy", map[string]any{"path": "docs/a.txt", "destination": "docs/b.txt"}, userCookie, http.StatusCreated)
 	assertStatus(t, handler, http.MethodPost, "/api/admin/storages/"+storage.ID+"/files-rename", map[string]any{"path": "docs/b.txt", "destination": "docs/c.txt"}, userCookie, http.StatusOK)
+	uploadDownloadRec := assertStatus(t, handler, http.MethodGet, "/api/admin/storages/"+storage.ID+"/files-download?path=docs/uploaded.txt", nil, userCookie, http.StatusOK)
+	if strings.TrimSpace(uploadDownloadRec.Body.String()) != "uploaded" {
+		t.Fatalf("uploaded file body = %q, want uploaded", uploadDownloadRec.Body.String())
+	}
 	downloadRec := assertStatus(t, handler, http.MethodGet, "/api/admin/storages/"+storage.ID+"/files-download?path=docs/c.txt", nil, userCookie, http.StatusOK)
 	if strings.TrimSpace(downloadRec.Body.String()) != "alpha" {
 		t.Fatalf("download body = %q, want alpha", downloadRec.Body.String())
@@ -7526,6 +7533,8 @@ func TestStorageAuthorizationStrategyPermissions(t *testing.T) {
 		`"destination_path":"docs/b.txt"`,
 		`"source_path":"docs/b.txt"`,
 		`"destination_path":"docs/c.txt"`,
+		`"filename":"uploaded.txt"`,
+		`"path":"docs/uploaded.txt"`,
 		`"path":"docs/c.txt"`,
 		`"size":5`,
 		`"storage_id":"` + storage.ID + `"`,
@@ -7535,6 +7544,9 @@ func TestStorageAuthorizationStrategyPermissions(t *testing.T) {
 		if !strings.Contains(logsBody, want) {
 			t.Fatalf("file logs missing audit metadata %s: %s", want, logsBody)
 		}
+	}
+	if strings.Contains(logsBody, `C:\Users\ops`) || strings.Contains(logsBody, `Downloads\`) {
+		t.Fatalf("storage upload audit leaked client path: %s", logsBody)
 	}
 
 	assertStatus(t, handler, http.MethodPost, "/api/admin/strategies", map[string]any{

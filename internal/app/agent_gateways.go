@@ -93,8 +93,14 @@ func (s *Server) handleAgentGatewayToken(w http.ResponseWriter, r *http.Request,
 		item.Metadata = map[string]any{}
 	}
 	now := time.Now().UTC()
+	if strings.EqualFold(item.Status, "online") {
+		item.Status = "offline"
+		item.Metadata["last_offline_at"] = now.Format(time.RFC3339Nano)
+		item.Metadata["offline_reason"] = "token rotated"
+	}
 	item.Metadata["agent_token_hash"] = string(hash)
 	item.Metadata["token_issued_at"] = now.Format(time.RFC3339Nano)
+	item.Metadata["token_rotated_at"] = now.Format(time.RFC3339Nano)
 	item.Metadata["token_issued_by"] = s.currentUserID(r)
 	item.Metadata["token_generation"] = metadataIntDefault(item.Metadata["token_generation"], 0) + 1
 	item.Metadata["heartbeat_timeout_seconds"] = agentHeartbeatTimeout(item).Seconds()

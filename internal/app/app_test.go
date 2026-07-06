@@ -3697,6 +3697,33 @@ func TestAgentGatewayRegistrationHeartbeatAndTimeout(t *testing.T) {
 		t.Fatal("valid heartbeat did not recover offline gateway")
 	}
 
+	rotatedTokenRec := assertStatus(t, handler, http.MethodPost, "/api/admin/agent-gateways/"+gateway.ID+"/token", nil, adminCookie, http.StatusOK)
+	var rotatedTokenPayload map[string]any
+	decodeResponse(t, rotatedTokenRec, &rotatedTokenPayload)
+	rotatedRegistrationToken, _ := rotatedTokenPayload["registration_token"].(string)
+	if rotatedRegistrationToken == "" || rotatedRegistrationToken == registrationToken {
+		t.Fatalf("rotated registration token = %q, old token = %q", rotatedRegistrationToken, registrationToken)
+	}
+	if strings.Contains(rotatedTokenRec.Body.String(), "agent_token_hash") || strings.Contains(rotatedTokenRec.Body.String(), registrationToken) {
+		t.Fatalf("rotated token response leaked token material: %s", rotatedTokenRec.Body.String())
+	}
+	rotatedStatusRec := assertStatus(t, handler, http.MethodGet, "/api/admin/agent-gateways", nil, adminCookie, http.StatusOK)
+	if !strings.Contains(rotatedStatusRec.Body.String(), `"status":"offline"`) || !strings.Contains(rotatedStatusRec.Body.String(), "token rotated") {
+		t.Fatalf("token rotation did not mark gateway offline: %s", rotatedStatusRec.Body.String())
+	}
+	assertStatus(t, handler, http.MethodPost, "/api/agent/gateways/heartbeat", map[string]any{
+		"registration_token": registrationToken,
+		"latency_ms":         7,
+	}, nil, http.StatusUnauthorized)
+	assertStatus(t, handler, http.MethodPost, "/api/agent/gateways/heartbeat", map[string]any{
+		"registration_token": rotatedRegistrationToken,
+		"latency_ms":         6,
+	}, nil, http.StatusOK)
+	rotatedRecoveredRec := assertStatus(t, handler, http.MethodGet, "/api/admin/agent-gateways", nil, adminCookie, http.StatusOK)
+	if !strings.Contains(rotatedRecoveredRec.Body.String(), `"status":"online"`) || !strings.Contains(rotatedRecoveredRec.Body.String(), `"latency_ms":6`) {
+		t.Fatalf("rotated token heartbeat did not recover gateway: %s", rotatedRecoveredRec.Body.String())
+	}
+
 	logsRec := assertStatus(t, handler, http.MethodGet, "/api/admin/audit/operation-logs", nil, adminCookie, http.StatusOK)
 	if !strings.Contains(logsRec.Body.String(), "agent.gateway.register") || !strings.Contains(logsRec.Body.String(), "agent_gateway.token") {
 		t.Fatal("agent gateway token/register operations were not audited")

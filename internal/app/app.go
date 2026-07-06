@@ -669,7 +669,7 @@ func (s *Server) platformSSHConnectionParts(w http.ResponseWriter, session model
 		writeError(w, http.StatusNotFound, "server not found")
 		return model.PlatformItem{}, model.PlatformItem{}, store.CredentialSecret{}, false
 	}
-	if !platformItemEnabled(asset) {
+	if !platformAccessItemEnabled(asset) {
 		writeError(w, http.StatusNotFound, "server not found")
 		return model.PlatformItem{}, model.PlatformItem{}, store.CredentialSecret{}, false
 	}

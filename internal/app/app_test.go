@@ -302,6 +302,16 @@ func TestAccessPortalExcludesDisabledAssets(t *testing.T) {
 	}, adminCookie, http.StatusCreated)
 	var sshAsset model.PlatformItem
 	decodeResponse(t, sshRec, &sshAsset)
+	lockedSSHRec := assertStatus(t, handler, http.MethodPost, "/api/admin/assets", map[string]any{
+		"name":     "locked-ssh-asset",
+		"type":     "linux",
+		"status":   "locked",
+		"protocol": "ssh",
+		"host":     "127.0.0.1",
+		"port":     22,
+	}, adminCookie, http.StatusCreated)
+	var lockedSSHAsset model.PlatformItem
+	decodeResponse(t, lockedSSHRec, &lockedSSHAsset)
 	webRec := assertStatus(t, handler, http.MethodPost, "/api/admin/websites", map[string]any{
 		"name":     "disabled-web-asset",
 		"type":     "http",
@@ -311,6 +321,15 @@ func TestAccessPortalExcludesDisabledAssets(t *testing.T) {
 	}, adminCookie, http.StatusCreated)
 	var webAsset model.PlatformItem
 	decodeResponse(t, webRec, &webAsset)
+	lockedWebRec := assertStatus(t, handler, http.MethodPost, "/api/admin/websites", map[string]any{
+		"name":     "locked-web-asset",
+		"type":     "http",
+		"status":   "locked",
+		"protocol": "http",
+		"host":     "https://locked.example.test",
+	}, adminCookie, http.StatusCreated)
+	var lockedWebAsset model.PlatformItem
+	decodeResponse(t, lockedWebRec, &lockedWebAsset)
 	databaseRec := assertStatus(t, handler, http.MethodPost, "/api/admin/database-assets", map[string]any{
 		"name":     "disabled-database-asset",
 		"type":     "sqlite",
@@ -320,11 +339,26 @@ func TestAccessPortalExcludesDisabledAssets(t *testing.T) {
 	}, adminCookie, http.StatusCreated)
 	var databaseAsset model.PlatformItem
 	decodeResponse(t, databaseRec, &databaseAsset)
+	lockedDatabaseRec := assertStatus(t, handler, http.MethodPost, "/api/admin/database-assets", map[string]any{
+		"name":     "locked-database-asset",
+		"type":     "sqlite",
+		"status":   "locked",
+		"protocol": "database",
+		"metadata": map[string]any{"sqlite_path": "locked-access.db"},
+	}, adminCookie, http.StatusCreated)
+	var lockedDatabaseAsset model.PlatformItem
+	decodeResponse(t, lockedDatabaseRec, &lockedDatabaseAsset)
 
 	assertStatus(t, handler, http.MethodPost, "/api/admin/authorizations/assets", map[string]any{
 		"name":      "disabled user ssh",
 		"owner_id":  user.ID,
 		"target_id": sshAsset.ID,
+		"status":    "enabled",
+	}, adminCookie, http.StatusCreated)
+	assertStatus(t, handler, http.MethodPost, "/api/admin/authorizations/assets", map[string]any{
+		"name":      "locked user ssh",
+		"owner_id":  user.ID,
+		"target_id": lockedSSHAsset.ID,
 		"status":    "enabled",
 	}, adminCookie, http.StatusCreated)
 	assertStatus(t, handler, http.MethodPost, "/api/admin/authorizations/websites", map[string]any{
@@ -333,10 +367,22 @@ func TestAccessPortalExcludesDisabledAssets(t *testing.T) {
 		"target_id": webAsset.ID,
 		"status":    "enabled",
 	}, adminCookie, http.StatusCreated)
+	assertStatus(t, handler, http.MethodPost, "/api/admin/authorizations/websites", map[string]any{
+		"name":      "locked user web",
+		"owner_id":  user.ID,
+		"target_id": lockedWebAsset.ID,
+		"status":    "enabled",
+	}, adminCookie, http.StatusCreated)
 	assertStatus(t, handler, http.MethodPost, "/api/admin/authorizations/databases", map[string]any{
 		"name":      "disabled user database",
 		"owner_id":  user.ID,
 		"target_id": databaseAsset.ID,
+		"status":    "enabled",
+	}, adminCookie, http.StatusCreated)
+	assertStatus(t, handler, http.MethodPost, "/api/admin/authorizations/databases", map[string]any{
+		"name":      "locked user database",
+		"owner_id":  user.ID,
+		"target_id": lockedDatabaseAsset.ID,
 		"status":    "enabled",
 	}, adminCookie, http.StatusCreated)
 
@@ -344,19 +390,24 @@ func TestAccessPortalExcludesDisabledAssets(t *testing.T) {
 	userCookie := loginRec.Result().Cookies()[0]
 	accessRec := assertStatus(t, handler, http.MethodGet, "/api/access/assets", nil, userCookie, http.StatusOK)
 	accessBody := accessRec.Body.String()
-	for _, forbidden := range []string{sshAsset.ID, webAsset.ID, databaseAsset.ID} {
+	for _, forbidden := range []string{sshAsset.ID, lockedSSHAsset.ID, webAsset.ID, lockedWebAsset.ID, databaseAsset.ID, lockedDatabaseAsset.ID} {
 		if strings.Contains(accessBody, forbidden) {
-			t.Fatalf("disabled asset leaked into access portal: %s", accessBody)
+			t.Fatalf("non-connectable asset leaked into access portal: %s", accessBody)
 		}
 	}
 	adminAccessRec := assertStatus(t, handler, http.MethodGet, "/api/access/assets", nil, adminCookie, http.StatusOK)
-	if strings.Contains(adminAccessRec.Body.String(), sshAsset.ID) || strings.Contains(adminAccessRec.Body.String(), webAsset.ID) || strings.Contains(adminAccessRec.Body.String(), databaseAsset.ID) {
-		t.Fatalf("disabled assets leaked into admin access portal: %s", adminAccessRec.Body.String())
+	for _, forbidden := range []string{sshAsset.ID, lockedSSHAsset.ID, webAsset.ID, lockedWebAsset.ID, databaseAsset.ID, lockedDatabaseAsset.ID} {
+		if strings.Contains(adminAccessRec.Body.String(), forbidden) {
+			t.Fatalf("non-connectable asset leaked into admin access portal: %s", adminAccessRec.Body.String())
+		}
 	}
 
 	assertStatus(t, handler, http.MethodPost, "/api/access/ssh/"+sshAsset.ID, map[string]any{"cols": 120, "rows": 32}, userCookie, http.StatusNotFound)
+	assertStatus(t, handler, http.MethodPost, "/api/access/ssh/"+lockedSSHAsset.ID, map[string]any{"cols": 120, "rows": 32}, userCookie, http.StatusNotFound)
 	assertStatus(t, handler, http.MethodGet, "/api/access/http/"+webAsset.ID+"/proxy/", nil, userCookie, http.StatusNotFound)
+	assertStatus(t, handler, http.MethodGet, "/api/access/http/"+lockedWebAsset.ID+"/proxy/", nil, userCookie, http.StatusNotFound)
 	assertStatus(t, handler, http.MethodPost, "/api/access/database/"+databaseAsset.ID+"/query", map[string]any{"sql": "SELECT 1"}, userCookie, http.StatusNotFound)
+	assertStatus(t, handler, http.MethodPost, "/api/access/database/"+lockedDatabaseAsset.ID+"/query", map[string]any{"sql": "SELECT 1"}, userCookie, http.StatusNotFound)
 }
 
 func TestAuthenticatedPasswordChange(t *testing.T) {
@@ -1107,6 +1158,13 @@ func TestPlatformConnectionsRejectDisabledAssetsAndCredentialsAtOpen(t *testing.
 		t.Fatalf("disabled ssh asset resolved: ok=%v status=%d body=%s", ok, disabledAssetRec.Code, disabledAssetRec.Body.String())
 	}
 	assertStatus(t, handler, http.MethodPatch, "/api/admin/assets/"+sshAsset.ID, map[string]any{"status": "active"}, adminCookie, http.StatusOK)
+	assertStatus(t, handler, http.MethodPatch, "/api/admin/assets/"+sshAsset.ID, map[string]any{"status": "locked"}, adminCookie, http.StatusOK)
+	lockedAssetRec := httptest.NewRecorder()
+	_, _, _, _, ok = srv.connectionParts(lockedAssetRec, sshReq, sshSession.ID, model.ProtocolSSH)
+	if ok || lockedAssetRec.Code != http.StatusNotFound {
+		t.Fatalf("locked ssh asset resolved: ok=%v status=%d body=%s", ok, lockedAssetRec.Code, lockedAssetRec.Body.String())
+	}
+	assertStatus(t, handler, http.MethodPatch, "/api/admin/assets/"+sshAsset.ID, map[string]any{"status": "active"}, adminCookie, http.StatusOK)
 	assertStatus(t, handler, http.MethodPatch, "/api/admin/credentials/"+sshCredential.ID, map[string]any{"status": "disabled"}, adminCookie, http.StatusOK)
 	disabledCredentialRec := httptest.NewRecorder()
 	_, _, _, _, ok = srv.connectionParts(disabledCredentialRec, sshReq, sshSession.ID, model.ProtocolSSH)
@@ -1165,6 +1223,12 @@ func TestPlatformConnectionsRejectDisabledAssetsAndCredentialsAtOpen(t *testing.
 	disabledVNCAssetRec := httptest.NewRecorder()
 	if _, ok := srv.desktopTunnelConfig(disabledVNCAssetRec, vncReq, vncSession.ID, model.ProtocolVNC); ok || disabledVNCAssetRec.Code != http.StatusNotFound {
 		t.Fatalf("disabled vnc asset resolved: ok=%v status=%d body=%s", ok, disabledVNCAssetRec.Code, disabledVNCAssetRec.Body.String())
+	}
+	assertStatus(t, handler, http.MethodPatch, "/api/admin/assets/"+vncAsset.ID, map[string]any{"status": "enabled"}, adminCookie, http.StatusOK)
+	assertStatus(t, handler, http.MethodPatch, "/api/admin/assets/"+vncAsset.ID, map[string]any{"status": "locked"}, adminCookie, http.StatusOK)
+	lockedVNCAssetRec := httptest.NewRecorder()
+	if _, ok := srv.desktopTunnelConfig(lockedVNCAssetRec, vncReq, vncSession.ID, model.ProtocolVNC); ok || lockedVNCAssetRec.Code != http.StatusNotFound {
+		t.Fatalf("locked vnc asset resolved: ok=%v status=%d body=%s", ok, lockedVNCAssetRec.Code, lockedVNCAssetRec.Body.String())
 	}
 	assertStatus(t, handler, http.MethodPatch, "/api/admin/assets/"+vncAsset.ID, map[string]any{"status": "enabled"}, adminCookie, http.StatusOK)
 	assertStatus(t, handler, http.MethodPatch, "/api/admin/credentials/"+enabledVNC.ID, map[string]any{"status": "disabled"}, adminCookie, http.StatusOK)

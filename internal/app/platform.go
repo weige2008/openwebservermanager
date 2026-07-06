@@ -1346,7 +1346,7 @@ func filterAuthorizedItems(platform map[string][]model.PlatformItem, items, auth
 	ctx := accessAuthorizationContextFor(platform, userID)
 	result := []model.PlatformItem{}
 	for _, item := range items {
-		if !platformItemEnabled(item) {
+		if !platformAccessItemEnabled(item) {
 			continue
 		}
 		if isAdmin {
@@ -1631,7 +1631,7 @@ func filterAuthorizationsForEnabledTargets(platform map[string][]model.PlatformI
 func authorizationTargetsEnabledItem(platform map[string][]model.PlatformItem, authorization model.PlatformItem) bool {
 	for _, items := range [][]model.PlatformItem{platform["assets"], platform["web_assets"], platform["database_assets"]} {
 		for _, item := range items {
-			if platformItemEnabled(item) && authorizationTargetMatches(platform, authorization, item) {
+			if platformAccessItemEnabled(item) && authorizationTargetMatches(platform, authorization, item) {
 				return true
 			}
 		}
@@ -1691,7 +1691,7 @@ func findAccessAsset(platform map[string][]model.PlatformItem, protocol model.Pr
 		if item.ID != assetID {
 			continue
 		}
-		if !platformItemEnabled(item) {
+		if !platformAccessItemEnabled(item) {
 			return model.PlatformItem{}, false
 		}
 		if collection == "assets" && item.Protocol != protocol {
@@ -1727,6 +1727,15 @@ func isAccessAuthorized(platform map[string][]model.PlatformItem, protocol model
 		}
 	}
 	return false
+}
+
+func platformAccessItemEnabled(item model.PlatformItem) bool {
+	switch strings.ToLower(strings.TrimSpace(item.Status)) {
+	case "", "enabled", "active":
+		return true
+	default:
+		return false
+	}
 }
 
 func protocolSessionName(protocol model.Protocol, assetID string) string {

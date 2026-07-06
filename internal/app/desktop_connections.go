@@ -149,7 +149,7 @@ func (s *Server) platformDesktopParts(w http.ResponseWriter, session model.Conne
 		writeError(w, http.StatusNotFound, "desktop asset not found")
 		return model.PlatformItem{}, model.PlatformItem{}, store.CredentialSecret{}, false
 	}
-	if !platformItemEnabled(asset) {
+	if !platformAccessItemEnabled(asset) {
 		writeError(w, http.StatusNotFound, "desktop asset not found")
 		return model.PlatformItem{}, model.PlatformItem{}, store.CredentialSecret{}, false
 	}

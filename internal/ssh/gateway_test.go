@@ -622,6 +622,105 @@ func TestNativeSSHGatewayAuthorizationMetadataAliases(t *testing.T) {
 	}
 }
 
+func TestNativeSSHGatewayCommandFilterBlocksTargetExecution(t *testing.T) {
+	targetAddr, targetCommands, closeTarget := startRecordingSSHServer(t, "remote", "target-secret")
+	defer closeTarget()
+
+	st := newGatewayTestStore(t)
+	assetRec := createGatewayUserAssetAndCredential(t, st, targetAddr)
+	if _, err := st.CreatePlatformItem("command_filters", model.PlatformItemRequest{
+		Name:     "native gateway dangerous shell",
+		Type:     "deny",
+		Status:   "enabled",
+		Protocol: model.ProtocolSSH,
+		TargetID: assetRec.ID,
+		Metadata: map[string]any{
+			"pattern": "rm -rf",
+			"risk":    "high",
+		},
+	}); err != nil {
+		t.Fatalf("create command filter: %v", err)
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	gatewayDataDir := mustTempDir(t)
+	defer removeTempDir(gatewayDataDir)
+	gateway, err := StartGateway(ctx, GatewayConfig{
+		Enabled:        true,
+		Address:        "127.0.0.1:0",
+		DataDir:        gatewayDataDir,
+		KnownHostsPath: filepath.Join(gatewayDataDir, "known_hosts"),
+		Store:          st,
+	})
+	if err != nil {
+		t.Fatalf("start gateway: %v", err)
+	}
+	defer gateway.Close()
+
+	client, err := ssh.Dial("tcp", gateway.Address(), &ssh.ClientConfig{
+		User:            "gateway-user",
+		Auth:            []ssh.AuthMethod{ssh.Password("password123")},
+		HostKeyCallback: ssh.InsecureIgnoreHostKey(),
+		Timeout:         5 * time.Second,
+	})
+	if err != nil {
+		t.Fatalf("dial gateway: %v", err)
+	}
+	defer client.Close()
+	session, err := client.NewSession()
+	if err != nil {
+		t.Fatalf("new gateway session: %v", err)
+	}
+	defer session.Close()
+	stdout, err := session.StdoutPipe()
+	if err != nil {
+		t.Fatalf("stdout pipe: %v", err)
+	}
+	stdin, err := session.StdinPipe()
+	if err != nil {
+		t.Fatalf("stdin pipe: %v", err)
+	}
+	if err := session.RequestPty("xterm-256color", 24, 80, ssh.TerminalModes{ssh.ECHO: 1}); err != nil {
+		t.Fatalf("request pty: %v", err)
+	}
+	if err := session.Shell(); err != nil {
+		t.Fatalf("start gateway shell: %v", err)
+	}
+	if _, err := io.WriteString(stdin, "1\r"); err != nil {
+		t.Fatalf("select asset: %v", err)
+	}
+	_ = readUntilContains(t, stdout, "target-shell", 5*time.Second)
+
+	if _, err := io.WriteString(stdin, "rm -rf /\r"); err != nil {
+		t.Fatalf("write blocked command: %v", err)
+	}
+	notice := readUntilContains(t, stdout, "command blocked by native gateway dangerous shell", 5*time.Second)
+	if !strings.Contains(notice, "rm -rf /") {
+		t.Fatalf("block notice = %q, want command", notice)
+	}
+	assertNoRecordedCommand(t, targetCommands, 300*time.Millisecond)
+
+	if _, err := io.WriteString(stdin, "printf ok\r"); err != nil {
+		t.Fatalf("write allowed command: %v", err)
+	}
+	allowedOutput := readUntilContains(t, stdout, "ran: printf ok", 5*time.Second)
+	if !strings.Contains(allowedOutput, "ran: printf ok") {
+		t.Fatalf("allowed command output = %q", allowedOutput)
+	}
+	if got := readRecordedCommand(t, targetCommands, 2*time.Second); got != "printf ok" {
+		t.Fatalf("recorded command = %q, want allowed command only", got)
+	}
+
+	logs, err := st.ListPlatformItems("exec_command_logs")
+	if err != nil {
+		t.Fatalf("list command logs: %v", err)
+	}
+	if commandLogStatusByCommand(logs, "rm -rf /") != "denied" || commandLogStatusByCommand(logs, "printf ok") != "submitted" {
+		t.Fatalf("command logs = %#v, want denied blocked command and submitted allowed command", logs)
+	}
+}
+
 func TestNativeSSHGatewayChineseAdminDirectAssetLoginWithoutGrant(t *testing.T) {
 	targetAddr, closeTarget := startFakeSSHServer(t, "remote", "target-secret")
 	defer closeTarget()
@@ -1129,6 +1228,40 @@ func startFakeSSHServer(t *testing.T, username, password string) (string, func()
 	}
 }
 
+func startRecordingSSHServer(t *testing.T, username, password string) (string, <-chan string, func()) {
+	t.Helper()
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("listen recording target: %v", err)
+	}
+	commands := make(chan string, 16)
+	signer := testSSHSigner(t)
+	config := &ssh.ServerConfig{
+		PasswordCallback: func(meta ssh.ConnMetadata, payload []byte) (*ssh.Permissions, error) {
+			if meta.User() == username && string(payload) == password {
+				return nil, nil
+			}
+			return nil, errUnauthorized
+		},
+	}
+	config.AddHostKey(signer)
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		for {
+			conn, err := listener.Accept()
+			if err != nil {
+				return
+			}
+			go handleRecordingSSHConn(conn, config, commands)
+		}
+	}()
+	return listener.Addr().String(), commands, func() {
+		_ = listener.Close()
+		<-done
+	}
+}
+
 var errUnauthorized = errors.New("unauthorized")
 
 func handleFakeSSHConn(conn net.Conn, config *ssh.ServerConfig) {
@@ -1165,6 +1298,107 @@ func handleFakeSSHConn(conn net.Conn, config *ssh.ServerConfig) {
 			}
 		}()
 	}
+}
+
+func handleRecordingSSHConn(conn net.Conn, config *ssh.ServerConfig, commands chan<- string) {
+	sshConn, chans, reqs, err := ssh.NewServerConn(conn, config)
+	if err != nil {
+		_ = conn.Close()
+		return
+	}
+	defer sshConn.Close()
+	go ssh.DiscardRequests(reqs)
+	for newChannel := range chans {
+		if newChannel.ChannelType() != "session" {
+			_ = newChannel.Reject(ssh.UnknownChannelType, "session only")
+			continue
+		}
+		channel, requests, err := newChannel.Accept()
+		if err != nil {
+			continue
+		}
+		go func() {
+			defer channel.Close()
+			for req := range requests {
+				switch req.Type {
+				case "pty-req":
+					replyRequest(req, true)
+				case "shell":
+					replyRequest(req, true)
+					_, _ = channel.Write([]byte("target-shell\r\n"))
+					recordShellCommands(channel, commands)
+					return
+				default:
+					replyRequest(req, false)
+				}
+			}
+		}()
+	}
+}
+
+func recordShellCommands(channel ssh.Channel, commands chan<- string) {
+	var line strings.Builder
+	buffer := make([]byte, 1024)
+	for {
+		n, err := channel.Read(buffer)
+		if n > 0 {
+			for _, b := range buffer[:n] {
+				switch b {
+				case '\r', '\n':
+					command := strings.TrimSpace(line.String())
+					line.Reset()
+					if command != "" {
+						commands <- command
+						_, _ = channel.Write([]byte("ran: " + command + "\r\n"))
+					}
+				case clearCurrentLine, 0x03:
+					line.Reset()
+				case 0x7f, 0x08:
+					value := line.String()
+					if len(value) > 0 {
+						line.Reset()
+						line.WriteString(value[:len(value)-1])
+					}
+				default:
+					if b == '\t' || b >= 0x20 {
+						line.WriteByte(b)
+					}
+				}
+			}
+		}
+		if err != nil {
+			return
+		}
+	}
+}
+
+func assertNoRecordedCommand(t *testing.T, commands <-chan string, timeout time.Duration) {
+	t.Helper()
+	select {
+	case command := <-commands:
+		t.Fatalf("unexpected command reached target: %q", command)
+	case <-time.After(timeout):
+	}
+}
+
+func readRecordedCommand(t *testing.T, commands <-chan string, timeout time.Duration) string {
+	t.Helper()
+	select {
+	case command := <-commands:
+		return command
+	case <-time.After(timeout):
+		t.Fatalf("timed out waiting for recorded command")
+		return ""
+	}
+}
+
+func commandLogStatusByCommand(logs []model.PlatformItem, command string) string {
+	for _, log := range logs {
+		if log.Metadata["command"] == command {
+			return log.Status
+		}
+	}
+	return ""
 }
 
 func newGatewayTestStore(t *testing.T) *store.Store {

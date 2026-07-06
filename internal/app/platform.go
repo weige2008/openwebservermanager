@@ -71,6 +71,9 @@ func (s *Server) handlePlatformAPI(w http.ResponseWriter, r *http.Request) bool 
 	case path == "access/assets":
 		s.handleAccessAssets(w, r)
 		return true
+	case path == "access/command-snippets":
+		s.handleAccessCommandSnippets(w, r)
+		return true
 	case strings.HasPrefix(path, "access/"):
 		s.handleAccessAction(w, r)
 		return true
@@ -226,6 +229,21 @@ func (s *Server) handleAccessAssets(w http.ResponseWriter, r *http.Request) {
 		"database":   databaseAssets,
 		"authorized": authorizations,
 	})
+}
+
+func (s *Server) handleAccessCommandSnippets(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		writeError(w, http.StatusMethodNotAllowed, "method not allowed")
+		return
+	}
+	platform, err := s.cfg.Store.PlatformBootstrap()
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	userID, isAdmin := s.accessUser(r)
+	items := filterCommandSnippetsForUser(platform["command_snippets"], userID, isAdmin)
+	writeJSON(w, http.StatusOK, map[string]any{"items": items})
 }
 
 func (s *Server) handleAccessAction(w http.ResponseWriter, r *http.Request) {

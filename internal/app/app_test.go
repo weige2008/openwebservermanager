@@ -1510,6 +1510,24 @@ func TestCommandSnippetBootstrapVisibility(t *testing.T) {
 	if strings.Contains(body, otherSnippet.ID) || strings.Contains(body, disabledSnippet.ID) {
 		t.Fatal("user bootstrap leaked private or disabled command snippets")
 	}
+	userAccessRec := assertStatus(t, handler, http.MethodGet, "/api/access/command-snippets", nil, userCookie, http.StatusOK)
+	userAccessBody := userAccessRec.Body.String()
+	if !strings.Contains(userAccessBody, publicSnippet.ID) || !strings.Contains(userAccessBody, ownedSnippet.ID) {
+		t.Fatalf("user access snippets did not include public and owned snippets: %s", userAccessBody)
+	}
+	if strings.Contains(userAccessBody, otherSnippet.ID) || strings.Contains(userAccessBody, disabledSnippet.ID) {
+		t.Fatalf("user access snippets leaked private or disabled snippets: %s", userAccessBody)
+	}
+	adminAccessRec := assertStatus(t, handler, http.MethodGet, "/api/access/command-snippets", nil, adminCookie, http.StatusOK)
+	adminAccessBody := adminAccessRec.Body.String()
+	for _, want := range []string{publicSnippet.ID, ownedSnippet.ID, otherSnippet.ID} {
+		if !strings.Contains(adminAccessBody, want) {
+			t.Fatalf("admin access snippets missing %s: %s", want, adminAccessBody)
+		}
+	}
+	if strings.Contains(adminAccessBody, disabledSnippet.ID) {
+		t.Fatalf("admin access snippets leaked disabled snippet: %s", adminAccessBody)
+	}
 }
 
 func TestWebAssetProxyRequiresAuthorizationAndLogs(t *testing.T) {

@@ -1,4 +1,5 @@
 import { FitAddon } from '@xterm/addon-fit'
+import { useQuery } from '@tanstack/react-query'
 import { Terminal } from '@xterm/xterm'
 import { Clipboard, Code2, Power, Upload } from 'lucide-react'
 import { useEffect, useMemo, useRef, useState } from 'react'
@@ -13,6 +14,10 @@ import { apiRequest } from '@/lib/api'
 import { base64ToText, textToBase64 } from '@/lib/codec'
 import { statusLabel } from '@/lib/utils'
 import type { ConnectionSession, PlatformItem } from '@/types'
+
+interface AccessCommandSnippetsResponse {
+  items?: PlatformItem[]
+}
 
 export function WorkspaceView() {
   const app = useApp()
@@ -43,12 +48,18 @@ export function WorkspaceView() {
     }),
     [t]
   )
+  const commandSnippetsQuery = useQuery({
+    queryKey: ['access-command-snippets'],
+    queryFn: () => apiRequest<AccessCommandSnippetsResponse>('/api/access/command-snippets'),
+    enabled: workspace?.type === 'ssh',
+    staleTime: 10_000,
+  })
 
   if (!workspace) return null
 
   const server = app.data.servers.find((item) => item.id === workspace.session.server_id)
   const platformAsset = app.data.platform?.assets?.find((item) => item.id === workspace.session.server_id)
-  const commandSnippets = app.data.platform?.command_snippets || []
+  const commandSnippets = commandSnippetsQuery.data?.items || []
   const selectedSnippet = commandSnippets.find((item) => item.id === selectedSnippetID) || commandSnippets[0]
   const isDesktopWorkspace = workspace.type === 'rdp' || workspace.type === 'vnc'
   const clipboardEnabled = isDesktopWorkspace && workspace.session.clipboard_enabled !== false

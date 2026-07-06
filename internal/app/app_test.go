@@ -5576,6 +5576,81 @@ func TestResourceOperationEndpoints(t *testing.T) {
 	if !foundExportRow {
 		t.Fatalf("asset csv export missing created asset row: %#v", rows)
 	}
+
+	credentialRec := assertStatus(t, handler, http.MethodPost, "/api/admin/credentials", map[string]any{
+		"name":        "credential-export",
+		"type":        "ssh_password",
+		"status":      "enabled",
+		"username":    "root",
+		"password":    "credential-export-password",
+		"private_key": "credential-export-private-key",
+		"metadata": map[string]any{
+			"nested": map[string]any{
+				"secret": "credential-export-nested-secret",
+				"label":  "kept-label",
+			},
+		},
+	}, cookie, http.StatusCreated)
+	var credential model.PlatformItem
+	decodeResponse(t, credentialRec, &credential)
+	credentialJSONRec := assertStatus(t, handler, http.MethodGet, "/api/admin/credentials/export", nil, cookie, http.StatusOK)
+	credentialJSONBody := credentialJSONRec.Body.String()
+	for _, leaked := range []string{"credential-export-password", "credential-export-private-key", "credential-export-nested-secret", "encrypted_password", "encrypted_private_key"} {
+		if strings.Contains(credentialJSONBody, leaked) {
+			t.Fatalf("credential json export leaked %q: %s", leaked, credentialJSONBody)
+		}
+	}
+	if !strings.Contains(credentialJSONBody, credential.ID) || !strings.Contains(credentialJSONBody, "kept-label") {
+		t.Fatalf("credential json export missing sanitized credential: %s", credentialJSONBody)
+	}
+	credentialCSVRec := assertStatus(t, handler, http.MethodGet, "/api/admin/credentials/export?format=csv", nil, cookie, http.StatusOK)
+	if contentType := credentialCSVRec.Header().Get("Content-Type"); !strings.Contains(contentType, "text/csv") {
+		t.Fatalf("credential csv export content type = %q", contentType)
+	}
+	credentialRows, err := csv.NewReader(strings.NewReader(credentialCSVRec.Body.String())).ReadAll()
+	if err != nil {
+		t.Fatalf("parse credential csv export: %v", err)
+	}
+	if len(credentialRows) < 2 || strings.Join(credentialRows[0], ",") != "id,module,name,type,status,protocol,host,port,username,group,owner_id,parent_id,target_id,tags,permissions_json,description,created_at,updated_at,metadata_json" {
+		t.Fatalf("credential csv export header/rows invalid: %#v", credentialRows)
+	}
+	for _, leaked := range []string{"credential-export-password", "credential-export-private-key", "credential-export-nested-secret", "encrypted_password", "encrypted_private_key"} {
+		if strings.Contains(credentialCSVRec.Body.String(), leaked) {
+			t.Fatalf("credential csv export leaked %q: %s", leaked, credentialCSVRec.Body.String())
+		}
+	}
+	assertStatus(t, handler, http.MethodPost, "/api/admin/credentials/export", nil, cookie, http.StatusMethodNotAllowed)
+	assertStatus(t, handler, http.MethodGet, "/api/admin/credentials/export?format=xml", nil, cookie, http.StatusBadRequest)
+
+	authorizationRec := assertStatus(t, handler, http.MethodPost, "/api/admin/authorizations/assets", map[string]any{
+		"name":      "authorization-export",
+		"type":      "user",
+		"status":    "enabled",
+		"owner_id":  "admin",
+		"target_id": asset.ID,
+		"metadata": map[string]any{
+			"approval_note": "kept-authorization-note",
+			"token":         "authorization-export-token",
+		},
+	}, cookie, http.StatusCreated)
+	var authorization model.PlatformItem
+	decodeResponse(t, authorizationRec, &authorization)
+	authorizationJSONRec := assertStatus(t, handler, http.MethodGet, "/api/admin/authorizations/assets/export", nil, cookie, http.StatusOK)
+	authorizationJSONBody := authorizationJSONRec.Body.String()
+	if strings.Contains(authorizationJSONBody, "authorization-export-token") {
+		t.Fatalf("authorization json export leaked token: %s", authorizationJSONBody)
+	}
+	if !strings.Contains(authorizationJSONBody, authorization.ID) || !strings.Contains(authorizationJSONBody, "kept-authorization-note") {
+		t.Fatalf("authorization json export missing sanitized authorization: %s", authorizationJSONBody)
+	}
+	authorizationCSVRec := assertStatus(t, handler, http.MethodGet, "/api/admin/authorizations/assets/export?format=csv", nil, cookie, http.StatusOK)
+	if contentType := authorizationCSVRec.Header().Get("Content-Type"); !strings.Contains(contentType, "text/csv") {
+		t.Fatalf("authorization csv export content type = %q", contentType)
+	}
+	if strings.Contains(authorizationCSVRec.Body.String(), "authorization-export-token") || !strings.Contains(authorizationCSVRec.Body.String(), "kept-authorization-note") {
+		t.Fatalf("authorization csv export redaction/content invalid: %s", authorizationCSVRec.Body.String())
+	}
+
 	importAssetRec := assertStatus(t, handler, http.MethodPost, "/api/admin/assets/import", map[string]any{
 		"items": []map[string]any{{
 			"name":     "imported-rdp",

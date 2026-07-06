@@ -901,48 +901,32 @@ function AssetGroupTreeBranch({ node, depth, onEdit, onDelete }: { node: AssetGr
 function ResourceHeaderActions({ config, rows, onOperation }: { config: PlatformPageConfig; rows: PlatformItem[]; onOperation: (operation: ResourceOperation) => void }) {
   const app = useApp()
 
-  const exportAuditLogs = async (format: 'json' | 'csv') => {
+  const exportTable = async (format: 'json' | 'csv') => {
     if (!config.apiPath) return
     try {
       const filename = `openwebservermanager-${config.collection}.${format}`
       await downloadResponse(`${config.apiPath}/export?format=${format}`, filename)
-      app.showToast(app.t('auditLogsExported', '审计日志已导出'))
+      app.showToast(app.t('tableExported', '表格已导出'))
     } catch (error) {
       app.handleApiError(error)
     }
   }
 
-  const exportAssets = async (format: 'json' | 'csv') => {
-    try {
-      await downloadResponse(`/api/admin/assets/export?format=${format}`, `openwebservermanager-assets.${format}`)
-      app.showToast('资产已导出')
-    } catch (error) {
-      app.handleApiError(error)
-    }
-  }
-
-  const exportUsers = async (format: 'json' | 'csv') => {
-    try {
-      await downloadResponse(`/api/admin/users/export?format=${format}`, `openwebservermanager-users.${format}`)
-      app.showToast('用户已导出')
-    } catch (error) {
-      app.handleApiError(error)
-    }
-  }
+  const exportButtons = config.apiPath ? (
+    <>
+      <Button variant='outline' onClick={() => void exportTable('json')}>
+        <Download className='size-4' />
+        JSON
+      </Button>
+      <Button variant='outline' onClick={() => void exportTable('csv')}>
+        <Download className='size-4' />
+        CSV
+      </Button>
+    </>
+  ) : null
 
   if (config.apiPath?.startsWith('/api/admin/audit/')) {
-    return (
-      <>
-        <Button variant='outline' onClick={() => void exportAuditLogs('json')}>
-          <Download className='size-4' />
-          JSON
-        </Button>
-        <Button variant='outline' onClick={() => void exportAuditLogs('csv')}>
-          <Download className='size-4' />
-          CSV
-        </Button>
-      </>
-    )
+    return exportButtons
   }
 
   if (config.collection === 'assets') {
@@ -952,14 +936,7 @@ function ResourceHeaderActions({ config, rows, onOperation }: { config: Platform
           <Save className='size-4' />
           批量授权
         </Button>
-        <Button variant='outline' onClick={() => void exportAssets('json')}>
-          <Download className='size-4' />
-          JSON
-        </Button>
-        <Button variant='outline' onClick={() => void exportAssets('csv')}>
-          <Download className='size-4' />
-          CSV
-        </Button>
+        {exportButtons}
         <Button variant='outline' onClick={() => onOperation({ type: 'asset-import' })}>
           <Upload className='size-4' />
           导入
@@ -970,24 +947,20 @@ function ResourceHeaderActions({ config, rows, onOperation }: { config: Platform
 
   if (config.collection === 'web_assets' || config.collection === 'database_assets') {
     return (
-      <Button variant='outline' onClick={() => onOperation({ type: 'bulk-authorize', collection: config.collection, items: rows })}>
-        <Save className='size-4' />
-        批量授权
-      </Button>
+      <>
+        <Button variant='outline' onClick={() => onOperation({ type: 'bulk-authorize', collection: config.collection, items: rows })}>
+          <Save className='size-4' />
+          批量授权
+        </Button>
+        {exportButtons}
+      </>
     )
   }
 
   if (config.collection === 'users') {
     return (
       <>
-        <Button variant='outline' onClick={() => void exportUsers('json')}>
-          <Download className='size-4' />
-          JSON
-        </Button>
-        <Button variant='outline' onClick={() => void exportUsers('csv')}>
-          <Download className='size-4' />
-          CSV
-        </Button>
+        {exportButtons}
         <Button variant='outline' onClick={() => onOperation({ type: 'user-import' })}>
           <Upload className='size-4' />
           导入
@@ -999,6 +972,7 @@ function ResourceHeaderActions({ config, rows, onOperation }: { config: Platform
   if (config.collection === 'certificates') {
     return (
       <>
+        {exportButtons}
         <Button variant='outline' onClick={() => onOperation({ type: 'certificate-acme' })}>
           <Play className='size-4' />
           ACME
@@ -1019,7 +993,7 @@ function ResourceHeaderActions({ config, rows, onOperation }: { config: Platform
     )
   }
 
-  return null
+  return exportButtons
 }
 
 function ResourceRowActions({ config, item, onOperation }: { config: PlatformPageConfig; item: PlatformItem; onOperation: (operation: ResourceOperation) => void }) {

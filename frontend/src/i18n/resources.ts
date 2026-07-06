@@ -37,6 +37,7 @@ const en = {
   copyright: 'Copyright',
   refresh: 'Refresh',
   refreshData: 'Refresh data',
+  tableExported: 'Table exported',
   addServer: 'Add server',
   addAsset: 'Add asset',
   addCredential: 'Add account',
@@ -682,6 +683,7 @@ const en = {
 
 const zh = {
   ...en,
+  tableExported: "\u8868\u683c\u5df2\u5bfc\u51fa",
   testing: "\u6d4b\u8bd5\u4e2d",
   defaultCertificateUpdated: "\u9ed8\u8ba4\u8bc1\u4e66\u5df2\u66f4\u65b0",
   certificateAcmeIssued: "ACME \u8bc1\u4e66\u5df2\u7b7e\u53d1",

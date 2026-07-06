@@ -156,6 +156,14 @@ func (s *Server) handleResourceOperation(w http.ResponseWriter, r *http.Request,
 			return true
 		}
 		return false
+	case strings.HasPrefix(path, "admin/authorizations/") && strings.HasSuffix(path, "/export"):
+		route := strings.TrimSuffix(strings.TrimPrefix(path, "admin/authorizations/"), "/export")
+		collection, ok := authorizationCollectionRoutes[route]
+		if !ok {
+			return false
+		}
+		s.handlePlatformCollectionExport(w, r, route, collection)
+		return true
 	case path == "admin/certificates/self-signed":
 		s.handleCertificateSelfSigned(w, r)
 		return true
@@ -196,6 +204,17 @@ func (s *Server) handleResourceOperation(w http.ResponseWriter, r *http.Request,
 			return true
 		}
 		return false
+	case strings.HasPrefix(path, "admin/") && strings.HasSuffix(path, "/export"):
+		route := strings.TrimSuffix(strings.TrimPrefix(path, "admin/"), "/export")
+		if strings.Contains(route, "/") {
+			return false
+		}
+		collection, ok := adminCollectionRoutes[route]
+		if !ok {
+			return false
+		}
+		s.handlePlatformCollectionExport(w, r, route, collection)
+		return true
 	case path == "admin/backups":
 		s.handleBackups(w, r)
 		return true
@@ -384,6 +403,71 @@ func writeUserExportCSV(w io.Writer, items []model.PlatformItem) {
 			firstMetadataString(item.Metadata, "last_login_at"),
 			firstMetadataString(item.Metadata, "last_login_ip"),
 			item.Description,
+			string(metadata),
+		})
+	}
+	writer.Flush()
+}
+
+func (s *Server) handlePlatformCollectionExport(w http.ResponseWriter, r *http.Request, route, collection string) {
+	if r.Method != http.MethodGet {
+		writeError(w, http.StatusMethodNotAllowed, "method not allowed")
+		return
+	}
+	items, err := s.cfg.Store.ListPlatformItems(collection)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	exportedAt := time.Now().UTC()
+	format := strings.ToLower(strings.TrimSpace(r.URL.Query().Get("format")))
+	if format == "" {
+		format = "json"
+	}
+	_ = s.audit(r, collection+".export", collection, "", "exported "+collection)
+	switch format {
+	case "json":
+		w.Header().Set("Content-Disposition", `attachment; filename="`+auditExportFilename(route, exportedAt, "json")+`"`)
+		writeJSON(w, http.StatusOK, map[string]any{
+			"collection":  collection,
+			"items":       items,
+			"exported_at": exportedAt,
+		})
+	case "csv":
+		w.Header().Set("Content-Disposition", `attachment; filename="`+auditExportFilename(route, exportedAt, "csv")+`"`)
+		w.Header().Set("Content-Type", "text/csv; charset=utf-8")
+		w.WriteHeader(http.StatusOK)
+		writePlatformCollectionExportCSV(w, items)
+	default:
+		writeError(w, http.StatusBadRequest, "unsupported export format")
+	}
+}
+
+func writePlatformCollectionExportCSV(w io.Writer, items []model.PlatformItem) {
+	writer := csv.NewWriter(w)
+	_ = writer.Write([]string{"id", "module", "name", "type", "status", "protocol", "host", "port", "username", "group", "owner_id", "parent_id", "target_id", "tags", "permissions_json", "description", "created_at", "updated_at", "metadata_json"})
+	for _, item := range items {
+		permissions, _ := json.Marshal(item.Permissions)
+		metadata, _ := json.Marshal(item.Metadata)
+		_ = writer.Write([]string{
+			item.ID,
+			item.Module,
+			item.Name,
+			item.Type,
+			item.Status,
+			string(item.Protocol),
+			item.Host,
+			strconv.Itoa(item.Port),
+			item.Username,
+			item.Group,
+			item.OwnerID,
+			item.ParentID,
+			item.TargetID,
+			strings.Join(item.Tags, ","),
+			string(permissions),
+			item.Description,
+			item.CreatedAt.Format(time.RFC3339Nano),
+			item.UpdatedAt.Format(time.RFC3339Nano),
 			string(metadata),
 		})
 	}

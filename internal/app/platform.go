@@ -646,10 +646,17 @@ func rewriteWebAssetSetCookies(resp *http.Response, proxyBasePath string) {
 	}
 	resp.Header.Del("Set-Cookie")
 	for _, cookie := range cookies {
+		if webAssetProxyReservedCookie(cookie.Name) {
+			continue
+		}
 		cookie.Domain = ""
 		cookie.Path = proxyBasePath
 		resp.Header.Add("Set-Cookie", cookie.String())
 	}
+}
+
+func webAssetProxyReservedCookie(name string) bool {
+	return strings.EqualFold(strings.TrimSpace(name), authCookieName)
 }
 
 func sameURLOrigin(left, right *url.URL) bool {

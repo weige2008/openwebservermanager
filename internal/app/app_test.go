@@ -2005,6 +2005,7 @@ func TestWebAssetProxyRequiresAuthorizationAndLogs(t *testing.T) {
 			_, _ = w.Write([]byte("proxied ok"))
 		case "/root/redirect":
 			http.SetCookie(w, &http.Cookie{Name: "upstream_session", Value: "abc", Domain: "upstream.internal", Path: "/root", HttpOnly: true})
+			http.SetCookie(w, &http.Cookie{Name: authCookieName, Value: "upstream", Domain: "upstream.internal", Path: "/", HttpOnly: true})
 			http.Redirect(w, r, "/root/dashboard?tab=1", http.StatusFound)
 		case "/root/fail":
 			if r.URL.Query().Get("x") != "2" {
@@ -2047,7 +2048,7 @@ func TestWebAssetProxyRequiresAuthorizationAndLogs(t *testing.T) {
 	}, adminCookie, http.StatusCreated)
 	proxyRec := assertStatusWithHeaders(t, handler, http.MethodGet, "/api/access/http/"+webAsset.ID+"/proxy/hello?x=1", nil, userCookie, map[string]string{
 		"Connection":  "X-Remove-Me",
-		"Cookie":      "upstream_theme=dark",
+		"Cookie":      authCookieName + "=invalid; upstream_theme=dark",
 		"Referer":     "https://docs.example.test/start",
 		"User-Agent":  "openwebservermanager-test",
 		"X-Remove-Me": "secret",
@@ -2068,6 +2069,11 @@ func TestWebAssetProxyRequiresAuthorizationAndLogs(t *testing.T) {
 	}
 	if upstreamCookie == nil || upstreamCookie.Path != "/api/access/http/"+webAsset.ID+"/proxy" || upstreamCookie.Domain != "" {
 		t.Fatalf("rewritten upstream cookie = %#v", upstreamCookie)
+	}
+	for _, cookie := range redirectRec.Result().Cookies() {
+		if cookie.Name == authCookieName {
+			t.Fatalf("proxy forwarded reserved auth cookie from upstream: %#v", cookie)
+		}
 	}
 	assertStatusWithHeaders(t, handler, http.MethodGet, "/api/access/http/"+webAsset.ID+"/proxy/fail?x=2", nil, userCookie, map[string]string{
 		"Referer":    "https://docs.example.test/error",

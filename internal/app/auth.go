@@ -179,24 +179,27 @@ func (m *authManager) hasUserSession(userID string) bool {
 }
 
 func (m *authManager) session(r *http.Request) (string, authSession, bool) {
-	cookie, err := r.Cookie(authCookieName)
-	if err != nil || cookie.Value == "" {
-		return "", authSession{}, false
-	}
-	token := cookie.Value
 	now := time.Now().UTC()
 
-	m.mu.RLock()
-	session, ok := m.sessions[token]
-	m.mu.RUnlock()
-	if !ok {
-		return "", authSession{}, false
+	for _, cookie := range r.Cookies() {
+		if !strings.EqualFold(cookie.Name, authCookieName) || cookie.Value == "" {
+			continue
+		}
+		token := cookie.Value
+
+		m.mu.RLock()
+		session, ok := m.sessions[token]
+		m.mu.RUnlock()
+		if !ok {
+			continue
+		}
+		if now.After(session.ExpiresAt) {
+			m.delete(token)
+			continue
+		}
+		return token, session, true
 	}
-	if now.After(session.ExpiresAt) {
-		m.delete(token)
-		return "", authSession{}, false
-	}
-	return token, session, true
+	return "", authSession{}, false
 }
 
 func (m *authManager) checkLoginAllowed(key string, policy loginFailurePolicy) (time.Duration, bool) {

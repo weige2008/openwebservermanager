@@ -2376,6 +2376,111 @@ func TestExternalOIDCLoginCreatesUserAndSession(t *testing.T) {
 	}
 }
 
+func TestOIDCIntegrationAuthorizationEndpointTest(t *testing.T) {
+	handler, adminCookie := newTestHandler(t)
+	var gotClientID string
+	var gotRedirectURI string
+	var gotScope string
+	var gotState string
+	var gotNonce string
+	provider := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/authorize":
+			query := r.URL.Query()
+			gotClientID = query.Get("client_id")
+			gotRedirectURI = query.Get("redirect_uri")
+			gotScope = query.Get("scope")
+			gotState = query.Get("state")
+			gotNonce = query.Get("nonce")
+			if query.Get("response_type") != "code" || gotClientID != "openweb-client" || !strings.Contains(gotRedirectURI, "/api/auth/oidc/callback") || gotScope != "openid profile email" {
+				http.Error(w, "bad authorize request", http.StatusBadRequest)
+				return
+			}
+			http.Redirect(w, r, "/login", http.StatusFound)
+		case "/bad-authorize":
+			http.Error(w, "invalid client secret openweb-secret", http.StatusBadRequest)
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer provider.Close()
+
+	settingRec := assertStatus(t, handler, http.MethodPost, "/api/admin/system-settings", map[string]any{
+		"name":   "External OIDC identity",
+		"type":   "identity",
+		"status": "enabled",
+		"metadata": map[string]any{
+			"oidc_login_enabled":          true,
+			"oidc_provider_id":            "fake-sso",
+			"oidc_provider_name":          "Fake SSO",
+			"oidc_authorization_endpoint": provider.URL + "/authorize",
+			"oidc_token_endpoint":         provider.URL + "/token",
+			"oidc_userinfo_endpoint":      provider.URL + "/userinfo",
+			"oidc_client_id":              "openweb-client",
+			"oidc_client_secret":          "openweb-secret",
+			"oidc_scopes":                 []string{"openid", "profile", "email"},
+			"oidc_role":                   "user",
+		},
+	}, adminCookie, http.StatusCreated)
+	var setting model.PlatformItem
+	decodeResponse(t, settingRec, &setting)
+
+	settingsRec := assertStatus(t, handler, http.MethodGet, "/api/admin/system-settings", nil, adminCookie, http.StatusOK)
+	for _, leaked := range []string{"openweb-secret", "oidc_client_secret_encrypted", "client_secret_encrypted"} {
+		if strings.Contains(settingsRec.Body.String(), leaked) {
+			t.Fatalf("oidc settings leaked sensitive value %q: %s", leaked, settingsRec.Body.String())
+		}
+	}
+	testRec := assertStatus(t, handler, http.MethodPost, "/api/admin/system-settings/oidc/test", map[string]any{
+		"setting_id": setting.ID,
+	}, adminCookie, http.StatusOK)
+	if gotClientID != "openweb-client" || !strings.Contains(gotRedirectURI, "/api/auth/oidc/callback") || gotScope != "openid profile email" || gotState == "" || gotNonce == "" {
+		t.Fatalf("bad oidc authorize probe client=%q redirect=%q scope=%q state=%q nonce=%q", gotClientID, gotRedirectURI, gotScope, gotState, gotNonce)
+	}
+	body := testRec.Body.String()
+	for _, expected := range []string{`"ok":true`, `"provider_id":"fake-sso"`, `"client_id":"openweb-client"`, `"status_code":302`, "openid", "/api/auth/oidc/callback"} {
+		if !strings.Contains(body, expected) {
+			t.Fatalf("oidc test response missing %q: %s", expected, body)
+		}
+	}
+	for _, leaked := range []string{"openweb-secret", "client_secret", "oidc_client_secret_encrypted", "client_secret_encrypted"} {
+		if strings.Contains(body, leaked) {
+			t.Fatalf("oidc test response leaked sensitive value %q: %s", leaked, body)
+		}
+	}
+	usersRec := assertStatus(t, handler, http.MethodGet, "/api/admin/users", nil, adminCookie, http.StatusOK)
+	if strings.Contains(usersRec.Body.String(), `"type":"oidc"`) {
+		t.Fatalf("oidc authorization test unexpectedly created a user: %s", usersRec.Body.String())
+	}
+
+	badSettingRec := assertStatus(t, handler, http.MethodPost, "/api/admin/system-settings", map[string]any{
+		"name":   "Broken External OIDC identity",
+		"type":   "identity",
+		"status": "enabled",
+		"metadata": map[string]any{
+			"oidc_login_enabled":          true,
+			"oidc_provider_id":            "bad-sso",
+			"oidc_provider_name":          "Bad SSO",
+			"oidc_authorization_endpoint": provider.URL + "/bad-authorize",
+			"oidc_token_endpoint":         provider.URL + "/token",
+			"oidc_client_id":              "openweb-client",
+			"oidc_client_secret":          "openweb-secret",
+		},
+	}, adminCookie, http.StatusCreated)
+	var badSetting model.PlatformItem
+	decodeResponse(t, badSettingRec, &badSetting)
+	failedRec := assertStatus(t, handler, http.MethodPost, "/api/admin/system-settings/oidc/test", map[string]any{
+		"setting_id": badSetting.ID,
+	}, adminCookie, http.StatusBadGateway)
+	if strings.Contains(failedRec.Body.String(), "openweb-secret") {
+		t.Fatalf("oidc failed test leaked secret: %s", failedRec.Body.String())
+	}
+	logsRec := assertStatus(t, handler, http.MethodGet, "/api/admin/audit/operation-logs", nil, adminCookie, http.StatusOK)
+	if !strings.Contains(logsRec.Body.String(), "system_settings.oidc_test") || !strings.Contains(logsRec.Body.String(), "system_settings.oidc_test.failed") || strings.Contains(logsRec.Body.String(), "openweb-secret") {
+		t.Fatalf("oidc test operation logs missing entries or leaked secret: %s", logsRec.Body.String())
+	}
+}
+
 func TestExternalLDAPLoginCreatesUserAndSession(t *testing.T) {
 	handler, adminCookie := newTestHandler(t)
 	srv := handler.(*Server)

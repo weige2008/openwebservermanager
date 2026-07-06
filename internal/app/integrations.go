@@ -43,6 +43,11 @@ type weComTestRequest struct {
 	ProviderID string `json:"provider_id"`
 }
 
+type oidcTestRequest struct {
+	SettingID  string `json:"setting_id"`
+	ProviderID string `json:"provider_id"`
+}
+
 type smtpDeliveryConfig struct {
 	SettingID          string
 	Host               string
@@ -241,6 +246,56 @@ func (s *Server) handleLDAPTest(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
+func (s *Server) handleOIDCTest(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		writeError(w, http.StatusMethodNotAllowed, "method not allowed")
+		return
+	}
+	var req oidcTestRequest
+	if !decodeJSON(w, r, &req) {
+		return
+	}
+	item, providers, ok, err := s.oidcTestSetting(req.SettingID)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	if !ok {
+		writeError(w, http.StatusNotFound, "External OIDC identity setting not found")
+		return
+	}
+	provider, ok := selectOIDCTestProvider(providers, req.ProviderID)
+	if !ok {
+		writeError(w, http.StatusBadRequest, "External OIDC provider is not configured")
+		return
+	}
+	redirectURI := externalOIDCRedirectURI(r, s.cfg.TrustProxyHeaders)
+	started := time.Now()
+	statusCode, authorizeURL, err := testExternalOIDCAuthorizationEndpoint(provider, redirectURI)
+	if err != nil {
+		errText := sanitizedOIDCTestError(provider, err)
+		_ = s.audit(r, "system_settings.oidc_test.failed", item.ID, "", "External OIDC test failed: "+errText)
+		writeError(w, http.StatusBadGateway, "test external OIDC authorization endpoint: "+errText)
+		return
+	}
+	_ = s.audit(r, "system_settings.oidc_test", item.ID, "", "External OIDC authorization endpoint test succeeded")
+	writeJSON(w, http.StatusOK, map[string]any{
+		"ok":                     true,
+		"message":                "External OIDC authorization endpoint test succeeded",
+		"setting_id":             item.ID,
+		"provider_id":            provider.ID,
+		"provider":               provider.Name,
+		"authorization_endpoint": provider.AuthorizationEndpoint,
+		"authorize_url":          authorizeURL,
+		"redirect_uri":           redirectURI,
+		"client_id":              provider.ClientID,
+		"scopes":                 provider.Scopes,
+		"status_code":            statusCode,
+		"duration_ms":            time.Since(started).Milliseconds(),
+		"tested_at":              time.Now().UTC(),
+	})
+}
+
 func (s *Server) handleWeComTest(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
 		writeError(w, http.StatusMethodNotAllowed, "method not allowed")
@@ -357,6 +412,52 @@ func (s *Server) ldapTestSetting(id string) (model.PlatformItem, []externalLDAPP
 	return model.PlatformItem{}, nil, false, nil
 }
 
+func (s *Server) oidcTestSetting(id string) (model.PlatformItem, []externalOIDCProvider, bool, error) {
+	if strings.TrimSpace(id) != "" {
+		item, ok, err := s.cfg.Store.GetPlatformItem("system_settings", strings.TrimSpace(id))
+		if err != nil || !ok {
+			return model.PlatformItem{}, nil, ok, err
+		}
+		providers, err := s.externalOIDCProvidersFromMetadata(item.Metadata)
+		if err != nil {
+			return model.PlatformItem{}, nil, false, err
+		}
+		return item, providers, true, nil
+	}
+	items, err := s.cfg.Store.ListPlatformItems("system_settings")
+	if err != nil {
+		return model.PlatformItem{}, nil, false, err
+	}
+	sort.SliceStable(items, func(i, j int) bool {
+		return items[i].UpdatedAt.After(items[j].UpdatedAt)
+	})
+	for _, item := range items {
+		if !strings.EqualFold(strings.TrimSpace(item.Type), "identity") || !platformItemEnabled(item) {
+			continue
+		}
+		providers, err := s.externalOIDCProvidersFromMetadata(item.Metadata)
+		if err != nil {
+			return model.PlatformItem{}, nil, false, err
+		}
+		if len(providers) > 0 {
+			return item, providers, true, nil
+		}
+	}
+	for _, item := range items {
+		if !strings.EqualFold(strings.TrimSpace(item.Type), "identity") {
+			continue
+		}
+		providers, err := s.externalOIDCProvidersFromMetadata(item.Metadata)
+		if err != nil {
+			return model.PlatformItem{}, nil, false, err
+		}
+		if len(providers) > 0 {
+			return item, providers, true, nil
+		}
+	}
+	return model.PlatformItem{}, nil, false, nil
+}
+
 func (s *Server) weComTestSetting(id string) (model.PlatformItem, []externalWeComProvider, bool, error) {
 	if strings.TrimSpace(id) != "" {
 		item, ok, err := s.cfg.Store.GetPlatformItem("system_settings", strings.TrimSpace(id))
@@ -416,6 +517,19 @@ func selectLDAPTestProvider(providers []externalLDAPProvider, id string) (extern
 	return externalLDAPProvider{}, false
 }
 
+func selectOIDCTestProvider(providers []externalOIDCProvider, id string) (externalOIDCProvider, bool) {
+	id = strings.TrimSpace(id)
+	if id == "" && len(providers) > 0 {
+		return providers[0], true
+	}
+	for _, provider := range providers {
+		if provider.ID == id {
+			return provider, true
+		}
+	}
+	return externalOIDCProvider{}, false
+}
+
 func selectWeComTestProvider(providers []externalWeComProvider, id string) (externalWeComProvider, bool) {
 	id = strings.TrimSpace(id)
 	if id == "" && len(providers) > 0 {
@@ -427,6 +541,47 @@ func selectWeComTestProvider(providers []externalWeComProvider, id string) (exte
 		}
 	}
 	return externalWeComProvider{}, false
+}
+
+func testExternalOIDCAuthorizationEndpoint(provider externalOIDCProvider, redirectURI string) (int, string, error) {
+	authorizeURL, err := url.Parse(provider.AuthorizationEndpoint)
+	if err != nil {
+		return 0, "", err
+	}
+	values := authorizeURL.Query()
+	values.Set("response_type", "code")
+	values.Set("client_id", provider.ClientID)
+	values.Set("redirect_uri", redirectURI)
+	values.Set("scope", strings.Join(provider.Scopes, " "))
+	values.Set("state", "configuration-test")
+	values.Set("nonce", "configuration-test")
+	authorizeURL.RawQuery = values.Encode()
+	client := http.Client{
+		Timeout: 10 * time.Second,
+		CheckRedirect: func(_ *http.Request, _ []*http.Request) error {
+			return http.ErrUseLastResponse
+		},
+	}
+	resp, err := client.Get(authorizeURL.String())
+	if err != nil {
+		return 0, authorizeURL.String(), err
+	}
+	defer resp.Body.Close()
+	body, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
+	if resp.StatusCode < 200 || resp.StatusCode >= 400 {
+		return resp.StatusCode, authorizeURL.String(), fmt.Errorf("oidc authorization endpoint returned %s: %s", resp.Status, strings.TrimSpace(string(body)))
+	}
+	return resp.StatusCode, authorizeURL.String(), nil
+}
+
+func sanitizedOIDCTestError(provider externalOIDCProvider, err error) string {
+	text := err.Error()
+	for _, secret := range []string{provider.ClientSecret} {
+		if strings.TrimSpace(secret) != "" {
+			text = strings.ReplaceAll(text, secret, "[redacted]")
+		}
+	}
+	return text
 }
 
 func testExternalWeComAccessToken(provider externalWeComProvider) (int, error) {

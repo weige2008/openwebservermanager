@@ -1,4 +1,4 @@
-import { Fingerprint, KeyRound, MessageCircle, Monitor, Moon, Network, RotateCcw, ShieldCheck, Sun, Trash2, UserCircle } from 'lucide-react'
+import { Fingerprint, Globe2, KeyRound, MessageCircle, Monitor, Moon, Network, RotateCcw, ShieldCheck, Sun, Trash2, UserCircle } from 'lucide-react'
 import { useEffect, useState } from 'react'
 import { useTranslation } from 'react-i18next'
 
@@ -73,6 +73,21 @@ interface LoginSecurityState {
   setting?: PlatformItem
 }
 
+interface OIDCSettingsState {
+  enabled: boolean
+  providerName: string
+  authorizationEndpoint: string
+  tokenEndpoint: string
+  userInfoEndpoint: string
+  clientID: string
+  clientSecret: string
+  clientSecretSet: boolean
+  scopes: string
+  role: string
+  autoCreate: boolean
+  setting?: PlatformItem
+}
+
 interface LDAPSettingsState {
   enabled: boolean
   providerName: string
@@ -116,6 +131,7 @@ const loginSecurityTypes = ['security', 'identity', 'login', 'password', 'captch
 const captchaKeys = ['captcha_enabled', 'login_captcha', 'enable_captcha', 'captcha', 'require_captcha']
 const disablePasswordKeys = ['disable_password_login', 'password_login_disabled', 'disablePasswordLogin', 'passwordLoginDisabled', 'no_password_login']
 const passwordLoginKeys = ['password_login', 'enable_password_login', 'password_auth', 'local_password_login']
+const oidcSettingKeys = ['oidc_login_enabled', 'external_oidc_enabled', 'oidc_authorization_endpoint', 'oidc_token_endpoint', 'oidc_client_id', 'oidc_provider_id']
 const ldapSettingKeys = ['ldap_enabled', 'ldap_url', 'ldap_base_dn', 'ldap_bind_dn', 'ldap_user_filter', 'ldap_provider_id', 'ldap_provider_name']
 const wecomSettingKeys = ['wecom_enabled', 'wecom_corp_id', 'wecom_agent_id', 'wecom_provider_id', 'wecom_provider_name']
 
@@ -137,6 +153,9 @@ export function SettingsPage() {
     passwordLoginDisabled: app.passwordLoginDisabled,
   })
   const [loginSecurityBusy, setLoginSecurityBusy] = useState(false)
+  const [oidcSettings, setOIDCSettings] = useState<OIDCSettingsState>(() => defaultOIDCSettings())
+  const [oidcBusy, setOIDCBusy] = useState(false)
+  const [oidcTestBusy, setOIDCTestBusy] = useState(false)
   const [ldapSettings, setLDAPSettings] = useState<LDAPSettingsState>(() => defaultLDAPSettings())
   const [ldapBusy, setLDAPBusy] = useState(false)
   const [ldapTestUsername, setLDAPTestUsername] = useState('')
@@ -158,6 +177,7 @@ export function SettingsPage() {
   const loadLoginSecurity = async () => {
     const result = await apiRequest<{ items: PlatformItem[] }>('/api/admin/system-settings')
     setLoginSecurity(loginSecurityFromSettings(result.items, app.captchaRequired, app.passwordLoginDisabled))
+    setOIDCSettings(oidcSettingsFromSettings(result.items))
     setLDAPSettings(ldapSettingsFromSettings(result.items))
     setWeComSettings(wecomSettingsFromSettings(result.items))
   }
@@ -314,7 +334,69 @@ export function SettingsPage() {
   }
 
   const patchLDAP = (next: Partial<LDAPSettingsState>) => setLDAPSettings((current) => ({ ...current, ...next }))
+  const patchOIDC = (next: Partial<OIDCSettingsState>) => setOIDCSettings((current) => ({ ...current, ...next }))
   const patchWeCom = (next: Partial<WeComSettingsState>) => setWeComSettings((current) => ({ ...current, ...next }))
+
+  const saveOIDCSettings = async () => {
+    setOIDCBusy(true)
+    try {
+      const target = oidcSettings.setting
+      const metadata: Record<string, unknown> = {
+        ...(target?.metadata ?? {}),
+        oidc_login_enabled: oidcSettings.enabled,
+        oidc_provider_id: 'default-oidc',
+        oidc_provider_name: oidcSettings.providerName.trim() || 'OIDC',
+        oidc_authorization_endpoint: oidcSettings.authorizationEndpoint.trim(),
+        oidc_token_endpoint: oidcSettings.tokenEndpoint.trim(),
+        oidc_userinfo_endpoint: oidcSettings.userInfoEndpoint.trim(),
+        oidc_client_id: oidcSettings.clientID.trim(),
+        oidc_scopes: oidcSettings.scopes.split(/[,\s]+/).map((item) => item.trim()).filter(Boolean),
+        oidc_role: oidcSettings.role || 'user',
+        oidc_auto_create: oidcSettings.autoCreate,
+      }
+      if (oidcSettings.clientSecret.trim()) metadata.oidc_client_secret = oidcSettings.clientSecret.trim()
+      const payload = {
+        name: target?.name || 'External OIDC identity',
+        type: 'identity',
+        status: 'enabled',
+        metadata,
+      }
+      if (target?.id) {
+        await apiRequest<PlatformItem>(`/api/admin/system-settings/${target.id}`, {
+          method: 'PATCH',
+          body: JSON.stringify(payload),
+        })
+      } else {
+        await apiRequest<PlatformItem>('/api/admin/system-settings', {
+          method: 'POST',
+          body: JSON.stringify(payload),
+        })
+      }
+      patchOIDC({ clientSecret: '' })
+      await app.refresh(true)
+      await loadLoginSecurity()
+      app.showToast(t('saved'))
+    } catch (error) {
+      app.handleApiError(error)
+    } finally {
+      setOIDCBusy(false)
+    }
+  }
+
+  const testOIDCSettings = async () => {
+    setOIDCTestBusy(true)
+    try {
+      await apiRequest('/api/admin/system-settings/oidc/test', {
+        method: 'POST',
+        body: JSON.stringify({ setting_id: oidcSettings.setting?.id }),
+      })
+      app.showToast(t('settingsPage.oidcTestSucceeded', { defaultValue: 'OIDC authorization endpoint test succeeded' }))
+    } catch (error) {
+      app.handleApiError(error)
+    } finally {
+      setOIDCTestBusy(false)
+    }
+  }
 
   const saveLDAPSettings = async () => {
     setLDAPBusy(true)
@@ -496,6 +578,98 @@ export function SettingsPage() {
             <InfoTile label={t('gateway')} value={app.data.guacd?.address || t('guacdOffline')} />
           </StaggerItem>
         </StaggerContainer>
+      </CardStaggerItem>
+
+      <CardStaggerItem className='grid gap-4 rounded-xl border border-border bg-card p-5 shadow-sm lg:grid-cols-[0.85fr_1.15fr]'>
+        <div className='flex min-w-0 items-start gap-3'>
+          <span className='grid size-12 shrink-0 place-items-center rounded-full bg-primary text-primary-foreground'>
+            <Globe2 className='size-5' />
+          </span>
+          <div className='min-w-0'>
+            <div className='flex flex-wrap items-center gap-2'>
+              <h2 className='truncate text-base font-semibold'>{t('settingsPage.oidcTitle', { defaultValue: 'External OIDC login' })}</h2>
+              <Badge tone={oidcSettings.enabled ? 'success' : 'warning'}>
+                {oidcSettings.enabled ? t('settingsPage.oidcEnabled', { defaultValue: 'OIDC on' }) : t('settingsPage.oidcDisabled', { defaultValue: 'OIDC off' })}
+              </Badge>
+              <Badge tone={oidcSettings.clientSecretSet ? 'success' : 'neutral'}>
+                {oidcSettings.clientSecretSet ? t('passwordSaved') : t('passwordNotSet')}
+              </Badge>
+            </div>
+            <p className='mt-1 max-w-lg text-sm leading-6 text-muted-foreground'>
+              {t('settingsPage.oidcDescription', { defaultValue: 'Allow users to sign in through an external OpenID Connect provider. Client secrets are encrypted server-side and never returned by API responses.' })}
+            </p>
+          </div>
+        </div>
+        <div className='grid gap-3'>
+          <label className='flex items-center gap-2 rounded-lg border border-border bg-background/70 px-3 py-2 text-sm'>
+            <input
+              type='checkbox'
+              className='size-4 accent-primary'
+              checked={oidcSettings.enabled}
+              onChange={(event) => patchOIDC({ enabled: event.currentTarget.checked })}
+            />
+            <span>{t('settingsPage.oidcEnableLogin', { defaultValue: 'Enable OIDC login' })}</span>
+          </label>
+          <div className='grid gap-3 md:grid-cols-2'>
+            <Field label={t('name')}>
+              <Input value={oidcSettings.providerName} onChange={(event) => patchOIDC({ providerName: event.currentTarget.value })} placeholder='Corporate SSO' />
+            </Field>
+            <Field label={t('settingsPage.oidcClientID', { defaultValue: 'Client ID' })}>
+              <Input value={oidcSettings.clientID} onChange={(event) => patchOIDC({ clientID: event.currentTarget.value })} placeholder='openweb-client' />
+            </Field>
+            <Field label={t('settingsPage.oidcClientSecret', { defaultValue: 'Client secret' })}>
+              <Input type='password' value={oidcSettings.clientSecret} onChange={(event) => patchOIDC({ clientSecret: event.currentTarget.value })} placeholder={oidcSettings.clientSecretSet ? 'Leave blank to keep current secret' : ''} autoComplete='new-password' />
+            </Field>
+            <Field label={t('settingsPage.oidcScopes', { defaultValue: 'Scopes' })}>
+              <Input value={oidcSettings.scopes} onChange={(event) => patchOIDC({ scopes: event.currentTarget.value })} placeholder='openid profile email' />
+            </Field>
+            <Field label={t('settingsPage.oidcAuthorizationEndpoint', { defaultValue: 'Authorization endpoint' })}>
+              <Input value={oidcSettings.authorizationEndpoint} onChange={(event) => patchOIDC({ authorizationEndpoint: event.currentTarget.value })} placeholder='https://sso.example.com/oauth2/authorize' />
+            </Field>
+            <Field label={t('settingsPage.oidcTokenEndpoint', { defaultValue: 'Token endpoint' })}>
+              <Input value={oidcSettings.tokenEndpoint} onChange={(event) => patchOIDC({ tokenEndpoint: event.currentTarget.value })} placeholder='https://sso.example.com/oauth2/token' />
+            </Field>
+            <Field label={t('settingsPage.oidcUserInfoEndpoint', { defaultValue: 'UserInfo endpoint' })}>
+              <Input value={oidcSettings.userInfoEndpoint} onChange={(event) => patchOIDC({ userInfoEndpoint: event.currentTarget.value })} placeholder='https://sso.example.com/oauth2/userinfo' />
+            </Field>
+            <Field label={t('settingsPage.defaultRole', { defaultValue: 'Default role' })}>
+              <Select value={oidcSettings.role} onChange={(event) => patchOIDC({ role: event.currentTarget.value })}>
+                <option value='user'>user</option>
+                <option value='auditor'>auditor</option>
+                <option value='admin'>admin</option>
+              </Select>
+            </Field>
+          </div>
+          <label className='flex items-center gap-2 rounded-lg border border-border bg-background/70 px-3 py-2 text-sm'>
+            <input
+              type='checkbox'
+              className='size-4 accent-primary'
+              checked={oidcSettings.autoCreate}
+              onChange={(event) => patchOIDC({ autoCreate: event.currentTarget.checked })}
+            />
+            <span>{t('settingsPage.oidcAutoCreate', { defaultValue: 'Create OIDC users on first successful login' })}</span>
+          </label>
+          <div className='grid gap-3 rounded-lg border border-border bg-background/70 p-3'>
+            <div>
+              <div className='text-sm font-medium'>{t('settingsPage.oidcTestTitle', { defaultValue: 'Test OIDC authorization endpoint' })}</div>
+              <p className='mt-1 text-xs leading-5 text-muted-foreground'>{t('settingsPage.oidcTestDescription', { defaultValue: 'Validate the saved authorization endpoint, client ID, redirect URI, and scopes by starting a no-redirect OIDC authorization request.' })}</p>
+            </div>
+            <div className='flex justify-end'>
+              <Button
+                variant='outline'
+                onClick={() => void testOIDCSettings()}
+                disabled={oidcTestBusy || !oidcSettings.setting?.id}
+              >
+                {oidcTestBusy ? t('testing') : t('settingsPage.testOIDC', { defaultValue: 'Test OIDC' })}
+              </Button>
+            </div>
+          </div>
+          <div className='flex justify-end'>
+            <Button variant='primary' onClick={() => void saveOIDCSettings()} disabled={oidcBusy || (oidcSettings.enabled && (!oidcSettings.authorizationEndpoint.trim() || !oidcSettings.tokenEndpoint.trim() || !oidcSettings.clientID.trim()))}>
+              {oidcBusy ? t('saving') : t('save')}
+            </Button>
+          </div>
+        </div>
       </CardStaggerItem>
 
       <CardStaggerItem className='grid gap-4 rounded-xl border border-border bg-card p-5 shadow-sm lg:grid-cols-[0.85fr_1.15fr]'>
@@ -994,6 +1168,22 @@ function loginSecurityFromSettings(items: PlatformItem[], fallbackCaptcha: boole
   return { captchaEnabled, passwordLoginDisabled, setting }
 }
 
+function defaultOIDCSettings(): OIDCSettingsState {
+  return {
+    enabled: false,
+    providerName: 'OIDC',
+    authorizationEndpoint: '',
+    tokenEndpoint: '',
+    userInfoEndpoint: '',
+    clientID: '',
+    clientSecret: '',
+    clientSecretSet: false,
+    scopes: 'openid profile email',
+    role: 'user',
+    autoCreate: true,
+  }
+}
+
 function defaultLDAPSettings(): LDAPSettingsState {
   return {
     enabled: false,
@@ -1022,6 +1212,30 @@ function defaultWeComSettings(): WeComSettingsState {
     agentSecretSet: false,
     role: 'user',
     autoCreate: true,
+  }
+}
+
+function oidcSettingsFromSettings(items: PlatformItem[]): OIDCSettingsState {
+  const candidates = items.filter((item) => {
+    const type = (item.type || '').trim().toLowerCase()
+    return platformItemEnabled(item) && type === 'identity' && hasOIDCMetadata(item)
+  })
+  const setting = candidates.find((item) => item.name === 'External OIDC identity') || candidates[0]
+  if (!setting) return defaultOIDCSettings()
+  const metadata = setting.metadata ?? {}
+  return {
+    enabled: metadataBoolValue(metadata.oidc_login_enabled) === true || metadataBoolValue(metadata.external_oidc_enabled) === true,
+    providerName: metadataText(metadata.oidc_provider_name) || metadataText(metadata.provider_name) || setting.name || 'OIDC',
+    authorizationEndpoint: metadataText(metadata.oidc_authorization_endpoint) || metadataText(metadata.authorization_endpoint) || metadataText(metadata.authorize_endpoint) || '',
+    tokenEndpoint: metadataText(metadata.oidc_token_endpoint) || metadataText(metadata.token_endpoint) || '',
+    userInfoEndpoint: metadataText(metadata.oidc_userinfo_endpoint) || metadataText(metadata.userinfo_endpoint) || metadataText(metadata.user_info_endpoint) || '',
+    clientID: metadataText(metadata.oidc_client_id) || metadataText(metadata.client_id) || '',
+    clientSecret: '',
+    clientSecretSet: metadataBoolValue(metadata.oidc_client_secret_set) === true,
+    scopes: metadataListText(metadata.oidc_scopes) || metadataText(metadata.scope) || metadataText(metadata.scopes) || 'openid profile email',
+    role: metadataText(metadata.oidc_role) || metadataText(metadata.role) || 'user',
+    autoCreate: metadata.oidc_auto_create === undefined ? true : metadataBoolValue(metadata.oidc_auto_create) === true,
+    setting,
   }
 }
 
@@ -1072,6 +1286,11 @@ function wecomSettingsFromSettings(items: PlatformItem[]): WeComSettingsState {
   }
 }
 
+function hasOIDCMetadata(item: PlatformItem) {
+  const metadata = item.metadata ?? {}
+  return oidcSettingKeys.some((key) => Object.prototype.hasOwnProperty.call(metadata, key))
+}
+
 function hasLDAPMetadata(item: PlatformItem) {
   const metadata = item.metadata ?? {}
   return ldapSettingKeys.some((key) => Object.prototype.hasOwnProperty.call(metadata, key))
@@ -1110,4 +1329,9 @@ function metadataText(value: unknown): string {
   if (typeof value === 'string') return value
   if (typeof value === 'number' || typeof value === 'boolean') return String(value)
   return ''
+}
+
+function metadataListText(value: unknown): string {
+  if (Array.isArray(value)) return value.map(metadataText).filter(Boolean).join(' ')
+  return metadataText(value)
 }

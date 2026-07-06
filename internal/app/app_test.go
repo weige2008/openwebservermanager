@@ -139,6 +139,67 @@ func TestPlatformCollectionEndpoints(t *testing.T) {
 	}
 }
 
+func TestAuditLogExportJSONAndCSV(t *testing.T) {
+	handler, adminCookie := newTestHandler(t)
+
+	logRec := assertStatus(t, handler, http.MethodPost, "/api/admin/audit/login-logs", map[string]any{
+		"name":        "operator login",
+		"type":        "password",
+		"status":      "success",
+		"owner_id":    "operator",
+		"description": "login accepted",
+		"metadata": map[string]any{
+			"client_ip":  "192.0.2.10",
+			"user_agent": "test-browser",
+		},
+	}, adminCookie, http.StatusCreated)
+	var logItem model.PlatformItem
+	decodeResponse(t, logRec, &logItem)
+
+	jsonRec := assertStatus(t, handler, http.MethodGet, "/api/admin/audit/login-logs/export", nil, adminCookie, http.StatusOK)
+	if !strings.Contains(jsonRec.Header().Get("Content-Disposition"), "openwebservermanager-login-logs") {
+		t.Fatalf("json export missing attachment filename: %s", jsonRec.Header().Get("Content-Disposition"))
+	}
+	var payload struct {
+		Collection string               `json:"collection"`
+		Items      []model.PlatformItem `json:"items"`
+		ExportedAt time.Time            `json:"exported_at"`
+	}
+	decodeResponse(t, jsonRec, &payload)
+	if payload.Collection != "login_logs" || payload.ExportedAt.IsZero() || !platformItemsContainID(payload.Items, logItem.ID) {
+		t.Fatalf("unexpected json export payload: %#v", payload)
+	}
+
+	csvRec := assertStatus(t, handler, http.MethodGet, "/api/admin/audit/login-logs/export?format=csv", nil, adminCookie, http.StatusOK)
+	if !strings.Contains(csvRec.Header().Get("Content-Type"), "text/csv") {
+		t.Fatalf("csv export content type = %q", csvRec.Header().Get("Content-Type"))
+	}
+	csvBody := csvRec.Body.String()
+	for _, want := range []string{"id,module,name,type,status,protocol", logItem.ID, "operator login", "192.0.2.10", "test-browser"} {
+		if !strings.Contains(csvBody, want) {
+			t.Fatalf("csv export missing %q: %s", want, csvBody)
+		}
+	}
+
+	assertStatus(t, handler, http.MethodGet, "/api/admin/audit/login-logs/export?format=xml", nil, adminCookie, http.StatusBadRequest)
+	assertStatus(t, handler, http.MethodPost, "/api/admin/audit/login-logs/export", nil, adminCookie, http.StatusMethodNotAllowed)
+	assertStatus(t, handler, http.MethodGet, "/api/admin/audit/missing/export", nil, adminCookie, http.StatusNotFound)
+
+	operationLogsRec := assertStatus(t, handler, http.MethodGet, "/api/admin/audit/operation-logs", nil, adminCookie, http.StatusOK)
+	if !strings.Contains(operationLogsRec.Body.String(), "audit.login_logs.export") {
+		t.Fatalf("audit export did not write operation log: %s", operationLogsRec.Body.String())
+	}
+}
+
+func platformItemsContainID(items []model.PlatformItem, id string) bool {
+	for _, item := range items {
+		if item.ID == id {
+			return true
+		}
+	}
+	return false
+}
+
 func TestAdminLicenseEndpoint(t *testing.T) {
 	handler, adminCookie := newTestHandler(t)
 

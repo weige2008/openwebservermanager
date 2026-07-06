@@ -598,6 +598,17 @@ export function PlatformTablePage({ config }: { config: PlatformPageConfig }) {
 function ResourceHeaderActions({ config, rows, onOperation }: { config: PlatformPageConfig; rows: PlatformItem[]; onOperation: (operation: ResourceOperation) => void }) {
   const app = useApp()
 
+  const exportAuditLogs = async (format: 'json' | 'csv') => {
+    if (!config.apiPath) return
+    try {
+      const filename = `openwebservermanager-${config.collection}.${format}`
+      await downloadResponse(`${config.apiPath}/export?format=${format}`, filename)
+      app.showToast(app.t('auditLogsExported', '审计日志已导出'))
+    } catch (error) {
+      app.handleApiError(error)
+    }
+  }
+
   const exportAssets = async () => {
     try {
       const data = await apiRequest<Record<string, unknown>>('/api/admin/assets/export')
@@ -606,6 +617,21 @@ function ResourceHeaderActions({ config, rows, onOperation }: { config: Platform
     } catch (error) {
       app.handleApiError(error)
     }
+  }
+
+  if (config.apiPath?.startsWith('/api/admin/audit/')) {
+    return (
+      <>
+        <Button variant='outline' onClick={() => void exportAuditLogs('json')}>
+          <Download className='size-4' />
+          JSON
+        </Button>
+        <Button variant='outline' onClick={() => void exportAuditLogs('csv')}>
+          <Download className='size-4' />
+          CSV
+        </Button>
+      </>
+    )
   }
 
   if (config.collection === 'assets') {

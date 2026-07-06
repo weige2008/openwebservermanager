@@ -11,6 +11,7 @@ import (
 	"crypto/x509/pkix"
 	"database/sql"
 	"encoding/base64"
+	"encoding/csv"
 	"encoding/json"
 	"encoding/pem"
 	"errors"
@@ -188,6 +189,13 @@ func (s *Server) handleResourceOperation(w http.ResponseWriter, r *http.Request,
 	case path == "admin/audit/access-stats":
 		s.handleAccessStats(w, r)
 		return true
+	case strings.HasPrefix(path, "admin/audit/") && strings.HasSuffix(path, "/export"):
+		parts := splitPath(strings.TrimPrefix(path, "admin/audit/"))
+		if len(parts) == 2 && parts[1] == "export" {
+			s.handleAuditExport(w, r, parts[0])
+			return true
+		}
+		return false
 	case path == "admin/backups":
 		s.handleBackups(w, r)
 		return true
@@ -284,6 +292,78 @@ func (s *Server) handleAssetExport(w http.ResponseWriter, r *http.Request) {
 	}
 	_ = s.audit(r, "assets.export", "assets", "", "exported assets")
 	writeJSON(w, http.StatusOK, map[string]any{"items": items, "exported_at": time.Now().UTC()})
+}
+
+func (s *Server) handleAuditExport(w http.ResponseWriter, r *http.Request, route string) {
+	if r.Method != http.MethodGet {
+		writeError(w, http.StatusMethodNotAllowed, "method not allowed")
+		return
+	}
+	collection, ok := auditCollectionRoutes[route]
+	if !ok {
+		writeError(w, http.StatusNotFound, "audit collection not found")
+		return
+	}
+	items, err := s.cfg.Store.ListPlatformItems(collection)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	exportedAt := time.Now().UTC()
+	format := strings.ToLower(strings.TrimSpace(r.URL.Query().Get("format")))
+	if format == "" {
+		format = "json"
+	}
+	_ = s.audit(r, "audit."+collection+".export", collection, "", "exported audit logs")
+	switch format {
+	case "json":
+		filename := auditExportFilename(route, exportedAt, "json")
+		w.Header().Set("Content-Disposition", `attachment; filename="`+filename+`"`)
+		writeJSON(w, http.StatusOK, map[string]any{
+			"collection":  collection,
+			"items":       items,
+			"exported_at": exportedAt,
+		})
+	case "csv":
+		filename := auditExportFilename(route, exportedAt, "csv")
+		w.Header().Set("Content-Disposition", `attachment; filename="`+filename+`"`)
+		w.Header().Set("Content-Type", "text/csv; charset=utf-8")
+		w.WriteHeader(http.StatusOK)
+		writer := csv.NewWriter(w)
+		_ = writer.Write([]string{"id", "module", "name", "type", "status", "protocol", "owner_id", "target_id", "host", "port", "username", "group", "description", "created_at", "updated_at", "metadata_json"})
+		for _, item := range items {
+			metadata, _ := json.Marshal(item.Metadata)
+			_ = writer.Write([]string{
+				item.ID,
+				item.Module,
+				item.Name,
+				item.Type,
+				item.Status,
+				string(item.Protocol),
+				item.OwnerID,
+				item.TargetID,
+				item.Host,
+				strconv.Itoa(item.Port),
+				item.Username,
+				item.Group,
+				item.Description,
+				item.CreatedAt.Format(time.RFC3339Nano),
+				item.UpdatedAt.Format(time.RFC3339Nano),
+				string(metadata),
+			})
+		}
+		writer.Flush()
+	default:
+		writeError(w, http.StatusBadRequest, "unsupported export format")
+	}
+}
+
+func auditExportFilename(route string, exportedAt time.Time, ext string) string {
+	safeRoute := strings.NewReplacer("/", "-", "\\", "-", `"`, "", "'", "").Replace(route)
+	if safeRoute == "" {
+		safeRoute = "audit"
+	}
+	return "openwebservermanager-" + safeRoute + "-" + exportedAt.Format("20060102-150405") + "." + ext
 }
 
 func (s *Server) handleAssetImport(w http.ResponseWriter, r *http.Request) {

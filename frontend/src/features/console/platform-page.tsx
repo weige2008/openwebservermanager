@@ -9,6 +9,7 @@ import { CardStaggerContainer, CardStaggerItem } from '@/components/page-transit
 import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card'
+import { useConfirmDialog } from '@/components/ui/confirm-dialog'
 import { DialogShell } from '@/components/ui/dialog'
 import { Field, Input, Select, Textarea } from '@/components/ui/field'
 import { ApiError, apiRequest } from '@/lib/api'
@@ -229,6 +230,7 @@ export function PlatformTablePage({ config }: { config: PlatformPageConfig }) {
   const [form, setForm] = useState<PlatformFormState>(initialForm)
   const [operation, setOperation] = useState<ResourceOperation | null>(null)
   const { requestAccessMFACode, accessMFADialog } = useAccessMFADialog()
+  const { confirm, confirmDialog } = useConfirmDialog()
 
   const columns = useMemo<ColumnDef<PlatformItem>[]>(
     () => [
@@ -461,7 +463,13 @@ export function PlatformTablePage({ config }: { config: PlatformPageConfig }) {
   }
 
   const remove = async (item: PlatformItem) => {
-    if (!window.confirm(`${app.t('delete', '删除')} ${item.name}?`)) return
+    const confirmed = await confirm({
+      title: `${app.t('delete', '删除')} ${item.name}?`,
+      description: app.t('confirmDestructiveAction', 'This action cannot be undone.'),
+      confirmText: app.t('delete', '删除'),
+      destructive: true,
+    })
+    if (!confirmed) return
     try {
       await apiRequest(`${config.apiPath || `/api/admin/${config.collection}`}/${item.id}`, { method: 'DELETE' })
       await app.refresh(true)
@@ -525,6 +533,7 @@ export function PlatformTablePage({ config }: { config: PlatformPageConfig }) {
       />
       <ResourceOperationDialog operation={operation} onOpenChange={setOperation} requestAccessMFACode={requestAccessMFACode} />
       {accessMFADialog}
+      {confirmDialog}
     </CardStaggerContainer>
   )
 }
@@ -607,6 +616,7 @@ function ResourceHeaderActions({ config, rows, onOperation }: { config: Platform
 
 function ResourceRowActions({ config, item, onOperation }: { config: PlatformPageConfig; item: PlatformItem; onOperation: (operation: ResourceOperation) => void }) {
   const app = useApp()
+  const { confirm, confirmDialog } = useConfirmDialog()
 
   const runTask = async () => {
     try {
@@ -647,7 +657,13 @@ function ResourceRowActions({ config, item, onOperation }: { config: PlatformPag
   }
 
   const disconnectSession = async () => {
-    if (!window.confirm(`断开 ${item.name || item.id}?`)) return
+    const confirmed = await confirm({
+      title: `断开 ${item.name || item.id}?`,
+      description: '该在线会话会被强制断开，用户需要重新接入资产。',
+      confirmText: '断开',
+      destructive: true,
+    })
+    if (!confirmed) return
     try {
       await apiRequest(`/api/admin/audit/online-sessions/${item.id}/disconnect`, { method: 'POST', body: '{}' })
       await app.refresh(true)
@@ -667,7 +683,13 @@ function ResourceRowActions({ config, item, onOperation }: { config: PlatformPag
   }
 
   const deleteRecording = async () => {
-    if (!window.confirm(`删除 ${item.name || item.id} 的录屏?`)) return
+    const confirmed = await confirm({
+      title: `删除 ${item.name || item.id} 的录屏?`,
+      description: '录屏文件删除后不可恢复。',
+      confirmText: '删除录屏',
+      destructive: true,
+    })
+    if (!confirmed) return
     try {
       await apiRequest(`/api/admin/audit/offline-sessions/${item.id}/recording`, { method: 'DELETE' })
       await app.refresh(true)
@@ -688,7 +710,13 @@ function ResourceRowActions({ config, item, onOperation }: { config: PlatformPag
   }
 
   const rejectSQLWorkOrder = async () => {
-    if (!window.confirm(`拒绝 ${item.name || item.id}?`)) return
+    const confirmed = await confirm({
+      title: `拒绝 ${item.name || item.id}?`,
+      description: '该 SQL 工单会被标记为拒绝，申请人需要重新提交。',
+      confirmText: '拒绝',
+      destructive: true,
+    })
+    if (!confirmed) return
     try {
       await apiRequest(`/api/admin/sql-work-orders/${item.id}/reject`, { method: 'POST', body: '{}' })
       await app.refresh(true)
@@ -700,10 +728,13 @@ function ResourceRowActions({ config, item, onOperation }: { config: PlatformPag
 
   if (config.collection === 'online_sessions') {
     return (
-      <Button size='sm' variant='destructive' onClick={() => void disconnectSession()}>
-        <Trash2 className='size-3.5' />
-        断开
-      </Button>
+      <>
+        <Button size='sm' variant='destructive' onClick={() => void disconnectSession()}>
+          <Trash2 className='size-3.5' />
+          断开
+        </Button>
+        {confirmDialog}
+      </>
     )
   }
 
@@ -718,6 +749,7 @@ function ResourceRowActions({ config, item, onOperation }: { config: PlatformPag
           <Trash2 className='size-3.5' />
           删除录屏
         </Button>
+        {confirmDialog}
       </>
     )
   }
@@ -795,6 +827,7 @@ function ResourceRowActions({ config, item, onOperation }: { config: PlatformPag
             <Trash2 className='size-3.5' />
             拒绝
           </Button>
+          {confirmDialog}
         </>
       )
     }
@@ -1433,6 +1466,7 @@ function CertificateLogsDialog({ item, onClose }: { item: PlatformItem; onClose:
 
 function StorageFilesDialog({ item, onClose }: { item: PlatformItem; onClose: () => void }) {
   const app = useApp()
+  const { confirm, confirmDialog } = useConfirmDialog()
   const [path, setPath] = useState('.')
   const [entries, setEntries] = useState<StorageEntry[]>([])
   const [usage, setUsage] = useState<StorageUsage | null>(null)
@@ -1522,7 +1556,13 @@ function StorageFilesDialog({ item, onClose }: { item: PlatformItem; onClose: ()
   }
 
   const deleteEntry = async (entry: StorageEntry) => {
-    if (!window.confirm(`删除 ${entry.path}?`)) return
+    const confirmed = await confirm({
+      title: `删除 ${entry.path}?`,
+      description: '文件或目录删除后不可恢复。',
+      confirmText: '删除',
+      destructive: true,
+    })
+    if (!confirmed) return
     try {
       await apiRequest(`/api/admin/storages/${item.id}/files?path=${encodeURIComponent(entry.path)}`, { method: 'DELETE' })
       await load()
@@ -1659,6 +1699,7 @@ function StorageFilesDialog({ item, onClose }: { item: PlatformItem; onClose: ()
             <Button variant='primary' onClick={() => void writeFile()} disabled={!filePath.trim()}><Save className='size-4' />写入文件</Button>
           </div>
         </div>
+        {confirmDialog}
       </div>
     </DialogShell>
   )
@@ -3591,6 +3632,7 @@ function BackupsPage({ config }: { config: PlatformPageConfig }) {
   const label = platformLabel(config, app.locale)
   const description = platformDescription(config, app.locale)
   const Icon = config.icon
+  const { confirm, confirmDialog } = useConfirmDialog()
   const [items, setItems] = useState<BackupInfo[]>([])
   const [loading, setLoading] = useState(false)
   const [creating, setCreating] = useState(false)
@@ -3643,7 +3685,13 @@ function BackupsPage({ config }: { config: PlatformPageConfig }) {
 
   const restoreUpload = async () => {
     if (!uploadFile) return
-    if (!window.confirm('恢复会覆盖当前系统数据，并在恢复前自动创建一份当前备份。继续?')) return
+    const confirmed = await confirm({
+      title: '恢复备份并覆盖当前数据?',
+      description: '恢复会覆盖当前系统数据，并在恢复前自动创建一份当前备份。恢复完成后需要重新登录。',
+      confirmText: '恢复',
+      destructive: true,
+    })
+    if (!confirmed) return
     setRestoring(true)
     try {
       const result = await submitBackupFile(uploadFile, false)
@@ -3658,7 +3706,13 @@ function BackupsPage({ config }: { config: PlatformPageConfig }) {
   }
 
   const deleteBackup = async (item: BackupInfo) => {
-    if (!window.confirm(`删除备份 ${item.name}?`)) return
+    const confirmed = await confirm({
+      title: `删除备份 ${item.name}?`,
+      description: '备份文件删除后不可恢复。',
+      confirmText: '删除',
+      destructive: true,
+    })
+    if (!confirmed) return
     try {
       await apiRequest(`/api/admin/backups/${encodeURIComponent(item.name)}`, { method: 'DELETE' })
       await load()
@@ -3743,6 +3797,7 @@ function BackupsPage({ config }: { config: PlatformPageConfig }) {
           </CardContent>
         </Card>
       </CardStaggerItem>
+      {confirmDialog}
     </CardStaggerContainer>
   )
 }

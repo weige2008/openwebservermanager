@@ -6,6 +6,7 @@ import { useApp } from '@/app/app-provider'
 import { CardStaggerContainer, CardStaggerItem, StaggerContainer, StaggerItem } from '@/components/page-transition'
 import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
+import { useConfirmDialog } from '@/components/ui/confirm-dialog'
 import { Field, Input, Select } from '@/components/ui/field'
 import { AboutContent } from '@/features/about/about-page'
 import { INTERFACE_LANGUAGE_OPTIONS } from '@/i18n/languages'
@@ -154,6 +155,7 @@ const wecomSettingKeys = ['wecom_enabled', 'wecom_corp_id', 'wecom_agent_id', 'w
 export function SettingsPage() {
   const app = useApp()
   const { t } = useTranslation()
+  const { confirm, confirmDialog } = useConfirmDialog()
   const activeSessions = app.data.sessions.filter((session) => session.status === 'active').length
   const username = app.auth?.username || 'admin'
   const initials = username.slice(0, 2).toUpperCase()
@@ -367,7 +369,13 @@ export function SettingsPage() {
   }
 
   const deletePasskey = async (item: PasskeyItem) => {
-    if (!window.confirm(t('settingsPage.passkeyDeleteConfirm', { defaultValue: 'Delete this passkey?' }))) return
+    const confirmed = await confirm({
+      title: t('settingsPage.passkeyDeleteConfirm', { defaultValue: 'Delete this passkey?' }),
+      description: t('settingsPage.passkeyDeleteDescription', { defaultValue: 'This passkey can no longer be used to sign in after deletion.' }),
+      confirmText: t('settingsPage.deletePasskey', { defaultValue: 'Delete passkey' }),
+      destructive: true,
+    })
+    if (!confirmed) return
     setPasskeyBusy(true)
     try {
       await apiRequest(`/api/auth/passkeys/${item.id}`, { method: 'DELETE' })
@@ -1584,6 +1592,7 @@ export function SettingsPage() {
       </CardStaggerItem>
 
       <AboutContent />
+      {confirmDialog}
     </CardStaggerContainer>
   )
 }

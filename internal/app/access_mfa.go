@@ -13,6 +13,11 @@ type accessMFAInput struct {
 	RecoveryCode string
 }
 
+type accessMFAVerifyRequest struct {
+	MFACode      string `json:"mfa_code"`
+	RecoveryCode string `json:"recovery_code"`
+}
+
 func accessMFAInputFromRequest(r *http.Request) accessMFAInput {
 	query := r.URL.Query()
 	code := strings.TrimSpace(r.Header.Get("X-OpenWebServerManager-MFA-Code"))
@@ -24,6 +29,37 @@ func accessMFAInputFromRequest(r *http.Request) accessMFAInput {
 		recovery = strings.TrimSpace(query.Get("recovery_code"))
 	}
 	return accessMFAInput{MFACode: code, RecoveryCode: recovery}
+}
+
+func decodeOptionalAccessMFARequest(w http.ResponseWriter, r *http.Request) (accessMFAVerifyRequest, bool) {
+	if r.Body == nil || r.ContentLength == 0 {
+		return accessMFAVerifyRequest{}, true
+	}
+	var req accessMFAVerifyRequest
+	if !decodeJSON(w, r, &req) {
+		return accessMFAVerifyRequest{}, false
+	}
+	return req, true
+}
+
+func (s *Server) handleAccessMFAVerify(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		writeError(w, http.StatusMethodNotAllowed, "method not allowed")
+		return
+	}
+	req, ok := decodeOptionalAccessMFARequest(w, r)
+	if !ok {
+		return
+	}
+	if !s.requireAccessMFA(w, r, accessMFAInput{MFACode: req.MFACode, RecoveryCode: req.RecoveryCode}) {
+		return
+	}
+	_, ttl := s.accessMFASettings()
+	writeJSON(w, http.StatusOK, map[string]any{
+		"ok":         true,
+		"mfa_scope":  "access",
+		"expires_in": int(ttl.Seconds()),
+	})
 }
 
 func (s *Server) requireAccessMFA(w http.ResponseWriter, r *http.Request, input accessMFAInput) bool {

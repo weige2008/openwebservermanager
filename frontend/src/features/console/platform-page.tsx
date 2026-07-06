@@ -3043,6 +3043,23 @@ function promptAccessMFACode(t: (key: string, fallback?: string) => string) {
   return window.prompt(t('accessMFAPrompt', 'Enter MFA code or recovery code'))?.trim() || ''
 }
 
+async function ensureAccessMFA(path: string, t: (key: string, fallback?: string) => string) {
+  const verify = (mfaCode = '') => apiRequest<{ ok?: boolean }>(path, {
+    method: 'POST',
+    body: JSON.stringify(mfaCode ? { mfa_code: mfaCode } : {}),
+  })
+  try {
+    await verify()
+    return true
+  } catch (error) {
+    if (!isAccessMFARequiredError(error)) throw error
+    const mfaCode = promptAccessMFACode(t)
+    if (!mfaCode) return false
+    await verify(mfaCode)
+    return true
+  }
+}
+
 export function AccessPortalPage() {
   const app = useApp()
   const assets = app.data.platform?.assets || []
@@ -3102,7 +3119,12 @@ function AccessSection({
   const connect = async (item: PlatformItem) => {
     const accessProtocol = (protocol || item.protocol || 'ssh') as Protocol
     if (accessProtocol === 'http') {
-      window.open(`/api/access/http/${item.id}/proxy/`, '_blank', 'noopener,noreferrer')
+      try {
+        if (!(await ensureAccessMFA(`/api/access/http/${item.id}/mfa`, app.t))) return
+        window.open(`/api/access/http/${item.id}/proxy/`, '_blank', 'noopener,noreferrer')
+      } catch (error) {
+        app.handleApiError(error)
+      }
       return
     }
     if (accessProtocol === 'database') {

@@ -227,6 +227,10 @@ func (s *Server) handleAccessAction(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusForbidden, "asset access denied")
 		return
 	}
+	if len(parts) >= 3 && parts[2] == "mfa" {
+		s.handleAccessMFAVerify(w, r)
+		return
+	}
 	if len(parts) >= 3 && parts[2] == "proxy" {
 		if protocol != model.ProtocolHTTP {
 			writeError(w, http.StatusBadRequest, "proxy access is only supported for web assets")

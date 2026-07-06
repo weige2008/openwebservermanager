@@ -331,6 +331,81 @@ func TestAccessMFARequiredForPortalConnections(t *testing.T) {
 	}
 }
 
+func TestAccessMFAWebAssetPreflightUnlocksProxy(t *testing.T) {
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = w.Write([]byte("web asset ok"))
+	}))
+	defer upstream.Close()
+
+	handler, adminCookie := newTestHandler(t)
+	srv := handler.(*Server)
+	userRec := assertStatus(t, handler, http.MethodPost, "/api/admin/users", map[string]any{
+		"name":     "web-mfa-user",
+		"type":     "local",
+		"status":   "enabled",
+		"password": "password123",
+		"metadata": map[string]any{"role": "user"},
+	}, adminCookie, http.StatusCreated)
+	var user model.PlatformItem
+	decodeResponse(t, userRec, &user)
+	secret := "JBSWY3DPEHPK3PXP"
+	if _, err := srv.cfg.Store.EnableUserMFA(user.ID, secret, []string{"KLMNO-PQRST"}); err != nil {
+		t.Fatalf("enable user MFA: %v", err)
+	}
+	webRec := assertStatus(t, handler, http.MethodPost, "/api/admin/websites", map[string]any{
+		"name":     "mfa web app",
+		"type":     "http",
+		"status":   "enabled",
+		"metadata": map[string]any{"target_url": upstream.URL},
+	}, adminCookie, http.StatusCreated)
+	var webAsset model.PlatformItem
+	decodeResponse(t, webRec, &webAsset)
+	assertStatus(t, handler, http.MethodPost, "/api/admin/authorizations/websites", map[string]any{
+		"name":      "web-mfa-user app",
+		"owner_id":  user.ID,
+		"target_id": webAsset.ID,
+		"status":    "enabled",
+	}, adminCookie, http.StatusCreated)
+	assertStatus(t, handler, http.MethodPost, "/api/admin/system-settings", map[string]any{
+		"name":   "Access MFA",
+		"type":   "access",
+		"status": "enabled",
+		"metadata": map[string]any{
+			"access_mfa_enabled":       true,
+			"access_mfa_valid_minutes": 5,
+		},
+	}, adminCookie, http.StatusCreated)
+
+	loginRec := assertStatus(t, handler, http.MethodPost, "/api/auth/login", map[string]any{
+		"username": "web-mfa-user",
+		"password": "password123",
+	}, nil, http.StatusAccepted)
+	var challenge map[string]any
+	decodeResponse(t, loginRec, &challenge)
+	completeRec := assertStatus(t, handler, http.MethodPost, "/api/auth/mfa/complete-login", map[string]any{
+		"token":    challenge["mfa_token"],
+		"mfa_code": totpCode(secret, time.Now().UTC()),
+	}, nil, http.StatusOK)
+	userCookie := completeRec.Result().Cookies()[0]
+
+	proxyBlocked := assertStatus(t, handler, http.MethodGet, "/api/access/http/"+webAsset.ID+"/proxy/", nil, userCookie, http.StatusPreconditionRequired)
+	if !strings.Contains(proxyBlocked.Body.String(), `"mfa_required":true`) {
+		t.Fatalf("web proxy did not require access MFA: %s", proxyBlocked.Body.String())
+	}
+	assertStatus(t, handler, http.MethodPost, "/api/access/http/"+webAsset.ID+"/mfa", map[string]any{}, userCookie, http.StatusPreconditionRequired)
+	assertStatus(t, handler, http.MethodPost, "/api/access/http/"+webAsset.ID+"/mfa", map[string]any{"mfa_code": "000000"}, userCookie, http.StatusUnauthorized)
+	preflightRec := assertStatus(t, handler, http.MethodPost, "/api/access/http/"+webAsset.ID+"/mfa", map[string]any{
+		"mfa_code": totpCode(secret, time.Now().UTC()),
+	}, userCookie, http.StatusOK)
+	if !strings.Contains(preflightRec.Body.String(), `"ok":true`) || !strings.Contains(preflightRec.Body.String(), `"mfa_scope":"access"`) {
+		t.Fatalf("web access MFA preflight response is not structured: %s", preflightRec.Body.String())
+	}
+	proxyRec := assertStatus(t, handler, http.MethodGet, "/api/access/http/"+webAsset.ID+"/proxy/", nil, userCookie, http.StatusOK)
+	if proxyRec.Body.String() != "web asset ok" {
+		t.Fatalf("web proxy after preflight = %q, want web asset ok", proxyRec.Body.String())
+	}
+}
+
 func TestPasskeyRegistrationAndLogin(t *testing.T) {
 	handler, adminCookie := newTestHandler(t)
 

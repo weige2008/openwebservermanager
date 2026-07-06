@@ -65,9 +65,14 @@ func (s *Server) handleDatabaseAssetQuery(w http.ResponseWriter, r *http.Request
 		writeError(w, http.StatusBadRequest, "sql is required")
 		return
 	}
+	gatewayRoute, ok := s.requireAssetGatewayRoute(w, asset)
+	if !ok {
+		return
+	}
 	logItem, statusCode, err := s.executeDatabaseAssetSQL(r, asset, userID, sqlText, databaseSQLExecutionOptions{
-		Source:  "access_portal",
-		LogType: "database_access",
+		Source:        "access_portal",
+		LogType:       "database_access",
+		ExtraMetadata: gatewayRouteMetadata(gatewayRoute),
 	})
 	if err != nil {
 		writeError(w, statusCode, err.Error())
@@ -98,6 +103,21 @@ func (s *Server) handleDatabaseWorkOrderCreate(w http.ResponseWriter, r *http.Re
 	if reason == "" {
 		reason = "requested from access portal"
 	}
+	gatewayRoute, ok := s.requireAssetGatewayRoute(w, asset)
+	if !ok {
+		return
+	}
+	metadata := map[string]any{
+		"sql":          sqlText,
+		"reason":       reason,
+		"asset_id":     asset.ID,
+		"asset_name":   asset.Name,
+		"client_ip":    s.clientIP(r),
+		"source":       "access_portal",
+		"requested_by": userID,
+		"requested_at": time.Now().UTC(),
+	}
+	applyGatewayRouteMetadata(metadata, gatewayRoute)
 	item, err := s.cfg.Store.CreatePlatformItem("sql_work_orders", model.PlatformItemRequest{
 		Name:        fmt.Sprintf("%s SQL request", asset.Name),
 		Type:        "database_access",
@@ -106,16 +126,7 @@ func (s *Server) handleDatabaseWorkOrderCreate(w http.ResponseWriter, r *http.Re
 		TargetID:    asset.ID,
 		OwnerID:     userID,
 		Description: reason,
-		Metadata: map[string]any{
-			"sql":          sqlText,
-			"reason":       reason,
-			"asset_id":     asset.ID,
-			"asset_name":   asset.Name,
-			"client_ip":    s.clientIP(r),
-			"source":       "access_portal",
-			"requested_by": userID,
-			"requested_at": time.Now().UTC(),
-		},
+		Metadata:    metadata,
 	})
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, err.Error())

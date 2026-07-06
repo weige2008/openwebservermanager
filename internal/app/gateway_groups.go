@@ -43,6 +43,24 @@ type gatewayGroupMember struct {
 	Metadata        map[string]any `json:"metadata,omitempty"`
 }
 
+type gatewayRouteDecision struct {
+	GatewayGroupID    string
+	GatewayGroupName  string
+	GatewayID         string
+	GatewayName       string
+	GatewayCollection string
+	GatewayType       string
+}
+
+type gatewayRouteError struct {
+	Status  int
+	Message string
+}
+
+func (e gatewayRouteError) Error() string {
+	return e.Message
+}
+
 func (s *Server) handleGatewayGroupStatus(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet {
 		writeError(w, http.StatusMethodNotAllowed, "method not allowed")
@@ -56,6 +74,98 @@ func (s *Server) handleGatewayGroupStatus(w http.ResponseWriter, r *http.Request
 	}
 	statuses := s.gatewayGroupStatuses(groups)
 	writeJSON(w, http.StatusOK, map[string]any{"items": statuses, "checked_at": time.Now().UTC()})
+}
+
+func (s *Server) requireAssetGatewayRoute(w http.ResponseWriter, asset model.PlatformItem) (gatewayRouteDecision, bool) {
+	route, required, err := s.assetGatewayRoute(asset)
+	if err != nil {
+		status := http.StatusServiceUnavailable
+		if routeErr, ok := err.(gatewayRouteError); ok {
+			status = routeErr.Status
+		}
+		writeError(w, status, err.Error())
+		return gatewayRouteDecision{}, false
+	}
+	if !required {
+		return gatewayRouteDecision{}, true
+	}
+	return route, true
+}
+
+func (s *Server) assetGatewayRoute(asset model.PlatformItem) (gatewayRouteDecision, bool, error) {
+	groupRef := assetGatewayGroupRef(asset)
+	if groupRef == "" {
+		return gatewayRouteDecision{}, false, nil
+	}
+	s.refreshAgentGatewayStatuses()
+	groups, err := s.cfg.Store.ListPlatformItems("gateway_groups")
+	if err != nil {
+		return gatewayRouteDecision{}, true, err
+	}
+	group, ok := findGatewayGroup(groups, groupRef)
+	if !ok {
+		return gatewayRouteDecision{}, true, gatewayRouteError{Status: http.StatusBadRequest, Message: "gateway group not found"}
+	}
+	if !platformItemEnabled(group) {
+		return gatewayRouteDecision{}, true, gatewayRouteError{Status: http.StatusServiceUnavailable, Message: "gateway group is disabled"}
+	}
+	statuses := s.gatewayGroupStatuses([]model.PlatformItem{group})
+	if len(statuses) == 0 || statuses[0].SelectedGateway == nil {
+		return gatewayRouteDecision{}, true, gatewayRouteError{Status: http.StatusServiceUnavailable, Message: "gateway group has no online gateway"}
+	}
+	selected := statuses[0].SelectedGateway
+	return gatewayRouteDecision{
+		GatewayGroupID:    group.ID,
+		GatewayGroupName:  group.Name,
+		GatewayID:         selected.ID,
+		GatewayName:       selected.Name,
+		GatewayCollection: selected.Collection,
+		GatewayType:       selected.Type,
+	}, true, nil
+}
+
+func assetGatewayGroupRef(asset model.PlatformItem) string {
+	return firstMetadataString(asset.Metadata, "gateway_group_id", "gatewayGroupId", "gateway_group", "gatewayGroup", "gateway_group_name")
+}
+
+func findGatewayGroup(groups []model.PlatformItem, ref string) (model.PlatformItem, bool) {
+	ref = strings.TrimSpace(ref)
+	for _, group := range groups {
+		if strings.EqualFold(group.ID, ref) || strings.EqualFold(group.Name, ref) {
+			return group, true
+		}
+	}
+	return model.PlatformItem{}, false
+}
+
+func gatewayRouteMetadata(route gatewayRouteDecision) map[string]any {
+	if route.GatewayGroupID == "" {
+		return nil
+	}
+	return map[string]any{
+		"gateway_group_id":   route.GatewayGroupID,
+		"gateway_group_name": route.GatewayGroupName,
+		"gateway_id":         route.GatewayID,
+		"gateway_name":       route.GatewayName,
+		"gateway_collection": route.GatewayCollection,
+		"gateway_type":       route.GatewayType,
+	}
+}
+
+func applyGatewayRouteMetadata(metadata map[string]any, route gatewayRouteDecision) {
+	for key, value := range gatewayRouteMetadata(route) {
+		metadata[key] = value
+	}
+}
+
+func applyGatewayRouteSession(session *model.ConnectionSession, route gatewayRouteDecision) {
+	if route.GatewayGroupID == "" {
+		return
+	}
+	session.GatewayGroupID = route.GatewayGroupID
+	session.GatewayID = route.GatewayID
+	session.GatewayName = route.GatewayName
+	session.GatewayCollection = route.GatewayCollection
 }
 
 func (s *Server) gatewayGroupsWithStatus(groups []model.PlatformItem) []model.PlatformItem {

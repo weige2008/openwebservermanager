@@ -100,6 +100,10 @@ type ConnectionSession struct {
 	Error               string        `json:"error,omitempty"`
 	RecordingPath       string        `json:"recording_path,omitempty"`
 	RecordingSize       int64         `json:"recording_size,omitempty"`
+	GatewayGroupID      string        `json:"gateway_group_id,omitempty"`
+	GatewayID           string        `json:"gateway_id,omitempty"`
+	GatewayName         string        `json:"gateway_name,omitempty"`
+	GatewayCollection   string        `json:"gateway_collection,omitempty"`
 	Width               int           `json:"width,omitempty"`
 	Height              int           `json:"height,omitempty"`
 	DPI                 int           `json:"dpi,omitempty"`

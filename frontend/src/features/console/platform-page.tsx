@@ -418,6 +418,14 @@ export function PlatformTablePage({ config }: { config: PlatformPageConfig }) {
             : <Badge tone='neutral'>{app.t('disabled', 'Disabled')}</Badge>,
         },
       ] satisfies ColumnDef<PlatformItem>[] : []),
+      ...(['assets', 'web_assets', 'database_assets'].includes(config.collection) ? [
+        {
+          header: app.t('gatewayGroup', '网关分组'),
+          cell: ({ row }) => metadataText(row.original.metadata?.gateway_group_id)
+            ? <Badge tone='neutral'>{metadataText(row.original.metadata?.gateway_group_id)}</Badge>
+            : <span className='text-muted-foreground'>{app.t('directAccess', '直连')}</span>,
+        },
+      ] satisfies ColumnDef<PlatformItem>[] : []),
       ...(config.collection === 'agent_gateways' ? [
         { header: '延迟', cell: ({ row }) => <span className='font-mono text-xs'>{formatNumberValue(row.original.metadata?.latency_ms)} ms</span> },
         {
@@ -559,7 +567,7 @@ export function PlatformTablePage({ config }: { config: PlatformPageConfig }) {
               emptyTitle={app.t('empty', '暂无数据')}
               emptyBody={description}
               searchPlaceholder={app.t('filter', '关键词搜索')}
-              getSearchText={(item) => [item.name, item.type, item.status, item.protocol, item.host, item.group, item.username, item.description, metadataText(item.metadata?.target_url), metadataText(item.metadata?.certificate_id), metadataText(item.metadata?.mtls_certificate_id), metadataText(item.metadata?.tls_server_name), metadataText(item.metadata?.database), metadataText(item.metadata?.sqlite_path), metadataText(item.metadata?.credential_id), metadataText(item.metadata?.pattern), metadataText(item.metadata?.command), metadataText(item.metadata?.risk), metadataText(item.metadata?.path_prefix), permissionSummary(item.permissions), metadataText(item.metadata?.last_login_at), metadataText(item.metadata?.last_login_ip), item.tags?.join(' ')].filter(Boolean).join(' ')}
+              getSearchText={(item) => [item.name, item.type, item.status, item.protocol, item.host, item.group, item.username, item.description, metadataText(item.metadata?.target_url), metadataText(item.metadata?.certificate_id), metadataText(item.metadata?.mtls_certificate_id), metadataText(item.metadata?.tls_server_name), metadataText(item.metadata?.database), metadataText(item.metadata?.sqlite_path), metadataText(item.metadata?.credential_id), metadataText(item.metadata?.gateway_group_id), metadataText(item.metadata?.gateway_id), metadataText(item.metadata?.pattern), metadataText(item.metadata?.command), metadataText(item.metadata?.risk), metadataText(item.metadata?.path_prefix), permissionSummary(item.permissions), metadataText(item.metadata?.last_login_at), metadataText(item.metadata?.last_login_ip), item.tags?.join(' ')].filter(Boolean).join(' ')}
             />
           </CardContent>
         </Card>
@@ -2091,12 +2099,14 @@ function PlatformItemDialog({
   const isCommandFilter = collection === 'command_filters'
   const isCommandSnippet = collection === 'command_snippets'
   const isAuthorizationStrategy = collection === 'authorization_strategies'
+  const isAsset = collection === 'assets'
   const isWebAsset = collection === 'web_assets'
   const isDatabaseAsset = collection === 'database_assets'
   const isScheduledTask = collection === 'scheduled_tasks'
   const roleItems = app.data.platform?.roles || []
   const assetGroupItems = (app.data.platform?.asset_groups || items).filter((item) => item.id !== editingId)
   const storageItems = app.data.platform?.storages || []
+  const gatewayGroupItems = app.data.platform?.gateway_groups || []
   const databaseCredentials = (app.data.platform?.credentials || []).filter((item) => item.type === 'database_password')
   const mtlsCertificates = (app.data.platform?.certificates || []).filter((item) => metadataBool(item.metadata?.mtls_enabled) && metadataBool(item.metadata?.has_private_key))
   return (
@@ -2289,6 +2299,14 @@ function PlatformItemDialog({
                   onChange={(event) => onChange({ metadata: metadataWithValue(form.metadata, 'tls_server_name', event.currentTarget.value) })}
                 />
               </Field>
+              <Field label={app.t('gatewayGroup', '网关分组')}>
+                <Select value={metadataFormText(form.metadata, 'gateway_group_id')} onChange={(event) => onChange({ metadata: metadataWithValue(form.metadata, 'gateway_group_id', event.currentTarget.value) })}>
+                  <option value=''>{app.t('directAccess', '直连')}</option>
+                  {gatewayGroupItems.map((group) => (
+                    <option key={group.id} value={group.id}>{group.name}</option>
+                  ))}
+                </Select>
+              </Field>
               <Field className='sm:col-span-2' label={app.t('caBundle', 'CA bundle')}>
                 <Textarea
                   className='min-h-36 font-mono text-xs'
@@ -2357,6 +2375,14 @@ function PlatformItemDialog({
               )}
               <Field label={app.t('rowLimit', '行数限制')}>
                 <Input type='number' placeholder='100' value={metadataFormText(form.metadata, 'row_limit')} onChange={(event) => onChange({ metadata: metadataWithValue(form.metadata, 'row_limit', event.currentTarget.value ? Number(event.currentTarget.value) : '') })} />
+              </Field>
+              <Field label={app.t('gatewayGroup', '网关分组')}>
+                <Select value={metadataFormText(form.metadata, 'gateway_group_id')} onChange={(event) => onChange({ metadata: metadataWithValue(form.metadata, 'gateway_group_id', event.currentTarget.value) })}>
+                  <option value=''>{app.t('directAccess', '直连')}</option>
+                  {gatewayGroupItems.map((group) => (
+                    <option key={group.id} value={group.id}>{group.name}</option>
+                  ))}
+                </Select>
               </Field>
               <Field label={app.t('group')}><Input value={form.group} onChange={(event) => onChange({ group: event.currentTarget.value })} /></Field>
               <Field label={app.t('tags', '标签')}><Input placeholder='mysql,prod' value={form.tags} onChange={(event) => onChange({ tags: event.currentTarget.value })} /></Field>
@@ -2555,6 +2581,16 @@ function PlatformItemDialog({
                   <Field label='Private key'><Textarea value={form.private_key} onChange={(event) => onChange({ private_key: event.currentTarget.value })} /></Field>
                   <Field label='Passphrase'><Input type='password' value={form.passphrase} onChange={(event) => onChange({ passphrase: event.currentTarget.value })} /></Field>
                 </>
+              ) : null}
+              {isAsset ? (
+                <Field label={app.t('gatewayGroup', '网关分组')}>
+                  <Select value={metadataFormText(form.metadata, 'gateway_group_id')} onChange={(event) => onChange({ metadata: metadataWithValue(form.metadata, 'gateway_group_id', event.currentTarget.value) })}>
+                    <option value=''>{app.t('directAccess', '直连')}</option>
+                    {gatewayGroupItems.map((group) => (
+                      <option key={group.id} value={group.id}>{group.name}</option>
+                    ))}
+                  </Select>
+                </Field>
               ) : null}
               <Field label={app.t('group')}><Input value={form.group} onChange={(event) => onChange({ group: event.currentTarget.value })} /></Field>
               <Field label={app.t('owner', '归属用户/部门')}><Input value={form.owner_id} onChange={(event) => onChange({ owner_id: event.currentTarget.value })} /></Field>

@@ -211,11 +211,15 @@ func (s *Server) createPlatformDesktopSession(w http.ResponseWriter, r *http.Req
 		writeError(w, http.StatusBadRequest, "credential secret is missing")
 		return
 	}
+	gatewayRoute, ok := s.requireAssetGatewayRoute(w, asset)
+	if !ok {
+		return
+	}
 	policy := s.desktopAccessPolicy(protocol)
 	req.Width = clampInt(req.Width, 640, 7680, policy.Width)
 	req.Height = clampInt(req.Height, 480, 4320, policy.Height)
 	req.DPI = clampInt(req.DPI, 72, 240, policy.DPI)
-	session, err := s.cfg.Store.CreateSession(model.ConnectionSession{
+	sessionRequest := model.ConnectionSession{
 		Protocol:            protocol,
 		ServerID:            asset.ID,
 		CredentialID:        credential.ID,
@@ -234,7 +238,9 @@ func (s *Server) createPlatformDesktopSession(w http.ResponseWriter, r *http.Req
 		WatermarkText:       policy.WatermarkText,
 		WatermarkColor:      policy.WatermarkColor,
 		WatermarkFontSize:   policy.WatermarkFontSize,
-	})
+	}
+	applyGatewayRouteSession(&sessionRequest, gatewayRoute)
+	session, err := s.cfg.Store.CreateSession(sessionRequest)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, err.Error())
 		return
@@ -289,9 +295,13 @@ func (s *Server) createPlatformSSHSession(w http.ResponseWriter, r *http.Request
 		writeError(w, http.StatusBadRequest, "credential secret is missing")
 		return
 	}
+	gatewayRoute, ok := s.requireAssetGatewayRoute(w, asset)
+	if !ok {
+		return
+	}
 	req.Cols = clampInt(req.Cols, 40, 300, 120)
 	req.Rows = clampInt(req.Rows, 10, 120, 32)
-	session, err := s.cfg.Store.CreateSession(model.ConnectionSession{
+	sessionRequest := model.ConnectionSession{
 		Protocol:     model.ProtocolSSH,
 		ServerID:     asset.ID,
 		CredentialID: credential.ID,
@@ -299,7 +309,9 @@ func (s *Server) createPlatformSSHSession(w http.ResponseWriter, r *http.Request
 		ClientIP:     s.clientIP(r),
 		Width:        req.Cols,
 		Height:       req.Rows,
-	})
+	}
+	applyGatewayRouteSession(&sessionRequest, gatewayRoute)
+	session, err := s.cfg.Store.CreateSession(sessionRequest)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, err.Error())
 		return

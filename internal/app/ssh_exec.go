@@ -54,13 +54,19 @@ func (s *Server) handleSSHExec(w http.ResponseWriter, r *http.Request, asset mod
 		writeError(w, http.StatusBadRequest, "credential secret is missing")
 		return
 	}
-	session, err := s.cfg.Store.CreateSession(model.ConnectionSession{
+	gatewayRoute, ok := s.requireAssetGatewayRoute(w, asset)
+	if !ok {
+		return
+	}
+	sessionRequest := model.ConnectionSession{
 		Protocol:     model.ProtocolSSH,
 		ServerID:     asset.ID,
 		CredentialID: credential.ID,
 		UserID:       userID,
 		ClientIP:     s.clientIP(r),
-	})
+	}
+	applyGatewayRouteSession(&sessionRequest, gatewayRoute)
+	session, err := s.cfg.Store.CreateSession(sessionRequest)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, err.Error())
 		return

@@ -5162,6 +5162,141 @@ func gatewayGroupStatusByID(items []gatewayGroupStatus, id string) *gatewayGroup
 	return nil
 }
 
+func TestAccessPortalEnforcesGatewayGroupRouting(t *testing.T) {
+	handler, adminCookie := newTestHandler(t)
+
+	offlineGatewayRec := assertStatus(t, handler, http.MethodPost, "/api/admin/agent-gateways", map[string]any{
+		"name":   "route-offline",
+		"type":   "agent",
+		"status": "offline",
+		"tags":   []string{"prod"},
+		"metadata": map[string]any{
+			"capabilities": []string{"ssh", "database"},
+		},
+	}, adminCookie, http.StatusCreated)
+	var offlineGateway model.PlatformItem
+	decodeResponse(t, offlineGatewayRec, &offlineGateway)
+
+	blockedGroupRec := assertStatus(t, handler, http.MethodPost, "/api/admin/gateway-groups", map[string]any{
+		"name":   "blocked-route",
+		"type":   "manual",
+		"status": "enabled",
+		"metadata": map[string]any{
+			"gateway_ids": []string{offlineGateway.ID},
+		},
+	}, adminCookie, http.StatusCreated)
+	var blockedGroup model.PlatformItem
+	decodeResponse(t, blockedGroupRec, &blockedGroup)
+
+	blockedAssetRec := assertStatus(t, handler, http.MethodPost, "/api/admin/assets", map[string]any{
+		"name":     "blocked-route-linux",
+		"type":     "linux",
+		"status":   "active",
+		"protocol": "ssh",
+		"host":     "127.0.0.1",
+		"port":     22,
+		"metadata": map[string]any{"gateway_group_id": blockedGroup.ID},
+	}, adminCookie, http.StatusCreated)
+	var blockedAsset model.PlatformItem
+	decodeResponse(t, blockedAssetRec, &blockedAsset)
+	assertStatus(t, handler, http.MethodPost, "/api/admin/credentials", map[string]any{
+		"name":      "blocked-route-root",
+		"type":      "ssh_password",
+		"status":    "encrypted",
+		"username":  "root",
+		"password":  "target-secret",
+		"target_id": blockedAsset.ID,
+	}, adminCookie, http.StatusCreated)
+
+	blockedRec := assertStatus(t, handler, http.MethodPost, "/api/access/ssh/"+blockedAsset.ID, map[string]any{
+		"cols": 120,
+		"rows": 32,
+	}, adminCookie, http.StatusServiceUnavailable)
+	if !strings.Contains(blockedRec.Body.String(), "gateway group has no online gateway") {
+		t.Fatalf("blocked route response did not explain gateway status: %s", blockedRec.Body.String())
+	}
+
+	onlineGatewayRec := assertStatus(t, handler, http.MethodPost, "/api/admin/agent-gateways", map[string]any{
+		"name":   "route-online",
+		"type":   "agent",
+		"status": "online",
+		"tags":   []string{"prod"},
+		"metadata": map[string]any{
+			"capabilities":    []string{"ssh", "database"},
+			"latency_ms":      10,
+			"active_sessions": 0,
+		},
+	}, adminCookie, http.StatusCreated)
+	var onlineGateway model.PlatformItem
+	decodeResponse(t, onlineGatewayRec, &onlineGateway)
+
+	routeGroupRec := assertStatus(t, handler, http.MethodPost, "/api/admin/gateway-groups", map[string]any{
+		"name":   "active-route",
+		"type":   "manual",
+		"status": "enabled",
+		"metadata": map[string]any{
+			"gateway_ids": []string{offlineGateway.ID, onlineGateway.ID},
+		},
+	}, adminCookie, http.StatusCreated)
+	var routeGroup model.PlatformItem
+	decodeResponse(t, routeGroupRec, &routeGroup)
+
+	assetRec := assertStatus(t, handler, http.MethodPost, "/api/admin/assets", map[string]any{
+		"name":     "routed-linux",
+		"type":     "linux",
+		"status":   "active",
+		"protocol": "ssh",
+		"host":     "127.0.0.1",
+		"port":     22,
+		"metadata": map[string]any{"gateway_group_id": routeGroup.ID},
+	}, adminCookie, http.StatusCreated)
+	var asset model.PlatformItem
+	decodeResponse(t, assetRec, &asset)
+	assertStatus(t, handler, http.MethodPost, "/api/admin/credentials", map[string]any{
+		"name":      "routed-root",
+		"type":      "ssh_password",
+		"status":    "encrypted",
+		"username":  "root",
+		"password":  "target-secret",
+		"target_id": asset.ID,
+	}, adminCookie, http.StatusCreated)
+
+	sessionRec := assertStatus(t, handler, http.MethodPost, "/api/access/ssh/"+asset.ID, map[string]any{
+		"cols": 100,
+		"rows": 24,
+	}, adminCookie, http.StatusAccepted)
+	var session model.ConnectionSession
+	decodeResponse(t, sessionRec, &session)
+	if session.GatewayGroupID != routeGroup.ID || session.GatewayID != onlineGateway.ID || session.GatewayName != onlineGateway.Name || session.GatewayCollection != "agent_gateways" {
+		t.Fatalf("session missing selected gateway route: %#v", session)
+	}
+	onlineSessionsRec := assertStatus(t, handler, http.MethodGet, "/api/admin/audit/online-sessions", nil, adminCookie, http.StatusOK)
+	if !strings.Contains(onlineSessionsRec.Body.String(), onlineGateway.ID) || !strings.Contains(onlineSessionsRec.Body.String(), routeGroup.ID) {
+		t.Fatalf("online session audit index missing gateway route metadata: %s", onlineSessionsRec.Body.String())
+	}
+
+	databaseRec := assertStatus(t, handler, http.MethodPost, "/api/admin/database-assets", map[string]any{
+		"name":     "routed-sqlite",
+		"type":     "sqlite",
+		"status":   "enabled",
+		"protocol": "database",
+		"metadata": map[string]any{
+			"sqlite_path":      "routed-sqlite.db",
+			"gateway_group_id": routeGroup.ID,
+		},
+	}, adminCookie, http.StatusCreated)
+	var databaseAsset model.PlatformItem
+	decodeResponse(t, databaseRec, &databaseAsset)
+	sqlLogRec := assertStatus(t, handler, http.MethodPost, "/api/access/database/"+databaseAsset.ID+"/query", map[string]any{
+		"sql": "SELECT 1 AS routed",
+	}, adminCookie, http.StatusOK)
+	var sqlLog model.PlatformItem
+	decodeResponse(t, sqlLogRec, &sqlLog)
+	if firstMetadataString(sqlLog.Metadata, "gateway_group_id") != routeGroup.ID || firstMetadataString(sqlLog.Metadata, "gateway_id") != onlineGateway.ID {
+		t.Fatalf("sql log missing selected gateway route: %#v", sqlLog.Metadata)
+	}
+}
+
 func TestResourceOperationEndpoints(t *testing.T) {
 	handler, cookie := newTestHandler(t)
 	server := handler.(*Server)

@@ -382,6 +382,16 @@ func (s *Server) handleAccessAction(w http.ResponseWriter, r *http.Request) {
 	if !s.requireAccessMFA(w, r, accessMFAInputFromRequest(r)) {
 		return
 	}
+	gatewayRoute, ok := s.requireAssetGatewayRoute(w, asset)
+	if !ok {
+		return
+	}
+	metadata := map[string]any{
+		"client_ip":  s.clientIP(r),
+		"source":     "access_portal",
+		"asset_name": asset.Name,
+	}
+	applyGatewayRouteMetadata(metadata, gatewayRoute)
 	item, err := s.cfg.Store.CreatePlatformItem("online_sessions", model.PlatformItemRequest{
 		Name:        protocolSessionName(protocol, asset.Name),
 		Type:        string(protocol),
@@ -390,11 +400,7 @@ func (s *Server) handleAccessAction(w http.ResponseWriter, r *http.Request) {
 		TargetID:    assetID,
 		OwnerID:     userID,
 		Description: "接入门户创建的授权会话。",
-		Metadata: map[string]any{
-			"client_ip":  s.clientIP(r),
-			"source":     "access_portal",
-			"asset_name": asset.Name,
-		},
+		Metadata:    metadata,
 	})
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, err.Error())
@@ -406,6 +412,10 @@ func (s *Server) handleAccessAction(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) handleWebAssetProxy(w http.ResponseWriter, r *http.Request, asset model.PlatformItem, userID, proxyPath string) {
 	started := time.Now()
+	gatewayRoute, ok := s.requireAssetGatewayRoute(w, asset)
+	if !ok {
+		return
+	}
 	target, err := webAssetTargetURL(asset)
 	if err != nil {
 		writeError(w, http.StatusBadRequest, err.Error())
@@ -469,6 +479,7 @@ func (s *Server) handleWebAssetProxy(w http.ResponseWriter, r *http.Request, ass
 		"referer":       r.Referer(),
 		"upstream":      target.String(),
 	}
+	applyGatewayRouteMetadata(metadata, gatewayRoute)
 	if certificateID := webAssetMTLSCertificateID(asset); certificateID != "" {
 		metadata["mtls_certificate_id"] = certificateID
 	}

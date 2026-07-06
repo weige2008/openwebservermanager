@@ -912,10 +912,9 @@ function ResourceHeaderActions({ config, rows, onOperation }: { config: Platform
     }
   }
 
-  const exportAssets = async () => {
+  const exportAssets = async (format: 'json' | 'csv') => {
     try {
-      const data = await apiRequest<Record<string, unknown>>('/api/admin/assets/export')
-      downloadText('openwebservermanager-assets.json', JSON.stringify(data, null, 2), 'application/json')
+      await downloadResponse(`/api/admin/assets/export?format=${format}`, `openwebservermanager-assets.${format}`)
       app.showToast('资产已导出')
     } catch (error) {
       app.handleApiError(error)
@@ -944,9 +943,13 @@ function ResourceHeaderActions({ config, rows, onOperation }: { config: Platform
           <Save className='size-4' />
           批量授权
         </Button>
-        <Button variant='outline' onClick={() => void exportAssets()}>
+        <Button variant='outline' onClick={() => void exportAssets('json')}>
           <Download className='size-4' />
-          导出
+          JSON
+        </Button>
+        <Button variant='outline' onClick={() => void exportAssets('csv')}>
+          <Download className='size-4' />
+          CSV
         </Button>
         <Button variant='outline' onClick={() => onOperation({ type: 'asset-import' })}>
           <Upload className='size-4' />
@@ -5285,11 +5288,6 @@ function parentStoragePath(value: string) {
   const parts = value.split('/').filter(Boolean)
   if (parts.length <= 1) return '.'
   return parts.slice(0, -1).join('/')
-}
-
-function downloadText(filename: string, content: string, type: string) {
-  const blob = new Blob([content], { type })
-  downloadBlob(filename, blob)
 }
 
 async function downloadResponse(path: string, filename: string) {

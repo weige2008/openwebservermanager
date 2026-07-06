@@ -17,6 +17,7 @@ import (
 	"database/sql"
 	"encoding/base64"
 	"encoding/binary"
+	"encoding/csv"
 	"encoding/json"
 	"encoding/pem"
 	"errors"
@@ -5496,18 +5497,49 @@ func TestResourceOperationEndpoints(t *testing.T) {
 	server := handler.(*Server)
 
 	assetRec := assertStatus(t, handler, http.MethodPost, "/api/admin/assets", map[string]any{
-		"name":     "linux-export",
-		"type":     "linux",
-		"status":   "active",
-		"protocol": "ssh",
-		"host":     "127.0.0.1",
-		"port":     22,
+		"name":        "linux-export",
+		"type":        "linux",
+		"status":      "active",
+		"protocol":    "ssh",
+		"host":        "127.0.0.1",
+		"port":        22,
+		"group":       "ops",
+		"tags":        []string{"linux", "export"},
+		"description": "export fixture",
+		"metadata":    map[string]any{"credential_id": "cred-export", "gateway_group_id": "gw-export"},
 	}, cookie, http.StatusCreated)
 	var asset model.PlatformItem
 	decodeResponse(t, assetRec, &asset)
 	exportRec := assertStatus(t, handler, http.MethodGet, "/api/admin/assets/export", nil, cookie, http.StatusOK)
 	if !strings.Contains(exportRec.Body.String(), asset.ID) {
 		t.Fatal("asset export did not include created asset")
+	}
+	exportCSVRec := assertStatus(t, handler, http.MethodGet, "/api/admin/assets/export?format=csv", nil, cookie, http.StatusOK)
+	if contentType := exportCSVRec.Header().Get("Content-Type"); !strings.Contains(contentType, "text/csv") {
+		t.Fatalf("asset csv export content type = %q", contentType)
+	}
+	rows, err := csv.NewReader(strings.NewReader(exportCSVRec.Body.String())).ReadAll()
+	if err != nil {
+		t.Fatalf("parse asset csv export: %v", err)
+	}
+	if len(rows) < 2 || strings.Join(rows[0], ",") != "name,type,status,protocol,host,port,username,group,owner_id,parent_id,target_id,tags,description,metadata_json" {
+		t.Fatalf("asset csv export header/rows invalid: %#v", rows)
+	}
+	foundExportRow := false
+	for _, row := range rows[1:] {
+		if len(row) >= 14 && row[0] == "linux-export" {
+			foundExportRow = row[3] == "ssh" &&
+				row[4] == "127.0.0.1" &&
+				row[5] == "22" &&
+				row[7] == "ops" &&
+				row[11] == "linux,export" &&
+				row[12] == "export fixture" &&
+				strings.Contains(row[13], `"credential_id":"cred-export"`) &&
+				strings.Contains(row[13], `"gateway_group_id":"gw-export"`)
+		}
+	}
+	if !foundExportRow {
+		t.Fatalf("asset csv export missing created asset row: %#v", rows)
 	}
 	importAssetRec := assertStatus(t, handler, http.MethodPost, "/api/admin/assets/import", map[string]any{
 		"items": []map[string]any{{

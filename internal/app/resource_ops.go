@@ -287,8 +287,49 @@ func (s *Server) handleAssetExport(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
+	exportedAt := time.Now().UTC()
 	_ = s.audit(r, "assets.export", "assets", "", "exported assets")
-	writeJSON(w, http.StatusOK, map[string]any{"items": items, "exported_at": time.Now().UTC()})
+	format := strings.ToLower(strings.TrimSpace(r.URL.Query().Get("format")))
+	if format == "" {
+		format = "json"
+	}
+	switch format {
+	case "json":
+		w.Header().Set("Content-Disposition", `attachment; filename="`+auditExportFilename("assets", exportedAt, "json")+`"`)
+		writeJSON(w, http.StatusOK, map[string]any{"items": items, "exported_at": exportedAt})
+	case "csv":
+		w.Header().Set("Content-Disposition", `attachment; filename="`+auditExportFilename("assets", exportedAt, "csv")+`"`)
+		w.Header().Set("Content-Type", "text/csv; charset=utf-8")
+		w.WriteHeader(http.StatusOK)
+		writeAssetExportCSV(w, items)
+	default:
+		writeError(w, http.StatusBadRequest, "unsupported export format")
+	}
+}
+
+func writeAssetExportCSV(w io.Writer, items []model.PlatformItem) {
+	writer := csv.NewWriter(w)
+	_ = writer.Write([]string{"name", "type", "status", "protocol", "host", "port", "username", "group", "owner_id", "parent_id", "target_id", "tags", "description", "metadata_json"})
+	for _, item := range items {
+		metadata, _ := json.Marshal(item.Metadata)
+		_ = writer.Write([]string{
+			item.Name,
+			item.Type,
+			item.Status,
+			string(item.Protocol),
+			item.Host,
+			strconv.Itoa(item.Port),
+			item.Username,
+			item.Group,
+			item.OwnerID,
+			item.ParentID,
+			item.TargetID,
+			strings.Join(item.Tags, ","),
+			item.Description,
+			string(metadata),
+		})
+	}
+	writer.Flush()
 }
 
 func (s *Server) handleAuditExport(w http.ResponseWriter, r *http.Request, route string) {

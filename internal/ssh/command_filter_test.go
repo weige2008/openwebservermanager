@@ -171,6 +171,53 @@ func TestCommandInterceptorRespectsSessionScope(t *testing.T) {
 	}
 }
 
+func TestCommandInterceptorMatchesUserNameScope(t *testing.T) {
+	st := newTestStore(t)
+	user, err := st.CreatePlatformItem("users", model.PlatformItemRequest{
+		Name:     "operator-name",
+		Username: "operator-login",
+		Status:   "enabled",
+		Password: "password123",
+	})
+	if err != nil {
+		t.Fatalf("create user: %v", err)
+	}
+	_, err = st.CreatePlatformItem("command_filters", model.PlatformItemRequest{
+		Name:     "operator scoped restart",
+		Type:     "deny",
+		Status:   "enabled",
+		Protocol: model.ProtocolSSH,
+		OwnerID:  "operator-login",
+		TargetID: "srv_scoped",
+		Metadata: map[string]any{
+			"pattern": "systemctl restart",
+			"risk":    "high",
+		},
+	})
+	if err != nil {
+		t.Fatalf("create command filter: %v", err)
+	}
+
+	interceptor := newCommandInterceptor(st, model.ConnectionSession{
+		ID:       "sess_username_scope",
+		Protocol: model.ProtocolSSH,
+		ServerID: "srv_scoped",
+		UserID:   user.ID,
+	})
+	filtered, events := interceptor.Process([]byte("systemctl restart nginx\r"))
+	if string(filtered) != "systemctl restart nginx\x15" || len(events) != 1 || !events[0].Blocked {
+		t.Fatalf("filtered = %q events = %#v, want username-scoped command blocked", string(filtered), events)
+	}
+
+	logs, err := st.ListPlatformItems("exec_command_logs")
+	if err != nil {
+		t.Fatalf("list command logs: %v", err)
+	}
+	if commandLogStatusBySession(logs, "sess_username_scope") != "denied" {
+		t.Fatalf("logs = %#v, want denied username-scoped command", logs)
+	}
+}
+
 func commandLogStatusBySession(logs []model.PlatformItem, sessionID string) string {
 	for _, log := range logs {
 		if log.Metadata["session_id"] == sessionID {

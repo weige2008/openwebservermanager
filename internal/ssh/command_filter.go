@@ -102,7 +102,7 @@ func (i *commandInterceptor) evaluate(command string) commandDecision {
 		if !commandFilterEnabled(filter) {
 			continue
 		}
-		if !commandFilterAppliesToSession(filter, i.session) {
+		if !commandFilterAppliesToSession(i.store, filter, i.session) {
 			continue
 		}
 		for _, pattern := range commandFilterPatterns(filter) {
@@ -167,17 +167,60 @@ func commandFilterEnabled(item model.PlatformItem) bool {
 	return status == "" || status == "enabled" || status == "active"
 }
 
-func commandFilterAppliesToSession(item model.PlatformItem, session model.ConnectionSession) bool {
+func commandFilterAppliesToSession(st *store.Store, item model.PlatformItem, session model.ConnectionSession) bool {
 	if item.Protocol != "" && item.Protocol != session.Protocol {
 		return false
 	}
 	if !commandScopeMatches(commandFilterScopeValues(item, []string{item.TargetID}, "target_id", "target_ids", "targetId", "asset_id", "asset_ids", "assetId", "server_id", "server_ids", "serverId", "resource_id", "resource_ids", "resourceId"), session.ServerID) {
 		return false
 	}
-	if !commandScopeMatches(commandFilterScopeValues(item, []string{item.OwnerID, item.Username}, "user_id", "user_ids", "userId", "username", "usernames", "account", "accounts", "owner_id", "owner_ids", "ownerId"), session.UserID) {
+	if !commandSubjectScopeMatches(st, commandFilterScopeValues(item, []string{item.OwnerID, item.Username}, "user_id", "user_ids", "userId", "username", "usernames", "account", "accounts", "owner_id", "owner_ids", "ownerId"), session) {
 		return false
 	}
 	return true
+}
+
+func commandSubjectScopeMatches(st *store.Store, values []string, session model.ConnectionSession) bool {
+	if len(values) == 0 {
+		return true
+	}
+	subjects := commandSessionSubjectValues(st, session)
+	for _, value := range values {
+		if strings.TrimSpace(value) == "*" {
+			return true
+		}
+		for _, subject := range subjects {
+			if subject != "" && strings.EqualFold(strings.TrimSpace(value), strings.TrimSpace(subject)) {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+func commandSessionSubjectValues(st *store.Store, session model.ConnectionSession) []string {
+	values := []string{session.UserID}
+	if st == nil || strings.TrimSpace(session.UserID) == "" {
+		return values
+	}
+	users, err := st.ListPlatformItems("users")
+	if err != nil {
+		return values
+	}
+	for _, user := range users {
+		if !commandScopeMatches([]string{user.ID, user.Name, user.Username}, session.UserID) {
+			continue
+		}
+		values = append(values, user.ID, user.Name, user.Username, user.OwnerID, user.ParentID, user.Group)
+		values = append(values, metadataStrings(user.Metadata["department_id"])...)
+		values = append(values, metadataStrings(user.Metadata["department_ids"])...)
+		values = append(values, metadataStrings(user.Metadata["department"])...)
+		values = append(values, metadataStrings(user.Metadata["departments"])...)
+		values = append(values, metadataStrings(user.Metadata["account"])...)
+		values = append(values, metadataStrings(user.Metadata["accounts"])...)
+		break
+	}
+	return values
 }
 
 func commandFilterScopeValues(item model.PlatformItem, direct []string, metadataKeys ...string) []string {

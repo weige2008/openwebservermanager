@@ -2709,7 +2709,7 @@ func (s *Server) auditRecordingTarget(w http.ResponseWriter, r *http.Request, id
 }
 
 func (s *Server) canAccessPlatformSession(r *http.Request, item model.PlatformItem) bool {
-	_, authSession, ok := s.auth.session(r)
+	_, authSession, ok := s.authSession(r)
 	if !ok {
 		return false
 	}

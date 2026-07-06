@@ -154,7 +154,7 @@ func (s *Server) handleOIDCAuthorize(w http.ResponseWriter, r *http.Request) {
 		s.redirectOIDCError(w, r, redirectURI, "invalid_request", "unsupported code_challenge_method")
 		return
 	}
-	_, session, ok := s.auth.session(r)
+	_, session, ok := s.authSession(r)
 	if !ok {
 		if query.Get("prompt") == "none" {
 			s.redirectOIDCError(w, r, redirectURI, "login_required", "user is not signed in")

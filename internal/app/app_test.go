@@ -2278,13 +2278,15 @@ func TestCustomRoleAPIAndMenuPermissions(t *testing.T) {
 	var asset model.PlatformItem
 	decodeResponse(t, assetRec, &asset)
 
-	assertStatus(t, handler, http.MethodPost, "/api/admin/users", map[string]any{
+	userRec := assertStatus(t, handler, http.MethodPost, "/api/admin/users", map[string]any{
 		"name":     "custom-role-user",
 		"type":     "local",
 		"status":   "enabled",
 		"password": "password123",
 		"metadata": map[string]any{"role": "asset-menu-reader"},
 	}, adminCookie, http.StatusCreated)
+	var user model.PlatformItem
+	decodeResponse(t, userRec, &user)
 	loginRec := assertStatus(t, handler, http.MethodPost, "/api/auth/login", map[string]any{
 		"username": "custom-role-user",
 		"password": "password123",
@@ -2321,6 +2323,34 @@ func TestCustomRoleAPIAndMenuPermissions(t *testing.T) {
 		"status": "disabled",
 	}, adminCookie, http.StatusOK)
 	assertStatus(t, handler, http.MethodGet, "/api/admin/assets", nil, userCookie, http.StatusForbidden)
+	roleDisabledMeRec := assertStatus(t, handler, http.MethodGet, "/api/auth/me", nil, userCookie, http.StatusOK)
+	if strings.Contains(roleDisabledMeRec.Body.String(), "GET /api/admin/assets") || strings.Contains(roleDisabledMeRec.Body.String(), "menu_permissions") {
+		t.Fatalf("disabled custom role still exposed permissions: %s", roleDisabledMeRec.Body.String())
+	}
+
+	assertStatus(t, handler, http.MethodPatch, "/api/admin/roles/"+role.ID, map[string]any{
+		"name":   "asset-menu-reader",
+		"type":   "custom",
+		"status": "enabled",
+	}, adminCookie, http.StatusOK)
+	assertStatus(t, handler, http.MethodGet, "/api/admin/assets", nil, userCookie, http.StatusOK)
+	assertStatus(t, handler, http.MethodPatch, "/api/admin/users/"+user.ID, map[string]any{
+		"metadata": map[string]any{"role": "user"},
+	}, adminCookie, http.StatusOK)
+	assertStatus(t, handler, http.MethodGet, "/api/admin/assets", nil, userCookie, http.StatusForbidden)
+	downgradedMeRec := assertStatus(t, handler, http.MethodGet, "/api/auth/me", nil, userCookie, http.StatusOK)
+	if strings.Contains(downgradedMeRec.Body.String(), "GET /api/admin/assets") || strings.Contains(downgradedMeRec.Body.String(), "menu_permissions") {
+		t.Fatalf("downgraded user session still exposed custom role permissions: %s", downgradedMeRec.Body.String())
+	}
+	downgradedBootstrapRec := assertStatus(t, handler, http.MethodGet, "/api/bootstrap", nil, userCookie, http.StatusOK)
+	if strings.Contains(downgradedBootstrapRec.Body.String(), asset.ID) {
+		t.Fatalf("downgraded user bootstrap leaked custom-role asset: %s", downgradedBootstrapRec.Body.String())
+	}
+
+	assertStatus(t, handler, http.MethodPatch, "/api/admin/users/"+user.ID, map[string]any{
+		"status": "disabled",
+	}, adminCookie, http.StatusOK)
+	assertStatus(t, handler, http.MethodGet, "/api/auth/me", nil, userCookie, http.StatusUnauthorized)
 }
 
 func TestPlatformUserLoginPresenceAndDisable(t *testing.T) {
@@ -2868,8 +2898,11 @@ func TestOIDCProviderAuthorizationCodeFlow(t *testing.T) {
 	postUserInfoRec := assertStatusWithHeaders(t, handler, http.MethodPost, "/api/oidc/userinfo", nil, nil, map[string]string{
 		"Authorization": "bearer " + accessToken,
 	}, http.StatusOK)
-	if !strings.Contains(postUserInfoRec.Body.String(), `"preferred_username":"admin"`) || !strings.Contains(postUserInfoRec.Body.String(), `"role":"admin"`) {
-		t.Fatal("post userinfo did not include signed-in user claims")
+	var postUserInfo map[string]any
+	decodeResponse(t, postUserInfoRec, &postUserInfo)
+	role, _ := postUserInfo["role"].(string)
+	if postUserInfo["preferred_username"] != "admin" || normalizeBuiltInRole(role) != roleSuperAdmin {
+		t.Fatalf("post userinfo did not include signed-in user claims: %v", postUserInfo)
 	}
 	formUserInfoRec := assertFormStatus(t, handler, "/api/oidc/userinfo", url.Values{"access_token": {accessToken}}, nil, nil, http.StatusOK)
 	if !strings.Contains(formUserInfoRec.Body.String(), `"preferred_username":"admin"`) || !strings.Contains(formUserInfoRec.Body.String(), `"sub"`) {

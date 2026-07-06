@@ -182,7 +182,7 @@ func (s *Server) handlePasskeyLoginAPI(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handlePasskeyList(w http.ResponseWriter, r *http.Request) {
-	_, session, _ := s.auth.session(r)
+	_, session, _ := s.authSession(r)
 	items, err := s.passkeysForUser(session.UserID)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, err.Error())
@@ -196,7 +196,7 @@ func (s *Server) handlePasskeyList(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handlePasskeyRegisterOptions(w http.ResponseWriter, r *http.Request) {
-	_, session, _ := s.auth.session(r)
+	_, session, _ := s.authSession(r)
 	challenge, err := randomPasskeyChallenge()
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, err.Error())
@@ -252,7 +252,7 @@ func (s *Server) handlePasskeyRegisterVerify(w http.ResponseWriter, r *http.Requ
 	if !decodeJSON(w, r, &req) {
 		return
 	}
-	_, session, _ := s.auth.session(r)
+	_, session, _ := s.authSession(r)
 	challengeID := strings.TrimSpace(req.ChallengeID)
 	challenge, ok := s.auth.passkeyRegistrationChallenge(challengeID)
 	if challengeID == "" || !ok || challenge.User.UserID != session.UserID {
@@ -332,7 +332,7 @@ func (s *Server) handlePasskeyRegisterVerify(w http.ResponseWriter, r *http.Requ
 }
 
 func (s *Server) handlePasskeyDelete(w http.ResponseWriter, r *http.Request) {
-	_, session, _ := s.auth.session(r)
+	_, session, _ := s.authSession(r)
 	id := strings.Trim(strings.TrimPrefix(r.URL.Path, "/api/auth/passkeys/"), "/")
 	if id == "" {
 		writeError(w, http.StatusNotFound, "passkey not found")

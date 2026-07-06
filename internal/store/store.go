@@ -153,6 +153,15 @@ func (s *Store) AdminConfigured() bool {
 	return s.state.Admin != nil && s.state.Admin.PasswordHash != ""
 }
 
+func (s *Store) AdminUser() (AdminPublic, bool) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	if s.state.Admin == nil || s.state.Admin.UserID == "" {
+		return AdminPublic{}, false
+	}
+	return s.state.Admin.Public(), true
+}
+
 func (s *Store) SetupAdmin(username, password string) (AdminPublic, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()

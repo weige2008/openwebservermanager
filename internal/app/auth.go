@@ -133,6 +133,18 @@ func (m *authManager) delete(token string) {
 	delete(m.accessMFAGrants, token)
 }
 
+func (m *authManager) refreshSession(token string, session authSession) {
+	token = strings.TrimSpace(token)
+	if token == "" {
+		return
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if _, ok := m.sessions[token]; ok {
+		m.sessions[token] = session
+	}
+}
+
 func (m *authManager) deleteUserSessionsExcept(userID, keepToken string) {
 	userID = strings.TrimSpace(userID)
 	keepToken = strings.TrimSpace(keepToken)
@@ -394,7 +406,7 @@ func (s *Server) requireAuth(w http.ResponseWriter, r *http.Request) bool {
 		})
 		return false
 	}
-	_, _, ok := s.auth.session(r)
+	_, _, ok := s.authSession(r)
 	if ok {
 		return true
 	}
@@ -403,11 +415,74 @@ func (s *Server) requireAuth(w http.ResponseWriter, r *http.Request) bool {
 }
 
 func (s *Server) currentUserID(r *http.Request) string {
-	_, session, ok := s.auth.session(r)
+	_, session, ok := s.authSession(r)
 	if !ok || session.UserID == "" {
 		return "anonymous"
 	}
 	return session.UserID
+}
+
+func (s *Server) authSession(r *http.Request) (string, authSession, bool) {
+	token, session, ok := s.auth.session(r)
+	if !ok {
+		return "", authSession{}, false
+	}
+	session, ok = s.refreshAuthSession(token, session)
+	if !ok {
+		return "", authSession{}, false
+	}
+	return token, session, true
+}
+
+func (s *Server) refreshAuthSession(token string, session authSession) (authSession, bool) {
+	session.UserID = strings.TrimSpace(session.UserID)
+	if session.UserID == "" {
+		s.auth.delete(token)
+		return authSession{}, false
+	}
+	user, ok, err := s.cfg.Store.GetPlatformItem("users", session.UserID)
+	if err != nil {
+		return session, true
+	}
+	if !ok {
+		admin, adminOK := s.cfg.Store.AdminUser()
+		if adminOK && admin.UserID == session.UserID {
+			refreshed := authSession{
+				UserID:    admin.UserID,
+				Username:  admin.Username,
+				Role:      admin.Role,
+				ExpiresAt: session.ExpiresAt,
+			}
+			s.auth.refreshSession(token, refreshed)
+			return refreshed, true
+		}
+		s.auth.delete(token)
+		return authSession{}, false
+	}
+	if !platformItemEnabled(user) {
+		s.auth.delete(token)
+		return authSession{}, false
+	}
+	refreshed := authSession{
+		UserID:    user.ID,
+		Username:  strings.TrimSpace(user.Name),
+		Role:      userRole(user),
+		ExpiresAt: session.ExpiresAt,
+	}
+	if refreshed.Username == "" {
+		refreshed.Username = session.Username
+	}
+	s.auth.refreshSession(token, refreshed)
+	return refreshed, true
+}
+
+func userRole(user model.PlatformItem) string {
+	if user.Metadata != nil {
+		if role, ok := user.Metadata["role"].(string); ok && strings.TrimSpace(role) != "" {
+			return strings.TrimSpace(role)
+		}
+	}
+	return string(roleUser)
 }
 
 func (s *Server) authUserPayload(session authSession) authUserPayload {
@@ -620,7 +695,7 @@ func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleLogout(w http.ResponseWriter, r *http.Request) {
-	if token, session, ok := s.auth.session(r); ok {
+	if token, session, ok := s.authSession(r); ok {
 		s.auth.delete(token)
 		if !s.auth.hasUserSession(session.UserID) {
 			_ = s.cfg.Store.RecordUserLogout(session.UserID)
@@ -632,7 +707,7 @@ func (s *Server) handleLogout(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleMe(w http.ResponseWriter, r *http.Request) {
-	_, session, ok := s.auth.session(r)
+	_, session, ok := s.authSession(r)
 	if !ok {
 		writeError(w, http.StatusUnauthorized, "authentication required")
 		return
@@ -649,7 +724,7 @@ func (s *Server) handlePasswordChange(w http.ResponseWriter, r *http.Request) {
 	if !decodeJSON(w, r, &req) {
 		return
 	}
-	token, session, ok := s.auth.session(r)
+	token, session, ok := s.authSession(r)
 	if !ok {
 		writeError(w, http.StatusUnauthorized, "authentication required")
 		return

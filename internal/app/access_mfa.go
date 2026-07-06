@@ -67,7 +67,7 @@ func (s *Server) requireAccessMFA(w http.ResponseWriter, r *http.Request, input 
 	if !enabled {
 		return true
 	}
-	token, session, ok := s.auth.session(r)
+	token, session, ok := s.authSession(r)
 	if !ok {
 		writeError(w, http.StatusUnauthorized, "authentication required")
 		return false

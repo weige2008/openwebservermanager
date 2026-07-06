@@ -168,7 +168,7 @@ func (s *Server) handleAuthenticatedMFA(w http.ResponseWriter, r *http.Request) 
 }
 
 func (s *Server) handleMFAStatus(w http.ResponseWriter, r *http.Request) {
-	_, session, _ := s.auth.session(r)
+	_, session, _ := s.authSession(r)
 	profile, _, err := s.cfg.Store.UserMFAProfile(session.UserID)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, err.Error())
@@ -182,7 +182,7 @@ func (s *Server) handleMFAStatus(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleMFASetup(w http.ResponseWriter, r *http.Request) {
-	_, session, _ := s.auth.session(r)
+	_, session, _ := s.authSession(r)
 	secret, err := generateTOTPSecret()
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, err.Error())
@@ -201,7 +201,7 @@ func (s *Server) handleMFAEnable(w http.ResponseWriter, r *http.Request) {
 	if !decodeJSON(w, r, &req) {
 		return
 	}
-	_, session, _ := s.auth.session(r)
+	_, session, _ := s.authSession(r)
 	secret := normalizeTOTPSecret(req.Secret)
 	if secret == "" || !verifyTOTP(secret, req.MFACode, time.Now().UTC()) {
 		writeError(w, http.StatusBadRequest, "invalid MFA setup code")
@@ -226,7 +226,7 @@ func (s *Server) handleMFADisable(w http.ResponseWriter, r *http.Request) {
 	if !decodeJSON(w, r, &req) {
 		return
 	}
-	_, session, _ := s.auth.session(r)
+	_, session, _ := s.authSession(r)
 	if !s.verifyCurrentPassword(session.Username, req.CurrentPassword) {
 		writeError(w, http.StatusUnauthorized, "current password is invalid")
 		return
@@ -260,7 +260,7 @@ func (s *Server) handleMFARegenerateRecoveryCodes(w http.ResponseWriter, r *http
 	if !decodeJSON(w, r, &req) {
 		return
 	}
-	_, session, _ := s.auth.session(r)
+	_, session, _ := s.authSession(r)
 	if !s.verifyCurrentPassword(session.Username, req.CurrentPassword) {
 		writeError(w, http.StatusUnauthorized, "current password is invalid")
 		return

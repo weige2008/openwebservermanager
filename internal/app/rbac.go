@@ -28,7 +28,7 @@ func (s *Server) authorizeAPI(w http.ResponseWriter, r *http.Request) bool {
 	if isAlwaysAllowedAuthenticatedAPI(r) {
 		return true
 	}
-	_, session, ok := s.auth.session(r)
+	_, session, ok := s.authSession(r)
 	if !ok {
 		writeError(w, http.StatusUnauthorized, "authentication required")
 		return false
@@ -77,7 +77,7 @@ func auditorMayAccess(r *http.Request) bool {
 }
 
 func (s *Server) isAdminRequest(r *http.Request) bool {
-	_, session, ok := s.auth.session(r)
+	_, session, ok := s.authSession(r)
 	if !ok {
 		return false
 	}

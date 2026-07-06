@@ -32,7 +32,7 @@ func (s *Server) handleNotifications(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusMethodNotAllowed, "method not allowed")
 		return
 	}
-	_, session, ok := s.auth.session(r)
+	_, session, ok := s.authSession(r)
 	if !ok {
 		writeError(w, http.StatusUnauthorized, "authentication required")
 		return

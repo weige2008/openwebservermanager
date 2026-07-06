@@ -1330,7 +1330,7 @@ func filterDesktopAssets(items []model.PlatformItem) []model.PlatformItem {
 }
 
 func (s *Server) accessUser(r *http.Request) (string, bool) {
-	_, session, ok := s.auth.session(r)
+	_, session, ok := s.authSession(r)
 	if !ok {
 		return "", false
 	}

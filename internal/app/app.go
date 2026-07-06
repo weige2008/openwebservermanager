@@ -266,7 +266,7 @@ func (s *Server) handleBootstrap(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	platform["departments"] = departmentTreeItems(platform)
-	_, session, _ := s.auth.session(r)
+	_, session, _ := s.authSession(r)
 	decision := s.roleDecision(session.Role)
 	switch decision.Kind {
 	case roleSuperAdmin, roleAdmin:
@@ -856,7 +856,7 @@ func (s *Server) canAccessSession(r *http.Request, session model.ConnectionSessi
 	if r == nil {
 		return true
 	}
-	_, authSession, ok := s.auth.session(r)
+	_, authSession, ok := s.authSession(r)
 	if !ok {
 		return false
 	}

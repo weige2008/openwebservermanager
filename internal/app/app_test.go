@@ -7244,6 +7244,22 @@ func TestScheduledTaskRunners(t *testing.T) {
 	}, cookie, http.StatusCreated)
 	var webAsset model.PlatformItem
 	decodeResponse(t, webRec, &webAsset)
+	headlessUpstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodHead {
+			w.WriteHeader(http.StatusMethodNotAllowed)
+			return
+		}
+		_, _ = w.Write([]byte("ok"))
+	}))
+	defer headlessUpstream.Close()
+	headlessWebRec := assertStatus(t, handler, http.MethodPost, "/api/admin/websites", map[string]any{
+		"name":     "status web without head",
+		"type":     "http",
+		"status":   "enabled",
+		"metadata": map[string]any{"target_url": headlessUpstream.URL},
+	}, cookie, http.StatusCreated)
+	var headlessWebAsset model.PlatformItem
+	decodeResponse(t, headlessWebRec, &headlessWebAsset)
 	statusTaskRec := assertStatus(t, handler, http.MethodPost, "/api/admin/scheduled-tasks", map[string]any{
 		"name":     "Asset status",
 		"type":     "asset-status",
@@ -7259,6 +7275,13 @@ func TestScheduledTaskRunners(t *testing.T) {
 	webListRec := assertStatus(t, handler, http.MethodGet, "/api/admin/websites", nil, cookie, http.StatusOK)
 	if !strings.Contains(webListRec.Body.String(), webAsset.ID) || !strings.Contains(webListRec.Body.String(), "last_check_status") {
 		t.Fatal("asset status task did not update web asset check metadata")
+	}
+	storedHeadlessWebAsset, ok, err := srv.cfg.Store.GetPlatformItem("web_assets", headlessWebAsset.ID)
+	if err != nil || !ok {
+		t.Fatalf("load headless web asset after status task: ok=%v err=%v", ok, err)
+	}
+	if storedHeadlessWebAsset.Status != "active" || firstMetadataString(storedHeadlessWebAsset.Metadata, "last_check_status") != "active" {
+		t.Fatalf("asset status task did not fall back to GET after HEAD rejection: %#v", storedHeadlessWebAsset)
 	}
 
 	certRec := assertStatus(t, handler, http.MethodPost, "/api/admin/certificates/self-signed", map[string]any{

@@ -459,20 +459,7 @@ func (s *Server) checkAssetReachability(collection string, item model.PlatformIt
 		if err != nil {
 			return "offline", err.Error()
 		}
-		client := http.Client{Timeout: timeout}
-		req, err := http.NewRequest(http.MethodHead, target.String(), nil)
-		if err != nil {
-			return "offline", err.Error()
-		}
-		resp, err := client.Do(req)
-		if err != nil {
-			return "offline", err.Error()
-		}
-		defer resp.Body.Close()
-		if resp.StatusCode >= http.StatusInternalServerError {
-			return "offline", resp.Status
-		}
-		return "active", resp.Status
+		return checkWebAssetReachability(target.String(), timeout)
 	case "database_assets":
 		connection, err := s.databaseAssetConnection(item)
 		if err != nil {
@@ -503,6 +490,34 @@ func (s *Server) checkAssetReachability(collection string, item model.PlatformIt
 		_ = conn.Close()
 		return "active", fmt.Sprintf("%s:%d reachable", host, port)
 	}
+}
+
+func checkWebAssetReachability(target string, timeout time.Duration) (string, string) {
+	client := http.Client{Timeout: timeout}
+	resp, err := requestWebAssetHealth(client, http.MethodHead, target)
+	if err != nil {
+		return "offline", err.Error()
+	}
+	if resp.StatusCode == http.StatusMethodNotAllowed || resp.StatusCode == http.StatusNotImplemented {
+		resp.Body.Close()
+		resp, err = requestWebAssetHealth(client, http.MethodGet, target)
+		if err != nil {
+			return "offline", err.Error()
+		}
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode >= http.StatusInternalServerError {
+		return "offline", resp.Status
+	}
+	return "active", resp.Status
+}
+
+func requestWebAssetHealth(client http.Client, method, target string) (*http.Response, error) {
+	req, err := http.NewRequest(method, target, nil)
+	if err != nil {
+		return nil, err
+	}
+	return client.Do(req)
 }
 
 func defaultProtocolPort(protocol model.Protocol) int {

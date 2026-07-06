@@ -6806,7 +6806,8 @@ func TestBackupListDownloadAndRestore(t *testing.T) {
 		t.Fatalf("backup restore failure audit leaked upload content: %s", operationLogsBeforeRestoreBody)
 	}
 
-	restoreRec := assertMultipartStatus(t, handler, "/api/admin/backups/restore", nil, backupName, downloadRec.Body.Bytes(), cookie, http.StatusOK)
+	unsafeUploadName := `C:\Users\ops\Downloads\` + backupName
+	restoreRec := assertMultipartStatus(t, handler, "/api/admin/backups/restore", nil, unsafeUploadName, downloadRec.Body.Bytes(), cookie, http.StatusOK)
 	if !strings.Contains(restoreRec.Body.String(), `"restored":true`) || !strings.Contains(restoreRec.Body.String(), "pre_restore_backup") {
 		t.Fatal("backup restore response did not include restore summary and pre-restore backup")
 	}
@@ -6823,8 +6824,12 @@ func TestBackupListDownloadAndRestore(t *testing.T) {
 		t.Fatal("restored backup retained post-backup transient asset")
 	}
 	logsRec := assertStatus(t, handler, http.MethodGet, "/api/admin/audit/operation-logs", nil, newCookie, http.StatusOK)
-	if !strings.Contains(logsRec.Body.String(), "backup.restore") {
+	logsBody := logsRec.Body.String()
+	if !strings.Contains(logsBody, "backup.restore") {
 		t.Fatal("backup restore did not write operation log")
+	}
+	if !strings.Contains(logsBody, backupName) || strings.Contains(logsBody, `C:\Users\ops`) || strings.Contains(logsBody, `Downloads\`) {
+		t.Fatalf("backup restore audit did not sanitize uploaded filename: %s", logsBody)
 	}
 }
 

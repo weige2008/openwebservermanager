@@ -201,7 +201,7 @@ func (s *Server) handleBackupRestore(w http.ResponseWriter, r *http.Request) {
 		Description: "restored backup archive",
 		Metadata: map[string]any{
 			"client_ip":          s.clientIP(r),
-			"uploaded_filename":  header.Filename,
+			"uploaded_filename":  backupRestoreUploadName(header.Filename),
 			"uploaded_size":      written,
 			"manifest":           archive.Manifest,
 			"files":              archive.Files,

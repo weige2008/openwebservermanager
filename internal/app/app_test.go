@@ -7506,6 +7506,7 @@ func TestStorageAuthorizationStrategyPermissions(t *testing.T) {
 	assertStatus(t, handler, http.MethodGet, "/api/admin/storages/"+storage.ID+"/files", nil, userCookie, http.StatusOK)
 	assertStatus(t, handler, http.MethodPost, "/api/admin/storages/"+storage.ID+"/files-mkdir", map[string]any{"path": "docs"}, userCookie, http.StatusCreated)
 	assertStatus(t, handler, http.MethodPost, "/api/admin/storages/"+storage.ID+"/files-write", map[string]any{"path": "docs/a.txt", "content": "alpha"}, userCookie, http.StatusCreated)
+	assertStatus(t, handler, http.MethodPost, "/api/admin/storages/"+storage.ID+"/files-write", map[string]any{"path": `windows\style.txt`, "content": "slash"}, userCookie, http.StatusCreated)
 	uploadRec := assertMultipartStatus(t, handler, "/api/admin/storages/"+storage.ID+"/files-upload", map[string]string{"path": "docs"}, `C:\Users\ops\Downloads\uploaded.txt`, []byte("uploaded"), userCookie, http.StatusCreated)
 	if !strings.Contains(uploadRec.Body.String(), `"name":"uploaded.txt"`) || strings.Contains(uploadRec.Body.String(), `C:\Users\ops`) {
 		t.Fatalf("storage upload response did not sanitize filename: %s", uploadRec.Body.String())
@@ -7516,9 +7517,16 @@ func TestStorageAuthorizationStrategyPermissions(t *testing.T) {
 	if strings.TrimSpace(uploadDownloadRec.Body.String()) != "uploaded" {
 		t.Fatalf("uploaded file body = %q, want uploaded", uploadDownloadRec.Body.String())
 	}
+	windowsPathDownloadRec := assertStatus(t, handler, http.MethodGet, "/api/admin/storages/"+storage.ID+"/files-download?path=windows/style.txt", nil, userCookie, http.StatusOK)
+	if strings.TrimSpace(windowsPathDownloadRec.Body.String()) != "slash" {
+		t.Fatalf("backslash-normalized file body = %q, want slash", windowsPathDownloadRec.Body.String())
+	}
 	downloadRec := assertStatus(t, handler, http.MethodGet, "/api/admin/storages/"+storage.ID+"/files-download?path=docs/c.txt", nil, userCookie, http.StatusOK)
 	if strings.TrimSpace(downloadRec.Body.String()) != "alpha" {
 		t.Fatalf("download body = %q, want alpha", downloadRec.Body.String())
+	}
+	if contentDisposition := downloadRec.Header().Get("Content-Disposition"); !strings.Contains(contentDisposition, `filename="c.txt"`) {
+		t.Fatalf("storage download missing attachment filename: %s", contentDisposition)
 	}
 	assertStatus(t, handler, http.MethodDelete, "/api/admin/storages/"+storage.ID+"/files?path=docs/c.txt", nil, userCookie, http.StatusForbidden)
 	logsRec := assertStatus(t, handler, http.MethodGet, "/api/admin/audit/file-logs", nil, userCookie, http.StatusOK)

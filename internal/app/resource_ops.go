@@ -1419,6 +1419,7 @@ func (s *Server) handleStorageDownload(w http.ResponseWriter, r *http.Request, r
 		"size": info.Size(),
 	})
 	_ = s.audit(r, "storage.files.download", storageID, "", "downloaded "+rel)
+	w.Header().Set("Content-Disposition", `attachment; filename="`+sanitizeAttachmentName(filepath.Base(rel))+`"`)
 	http.ServeFile(w, r, target)
 }
 
@@ -1595,7 +1596,7 @@ func (s *Server) recordStorageFileLog(r *http.Request, storageID, action, status
 }
 
 func (s *Server) storagePath(w http.ResponseWriter, _ *http.Request, root, value string) (string, string, bool) {
-	value = strings.TrimSpace(value)
+	value = strings.TrimSpace(strings.ReplaceAll(value, "\\", "/"))
 	if value == "" || value == "/" {
 		value = "."
 	}

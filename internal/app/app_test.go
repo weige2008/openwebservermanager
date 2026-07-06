@@ -2597,9 +2597,36 @@ func TestResourceOperationEndpoints(t *testing.T) {
 	}, cookie, http.StatusCreated)
 	var cert model.PlatformItem
 	decodeResponse(t, certRec, &cert)
+	if cert.Metadata["has_private_key"] != true {
+		t.Fatalf("self-signed certificate response missing private key flag: %#v", cert.Metadata)
+	}
+	for _, leaked := range []string{"PRIVATE KEY", `"private_key"`} {
+		if strings.Contains(certRec.Body.String(), leaked) {
+			t.Fatalf("self-signed certificate response leaked %s", leaked)
+		}
+	}
 	certDownload := assertStatus(t, handler, http.MethodGet, "/api/admin/certificates/"+cert.ID+"/download", nil, cookie, http.StatusOK)
 	if !strings.Contains(certDownload.Body.String(), "BEGIN CERTIFICATE") {
 		t.Fatal("certificate download did not return pem")
+	}
+	certBundle := assertStatus(t, handler, http.MethodGet, "/api/admin/certificates/"+cert.ID+"/bundle", nil, cookie, http.StatusOK)
+	if certBundle.Header().Get("Content-Type") != "application/zip" {
+		t.Fatalf("certificate bundle content type = %q", certBundle.Header().Get("Content-Type"))
+	}
+	certBundleZip, err := zip.NewReader(bytes.NewReader(certBundle.Body.Bytes()), int64(certBundle.Body.Len()))
+	if err != nil {
+		t.Fatalf("open certificate bundle zip: %v", err)
+	}
+	for _, filename := range []string{"certificate.pem", "private.key", "README.txt"} {
+		if !zipHasEntry(certBundleZip, filename) {
+			t.Fatalf("certificate bundle missing %s", filename)
+		}
+	}
+	if !strings.Contains(zipEntryText(t, certBundleZip, "certificate.pem"), "BEGIN CERTIFICATE") {
+		t.Fatal("certificate bundle certificate.pem did not include certificate PEM")
+	}
+	if !strings.Contains(zipEntryText(t, certBundleZip, "private.key"), "BEGIN RSA PRIVATE KEY") {
+		t.Fatal("certificate bundle private.key did not include private key PEM")
 	}
 	uploadCertPEM, uploadKeyPEM, err := makeSelfSignedCertificate(certificateRequest{Domain: "uploaded.example.test", Days: 90})
 	if err != nil {
@@ -2609,15 +2636,23 @@ func TestResourceOperationEndpoints(t *testing.T) {
 	if err != nil {
 		t.Fatalf("make mismatch certificate: %v", err)
 	}
-	assertMultipartFilesStatus(t, handler, "/api/admin/certificates/upload", map[string]string{"name": "uploaded-cert"}, map[string]multipartFile{
+	uploadedCertRec := assertMultipartFilesStatus(t, handler, "/api/admin/certificates/upload", map[string]string{"name": "uploaded-cert"}, map[string]multipartFile{
 		"certificate": {Name: "uploaded.crt", Content: uploadCertPEM},
 		"private_key": {Name: "uploaded.key", Content: uploadKeyPEM},
 	}, cookie, http.StatusCreated)
-	uploadRec := assertMultipartFilesStatus(t, handler, "/api/admin/certificates/upload", map[string]string{"name": "bad-cert"}, map[string]multipartFile{
+	if !strings.Contains(uploadedCertRec.Body.String(), `"has_private_key":true`) {
+		t.Fatal("uploaded certificate response did not mark private key state")
+	}
+	for _, leaked := range []string{"PRIVATE KEY", `"private_key"`} {
+		if strings.Contains(uploadedCertRec.Body.String(), leaked) {
+			t.Fatalf("uploaded certificate response leaked %s", leaked)
+		}
+	}
+	badUploadRec := assertMultipartFilesStatus(t, handler, "/api/admin/certificates/upload", map[string]string{"name": "bad-cert"}, map[string]multipartFile{
 		"certificate": {Name: "bad.crt", Content: mismatchCertPEM},
 		"private_key": {Name: "uploaded.key", Content: uploadKeyPEM},
 	}, cookie, http.StatusBadRequest)
-	if !strings.Contains(uploadRec.Body.String(), "private key does not match certificate") {
+	if !strings.Contains(badUploadRec.Body.String(), "private key does not match certificate") {
 		t.Fatal("mismatched certificate upload did not explain key mismatch")
 	}
 	certificatesRec := assertStatus(t, handler, http.MethodGet, "/api/admin/certificates", nil, cookie, http.StatusOK)
@@ -2735,7 +2770,7 @@ func TestResourceOperationEndpoints(t *testing.T) {
 	}
 	certificateLogsRec := assertStatus(t, handler, http.MethodGet, "/api/admin/certificates/"+cert.ID+"/logs", nil, cookie, http.StatusOK)
 	certificateLogsBody := certificateLogsRec.Body.String()
-	for _, want := range []string{"certificate.self_signed", "certificate.default", "certificate.mtls.update"} {
+	for _, want := range []string{"certificate.self_signed", "certificate.bundle_download", "certificate.default", "certificate.mtls.update"} {
 		if !strings.Contains(certificateLogsBody, want) {
 			t.Fatalf("certificate logs missing %s in %s", want, certificateLogsBody)
 		}
@@ -4215,6 +4250,27 @@ func assertZipContains(t *testing.T, raw []byte, filename, content string) {
 		return
 	}
 	t.Fatalf("zip entry %q not found", filename)
+}
+
+func zipEntryText(t *testing.T, reader *zip.Reader, filename string) string {
+	t.Helper()
+	for _, file := range reader.File {
+		if file.Name != filename {
+			continue
+		}
+		rc, err := file.Open()
+		if err != nil {
+			t.Fatalf("open zip entry: %v", err)
+		}
+		defer rc.Close()
+		data, err := io.ReadAll(rc)
+		if err != nil {
+			t.Fatalf("read zip entry: %v", err)
+		}
+		return string(data)
+	}
+	t.Fatalf("zip entry %q not found", filename)
+	return ""
 }
 
 func stringSliceFromAny(value any) []string {

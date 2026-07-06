@@ -2,6 +2,7 @@ package app
 
 import (
 	"archive/zip"
+	"bytes"
 	"crypto/ecdsa"
 	"crypto/ed25519"
 	"crypto/rand"
@@ -184,6 +185,10 @@ func (s *Server) handleResourceOperation(w http.ResponseWriter, r *http.Request,
 	case strings.HasPrefix(path, "admin/certificates/") && strings.HasSuffix(path, "/download"):
 		id := pathSegmentFromTrimmed(path, 2)
 		s.handleCertificateDownload(w, r, id)
+		return true
+	case strings.HasPrefix(path, "admin/certificates/") && strings.HasSuffix(path, "/bundle"):
+		id := pathSegmentFromTrimmed(path, 2)
+		s.handleCertificateBundleDownload(w, r, id)
 		return true
 	case strings.HasPrefix(path, "admin/certificates/") && strings.HasSuffix(path, "/default"):
 		id := pathSegmentFromTrimmed(path, 2)
@@ -1427,10 +1432,11 @@ func (s *Server) handleCertificateSelfSigned(w http.ResponseWriter, r *http.Requ
 		Status:      "issued",
 		Description: "self-signed certificate for " + req.Domain,
 		Metadata: map[string]any{
-			"domain":      req.Domain,
-			"certificate": string(certPEM),
-			"private_key": string(keyPEM),
-			"expires_at":  time.Now().UTC().Add(time.Duration(clampInt(req.Days, 1, 3650, 365)) * 24 * time.Hour),
+			"domain":          req.Domain,
+			"certificate":     string(certPEM),
+			"private_key":     string(keyPEM),
+			"has_private_key": true,
+			"expires_at":      time.Now().UTC().Add(time.Duration(clampInt(req.Days, 1, 3650, 365)) * 24 * time.Hour),
 		},
 	})
 	if err != nil {
@@ -1860,6 +1866,98 @@ func (s *Server) handleCertificateDownload(w http.ResponseWriter, r *http.Reques
 	w.Header().Set("Content-Type", "application/x-pem-file")
 	w.Header().Set("Content-Disposition", "attachment; filename=\""+id+".crt\"")
 	_, _ = io.WriteString(w, cert)
+}
+
+func (s *Server) handleCertificateBundleDownload(w http.ResponseWriter, r *http.Request, id string) {
+	if r.Method != http.MethodGet {
+		writeError(w, http.StatusMethodNotAllowed, "method not allowed")
+		return
+	}
+	item, ok, err := s.cfg.Store.GetPlatformItem("certificates", id)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	if !ok {
+		writeError(w, http.StatusNotFound, "certificate not found")
+		return
+	}
+	bundle, err := certificateBundleZip(item)
+	if err != nil {
+		writeError(w, http.StatusNotFound, err.Error())
+		return
+	}
+	_ = s.audit(r, "certificate.bundle_download", id, "", "downloaded certificate deployment bundle")
+	w.Header().Set("Content-Type", "application/zip")
+	w.Header().Set("Content-Disposition", "attachment; filename=\""+id+".zip\"")
+	_, _ = w.Write(bundle)
+}
+
+func certificateBundleZip(item model.PlatformItem) ([]byte, error) {
+	certPEM, _ := item.Metadata["certificate"].(string)
+	if strings.TrimSpace(certPEM) == "" {
+		return nil, errors.New("certificate payload not found")
+	}
+	privateKeyPEM, _ := item.Metadata["private_key"].(string)
+	chainPEM, _ := item.Metadata["chain"].(string)
+	buffer := &bytes.Buffer{}
+	archive := zip.NewWriter(buffer)
+	if err := writeZipText(archive, "certificate.pem", certPEM); err != nil {
+		return nil, err
+	}
+	if strings.TrimSpace(privateKeyPEM) != "" {
+		if err := writeZipText(archive, "private.key", privateKeyPEM); err != nil {
+			return nil, err
+		}
+	}
+	if strings.TrimSpace(chainPEM) != "" {
+		if err := writeZipText(archive, "chain.pem", chainPEM); err != nil {
+			return nil, err
+		}
+		fullchain := strings.TrimRight(certPEM, "\r\n") + "\n" + strings.TrimLeft(chainPEM, "\r\n")
+		if err := writeZipText(archive, "fullchain.pem", fullchain); err != nil {
+			return nil, err
+		}
+	}
+	readme := certificateBundleReadme(item, strings.TrimSpace(privateKeyPEM) != "", strings.TrimSpace(chainPEM) != "")
+	if err := writeZipText(archive, "README.txt", readme); err != nil {
+		return nil, err
+	}
+	if err := archive.Close(); err != nil {
+		return nil, err
+	}
+	return buffer.Bytes(), nil
+}
+
+func writeZipText(archive *zip.Writer, name, content string) error {
+	entry, err := archive.Create(name)
+	if err != nil {
+		return err
+	}
+	_, err = io.WriteString(entry, content)
+	return err
+}
+
+func certificateBundleReadme(item model.PlatformItem, hasPrivateKey, hasChain bool) string {
+	lines := []string{
+		"openwebservermanager certificate bundle",
+		"",
+		"Certificate ID: " + item.ID,
+		"Certificate name: " + item.Name,
+		"Domain: " + firstMetadataString(item.Metadata, "domain", "common_name"),
+		"Includes private key: " + strconv.FormatBool(hasPrivateKey),
+		"Includes chain: " + strconv.FormatBool(hasChain),
+		"",
+		"Files:",
+		"- certificate.pem: leaf certificate",
+	}
+	if hasPrivateKey {
+		lines = append(lines, "- private.key: private key for the certificate")
+	}
+	if hasChain {
+		lines = append(lines, "- chain.pem: uploaded certificate chain", "- fullchain.pem: certificate plus chain")
+	}
+	return strings.Join(lines, "\n") + "\n"
 }
 
 func (s *Server) handleACMEHTTPChallenge(w http.ResponseWriter, r *http.Request) {

@@ -604,6 +604,15 @@ function ResourceRowActions({ config, item, onOperation }: { config: PlatformPag
     }
   }
 
+  const downloadCertificateBundle = async () => {
+    try {
+      await downloadResponse(`/api/admin/certificates/${item.id}/bundle`, `${item.name || item.id}.zip`)
+      app.showToast(app.t('certificateBundleDownloaded', 'Certificate bundle downloaded'))
+    } catch (error) {
+      app.handleApiError(error)
+    }
+  }
+
   const setDefaultCertificate = async () => {
     try {
       await apiRequest(`/api/admin/certificates/${item.id}/default`, { method: 'POST', body: '{}' })
@@ -705,6 +714,10 @@ function ResourceRowActions({ config, item, onOperation }: { config: PlatformPag
         <Button size='sm' variant='outline' onClick={() => void downloadCertificate()}>
           <FileDown className='size-3.5' />
           下载
+        </Button>
+        <Button size='sm' variant='outline' onClick={() => void downloadCertificateBundle()}>
+          <Download className='size-3.5' />
+          {app.t('bundle', 'Bundle')}
         </Button>
         <Button size='sm' variant='outline' onClick={() => void setDefaultCertificate()}>
           <Save className='size-3.5' />

@@ -403,7 +403,7 @@ func (a AdminAuth) Public() AdminPublic {
 	return AdminPublic{
 		UserID:    a.UserID,
 		Username:  a.Username,
-		Role:      "admin",
+		Role:      "super_admin",
 		CreatedAt: a.CreatedAt,
 		UpdatedAt: a.UpdatedAt,
 	}

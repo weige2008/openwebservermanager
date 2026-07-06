@@ -506,11 +506,19 @@ func (s *Server) authUserPayload(session authSession) authUserPayload {
 	return authUserPayload{
 		UserID:          session.UserID,
 		Username:        session.Username,
-		Role:            session.Role,
+		Role:            canonicalAuthRole(session.Role),
 		ExpiresAt:       session.ExpiresAt,
 		APIPermissions:  decision.Permissions,
 		MenuPermissions: decision.MenuPermissions,
 	}
+}
+
+func canonicalAuthRole(role string) string {
+	trimmed := strings.TrimSpace(role)
+	if kind := normalizeBuiltInRole(trimmed); kind != roleCustom {
+		return string(kind)
+	}
+	return trimmed
 }
 
 func (s *Server) handleAuthStatus(w http.ResponseWriter, _ *http.Request) {

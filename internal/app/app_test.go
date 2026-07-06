@@ -83,6 +83,40 @@ func TestValidateCredentialRequest(t *testing.T) {
 	}
 }
 
+func TestInitialAdminRoleIsCanonicalSuperAdmin(t *testing.T) {
+	handler := newUnconfiguredTestServer(t, nil)
+	setupRec := assertStatus(t, handler, http.MethodPost, "/api/auth/setup", map[string]any{"username": "admin", "password": "password123"}, nil, http.StatusCreated)
+	var setupPayload struct {
+		User authUserPayload `json:"user"`
+	}
+	decodeResponse(t, setupRec, &setupPayload)
+	if setupPayload.User.Role != string(roleSuperAdmin) {
+		t.Fatalf("setup role = %q, want %q", setupPayload.User.Role, roleSuperAdmin)
+	}
+	cookies := setupRec.Result().Cookies()
+	if len(cookies) == 0 {
+		t.Fatal("setup did not set auth cookie")
+	}
+
+	meRec := assertStatus(t, handler, http.MethodGet, "/api/auth/me", nil, cookies[0], http.StatusOK)
+	var mePayload struct {
+		User authUserPayload `json:"user"`
+	}
+	decodeResponse(t, meRec, &mePayload)
+	if mePayload.User.Role != string(roleSuperAdmin) {
+		t.Fatalf("auth/me role = %q, want %q", mePayload.User.Role, roleSuperAdmin)
+	}
+
+	loginRec := assertStatus(t, handler, http.MethodPost, "/api/auth/login", map[string]any{"username": "admin", "password": "password123"}, nil, http.StatusOK)
+	var loginPayload struct {
+		User authUserPayload `json:"user"`
+	}
+	decodeResponse(t, loginRec, &loginPayload)
+	if loginPayload.User.Role != string(roleSuperAdmin) {
+		t.Fatalf("login role = %q, want %q", loginPayload.User.Role, roleSuperAdmin)
+	}
+}
+
 func TestPlatformCollectionEndpoints(t *testing.T) {
 	handler, cookie := newTestHandler(t)
 	paths := []string{}
@@ -8855,6 +8889,17 @@ func newTestHandler(t *testing.T) (http.Handler, *http.Cookie) {
 
 func newTestServer(t *testing.T, configure func(*Config)) (*Server, *http.Cookie) {
 	t.Helper()
+	server := newUnconfiguredTestServer(t, configure)
+	rec := assertStatus(t, server, http.MethodPost, "/api/auth/setup", map[string]any{"username": "admin", "password": "password123"}, nil, http.StatusCreated)
+	cookies := rec.Result().Cookies()
+	if len(cookies) == 0 {
+		t.Fatal("setup did not set auth cookie")
+	}
+	return server, cookies[0]
+}
+
+func newUnconfiguredTestServer(t *testing.T, configure func(*Config)) *Server {
+	t.Helper()
 	key := make([]byte, 32)
 	cipher, err := security.NewCipher(key)
 	if err != nil {
@@ -8874,13 +8919,7 @@ func newTestServer(t *testing.T, configure func(*Config)) (*Server, *http.Cookie
 	if configure != nil {
 		configure(&cfg)
 	}
-	server := NewServer(cfg)
-	rec := assertStatus(t, server, http.MethodPost, "/api/auth/setup", map[string]any{"username": "admin", "password": "password123"}, nil, http.StatusCreated)
-	cookies := rec.Result().Cookies()
-	if len(cookies) == 0 {
-		t.Fatal("setup did not set auth cookie")
-	}
-	return server, cookies[0]
+	return NewServer(cfg)
 }
 
 type fakeSSHGatewayRuntime struct {

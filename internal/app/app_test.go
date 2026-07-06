@@ -1914,6 +1914,127 @@ func TestDatabaseAssetConnectionBuildsExternalDriverDSN(t *testing.T) {
 	}
 }
 
+func TestDatabaseAssetDirectDSNIsEncryptedAndRedacted(t *testing.T) {
+	handler, adminCookie := newTestHandler(t)
+	server := handler.(*Server)
+
+	dsn := "postgres://dsn_user:dsn-secret@postgres.internal:5432/app?sslmode=disable"
+	assetRec := assertStatus(t, handler, http.MethodPost, "/api/admin/database-assets", map[string]any{
+		"name":     "dsn-backed postgres",
+		"type":     "postgres",
+		"status":   "enabled",
+		"protocol": "database",
+		"metadata": map[string]any{"dsn": dsn},
+	}, adminCookie, http.StatusCreated)
+	assetBody := assetRec.Body.String()
+	for _, leaked := range []string{"dsn-secret", "postgres://dsn_user", `"dsn":`, "connection_string", "database_dsn_encrypted"} {
+		if strings.Contains(assetBody, leaked) {
+			t.Fatalf("database asset create response leaked %q: %s", leaked, assetBody)
+		}
+	}
+	if !strings.Contains(assetBody, "database_dsn_set") {
+		t.Fatalf("database asset response did not expose dsn presence flag: %s", assetBody)
+	}
+	var asset model.PlatformItem
+	decodeResponse(t, assetRec, &asset)
+
+	rawAsset, ok, err := server.cfg.Store.GetPlatformItem("database_assets", asset.ID)
+	if err != nil || !ok {
+		t.Fatalf("load raw database asset: ok=%v err=%v", ok, err)
+	}
+	if firstMetadataString(rawAsset.Metadata, "dsn", "connection_string", "connectionString", "database_url", "databaseUrl", "url") != "" {
+		t.Fatalf("raw database asset retained plain dsn metadata: %#v", rawAsset.Metadata)
+	}
+	dsnSet, _ := metadataBoolValue(rawAsset.Metadata["database_dsn_set"])
+	if firstMetadataString(rawAsset.Metadata, "database_dsn_encrypted") == "" || !dsnSet {
+		t.Fatalf("raw database asset did not store encrypted dsn with presence flag: %#v", rawAsset.Metadata)
+	}
+
+	connection, err := server.databaseAssetConnection(asset)
+	if err != nil {
+		t.Fatalf("database asset connection: %v", err)
+	}
+	parsed, err := url.Parse(connection.DSN)
+	if err != nil {
+		t.Fatalf("parse decrypted postgres dsn: %v", err)
+	}
+	password, _ := parsed.User.Password()
+	if connection.Driver != "pgx" || parsed.User.Username() != "dsn_user" || password != "dsn-secret" {
+		t.Fatalf("decrypted connection = %#v dsn=%q", connection, connection.DSN)
+	}
+	if strings.Contains(connection.Name, "dsn-secret") || strings.Contains(connection.Name, "postgres://") {
+		t.Fatalf("database display name leaked dsn material: %q", connection.Name)
+	}
+
+	patchRec := assertStatus(t, handler, http.MethodPatch, "/api/admin/database-assets/"+asset.ID, map[string]any{
+		"metadata": map[string]any{"row_limit": 50},
+	}, adminCookie, http.StatusOK)
+	patchBody := patchRec.Body.String()
+	for _, leaked := range []string{"dsn-secret", "postgres://dsn_user", `"dsn":`, "database_dsn_encrypted"} {
+		if strings.Contains(patchBody, leaked) {
+			t.Fatalf("database asset update response leaked %q: %s", leaked, patchBody)
+		}
+	}
+	connection, err = server.databaseAssetConnection(asset)
+	if err != nil {
+		t.Fatalf("database asset connection after metadata update: %v", err)
+	}
+	parsed, err = url.Parse(connection.DSN)
+	if err != nil {
+		t.Fatalf("parse decrypted postgres dsn after update: %v", err)
+	}
+	password, _ = parsed.User.Password()
+	if password != "dsn-secret" {
+		t.Fatalf("database dsn secret was not preserved across metadata update: %q", connection.DSN)
+	}
+
+	listRec := assertStatus(t, handler, http.MethodGet, "/api/admin/database-assets", nil, adminCookie, http.StatusOK)
+	listBody := listRec.Body.String()
+	for _, leaked := range []string{"dsn-secret", "postgres://dsn_user", `"dsn":`, "database_dsn_encrypted"} {
+		if strings.Contains(listBody, leaked) {
+			t.Fatalf("database asset list leaked %q: %s", leaked, listBody)
+		}
+	}
+
+	legacyItem, err := server.cfg.Store.SavePlatformItem("database_assets", model.PlatformItem{
+		ID:       "legacy_dsn_asset",
+		Module:   "database_assets",
+		Name:     "legacy dsn postgres",
+		Type:     "postgres",
+		Status:   "enabled",
+		Protocol: model.ProtocolDatabase,
+		Metadata: map[string]any{"dsn": dsn},
+	})
+	if err != nil {
+		t.Fatalf("save legacy dsn asset: %v", err)
+	}
+	assertStatus(t, handler, http.MethodPatch, "/api/admin/database-assets/"+legacyItem.ID, map[string]any{
+		"metadata": map[string]any{"row_limit": 25},
+	}, adminCookie, http.StatusOK)
+	rawLegacy, ok, err := server.cfg.Store.GetPlatformItem("database_assets", legacyItem.ID)
+	if err != nil || !ok {
+		t.Fatalf("load migrated legacy database asset: ok=%v err=%v", ok, err)
+	}
+	if firstMetadataString(rawLegacy.Metadata, "dsn", "connection_string", "connectionString", "database_url", "databaseUrl", "url") != "" {
+		t.Fatalf("legacy database asset kept plain dsn after update: %#v", rawLegacy.Metadata)
+	}
+	if firstMetadataString(rawLegacy.Metadata, "database_dsn_encrypted") == "" {
+		t.Fatalf("legacy database asset did not migrate dsn to encrypted metadata: %#v", rawLegacy.Metadata)
+	}
+	connection, err = server.databaseAssetConnection(legacyItem)
+	if err != nil {
+		t.Fatalf("legacy database asset connection after migration: %v", err)
+	}
+	parsed, err = url.Parse(connection.DSN)
+	if err != nil {
+		t.Fatalf("parse migrated legacy postgres dsn: %v", err)
+	}
+	password, _ = parsed.User.Password()
+	if password != "dsn-secret" {
+		t.Fatalf("legacy dsn secret was not preserved across migration: %q", connection.DSN)
+	}
+}
+
 func TestRoleBasedAccessControl(t *testing.T) {
 	handler, adminCookie := newTestHandler(t)
 

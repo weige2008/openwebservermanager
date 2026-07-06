@@ -859,6 +859,9 @@ func (s *Store) UpdatePlatformItem(collection, id string, req model.PlatformItem
 	existingAgentTokenHash, _ := item.Metadata["agent_token_hash"].(string)
 	existingCredentialSecrets := copyMetadataSecrets(item.Metadata, "encrypted_password", "encrypted_private_key", "encrypted_passphrase")
 	existingSystemSettingSecrets := copyMetadataSecrets(item.Metadata, "smtp_password_encrypted", "llm_api_key_encrypted", "oidc_client_secret_encrypted", "ldap_bind_password_encrypted", "wecom_agent_secret_encrypted", "dns_api_token_encrypted", "proxy_private_key_encrypted")
+	existingDatabaseAssetSecrets := copyMetadataSecrets(item.Metadata, "database_dsn_encrypted")
+	existingDatabaseAssetPlainDSN := firstMetadataString(item.Metadata, databaseAssetDSNPlainKeys...)
+	existingDatabaseAssetSecretState := copyMetadataValues(item.Metadata, "database_dsn_set", "database_dsn_updated_at")
 	existingSystemSettingSecretState := copyMetadataValues(item.Metadata,
 		"smtp_password_set",
 		"smtp_password_updated_at",
@@ -926,6 +929,18 @@ func (s *Store) UpdatePlatformItem(collection, id string, req model.PlatformItem
 				}
 			}
 			restoreMetadataAnyValues(item.Metadata, existingSystemSettingSecretState)
+		}
+		if collection == "database_assets" {
+			for key, value := range existingDatabaseAssetSecrets {
+				delete(item.Metadata, key)
+				if value != "" {
+					item.Metadata[key] = value
+				}
+			}
+			restoreMetadataAnyValues(item.Metadata, existingDatabaseAssetSecretState)
+			if existingDatabaseAssetSecrets["database_dsn_encrypted"] == "" && existingDatabaseAssetPlainDSN != "" && firstMetadataString(item.Metadata, databaseAssetDSNPlainKeys...) == "" {
+				item.Metadata["dsn"] = existingDatabaseAssetPlainDSN
+			}
 		}
 	}
 	if err := s.applyPlatformSecrets(collection, req, &item, false); err != nil {
@@ -1109,6 +1124,8 @@ func (s *Store) applyPlatformSecrets(collection string, req model.PlatformItemRe
 		return applyAgentGatewayPlatformSecret(item, creating)
 	case "credentials":
 		return s.applyCredentialPlatformSecret(req, item, creating)
+	case "database_assets":
+		return s.applyDatabaseAssetPlatformSecret(item, creating)
 	case "system_settings":
 		return s.applySystemSettingPlatformSecret(req, item, creating)
 	default:
@@ -1253,6 +1270,37 @@ func (s *Store) applyCredentialPlatformSecret(req model.PlatformItemRequest, ite
 		}
 		item.Metadata["encrypted_passphrase"] = encrypted
 	}
+	return nil
+}
+
+var databaseAssetDSNPlainKeys = []string{"dsn", "connection_string", "connectionString", "database_url", "databaseUrl", "url"}
+
+func (s *Store) applyDatabaseAssetPlatformSecret(item *model.PlatformItem, creating bool) error {
+	if item.Metadata == nil {
+		item.Metadata = map[string]any{}
+	}
+	dsn := firstMetadataString(item.Metadata, databaseAssetDSNPlainKeys...)
+	for _, key := range databaseAssetDSNPlainKeys {
+		delete(item.Metadata, key)
+	}
+	if dsn == "" {
+		if creating {
+			delete(item.Metadata, "database_dsn_encrypted")
+			delete(item.Metadata, "database_dsn_set")
+			delete(item.Metadata, "database_dsn_updated_at")
+		}
+		return nil
+	}
+	if len(dsn) > 128*1024 {
+		return errors.New("database dsn is too large")
+	}
+	encrypted, err := s.cipher.EncryptString(dsn)
+	if err != nil {
+		return err
+	}
+	item.Metadata["database_dsn_encrypted"] = encrypted
+	item.Metadata["database_dsn_set"] = true
+	item.Metadata["database_dsn_updated_at"] = time.Now().UTC().Format(time.RFC3339Nano)
 	return nil
 }
 
@@ -1751,7 +1799,24 @@ func sanitizePlatformItem(item *model.PlatformItem) {
 	if item.Metadata == nil {
 		return
 	}
+	if item.Module == "database_assets" || item.Protocol == model.ProtocolDatabase {
+		sanitizeDatabaseAssetMetadata(item.Metadata)
+	}
 	sanitizeMetadataValue(item.Metadata)
+}
+
+func sanitizeDatabaseAssetMetadata(metadata map[string]any) {
+	dsnSet := firstMetadataString(metadata, "database_dsn_encrypted") != "" || metadataBool(metadata["database_dsn_set"])
+	for _, key := range databaseAssetDSNPlainKeys {
+		if firstMetadataString(metadata, key) != "" {
+			dsnSet = true
+		}
+		delete(metadata, key)
+	}
+	delete(metadata, "database_dsn_encrypted")
+	if dsnSet {
+		metadata["database_dsn_set"] = true
+	}
 }
 
 type externalSystemSettingSecretSpec struct {
@@ -1872,6 +1937,7 @@ var sensitiveMetadataKeys = map[string]struct{}{
 	"public_key_x":                             {},
 	"public_key_y":                             {},
 	"cose_public_key":                          {},
+	"database_dsn_encrypted":                   {},
 }
 
 func sanitizeMetadataValue(value any) {

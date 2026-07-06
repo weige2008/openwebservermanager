@@ -234,6 +234,9 @@ func (s *Server) databaseAssetConnection(asset model.PlatformItem) (databaseAsse
 			rawAsset = item
 		}
 	}
+	if err := s.decryptDatabaseAssetDSN(&rawAsset); err != nil {
+		return databaseAssetConnection{}, err
+	}
 	secret, err := s.databaseAssetSecret(rawAsset)
 	if err != nil {
 		return databaseAssetConnection{}, err
@@ -252,6 +255,24 @@ func (s *Server) databaseAssetConnection(asset model.PlatformItem) (databaseAsse
 		Name:     databaseAssetName(rawAsset, dsn),
 		Username: username,
 	}, nil
+}
+
+func (s *Server) decryptDatabaseAssetDSN(asset *model.PlatformItem) error {
+	encrypted := firstMetadataString(asset.Metadata, "database_dsn_encrypted")
+	if encrypted == "" {
+		return nil
+	}
+	dsn, err := s.cfg.Store.DecryptPlatformSecret(encrypted)
+	if err != nil {
+		return err
+	}
+	nextMetadata := map[string]any{}
+	for key, value := range asset.Metadata {
+		nextMetadata[key] = value
+	}
+	nextMetadata["dsn"] = dsn
+	asset.Metadata = nextMetadata
+	return nil
 }
 
 func (s *Server) databaseAssetSecret(asset model.PlatformItem) (databaseAssetSecret, error) {
@@ -433,6 +454,15 @@ func databaseAssetName(asset model.PlatformItem, dsn string) string {
 	}
 	if asset.Host != "" {
 		return asset.Host
+	}
+	if asset.Name != "" {
+		return asset.Name
+	}
+	if parsed, err := url.Parse(dsn); err == nil && parsed.Host != "" {
+		if path := strings.Trim(strings.TrimSpace(parsed.Path), "/"); path != "" {
+			return path
+		}
+		return parsed.Host
 	}
 	return filepath.Base(dsn)
 }

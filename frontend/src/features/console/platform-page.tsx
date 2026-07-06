@@ -1599,8 +1599,12 @@ function StorageFilesDialog({ item, onClose }: { item: PlatformItem; onClose: ()
   const [fileContent, setFileContent] = useState('')
   const [copySource, setCopySource] = useState('')
   const [copyDestination, setCopyDestination] = useState('')
+  const [copyOverwrite, setCopyOverwrite] = useState(false)
   const [renameSource, setRenameSource] = useState('')
   const [renameDestination, setRenameDestination] = useState('')
+  const [renameOverwrite, setRenameOverwrite] = useState(false)
+  const [editingFilePath, setEditingFilePath] = useState('')
+  const [textLoadingPath, setTextLoadingPath] = useState('')
   const [uploadFileItem, setUploadFileItem] = useState<File | null>(null)
   const [uploadInputKey, setUploadInputKey] = useState(0)
 
@@ -1609,7 +1613,7 @@ function StorageFilesDialog({ item, onClose }: { item: PlatformItem; onClose: ()
     try {
       const data = await apiRequest<{ path: string; entries: StorageEntry[]; usage?: StorageUsage }>(`/api/admin/storages/${item.id}/files?path=${encodeURIComponent(target)}`)
       setPath(data.path || '.')
-      setEntries(data.entries || [])
+      setEntries(sortStorageEntries(data.entries || []))
       setUsage(data.usage || null)
     } catch (error) {
       app.handleApiError(error)
@@ -1626,7 +1630,7 @@ function StorageFilesDialog({ item, onClose }: { item: PlatformItem; onClose: ()
     try {
       await apiRequest(`/api/admin/storages/${item.id}/files-mkdir`, {
         method: 'POST',
-        body: JSON.stringify({ path: joinStoragePath(path, folderName) }),
+        body: JSON.stringify({ path: resolveStoragePath(path, folderName) }),
       })
       setFolderName('')
       await load()
@@ -1641,10 +1645,11 @@ function StorageFilesDialog({ item, onClose }: { item: PlatformItem; onClose: ()
     try {
       await apiRequest(`/api/admin/storages/${item.id}/files-write`, {
         method: 'POST',
-        body: JSON.stringify({ path: joinStoragePath(path, filePath), content: fileContent }),
+        body: JSON.stringify({ path: resolveStoragePath(path, filePath), content: fileContent }),
       })
       setFilePath('')
       setFileContent('')
+      setEditingFilePath('')
       await load()
       await app.refresh(true)
       app.showToast('文件已写入')
@@ -1709,10 +1714,15 @@ function StorageFilesDialog({ item, onClose }: { item: PlatformItem; onClose: ()
     try {
       await apiRequest(`/api/admin/storages/${item.id}/files-copy`, {
         method: 'POST',
-        body: JSON.stringify({ path: joinStoragePath(path, copySource), destination: joinStoragePath(path, copyDestination) }),
+        body: JSON.stringify({
+          path: resolveStoragePath(path, copySource),
+          destination: resolveStoragePath(path, copyDestination),
+          overwrite: copyOverwrite,
+        }),
       })
       setCopySource('')
       setCopyDestination('')
+      setCopyOverwrite(false)
       await load()
       await app.refresh(true)
       app.showToast('文件已复制')
@@ -1725,15 +1735,47 @@ function StorageFilesDialog({ item, onClose }: { item: PlatformItem; onClose: ()
     try {
       await apiRequest(`/api/admin/storages/${item.id}/files-rename`, {
         method: 'POST',
-        body: JSON.stringify({ path: joinStoragePath(path, renameSource), destination: joinStoragePath(path, renameDestination) }),
+        body: JSON.stringify({
+          path: resolveStoragePath(path, renameSource),
+          destination: resolveStoragePath(path, renameDestination),
+          overwrite: renameOverwrite,
+        }),
       })
       setRenameSource('')
       setRenameDestination('')
+      setRenameOverwrite(false)
       await load()
       await app.refresh(true)
       app.showToast('文件已重命名')
     } catch (error) {
       app.handleApiError(error)
+    }
+  }
+
+  const prefillCopyEntry = (entry: StorageEntry) => {
+    setCopySource(rootStoragePath(entry.path))
+    setCopyDestination(rootStoragePath(siblingStoragePath(entry.path, copiedStorageName(entry.name, entry.is_dir))))
+    setCopyOverwrite(false)
+  }
+
+  const prefillRenameEntry = (entry: StorageEntry) => {
+    setRenameSource(rootStoragePath(entry.path))
+    setRenameDestination(rootStoragePath(siblingStoragePath(entry.path, renamedStorageName(entry.name, entry.is_dir))))
+    setRenameOverwrite(false)
+  }
+
+  const editTextEntry = async (entry: StorageEntry) => {
+    setTextLoadingPath(entry.path)
+    try {
+      const text = await fetchStorageText(`/api/admin/storages/${item.id}/files-download?path=${encodeURIComponent(entry.path)}`)
+      setFilePath(rootStoragePath(entry.path))
+      setFileContent(text)
+      setEditingFilePath(entry.path)
+      app.showToast('文件内容已载入')
+    } catch (error) {
+      app.handleApiError(error)
+    } finally {
+      setTextLoadingPath('')
     }
   }
 
@@ -1768,16 +1810,21 @@ function StorageFilesDialog({ item, onClose }: { item: PlatformItem; onClose: ()
         ) : null}
         <div className='grid gap-2 rounded-xl border border-border bg-background/60 p-3'>
           {entries.length ? entries.map((entry) => (
-            <div key={entry.path} className='grid gap-2 rounded-lg border border-border bg-card p-2 text-sm sm:grid-cols-[minmax(0,1fr)_7rem_auto] sm:items-center'>
+            <div key={entry.path} className='grid gap-2 rounded-lg border border-border bg-card p-2 text-sm sm:grid-cols-[minmax(0,1fr)_5rem_minmax(0,auto)] sm:items-center'>
               <button className='min-w-0 text-left' onClick={() => entry.is_dir && void load(entry.path)}>
                 <span className='block truncate font-medium'>{entry.is_dir ? '目录' : '文件'} / {entry.name}</span>
                 <span className='block truncate text-xs text-muted-foreground'>{entry.path} · {entry.size} B · {formatDate(entry.modified)}</span>
               </button>
               <Badge tone={entry.is_dir ? 'neutral' : 'success'}>{entry.is_dir ? 'dir' : 'file'}</Badge>
-              <div className='flex justify-end gap-1.5'>
+              <div className='flex flex-wrap justify-end gap-1.5'>
                 {!entry.is_dir ? (
-                  <Button size='sm' variant='outline' onClick={() => void downloadEntry(entry)}><Download className='size-3.5' />下载</Button>
+                  <>
+                    <Button size='sm' variant='outline' onClick={() => void downloadEntry(entry)}><Download className='size-3.5' />下载</Button>
+                    <Button size='sm' variant='outline' onClick={() => void editTextEntry(entry)} disabled={textLoadingPath === entry.path}><Pencil className='size-3.5' />编辑</Button>
+                  </>
                 ) : null}
+                <Button size='sm' variant='outline' onClick={() => prefillCopyEntry(entry)}><Copy className='size-3.5' />复制</Button>
+                <Button size='sm' variant='outline' onClick={() => prefillRenameEntry(entry)}><MoveRight className='size-3.5' />重命名</Button>
                 <Button size='sm' variant='destructive' onClick={() => void deleteEntry(entry)}><Trash2 className='size-3.5' />删除</Button>
               </div>
             </div>
@@ -1798,24 +1845,32 @@ function StorageFilesDialog({ item, onClose }: { item: PlatformItem; onClose: ()
         </div>
         <div className='grid gap-3 rounded-xl border border-border bg-background/60 p-3'>
           <div className='grid gap-3 sm:grid-cols-[minmax(0,1fr)_minmax(0,1fr)_auto]'>
-            <Input placeholder='复制源，例如 docs/a.txt' value={copySource} onChange={(event) => setCopySource(event.currentTarget.value)} />
-            <Input placeholder='复制到，例如 docs/b.txt' value={copyDestination} onChange={(event) => setCopyDestination(event.currentTarget.value)} />
+            <Input placeholder='复制源，当前目录相对路径或 /docs/a.txt' value={copySource} onChange={(event) => setCopySource(event.currentTarget.value)} />
+            <Input placeholder='复制到，当前目录相对路径或 /docs/b.txt' value={copyDestination} onChange={(event) => setCopyDestination(event.currentTarget.value)} />
             <Button variant='outline' onClick={() => void copyEntry()} disabled={!copySource.trim() || !copyDestination.trim()}>
               <Copy className='size-4' />
               复制
             </Button>
           </div>
+          <CheckboxRow checked={copyOverwrite} onChange={setCopyOverwrite} label='复制时覆盖已存在的目标' />
           <div className='grid gap-3 sm:grid-cols-[minmax(0,1fr)_minmax(0,1fr)_auto]'>
-            <Input placeholder='重命名源，例如 docs/b.txt' value={renameSource} onChange={(event) => setRenameSource(event.currentTarget.value)} />
-            <Input placeholder='改为，例如 docs/c.txt' value={renameDestination} onChange={(event) => setRenameDestination(event.currentTarget.value)} />
+            <Input placeholder='重命名源，当前目录相对路径或 /docs/b.txt' value={renameSource} onChange={(event) => setRenameSource(event.currentTarget.value)} />
+            <Input placeholder='改为，当前目录相对路径或 /docs/c.txt' value={renameDestination} onChange={(event) => setRenameDestination(event.currentTarget.value)} />
             <Button variant='outline' onClick={() => void renameEntry()} disabled={!renameSource.trim() || !renameDestination.trim()}>
               <MoveRight className='size-4' />
               重命名
             </Button>
           </div>
+          <CheckboxRow checked={renameOverwrite} onChange={setRenameOverwrite} label='重命名时覆盖已存在的目标' />
         </div>
         <div className='grid gap-3'>
-          <Input placeholder='文件名，例如 notes/readme.txt' value={filePath} onChange={(event) => setFilePath(event.currentTarget.value)} />
+          {editingFilePath ? (
+            <div className='flex flex-wrap items-center justify-between gap-2 rounded-lg border border-border bg-muted/30 px-3 py-2 text-xs text-muted-foreground'>
+              <span className='truncate'>正在编辑 /{editingFilePath}</span>
+              <Button size='sm' variant='outline' onClick={() => { setEditingFilePath(''); setFilePath(''); setFileContent('') }}>清空编辑</Button>
+            </div>
+          ) : null}
+          <Input placeholder='文件名，当前目录相对路径或 /notes/readme.txt' value={filePath} onChange={(event) => setFilePath(event.currentTarget.value)} />
           <Textarea placeholder='文件内容' value={fileContent} onChange={(event) => setFileContent(event.currentTarget.value)} />
           <div className='flex justify-end gap-2'>
             <Button variant='outline' onClick={onClose}>关闭</Button>
@@ -4574,6 +4629,45 @@ function joinStoragePath(base: string, name: string) {
   return [cleanBase, cleanName].filter(Boolean).join('/') || '.'
 }
 
+function resolveStoragePath(base: string, value: string) {
+  const input = value.trim().replace(/\\/g, '/')
+  if (!input || input === '.') return joinStoragePath(base, '')
+  if (input === '/') return '.'
+  if (input.startsWith('/')) return input.replace(/^\/+/, '') || '.'
+  return joinStoragePath(base, input)
+}
+
+function rootStoragePath(value: string) {
+  const clean = value.trim().replace(/\\/g, '/').replace(/^\/+/, '')
+  return clean && clean !== '.' ? `/${clean}` : '/'
+}
+
+function siblingStoragePath(path: string, nextName: string) {
+  const parent = parentStoragePath(path)
+  return joinStoragePath(parent, nextName)
+}
+
+function copiedStorageName(name: string, isDirectory: boolean) {
+  if (isDirectory) return `${name}-copy`
+  const dotIndex = name.lastIndexOf('.')
+  if (dotIndex <= 0) return `${name}-copy`
+  return `${name.slice(0, dotIndex)}-copy${name.slice(dotIndex)}`
+}
+
+function renamedStorageName(name: string, isDirectory: boolean) {
+  if (isDirectory) return `${name}-renamed`
+  const dotIndex = name.lastIndexOf('.')
+  if (dotIndex <= 0) return `${name}-renamed`
+  return `${name.slice(0, dotIndex)}-renamed${name.slice(dotIndex)}`
+}
+
+function sortStorageEntries(entries: StorageEntry[]) {
+  return [...entries].sort((left, right) => {
+    if (left.is_dir !== right.is_dir) return left.is_dir ? -1 : 1
+    return left.name.localeCompare(right.name, undefined, { numeric: true, sensitivity: 'base' })
+  })
+}
+
 function parentStoragePath(value: string) {
   const parts = value.split('/').filter(Boolean)
   if (parts.length <= 1) return '.'
@@ -4592,6 +4686,15 @@ async function downloadResponse(path: string, filename: string) {
     throw new ApiError(payload.error || response.statusText, response.status, Boolean(payload.setup_required), payload)
   }
   downloadBlob(filename, await response.blob())
+}
+
+async function fetchStorageText(path: string) {
+  const response = await fetch(path, { credentials: 'same-origin' })
+  if (!response.ok) {
+    const payload = await response.json().catch(() => ({})) as { error?: string; setup_required?: boolean }
+    throw new ApiError(payload.error || response.statusText, response.status, Boolean(payload.setup_required), payload)
+  }
+  return response.text()
 }
 
 function downloadBlob(filename: string, blob: Blob) {

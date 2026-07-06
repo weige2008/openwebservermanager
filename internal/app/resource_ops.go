@@ -86,6 +86,8 @@ type storageUsageInfo struct {
 	CheckedAt      string `json:"checked_at"`
 }
 
+var errStoragePermissionDenied = errors.New("storage permission denied")
+
 type certificateRequest struct {
 	Name   string   `json:"name"`
 	Domain string   `json:"domain"`
@@ -890,7 +892,7 @@ func (s *Server) handleStorageDelete(w http.ResponseWriter, r *http.Request, roo
 		writeError(w, http.StatusBadRequest, "cannot delete storage root")
 		return
 	}
-	if !s.requireStoragePermission(w, r, storage.ID, "delete", rel) {
+	if !s.requireStorageTreePermission(w, r, storage.ID, "delete", target, rel) {
 		return
 	}
 	if err := os.RemoveAll(target); err != nil {
@@ -942,14 +944,14 @@ func (s *Server) handleStorageRename(w http.ResponseWriter, r *http.Request, roo
 		writeError(w, http.StatusBadRequest, "source and destination are required")
 		return
 	}
-	if !s.requireStoragePermission(w, r, storage.ID, "rename", sourceRel) {
-		return
-	}
-	if !s.requireStoragePermission(w, r, storage.ID, "paste", destinationRel) {
-		return
-	}
 	if _, err := os.Stat(source); err != nil {
 		writeError(w, http.StatusNotFound, "source not found")
+		return
+	}
+	if !s.requireStorageTreePermission(w, r, storage.ID, "rename", source, sourceRel) {
+		return
+	}
+	if !s.requireMappedStorageTreePermission(w, r, storage.ID, "paste", source, destinationRel) {
 		return
 	}
 	if _, err := os.Stat(destination); err == nil {
@@ -957,7 +959,7 @@ func (s *Server) handleStorageRename(w http.ResponseWriter, r *http.Request, roo
 			writeError(w, http.StatusConflict, "destination exists")
 			return
 		}
-		if !s.requireStoragePermission(w, r, storage.ID, "edit", destinationRel) {
+		if !s.requireStorageTreePermission(w, r, storage.ID, "edit", destination, destinationRel) {
 			return
 		}
 	}
@@ -1003,12 +1005,15 @@ func (s *Server) handleStorageCopy(w http.ResponseWriter, r *http.Request, root 
 		writeError(w, http.StatusBadRequest, "source and destination are required")
 		return
 	}
-	if !s.requireStoragePermission(w, r, storage.ID, "copy", sourceRel) || !s.requireStoragePermission(w, r, storage.ID, "paste", destinationRel) {
-		return
-	}
 	info, err := os.Stat(source)
 	if err != nil {
 		writeError(w, http.StatusNotFound, "source not found")
+		return
+	}
+	if !s.requireStorageTreePermission(w, r, storage.ID, "copy", source, sourceRel) {
+		return
+	}
+	if !s.requireMappedStorageTreePermission(w, r, storage.ID, "paste", source, destinationRel) {
 		return
 	}
 	if _, err := os.Stat(destination); err == nil {
@@ -1016,7 +1021,7 @@ func (s *Server) handleStorageCopy(w http.ResponseWriter, r *http.Request, root 
 			writeError(w, http.StatusConflict, "destination exists")
 			return
 		}
-		if !s.requireStoragePermission(w, r, storage.ID, "edit", destinationRel) {
+		if !s.requireStorageTreePermission(w, r, storage.ID, "edit", destination, destinationRel) {
 			return
 		}
 	}
@@ -1339,6 +1344,67 @@ func (s *Server) requireStoragePermission(w http.ResponseWriter, r *http.Request
 	return false
 }
 
+func (s *Server) requireStorageTreePermission(w http.ResponseWriter, r *http.Request, storageID, action, rootPath, rootRel string) bool {
+	if !s.requireStoragePermission(w, r, storageID, action, rootRel) {
+		return false
+	}
+	info, err := os.Stat(rootPath)
+	if errors.Is(err, os.ErrNotExist) {
+		return true
+	}
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err.Error())
+		return false
+	}
+	if !info.IsDir() {
+		return true
+	}
+	return s.requireStorageDescendantPermissions(w, r, storageID, action, rootPath, rootRel, rootPath)
+}
+
+func (s *Server) requireMappedStorageTreePermission(w http.ResponseWriter, r *http.Request, storageID, action, sourcePath, destinationRel string) bool {
+	if !s.requireStoragePermission(w, r, storageID, action, destinationRel) {
+		return false
+	}
+	info, err := os.Stat(sourcePath)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err.Error())
+		return false
+	}
+	if !info.IsDir() {
+		return true
+	}
+	return s.requireStorageDescendantPermissions(w, r, storageID, action, sourcePath, destinationRel, sourcePath)
+}
+
+func (s *Server) requireStorageDescendantPermissions(w http.ResponseWriter, r *http.Request, storageID, action, walkRoot, mappedRootRel, skipPath string) bool {
+	err := filepath.WalkDir(walkRoot, func(path string, entry os.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		if path == skipPath {
+			return nil
+		}
+		rel, err := filepath.Rel(walkRoot, path)
+		if err != nil {
+			return err
+		}
+		mappedRel := joinStoragePolicyPath(mappedRootRel, rel)
+		if !s.requireStoragePermission(w, r, storageID, action, mappedRel) {
+			return errStoragePermissionDenied
+		}
+		return nil
+	})
+	if errors.Is(err, errStoragePermissionDenied) {
+		return false
+	}
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err.Error())
+		return false
+	}
+	return true
+}
+
 func (s *Server) storagePermissionAllowed(storageID, action, path, userID string) (bool, bool) {
 	platform, err := s.cfg.Store.PlatformBootstrap()
 	if err != nil {
@@ -1455,6 +1521,18 @@ func normalizeStoragePolicyPath(value string) string {
 		return "."
 	}
 	return value
+}
+
+func joinStoragePolicyPath(base, child string) string {
+	base = normalizeStoragePolicyPath(base)
+	child = normalizeStoragePolicyPath(child)
+	if child == "." {
+		return base
+	}
+	if base == "." {
+		return child
+	}
+	return filepath.ToSlash(filepath.Join(filepath.FromSlash(base), filepath.FromSlash(child)))
 }
 
 func copyFile(source, destination string) error {

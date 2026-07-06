@@ -4882,6 +4882,104 @@ func TestStorageAuthorizationStrategySubjectAndPathScope(t *testing.T) {
 	}
 }
 
+func TestStorageAuthorizationStrategyPreventsDirectoryBypass(t *testing.T) {
+	handler, adminCookie := newTestHandler(t)
+
+	storageRec := assertStatus(t, handler, http.MethodPost, "/api/admin/storages", map[string]any{
+		"name":   "recursive-policy-drive",
+		"type":   "local",
+		"status": "enabled",
+	}, adminCookie, http.StatusCreated)
+	var storage model.PlatformItem
+	decodeResponse(t, storageRec, &storage)
+
+	assertStatus(t, handler, http.MethodPost, "/api/admin/roles", map[string]any{
+		"name":   "recursive-storage-operator",
+		"type":   "custom",
+		"status": "enabled",
+		"metadata": map[string]any{
+			"api_permissions": []string{
+				"GET /api/admin/storages/*",
+				"POST /api/admin/storages/*",
+				"DELETE /api/admin/storages/*",
+			},
+		},
+	}, adminCookie, http.StatusCreated)
+	userRec := assertStatus(t, handler, http.MethodPost, "/api/admin/users", map[string]any{
+		"name":     "recursive-storage-user",
+		"type":     "local",
+		"status":   "enabled",
+		"password": "password123",
+		"metadata": map[string]any{"role": "recursive-storage-operator"},
+	}, adminCookie, http.StatusCreated)
+	var user model.PlatformItem
+	decodeResponse(t, userRec, &user)
+	loginRec := assertStatus(t, handler, http.MethodPost, "/api/auth/login", map[string]any{"username": "recursive-storage-user", "password": "password123"}, nil, http.StatusOK)
+	userCookie := loginRec.Result().Cookies()[0]
+
+	writeFile := func(path, content string) {
+		t.Helper()
+		assertStatus(t, handler, http.MethodPost, "/api/admin/storages/"+storage.ID+"/files-write", map[string]any{"path": path, "content": content}, adminCookie, http.StatusCreated)
+	}
+	deny := func(name, action, pathPrefix string) {
+		t.Helper()
+		assertStatus(t, handler, http.MethodPost, "/api/admin/strategies", map[string]any{
+			"name":        name,
+			"type":        "file",
+			"status":      "enabled",
+			"target_id":   storage.ID,
+			"owner_id":    user.ID,
+			"permissions": map[string]bool{action: false},
+			"metadata":    map[string]any{"path_prefix": pathPrefix},
+		}, adminCookie, http.StatusCreated)
+	}
+	download := func(path string, want int) {
+		t.Helper()
+		assertStatus(t, handler, http.MethodGet, "/api/admin/storages/"+storage.ID+"/files-download?path="+path, nil, adminCookie, want)
+	}
+
+	writeFile("delete-tree/protected/blocked.txt", "blocked")
+	writeFile("delete-tree/open.txt", "open")
+	deny("deny recursive delete protected child", "delete", "delete-tree/protected")
+	assertStatus(t, handler, http.MethodDelete, "/api/admin/storages/"+storage.ID+"/files?path=delete-tree", nil, userCookie, http.StatusForbidden)
+	download("delete-tree/protected/blocked.txt", http.StatusOK)
+
+	writeFile("copy-source/protected/blocked.txt", "blocked")
+	deny("deny recursive copy protected child", "copy", "copy-source/protected")
+	assertStatus(t, handler, http.MethodPost, "/api/admin/storages/"+storage.ID+"/files-copy", map[string]any{"path": "copy-source", "destination": "copy-target"}, userCookie, http.StatusForbidden)
+	download("copy-target/protected/blocked.txt", http.StatusNotFound)
+
+	writeFile("paste-source/protected/blocked.txt", "blocked")
+	deny("deny recursive paste protected target child", "paste", "paste-target/protected")
+	assertStatus(t, handler, http.MethodPost, "/api/admin/storages/"+storage.ID+"/files-copy", map[string]any{"path": "paste-source", "destination": "paste-target"}, userCookie, http.StatusForbidden)
+	download("paste-target/protected/blocked.txt", http.StatusNotFound)
+
+	writeFile("overwrite-source/protected/new.txt", "new")
+	writeFile("overwrite-target/protected/existing.txt", "existing")
+	deny("deny recursive copy overwrite protected child", "edit", "overwrite-target/protected")
+	assertStatus(t, handler, http.MethodPost, "/api/admin/storages/"+storage.ID+"/files-copy", map[string]any{"path": "overwrite-source", "destination": "overwrite-target", "overwrite": true}, userCookie, http.StatusForbidden)
+	download("overwrite-target/protected/existing.txt", http.StatusOK)
+
+	writeFile("rename-source/protected/blocked.txt", "blocked")
+	deny("deny recursive rename protected source child", "rename", "rename-source/protected")
+	assertStatus(t, handler, http.MethodPost, "/api/admin/storages/"+storage.ID+"/files-rename", map[string]any{"path": "rename-source", "destination": "renamed-source"}, userCookie, http.StatusForbidden)
+	download("rename-source/protected/blocked.txt", http.StatusOK)
+	download("renamed-source/protected/blocked.txt", http.StatusNotFound)
+
+	writeFile("rename-paste-source/protected/blocked.txt", "blocked")
+	deny("deny recursive rename paste protected target child", "paste", "rename-paste-target/protected")
+	assertStatus(t, handler, http.MethodPost, "/api/admin/storages/"+storage.ID+"/files-rename", map[string]any{"path": "rename-paste-source", "destination": "rename-paste-target"}, userCookie, http.StatusForbidden)
+	download("rename-paste-source/protected/blocked.txt", http.StatusOK)
+	download("rename-paste-target/protected/blocked.txt", http.StatusNotFound)
+
+	writeFile("rename-overwrite-source/new.txt", "new")
+	writeFile("rename-overwrite-target/protected/existing.txt", "existing")
+	deny("deny recursive rename overwrite protected child", "edit", "rename-overwrite-target/protected")
+	assertStatus(t, handler, http.MethodPost, "/api/admin/storages/"+storage.ID+"/files-rename", map[string]any{"path": "rename-overwrite-source", "destination": "rename-overwrite-target", "overwrite": true}, userCookie, http.StatusForbidden)
+	download("rename-overwrite-source/new.txt", http.StatusOK)
+	download("rename-overwrite-target/protected/existing.txt", http.StatusOK)
+}
+
 func TestAuditSessionOperations(t *testing.T) {
 	handler, adminCookie := newTestHandler(t)
 

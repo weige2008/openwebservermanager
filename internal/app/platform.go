@@ -178,6 +178,10 @@ func (s *Server) handleCollection(w http.ResponseWriter, r *http.Request, collec
 		if !decodeJSON(w, r, &req) {
 			return
 		}
+		if err := validateAuthorizationRequest(collection, req); err != nil {
+			writeError(w, http.StatusBadRequest, err.Error())
+			return
+		}
 		item, err := s.cfg.Store.CreatePlatformItem(collection, req)
 		if err != nil {
 			writeError(w, http.StatusInternalServerError, err.Error())
@@ -188,6 +192,10 @@ func (s *Server) handleCollection(w http.ResponseWriter, r *http.Request, collec
 	case id != "" && r.Method == http.MethodPatch:
 		var req model.PlatformItemRequest
 		if !decodeJSON(w, r, &req) {
+			return
+		}
+		if err := validateAuthorizationRequest(collection, req); err != nil {
+			writeError(w, http.StatusBadRequest, err.Error())
 			return
 		}
 		item, err := s.cfg.Store.UpdatePlatformItem(collection, id, req)
@@ -214,6 +222,45 @@ func (s *Server) handleCollection(w http.ResponseWriter, r *http.Request, collec
 		writeJSON(w, http.StatusOK, map[string]bool{"ok": true})
 	default:
 		writeError(w, http.StatusMethodNotAllowed, "method not allowed")
+	}
+}
+
+func validateAuthorizationRequest(collection string, req model.PlatformItemRequest) error {
+	if !isAuthorizationCollection(collection) {
+		return nil
+	}
+	return validateAuthorizationExpiryMetadata(req.Metadata)
+}
+
+func validateAuthorizationExpiryMetadata(metadata map[string]any) error {
+	for _, key := range []string{"expires_at", "expire_at", "expiresAt", "expired_at", "valid_until", "not_after"} {
+		value, ok := metadata[key]
+		if !ok || metadataValueEmpty(value) {
+			continue
+		}
+		if _, ok := metadataTime(value); !ok {
+			return errors.New(key + " must be a valid RFC3339 timestamp")
+		}
+	}
+	return nil
+}
+
+func metadataValueEmpty(value any) bool {
+	if value == nil {
+		return true
+	}
+	if text, ok := value.(string); ok {
+		return strings.TrimSpace(text) == ""
+	}
+	return false
+}
+
+func isAuthorizationCollection(collection string) bool {
+	switch collection {
+	case "authorized_assets", "authorized_web_assets", "authorized_database_assets":
+		return true
+	default:
+		return false
 	}
 }
 

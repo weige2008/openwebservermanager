@@ -2110,6 +2110,25 @@ func TestBulkAuthorizationGrantsAccessAcrossResourceTypes(t *testing.T) {
 	var databaseAsset model.PlatformItem
 	decodeResponse(t, dbRec, &databaseAsset)
 
+	invalidSingleRec := assertStatus(t, handler, http.MethodPost, "/api/admin/authorizations/assets", map[string]any{
+		"name":      "invalid expiry direct grant",
+		"status":    "enabled",
+		"owner_id":  user.ID,
+		"target_id": asset.ID,
+		"metadata":  map[string]any{"expires_at": "not-a-date"},
+	}, adminCookie, http.StatusBadRequest)
+	if !strings.Contains(invalidSingleRec.Body.String(), "expires_at") {
+		t.Fatalf("invalid direct authorization expiry did not identify field: %s", invalidSingleRec.Body.String())
+	}
+	invalidBulkRec := assertStatus(t, handler, http.MethodPost, "/api/admin/authorizations/assets/bulk", map[string]any{
+		"subject_ids": []string{user.ID},
+		"target_ids":  []string{asset.ID},
+		"expires_at":  "not-a-date",
+	}, adminCookie, http.StatusBadRequest)
+	if !strings.Contains(invalidBulkRec.Body.String(), "expires_at") {
+		t.Fatalf("invalid bulk authorization expiry did not identify field: %s", invalidBulkRec.Body.String())
+	}
+
 	bulkRec := assertStatus(t, handler, http.MethodPost, "/api/admin/authorizations/assets/bulk", map[string]any{
 		"subject_ids": []string{user.ID},
 		"target_ids":  []string{asset.ID},

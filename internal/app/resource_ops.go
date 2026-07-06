@@ -947,6 +947,12 @@ func (s *Server) handleAuthorizationBulk(w http.ResponseWriter, r *http.Request,
 	if !decodeJSON(w, r, &req) {
 		return
 	}
+	if strings.TrimSpace(req.ExpiresAt) != "" {
+		if err := validateAuthorizationExpiryMetadata(map[string]any{"expires_at": req.ExpiresAt}); err != nil {
+			writeError(w, http.StatusBadRequest, err.Error())
+			return
+		}
+	}
 	subjects := uniqueNonEmptyStrings(req.SubjectIDs, req.OwnerIDs, req.UserIDs, req.DepartmentIDs)
 	targets := uniqueNonEmptyStrings(req.TargetIDs, req.AssetIDs, req.AssetGroupIDs, req.WebAssetIDs, req.WebGroupIDs, req.DatabaseIDs, req.DatabaseGroupIDs)
 	if len(subjects) == 0 {

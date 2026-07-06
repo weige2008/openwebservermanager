@@ -874,6 +874,58 @@ func TestDesktopAccessSettingsApplyToRDPAndVNC(t *testing.T) {
 	assertDesktopPolicySession(t, vncSession, 1600, 1000, 120, 16, false, false, false, true)
 }
 
+func TestAccessPortalDesktopRecordingUsesPolicyDefault(t *testing.T) {
+	handler, adminCookie := newTestHandler(t)
+
+	assetRec := assertStatus(t, handler, http.MethodPost, "/api/admin/assets", map[string]any{
+		"name":     "portal-rdp-recording-policy",
+		"type":     "windows",
+		"status":   "enabled",
+		"protocol": "rdp",
+		"host":     "127.0.0.1",
+		"port":     3389,
+	}, adminCookie, http.StatusCreated)
+	var asset model.PlatformItem
+	decodeResponse(t, assetRec, &asset)
+	credentialRec := assertStatus(t, handler, http.MethodPost, "/api/admin/credentials", map[string]any{
+		"name":      "portal-rdp-recording-policy",
+		"type":      "rdp_password",
+		"status":    "encrypted",
+		"username":  "Administrator",
+		"password":  "secret",
+		"target_id": asset.ID,
+	}, adminCookie, http.StatusCreated)
+	var credential model.PlatformItem
+	decodeResponse(t, credentialRec, &credential)
+
+	defaultRec := assertStatus(t, handler, http.MethodPost, "/api/access/rdp/"+asset.ID, map[string]any{
+		"width":  1440,
+		"height": 900,
+		"dpi":    96,
+	}, adminCookie, http.StatusAccepted)
+	var defaultSession model.ConnectionSession
+	decodeResponse(t, defaultRec, &defaultSession)
+	if defaultSession.RecordingPath != "" {
+		t.Fatalf("desktop access should not record when policy default is disabled: %#v", defaultSession)
+	}
+
+	explicitRec := assertStatus(t, handler, http.MethodPost, "/api/access/rdp/"+asset.ID, map[string]any{
+		"credential_id":     credential.ID,
+		"width":             1440,
+		"height":            900,
+		"dpi":               96,
+		"recording_enabled": true,
+	}, adminCookie, http.StatusAccepted)
+	var explicitSession model.ConnectionSession
+	decodeResponse(t, explicitRec, &explicitSession)
+	if explicitSession.RecordingPath == "" {
+		t.Fatal("explicit desktop recording request did not create recording path")
+	}
+	if _, err := os.Stat(explicitSession.RecordingPath); err != nil {
+		t.Fatalf("explicit recording directory missing: %v", err)
+	}
+}
+
 func assertDesktopPolicySession(t *testing.T, session model.ConnectionSession, width, height, dpi, colorDepth int, clipboard, fileTransfer, ignoreCert, readOnly bool) {
 	t.Helper()
 	if session.Width != width || session.Height != height || session.DPI != dpi || session.ColorDepth != colorDepth {

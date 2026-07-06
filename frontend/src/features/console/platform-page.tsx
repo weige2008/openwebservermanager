@@ -3434,7 +3434,6 @@ function AccessSection({
           width: Math.max(1024, window.innerWidth),
           height: Math.max(680, window.innerHeight - 52),
           dpi: 96,
-          recording_enabled: true,
         }
         : {
           cols: 120,

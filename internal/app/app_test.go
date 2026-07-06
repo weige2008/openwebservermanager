@@ -2606,6 +2606,13 @@ func TestDatabaseAssetQueryRequiresAuthorizationAndLogs(t *testing.T) {
 	}, adminCookie, http.StatusCreated)
 	var user model.PlatformItem
 	decodeResponse(t, userRec, &user)
+	assertStatus(t, handler, http.MethodPost, "/api/admin/users", map[string]any{
+		"name":     "database-limited-approver",
+		"type":     "local",
+		"status":   "enabled",
+		"password": "password123",
+		"metadata": map[string]any{"role": "sql-self-approver"},
+	}, adminCookie, http.StatusCreated)
 
 	databaseRec := assertStatus(t, handler, http.MethodPost, "/api/admin/database-assets", map[string]any{
 		"name":     "ops-db",
@@ -2619,6 +2626,8 @@ func TestDatabaseAssetQueryRequiresAuthorizationAndLogs(t *testing.T) {
 
 	loginRec := assertStatus(t, handler, http.MethodPost, "/api/auth/login", map[string]any{"username": "database-user", "password": "password123"}, nil, http.StatusOK)
 	userCookie := loginRec.Result().Cookies()[0]
+	limitedLoginRec := assertStatus(t, handler, http.MethodPost, "/api/auth/login", map[string]any{"username": "database-limited-approver", "password": "password123"}, nil, http.StatusOK)
+	limitedCookie := limitedLoginRec.Result().Cookies()[0]
 
 	assertStatus(t, handler, http.MethodPost, "/api/access/database/"+databaseAsset.ID+"/query", map[string]any{
 		"sql": "SELECT 1 AS answer",
@@ -2673,6 +2682,14 @@ func TestDatabaseAssetQueryRequiresAuthorizationAndLogs(t *testing.T) {
 	selfApproveLogsRec := assertStatus(t, handler, http.MethodGet, "/api/admin/audit/operation-logs", nil, adminCookie, http.StatusOK)
 	if !strings.Contains(selfApproveLogsRec.Body.String(), "sql_work_order.approve.denied") || !strings.Contains(selfApproveLogsRec.Body.String(), workOrder.ID) {
 		t.Fatalf("self approval denial was not audited: %s", selfApproveLogsRec.Body.String())
+	}
+	assetDeniedApproveRec := assertStatus(t, handler, http.MethodPost, "/api/admin/sql-work-orders/"+workOrder.ID+"/approve", map[string]any{"note": "no database auth"}, limitedCookie, http.StatusForbidden)
+	if !strings.Contains(assetDeniedApproveRec.Body.String(), "database asset access denied") {
+		t.Fatalf("asset authorization denial did not explain reason: %s", assetDeniedApproveRec.Body.String())
+	}
+	assetDeniedLogsRec := assertStatus(t, handler, http.MethodGet, "/api/admin/audit/operation-logs", nil, adminCookie, http.StatusOK)
+	if !strings.Contains(assetDeniedLogsRec.Body.String(), "sql_work_order.database_access.denied") || !strings.Contains(assetDeniedLogsRec.Body.String(), workOrder.ID) || !strings.Contains(assetDeniedLogsRec.Body.String(), databaseAsset.ID) {
+		t.Fatalf("sql work order asset denial was not audited: %s", assetDeniedLogsRec.Body.String())
 	}
 	approveRec := assertStatus(t, handler, http.MethodPost, "/api/admin/sql-work-orders/"+workOrder.ID+"/approve", map[string]any{"note": "approved for test"}, adminCookie, http.StatusOK)
 	var approvedOrder model.PlatformItem

@@ -3168,6 +3168,7 @@ func (s *Server) sqlWorkOrderDatabaseAsset(w http.ResponseWriter, r *http.Reques
 	}
 	userID, isAdmin := s.accessUser(r)
 	if !isAccessAuthorized(platform, model.ProtocolDatabase, asset.ID, userID, isAdmin) {
+		_ = s.audit(r, "sql_work_order.database_access.denied", order.ID, model.ProtocolDatabase, "database asset access denied: "+asset.ID)
 		writeError(w, http.StatusForbidden, "database asset access denied")
 		return model.PlatformItem{}, "", false
 	}

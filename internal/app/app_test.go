@@ -634,6 +634,8 @@ func TestAccessMFAWebAssetPreflightUnlocksProxy(t *testing.T) {
 	if proxyRec.Body.String() != "web asset ok" {
 		t.Fatalf("web proxy after preflight = %q, want web asset ok", proxyRec.Body.String())
 	}
+	assertStatus(t, handler, http.MethodPost, "/api/auth/logout", nil, userCookie, http.StatusOK)
+	assertStatus(t, handler, http.MethodGet, "/api/access/http/"+webAsset.ID+"/proxy/", nil, userCookie, http.StatusUnauthorized)
 }
 
 func TestPasskeyRegistrationAndLogin(t *testing.T) {

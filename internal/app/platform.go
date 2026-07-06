@@ -96,6 +96,9 @@ func (s *Server) handlePlatformAPI(w http.ResponseWriter, r *http.Request) bool 
 		if !ok {
 			return false
 		}
+		if len(parts) > 2 {
+			return false
+		}
 		s.handleCollection(w, r, collection, tailID(parts))
 		return true
 	case strings.HasPrefix(path, "admin/authorizations/"):
@@ -105,6 +108,9 @@ func (s *Server) handlePlatformAPI(w http.ResponseWriter, r *http.Request) bool 
 		if !ok {
 			return false
 		}
+		if len(parts) > 2 {
+			return false
+		}
 		s.handleCollection(w, r, collection, tailID(parts))
 		return true
 	case strings.HasPrefix(path, "admin/"):
@@ -112,6 +118,9 @@ func (s *Server) handlePlatformAPI(w http.ResponseWriter, r *http.Request) bool 
 		parts := splitPath(rest)
 		collection, ok := adminCollectionRoutes[firstPart(parts)]
 		if !ok {
+			return false
+		}
+		if len(parts) > 2 {
 			return false
 		}
 		s.handleCollection(w, r, collection, tailID(parts))

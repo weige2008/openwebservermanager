@@ -2201,7 +2201,10 @@ func TestRoleBasedAccessControl(t *testing.T) {
 	readerLogin := assertStatus(t, handler, http.MethodPost, "/api/auth/login", map[string]any{"username": "asset-reader-user", "password": "password123"}, nil, http.StatusOK)
 	readerCookie := readerLogin.Result().Cookies()[0]
 	assertStatus(t, handler, http.MethodGet, "/api/admin/assets", nil, readerCookie, http.StatusOK)
+	assertStatus(t, handler, http.MethodGet, "/api/admin/assets/"+allowedAsset.ID, nil, readerCookie, http.StatusOK)
+	assertStatus(t, handler, http.MethodGet, "/api/admin/assets/"+allowedAsset.ID+"/unexpected", nil, readerCookie, http.StatusForbidden)
 	assertStatus(t, handler, http.MethodPost, "/api/admin/assets", map[string]any{"name": "blocked"}, readerCookie, http.StatusForbidden)
+	assertStatus(t, handler, http.MethodGet, "/api/admin/assets/"+allowedAsset.ID+"/unexpected", nil, adminCookie, http.StatusNotFound)
 }
 
 func TestCustomRoleAPIAndMenuPermissions(t *testing.T) {
@@ -2257,6 +2260,8 @@ func TestCustomRoleAPIAndMenuPermissions(t *testing.T) {
 		t.Fatal("auth me did not include custom role permissions")
 	}
 	assertStatus(t, handler, http.MethodGet, "/api/admin/assets", nil, userCookie, http.StatusOK)
+	assertStatus(t, handler, http.MethodGet, "/api/admin/assets/"+asset.ID, nil, userCookie, http.StatusOK)
+	assertStatus(t, handler, http.MethodGet, "/api/admin/assets/"+asset.ID+"/unexpected", nil, userCookie, http.StatusForbidden)
 	assertStatus(t, handler, http.MethodPost, "/api/admin/assets", map[string]any{"name": "blocked"}, userCookie, http.StatusForbidden)
 	assertStatus(t, handler, http.MethodGet, "/api/admin/users", nil, userCookie, http.StatusForbidden)
 	bootstrapRec := assertStatus(t, handler, http.MethodGet, "/api/bootstrap", nil, userCookie, http.StatusOK)

@@ -203,9 +203,12 @@ func permissionMatchesAPI(permission, method, path string) bool {
 	}
 	parts := strings.Fields(permission)
 	if len(parts) == 1 {
-		return pathMatches(parts[0], path)
+		return pathMatches(parts[0], path) || (method == http.MethodGet && collectionDetailPathMatches(parts[0], path))
 	}
-	return (parts[0] == "*" || strings.EqualFold(parts[0], method)) && pathMatches(parts[1], path)
+	if parts[0] != "*" && !strings.EqualFold(parts[0], method) {
+		return false
+	}
+	return pathMatches(parts[1], path) || (method == http.MethodGet && collectionDetailPathMatches(parts[1], path))
 }
 
 func pathMatches(pattern, path string) bool {
@@ -221,4 +224,18 @@ func pathMatches(pattern, path string) bool {
 		return strings.HasPrefix(path, strings.TrimSuffix(pattern, "*"))
 	}
 	return false
+}
+
+func collectionDetailPathMatches(pattern, path string) bool {
+	pattern = strings.TrimRight(pattern, "/")
+	path = strings.TrimRight(path, "/")
+	if pattern == "" || strings.ContainsAny(pattern, "*") || pattern == path {
+		return false
+	}
+	prefix := pattern + "/"
+	if !strings.HasPrefix(path, prefix) {
+		return false
+	}
+	tail := strings.TrimPrefix(path, prefix)
+	return tail != "" && !strings.Contains(tail, "/")
 }

@@ -66,6 +66,8 @@ var auditCollectionRoutes = map[string]string{
 	"sql-logs":          "sql_logs",
 }
 
+var webAssetUpstreamMetadataKeys = []string{"target_url", "upstream", "url", "target", "address"}
+
 func (s *Server) handlePlatformAPI(w http.ResponseWriter, r *http.Request) bool {
 	path := strings.Trim(strings.TrimPrefix(r.URL.Path, "/api/"), "/")
 	switch {
@@ -494,6 +496,7 @@ func (s *Server) handleWebAssetProxy(w http.ResponseWriter, r *http.Request, ass
 		requestQuery := req.In.URL.RawQuery
 		req.Out.URL.Scheme = target.Scheme
 		req.Out.URL.Host = target.Host
+		req.Out.URL.User = nil
 		req.Out.Host = target.Host
 		req.Out.URL.Path = joinProxyPath(target.Path, proxyPath)
 		req.Out.URL.RawPath = ""
@@ -510,6 +513,10 @@ func (s *Server) handleWebAssetProxy(w http.ResponseWriter, r *http.Request, ass
 		req.Out.Header.Set("X-Forwarded-Uri", req.In.URL.RequestURI())
 		req.Out.Header.Set("X-OpenWebServerManager-User", userID)
 		req.Out.Header.Set("X-OpenWebServerManager-Asset", asset.ID)
+		if target.User != nil {
+			password, _ := target.User.Password()
+			req.Out.SetBasicAuth(target.User.Username(), password)
+		}
 		stripProxyInternalCookies(req.Out.Header)
 	}
 	recorder := &statusCaptureWriter{ResponseWriter: w, status: http.StatusOK}
@@ -557,6 +564,10 @@ func (s *Server) rawWebAssetForProxy(w http.ResponseWriter, asset model.Platform
 	}
 	if !ok || !platformAccessItemEnabled(raw) {
 		writeError(w, http.StatusNotFound, "asset not found")
+		return model.PlatformItem{}, false
+	}
+	if err := s.decryptWebAssetUpstreamURL(&raw); err != nil {
+		writeError(w, http.StatusInternalServerError, err.Error())
 		return model.PlatformItem{}, false
 	}
 	return raw, true
@@ -622,7 +633,7 @@ func webAssetAccessDomain(asset model.PlatformItem, target *url.URL) string {
 
 func webAssetTargetURL(asset model.PlatformItem) (*url.URL, error) {
 	raw := ""
-	for _, key := range []string{"target_url", "upstream", "url", "target", "address"} {
+	for _, key := range webAssetUpstreamMetadataKeys {
 		values := metadataStrings(asset.Metadata[key])
 		if len(values) > 0 && strings.TrimSpace(values[0]) != "" {
 			raw = strings.TrimSpace(values[0])
@@ -653,6 +664,24 @@ func webAssetTargetURL(asset model.PlatformItem) (*url.URL, error) {
 		return nil, errors.New("web asset upstream must use http or https")
 	}
 	return target, nil
+}
+
+func (s *Server) decryptWebAssetUpstreamURL(asset *model.PlatformItem) error {
+	encrypted := firstMetadataString(asset.Metadata, "web_upstream_url_encrypted")
+	if encrypted == "" {
+		return nil
+	}
+	upstream, err := s.cfg.Store.DecryptPlatformSecret(encrypted)
+	if err != nil {
+		return err
+	}
+	nextMetadata := map[string]any{}
+	for key, value := range asset.Metadata {
+		nextMetadata[key] = value
+	}
+	nextMetadata["target_url"] = upstream
+	asset.Metadata = nextMetadata
+	return nil
 }
 
 func joinProxyPath(basePath, proxyPath string) string {

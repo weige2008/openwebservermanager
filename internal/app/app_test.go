@@ -2427,6 +2427,10 @@ func TestWebAssetProxyRequiresAuthorizationAndLogs(t *testing.T) {
 		if r.Header.Get("X-OpenWebServerManager-User") == "" || r.Header.Get("X-OpenWebServerManager-Asset") == "" {
 			t.Fatal("upstream did not receive proxy identity headers")
 		}
+		username, password, ok := r.BasicAuth()
+		if !ok || username != "proxy-user" || password != "proxy-secret" {
+			t.Fatalf("upstream basic auth = %q/%q ok=%v, want proxy-user/proxy-secret", username, password, ok)
+		}
 		if _, err := r.Cookie(authCookieName); err == nil {
 			t.Fatal("upstream received internal auth cookie")
 		}
@@ -2473,6 +2477,7 @@ func TestWebAssetProxyRequiresAuthorizationAndLogs(t *testing.T) {
 	upstreamTarget.RawQuery = "from=asset"
 
 	handler, adminCookie := newTestHandler(t)
+	server := handler.(*Server)
 	userRec := assertStatus(t, handler, http.MethodPost, "/api/admin/users", map[string]any{
 		"name":     "web-user",
 		"type":     "local",
@@ -2497,12 +2502,42 @@ func TestWebAssetProxyRequiresAuthorizationAndLogs(t *testing.T) {
 	if targetURL := firstMetadataString(webAsset.Metadata, "target_url"); strings.Contains(targetURL, "@") || strings.Contains(targetURL, "proxy-user") || strings.Contains(targetURL, "proxy-secret") {
 		t.Fatalf("web asset create payload retained upstream userinfo: %#v", webAsset.Metadata)
 	}
-	rawWebAsset, ok, err := handler.(*Server).cfg.Store.GetPlatformItem("web_assets", webAsset.ID)
+	rawWebAsset, ok, err := server.cfg.Store.GetPlatformItem("web_assets", webAsset.ID)
 	if err != nil || !ok {
 		t.Fatalf("load raw web asset: ok=%v err=%v", ok, err)
 	}
-	if rawTargetURL := firstMetadataString(rawWebAsset.Metadata, "target_url"); !strings.Contains(rawTargetURL, "proxy-user") || !strings.Contains(rawTargetURL, "proxy-secret") {
-		t.Fatalf("raw web asset did not retain proxy credentials for server-side use: %#v", rawWebAsset.Metadata)
+	if rawTargetURL := firstMetadataString(rawWebAsset.Metadata, "target_url"); strings.Contains(rawTargetURL, "@") || strings.Contains(rawTargetURL, "proxy-user") || strings.Contains(rawTargetURL, "proxy-secret") {
+		t.Fatalf("raw web asset retained plaintext upstream credentials: %#v", rawWebAsset.Metadata)
+	}
+	encryptedUpstream := firstMetadataString(rawWebAsset.Metadata, "web_upstream_url_encrypted")
+	if encryptedUpstream == "" {
+		t.Fatalf("raw web asset did not store encrypted upstream credentials: %#v", rawWebAsset.Metadata)
+	}
+	decryptedUpstream, err := server.cfg.Store.DecryptPlatformSecret(encryptedUpstream)
+	if err != nil {
+		t.Fatalf("decrypt web asset upstream: %v", err)
+	}
+	if decryptedUpstream != upstreamTarget.String() {
+		t.Fatalf("decrypted web upstream = %q, want %q", decryptedUpstream, upstreamTarget.String())
+	}
+	patchRec := assertStatus(t, handler, http.MethodPatch, "/api/admin/websites/"+webAsset.ID, map[string]any{
+		"metadata": map[string]any{
+			"target_url": firstMetadataString(webAsset.Metadata, "target_url"),
+			"display":    "patched without resubmitting credentials",
+		},
+	}, adminCookie, http.StatusOK)
+	patchBody := patchRec.Body.String()
+	for _, leaked := range []string{"proxy-user", "proxy-secret", "web_upstream_url_encrypted"} {
+		if strings.Contains(patchBody, leaked) {
+			t.Fatalf("web asset patch response leaked %q: %s", leaked, patchBody)
+		}
+	}
+	rawWebAsset, ok, err = server.cfg.Store.GetPlatformItem("web_assets", webAsset.ID)
+	if err != nil || !ok {
+		t.Fatalf("reload raw web asset after patch: ok=%v err=%v", ok, err)
+	}
+	if firstMetadataString(rawWebAsset.Metadata, "web_upstream_url_encrypted") == "" {
+		t.Fatalf("web asset patch with unchanged redacted URL dropped encrypted upstream credentials: %#v", rawWebAsset.Metadata)
 	}
 	loginRec := assertStatus(t, handler, http.MethodPost, "/api/auth/login", map[string]any{"username": "web-user", "password": "password123"}, nil, http.StatusOK)
 	userCookie := loginRec.Result().Cookies()[0]
@@ -7131,6 +7166,17 @@ func TestBackupRestoreMigratesPlaintextPlatformSecrets(t *testing.T) {
 		CreatedAt: now,
 		UpdatedAt: now,
 	}
+	webUpstream := "https://restore-web:restore-web-secret@web.internal/app"
+	webAsset := model.PlatformItem{
+		ID:        "restore_plain_web_asset",
+		Name:      "restored plaintext web",
+		Type:      "https",
+		Status:    "enabled",
+		Protocol:  model.ProtocolHTTP,
+		Metadata:  map[string]any{"target_url": webUpstream},
+		CreatedAt: now,
+		UpdatedAt: now,
+	}
 	systemSetting := model.PlatformItem{
 		ID:     "restore_plain_system_setting",
 		Name:   "restored plaintext integrations",
@@ -7171,6 +7217,7 @@ func TestBackupRestoreMigratesPlaintextPlatformSecrets(t *testing.T) {
 		item       model.PlatformItem
 	}{
 		{collection: "database_assets", item: databaseAsset},
+		{collection: "web_assets", item: webAsset},
 		{collection: "system_settings", item: systemSetting},
 		{collection: "certificates", item: certificateItem},
 	} {
@@ -7217,12 +7264,12 @@ func TestBackupRestoreMigratesPlaintextPlatformSecrets(t *testing.T) {
 
 	restoreRec := assertMultipartStatus(t, handler, "/api/admin/backups/restore", nil, "legacy-plaintext-secrets.zip", backup.Bytes(), cookie, http.StatusOK)
 	restoreBody := restoreRec.Body.String()
-	for _, leaked := range []string{"restore-secret", "restore-smtp-secret", "restore-llm-secret", "restore-dns-secret", "postgres://restore_user", "PRIVATE KEY"} {
+	for _, leaked := range []string{"restore-secret", "restore-web-secret", "restore-smtp-secret", "restore-llm-secret", "restore-dns-secret", "postgres://restore_user", "PRIVATE KEY"} {
 		if strings.Contains(restoreBody, leaked) {
 			t.Fatalf("backup restore response leaked %q: %s", leaked, restoreBody)
 		}
 	}
-	if !strings.Contains(restoreBody, `"restored":true`) || !strings.Contains(restoreBody, `"migrated_platform_secrets":3`) {
+	if !strings.Contains(restoreBody, `"restored":true`) || !strings.Contains(restoreBody, `"migrated_platform_secrets":4`) {
 		t.Fatalf("backup restore response did not report migrated secrets: %s", restoreBody)
 	}
 
@@ -7251,6 +7298,26 @@ func TestBackupRestoreMigratesPlaintextPlatformSecrets(t *testing.T) {
 	password, _ := parsed.User.Password()
 	if parsed.User.Username() != "restore_user" || password != "restore-secret" {
 		t.Fatalf("restored database dsn was not decryptable: %q", connection.DSN)
+	}
+
+	rawWebAsset, ok, err := server.cfg.Store.GetPlatformItem("web_assets", webAsset.ID)
+	if err != nil || !ok {
+		t.Fatalf("load restored web asset: ok=%v err=%v", ok, err)
+	}
+	if rawTargetURL := firstMetadataString(rawWebAsset.Metadata, "target_url"); strings.Contains(rawTargetURL, "restore-web") || strings.Contains(rawTargetURL, "@") {
+		t.Fatalf("restored web asset retained plaintext upstream credentials: %#v", rawWebAsset.Metadata)
+	}
+	encryptedWebUpstream := firstMetadataString(rawWebAsset.Metadata, "web_upstream_url_encrypted")
+	webUpstreamSet, _ := metadataBoolValue(rawWebAsset.Metadata["web_upstream_url_set"])
+	if encryptedWebUpstream == "" || !webUpstreamSet {
+		t.Fatalf("restored web asset did not encrypt upstream credentials: %#v", rawWebAsset.Metadata)
+	}
+	decryptedWebUpstream, err := server.cfg.Store.DecryptPlatformSecret(encryptedWebUpstream)
+	if err != nil {
+		t.Fatalf("decrypt restored web upstream: %v", err)
+	}
+	if decryptedWebUpstream != webUpstream {
+		t.Fatalf("restored web upstream = %q, want %q", decryptedWebUpstream, webUpstream)
 	}
 
 	rawSystemSetting, ok, err := server.cfg.Store.GetPlatformItem("system_settings", systemSetting.ID)
@@ -7307,6 +7374,17 @@ func TestBackupRestoreMigratesPlaintextPlatformSecrets(t *testing.T) {
 	}
 	if !strings.Contains(databaseDetailBody, "database_dsn_set") {
 		t.Fatalf("database detail did not expose dsn presence flag: %s", databaseDetailBody)
+	}
+
+	webDetailRec := assertStatus(t, handler, http.MethodGet, "/api/admin/websites/"+webAsset.ID, nil, newCookie, http.StatusOK)
+	webDetailBody := webDetailRec.Body.String()
+	for _, leaked := range []string{"restore-web-secret", "web_upstream_url_encrypted", "restore-web:"} {
+		if strings.Contains(webDetailBody, leaked) {
+			t.Fatalf("web detail leaked %q: %s", leaked, webDetailBody)
+		}
+	}
+	if !strings.Contains(webDetailBody, "web_upstream_url_set") || !strings.Contains(webDetailBody, "target_url_credentials_set") {
+		t.Fatalf("web detail did not expose upstream credential presence flags: %s", webDetailBody)
 	}
 
 	settingsDetailRec := assertStatus(t, handler, http.MethodGet, "/api/admin/system-settings/"+systemSetting.ID, nil, newCookie, http.StatusOK)

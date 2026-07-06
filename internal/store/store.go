@@ -1011,6 +1011,17 @@ func (s *Store) UpdatePlatformItem(collection, id string, req model.PlatformItem
 	existingDatabaseAssetSecrets := copyMetadataSecrets(item.Metadata, "database_dsn_encrypted")
 	existingDatabaseAssetPlainDSN := firstMetadataString(item.Metadata, databaseAssetDSNPlainKeys...)
 	existingDatabaseAssetSecretState := copyMetadataValues(item.Metadata, "database_dsn_set", "database_dsn_updated_at")
+	existingWebAssetSecrets := copyMetadataSecrets(item.Metadata, webAssetUpstreamEncryptedKey)
+	existingWebAssetRedactedUpstream := firstMetadataString(item.Metadata, webAssetUpstreamPlainKeys...)
+	existingWebAssetSecretState := copyMetadataValues(item.Metadata,
+		"web_upstream_url_set",
+		"web_upstream_url_updated_at",
+		"upstream_credentials_set",
+		"target_url_credentials_set",
+		"url_credentials_set",
+		"target_credentials_set",
+		"address_credentials_set",
+	)
 	existingSystemSettingSecretState := copyMetadataValues(item.Metadata,
 		"smtp_password_set",
 		"smtp_password_updated_at",
@@ -1102,6 +1113,22 @@ func (s *Store) UpdatePlatformItem(collection, id string, req model.PlatformItem
 			restoreMetadataAnyValues(item.Metadata, existingDatabaseAssetSecretState)
 			if existingDatabaseAssetSecrets["database_dsn_encrypted"] == "" && existingDatabaseAssetPlainDSN != "" && firstMetadataString(item.Metadata, databaseAssetDSNPlainKeys...) == "" {
 				item.Metadata["dsn"] = existingDatabaseAssetPlainDSN
+			}
+		}
+		if collection == "web_assets" {
+			shouldRestoreSecret := !metadataHasWebAssetUpstreamInput(item.Metadata)
+			if !shouldRestoreSecret {
+				incoming := firstMetadataString(item.Metadata, webAssetUpstreamPlainKeys...)
+				shouldRestoreSecret = existingWebAssetSecrets[webAssetUpstreamEncryptedKey] != "" && webAssetUpstreamEquivalent(incoming, existingWebAssetRedactedUpstream)
+			}
+			if shouldRestoreSecret {
+				for key, value := range existingWebAssetSecrets {
+					delete(item.Metadata, key)
+					if value != "" {
+						item.Metadata[key] = value
+					}
+				}
+				restoreMetadataAnyValues(item.Metadata, existingWebAssetSecretState)
 			}
 		}
 	}
@@ -1405,6 +1432,8 @@ func (s *Store) applyPlatformSecrets(collection string, req model.PlatformItemRe
 		return s.applyCertificatePlatformSecret(item, creating)
 	case "database_assets":
 		return s.applyDatabaseAssetPlatformSecret(item, creating)
+	case "web_assets":
+		return s.applyWebAssetPlatformSecret(item, creating)
 	case "system_settings":
 		return s.applySystemSettingPlatformSecret(req, item, creating)
 	default:
@@ -1613,6 +1642,114 @@ func (s *Store) applyDatabaseAssetPlatformSecret(item *model.PlatformItem, creat
 	item.Metadata["database_dsn_set"] = true
 	item.Metadata["database_dsn_updated_at"] = time.Now().UTC().Format(time.RFC3339Nano)
 	return nil
+}
+
+var webAssetUpstreamPlainKeys = []string{"target_url", "upstream", "url", "target", "address"}
+
+const webAssetUpstreamEncryptedKey = "web_upstream_url_encrypted"
+
+func (s *Store) applyWebAssetPlatformSecret(item *model.PlatformItem, creating bool) error {
+	if item.Metadata == nil {
+		item.Metadata = map[string]any{}
+	}
+	upstream, upstreamKey := firstMetadataStringWithKey(item.Metadata, webAssetUpstreamPlainKeys...)
+	if upstream == "" {
+		if creating {
+			clearWebAssetUpstreamSecretState(item.Metadata, true)
+		}
+		return nil
+	}
+	redacted, hasCredentials := redactWebAssetUpstreamCredentials(upstream)
+	if !hasCredentials {
+		if firstMetadataString(item.Metadata, webAssetUpstreamEncryptedKey) != "" {
+			item.Metadata["web_upstream_url_set"] = true
+			item.Metadata["upstream_credentials_set"] = true
+			if upstreamKey != "" {
+				item.Metadata[upstreamKey+"_credentials_set"] = true
+			}
+			return nil
+		}
+		clearWebAssetUpstreamSecretState(item.Metadata, true)
+		return nil
+	}
+	if len(upstream) > 128*1024 {
+		return errors.New("web upstream url is too large")
+	}
+	encrypted, err := s.cipher.EncryptString(upstream)
+	if err != nil {
+		return err
+	}
+	item.Metadata[webAssetUpstreamEncryptedKey] = encrypted
+	item.Metadata["web_upstream_url_set"] = true
+	item.Metadata["web_upstream_url_updated_at"] = time.Now().UTC().Format(time.RFC3339Nano)
+	item.Metadata["upstream_credentials_set"] = true
+	if upstreamKey != "" {
+		item.Metadata[upstreamKey] = redacted
+		item.Metadata[upstreamKey+"_credentials_set"] = true
+	}
+	return nil
+}
+
+func metadataHasWebAssetUpstreamInput(metadata map[string]any) bool {
+	for _, key := range webAssetUpstreamPlainKeys {
+		if _, ok := metadata[key]; ok {
+			return true
+		}
+	}
+	return false
+}
+
+func webAssetUpstreamEquivalent(left, right string) bool {
+	return strings.TrimSpace(left) != "" && strings.TrimSpace(left) == strings.TrimSpace(right)
+}
+
+func firstMetadataStringWithKey(metadata map[string]any, keys ...string) (string, string) {
+	for _, key := range keys {
+		value, _ := metadata[key].(string)
+		if strings.TrimSpace(value) != "" {
+			return strings.TrimSpace(value), key
+		}
+	}
+	return "", ""
+}
+
+func redactWebAssetUpstreamCredentials(raw string) (string, bool) {
+	trimmed := strings.TrimSpace(raw)
+	if trimmed == "" {
+		return "", false
+	}
+	hasScheme := strings.Contains(trimmed, "://")
+	parseTarget := trimmed
+	if !hasScheme {
+		parseTarget = "http://" + trimmed
+	}
+	parsed, err := url.Parse(parseTarget)
+	if err != nil || parsed.User == nil {
+		return trimmed, false
+	}
+	parsed.User = nil
+	redacted := parsed.String()
+	if !hasScheme {
+		redacted = strings.TrimPrefix(redacted, "http://")
+	}
+	return redacted, true
+}
+
+func clearWebAssetUpstreamSecretState(metadata map[string]any, includeEncrypted bool) {
+	if includeEncrypted {
+		delete(metadata, webAssetUpstreamEncryptedKey)
+	}
+	for _, key := range []string{
+		"web_upstream_url_set",
+		"web_upstream_url_updated_at",
+		"upstream_credentials_set",
+		"target_url_credentials_set",
+		"url_credentials_set",
+		"target_credentials_set",
+		"address_credentials_set",
+	} {
+		delete(metadata, key)
+	}
 }
 
 func (s *Store) applySystemSettingPlatformSecret(req model.PlatformItemRequest, item *model.PlatformItem, creating bool) error {
@@ -2134,18 +2271,26 @@ func sanitizeDatabaseAssetMetadata(metadata map[string]any) {
 }
 
 func sanitizeWebAssetMetadata(metadata map[string]any) {
-	for _, key := range []string{"target_url", "upstream", "url", "target", "address"} {
+	encryptedSet := firstMetadataString(metadata, webAssetUpstreamEncryptedKey) != "" || metadataBool(metadata["web_upstream_url_set"])
+	delete(metadata, webAssetUpstreamEncryptedKey)
+	if encryptedSet {
+		metadata["web_upstream_url_set"] = true
+		metadata["upstream_credentials_set"] = true
+	}
+	for _, key := range webAssetUpstreamPlainKeys {
 		raw, _ := metadata[key].(string)
 		trimmed := strings.TrimSpace(raw)
 		if trimmed == "" {
 			continue
 		}
-		parsed, err := url.Parse(trimmed)
-		if err != nil || parsed.User == nil {
+		redacted, hasCredentials := redactWebAssetUpstreamCredentials(trimmed)
+		if !hasCredentials {
+			if encryptedSet {
+				metadata[key+"_credentials_set"] = true
+			}
 			continue
 		}
-		parsed.User = nil
-		metadata[key] = parsed.String()
+		metadata[key] = redacted
 		metadata[key+"_credentials_set"] = true
 		metadata["upstream_credentials_set"] = true
 	}
@@ -2275,6 +2420,7 @@ var sensitiveMetadataKeys = map[string]struct{}{
 	"public_key_y":                             {},
 	"cose_public_key":                          {},
 	"database_dsn_encrypted":                   {},
+	"web_upstream_url_encrypted":               {},
 }
 
 func sanitizeMetadataValue(value any) {

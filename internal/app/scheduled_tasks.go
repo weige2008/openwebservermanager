@@ -501,6 +501,9 @@ func (s *Server) checkAssetReachability(collection string, item model.PlatformIt
 		} else if ok {
 			item = raw
 		}
+		if err := s.decryptWebAssetUpstreamURL(&item); err != nil {
+			return "offline", err.Error()
+		}
 		target, err := webAssetTargetURL(item)
 		if err != nil {
 			return "offline", err.Error()

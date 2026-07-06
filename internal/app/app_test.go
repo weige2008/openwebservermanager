@@ -124,10 +124,85 @@ func TestPlatformCollectionEndpoints(t *testing.T) {
 				t.Fatal("password hash leaked in response")
 			}
 
+			detailRec := assertStatus(t, handler, http.MethodGet, path+"/"+item.ID, nil, cookie, http.StatusOK)
+			if !strings.Contains(detailRec.Body.String(), item.ID) {
+				t.Fatalf("detail response did not include created id: %s", detailRec.Body.String())
+			}
+			if strings.Contains(detailRec.Body.String(), "password_hash") {
+				t.Fatalf("detail response leaked password hash: %s", detailRec.Body.String())
+			}
 			assertStatus(t, handler, http.MethodPatch, path+"/"+item.ID, map[string]any{"name": item.Name + " updated", "status": "disabled"}, cookie, http.StatusOK)
 			assertStatus(t, handler, http.MethodDelete, path+"/"+item.ID, nil, cookie, http.StatusOK)
 		})
 	}
+}
+
+func TestPlatformCollectionDetailRedactsSensitiveMetadata(t *testing.T) {
+	handler, cookie := newTestHandler(t)
+
+	credentialRec := assertStatus(t, handler, http.MethodPost, "/api/admin/credentials", map[string]any{
+		"name":     "detail credential",
+		"type":     "database_password",
+		"status":   "enabled",
+		"username": "db-user",
+		"password": "credential-secret",
+	}, cookie, http.StatusCreated)
+	var credential model.PlatformItem
+	decodeResponse(t, credentialRec, &credential)
+	credentialDetail := assertStatus(t, handler, http.MethodGet, "/api/admin/credentials/"+credential.ID, nil, cookie, http.StatusOK)
+	for _, leaked := range []string{"credential-secret", "encrypted_password", "plain_password", `"password"`} {
+		if strings.Contains(credentialDetail.Body.String(), leaked) {
+			t.Fatalf("credential detail leaked %q: %s", leaked, credentialDetail.Body.String())
+		}
+	}
+
+	dsn := "postgres://detail_user:dsn-secret@postgres.internal:5432/app?sslmode=disable"
+	databaseRec := assertStatus(t, handler, http.MethodPost, "/api/admin/database-assets", map[string]any{
+		"name":     "detail dsn database",
+		"type":     "postgres",
+		"status":   "enabled",
+		"protocol": "database",
+		"metadata": map[string]any{"dsn": dsn},
+	}, cookie, http.StatusCreated)
+	var databaseAsset model.PlatformItem
+	decodeResponse(t, databaseRec, &databaseAsset)
+	databaseDetail := assertStatus(t, handler, http.MethodGet, "/api/admin/database-assets/"+databaseAsset.ID, nil, cookie, http.StatusOK)
+	for _, leaked := range []string{"dsn-secret", "postgres://detail_user", `"dsn":`, "database_dsn_encrypted"} {
+		if strings.Contains(databaseDetail.Body.String(), leaked) {
+			t.Fatalf("database asset detail leaked %q: %s", leaked, databaseDetail.Body.String())
+		}
+	}
+	if !strings.Contains(databaseDetail.Body.String(), "database_dsn_set") {
+		t.Fatalf("database asset detail did not expose dsn presence flag: %s", databaseDetail.Body.String())
+	}
+
+	settingRec := assertStatus(t, handler, http.MethodPost, "/api/admin/system-settings", map[string]any{
+		"name":     "detail integrations",
+		"type":     "integration",
+		"status":   "enabled",
+		"password": "smtp-secret",
+		"metadata": map[string]any{
+			"smtp_host":   "smtp.example.test",
+			"smtp_from":   "sender@example.test",
+			"smtp_to":     "receiver@example.test",
+			"llm_api_key": "llm-secret",
+		},
+	}, cookie, http.StatusCreated)
+	var setting model.PlatformItem
+	decodeResponse(t, settingRec, &setting)
+	settingDetail := assertStatus(t, handler, http.MethodGet, "/api/admin/system-settings/"+setting.ID, nil, cookie, http.StatusOK)
+	for _, leaked := range []string{"smtp-secret", "llm-secret", "smtp_password_encrypted", "llm_api_key_encrypted", `"llm_api_key":`} {
+		if strings.Contains(settingDetail.Body.String(), leaked) {
+			t.Fatalf("system setting detail leaked %q: %s", leaked, settingDetail.Body.String())
+		}
+	}
+	for _, expected := range []string{"smtp_password_set", "llm_api_key_set"} {
+		if !strings.Contains(settingDetail.Body.String(), expected) {
+			t.Fatalf("system setting detail missing %q presence flag: %s", expected, settingDetail.Body.String())
+		}
+	}
+
+	assertStatus(t, handler, http.MethodGet, "/api/admin/database-assets/missing-detail", nil, cookie, http.StatusNotFound)
 }
 
 func TestPlatformUserLoginAndAccessAuthorization(t *testing.T) {

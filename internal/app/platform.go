@@ -141,6 +141,22 @@ func (s *Server) handleCollection(w http.ResponseWriter, r *http.Request, collec
 			items = departmentTreeItems(platform)
 		}
 		writeJSON(w, http.StatusOK, map[string]any{"items": items})
+	case id != "" && r.Method == http.MethodGet:
+		if collection == "agent_gateways" {
+			s.refreshAgentGatewayStatuses()
+		}
+		items, err := s.cfg.Store.ListPlatformItems(collection)
+		if err != nil {
+			writeError(w, http.StatusInternalServerError, err.Error())
+			return
+		}
+		for _, item := range items {
+			if item.ID == id {
+				writeJSON(w, http.StatusOK, item)
+				return
+			}
+		}
+		writeError(w, http.StatusNotFound, "record not found")
 	case id == "" && r.Method == http.MethodPost:
 		var req model.PlatformItemRequest
 		if !decodeJSON(w, r, &req) {

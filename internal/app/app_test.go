@@ -3351,6 +3351,46 @@ func TestResourceOperationEndpoints(t *testing.T) {
 	if !strings.Contains(importAssetRec.Body.String(), `"created":1`) || !strings.Contains(importAssetRec.Body.String(), `"total":1`) {
 		t.Fatalf("asset import summary missing: %s", importAssetRec.Body.String())
 	}
+	skipAssetRec := assertStatus(t, handler, http.MethodPost, "/api/admin/assets/import", map[string]any{
+		"items": []map[string]any{{
+			"name":     "imported-rdp",
+			"type":     "windows",
+			"status":   "active",
+			"protocol": "rdp",
+			"host":     "192.0.2.20",
+			"port":     3389,
+		}},
+	}, cookie, http.StatusCreated)
+	if !strings.Contains(skipAssetRec.Body.String(), `"created":0`) || !strings.Contains(skipAssetRec.Body.String(), `"skipped":1`) {
+		t.Fatalf("asset import skip summary missing: %s", skipAssetRec.Body.String())
+	}
+	updateAssetRec := assertStatus(t, handler, http.MethodPost, "/api/admin/assets/import", map[string]any{
+		"update_existing": true,
+		"items": []map[string]any{{
+			"name":     "imported-rdp",
+			"type":     "windows",
+			"status":   "maintenance",
+			"protocol": "rdp",
+			"host":     "192.0.2.77",
+			"port":     3390,
+		}},
+	}, cookie, http.StatusCreated)
+	if !strings.Contains(updateAssetRec.Body.String(), `"updated":1`) || !strings.Contains(updateAssetRec.Body.String(), `"skipped":0`) {
+		t.Fatalf("asset import update summary missing: %s", updateAssetRec.Body.String())
+	}
+	listAssetsRec := assertStatus(t, handler, http.MethodGet, "/api/admin/assets", nil, cookie, http.StatusOK)
+	if strings.Count(listAssetsRec.Body.String(), "imported-rdp") != 1 || !strings.Contains(listAssetsRec.Body.String(), "192.0.2.77") || strings.Contains(listAssetsRec.Body.String(), "192.0.2.20") {
+		t.Fatalf("asset import should update existing asset without duplicates: %s", listAssetsRec.Body.String())
+	}
+	assertStatus(t, handler, http.MethodPost, "/api/admin/assets/import", map[string]any{
+		"items": []map[string]any{{
+			"name": "duplicate-in-file",
+			"host": "192.0.2.30",
+		}, {
+			"name": "duplicate-in-file",
+			"host": "192.0.2.31",
+		}},
+	}, cookie, http.StatusBadRequest)
 
 	storageRec := assertStatus(t, handler, http.MethodPost, "/api/admin/storages", map[string]any{
 		"name":   "team-drive",

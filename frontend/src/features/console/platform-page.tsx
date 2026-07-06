@@ -872,7 +872,8 @@ function ResourceOperationDialog({
 
 function AssetImportDialog({ onClose }: { onClose: () => void }) {
   const app = useApp()
-  const [content, setContent] = useState('{\n  "items": []\n}')
+  const [content, setContent] = useState('{\n  "update_existing": false,\n  "items": []\n}')
+  const [updateExisting, setUpdateExisting] = useState(false)
   const [saving, setSaving] = useState(false)
   const [summary, setSummary] = useState<ImportSummary | null>(null)
 
@@ -881,7 +882,11 @@ function AssetImportDialog({ onClose }: { onClose: () => void }) {
     setSummary(null)
     try {
       const parsed = JSON.parse(content) as unknown
-      const payload = Array.isArray(parsed) ? { items: parsed } : parsed
+      const payload = Array.isArray(parsed)
+        ? { update_existing: updateExisting, items: parsed }
+        : typeof parsed === 'object' && parsed !== null
+          ? { ...(parsed as Record<string, unknown>), update_existing: updateExisting }
+          : parsed
       const data = await apiRequest<{ items?: PlatformItem[]; summary?: ImportSummary }>('/api/admin/assets/import', { method: 'POST', body: JSON.stringify(payload) })
       setSummary(data.summary || { created: data.items?.length || 0, total: data.items?.length || 0 })
       await app.refresh(true)
@@ -897,6 +902,11 @@ function AssetImportDialog({ onClose }: { onClose: () => void }) {
     <DialogShell open onOpenChange={(open) => !open && onClose()} title='导入资产' description='粘贴导出的 JSON，或使用 {"items":[...]} 格式批量导入。'>
       <div className='grid gap-4'>
         <Field label='资产 JSON'><Textarea className='min-h-64 font-mono text-xs' value={content} onChange={(event) => { setContent(event.currentTarget.value); setSummary(null) }} /></Field>
+        <CheckboxRow
+          checked={updateExisting}
+          onChange={(checked) => { setUpdateExisting(checked); setSummary(null) }}
+          label='更新已有同名资产；关闭时自动跳过已有资产'
+        />
         {summary ? <ImportSummaryPanel summary={summary} /> : null}
         <div className='flex justify-end gap-2'>
           <Button variant='outline' onClick={onClose}>{summary ? '关闭' : '取消'}</Button>

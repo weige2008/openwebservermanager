@@ -31,7 +31,8 @@ import (
 )
 
 type importRequest struct {
-	Items []model.PlatformItemRequest `json:"items"`
+	Items          []model.PlatformItemRequest `json:"items"`
+	UpdateExisting bool                        `json:"update_existing"`
 }
 
 type userImportRequest struct {
@@ -294,8 +295,44 @@ func (s *Server) handleAssetImport(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "too many items")
 		return
 	}
-	created := make([]model.PlatformItem, 0, len(req.Items))
-	for _, itemReq := range req.Items {
+	existingAssets, err := s.cfg.Store.ListPlatformItems("assets")
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	existingByName := map[string]model.PlatformItem{}
+	for _, item := range existingAssets {
+		existingByName[strings.ToLower(strings.TrimSpace(item.Name))] = item
+	}
+	seen := map[string]bool{}
+	created := []model.PlatformItem{}
+	updated := []model.PlatformItem{}
+	skipped := []map[string]string{}
+	for index, itemReq := range req.Items {
+		itemReq.Name = strings.TrimSpace(itemReq.Name)
+		if itemReq.Name == "" {
+			writeError(w, http.StatusBadRequest, fmt.Sprintf("items[%d].name is required", index))
+			return
+		}
+		key := strings.ToLower(itemReq.Name)
+		if seen[key] {
+			writeError(w, http.StatusBadRequest, "duplicate asset name in import: "+itemReq.Name)
+			return
+		}
+		seen[key] = true
+		if existing, ok := existingByName[key]; ok {
+			if !req.UpdateExisting {
+				skipped = append(skipped, map[string]string{"name": itemReq.Name, "reason": "asset already exists"})
+				continue
+			}
+			item, err := s.cfg.Store.UpdatePlatformItem("assets", existing.ID, itemReq)
+			if err != nil {
+				writeError(w, http.StatusInternalServerError, err.Error())
+				return
+			}
+			updated = append(updated, item)
+			continue
+		}
 		item, err := s.cfg.Store.CreatePlatformItem("assets", itemReq)
 		if err != nil {
 			writeError(w, http.StatusInternalServerError, err.Error())
@@ -304,10 +341,17 @@ func (s *Server) handleAssetImport(w http.ResponseWriter, r *http.Request) {
 		created = append(created, item)
 	}
 	_ = s.audit(r, "assets.import", "assets", "", "imported assets")
+	items := append([]model.PlatformItem{}, created...)
+	items = append(items, updated...)
 	writeJSON(w, http.StatusCreated, map[string]any{
-		"items": created,
+		"items":   items,
+		"created": created,
+		"updated": updated,
+		"skipped": skipped,
 		"summary": map[string]int{
 			"created": len(created),
+			"updated": len(updated),
+			"skipped": len(skipped),
 			"total":   len(req.Items),
 		},
 	})

@@ -189,6 +189,7 @@ func (s *Server) proxyServicesResponse(item model.PlatformItem) map[string]any {
 	}
 	sshLiveAddress := s.sshGatewayAddress()
 	sshLastError := s.sshGatewayLastError()
+	sshListen := firstMetadataString(metadata, "ssh_listen_address", "listen_address")
 	rdpListen := firstMetadataString(metadata, "rdp_listen_address")
 	rdpAllowlist := metadataStrings(metadata["rdp_forward_allowlist"])
 	rdpLiveAddress := s.rdpProxyAddress()
@@ -204,10 +205,10 @@ func (s *Server) proxyServicesResponse(item model.PlatformItem) map[string]any {
 		"status": map[string]any{
 			"ssh_gateway": map[string]any{
 				"enabled":        sshEnabled,
-				"listen_address": firstMetadataString(metadata, "ssh_listen_address", "listen_address"),
+				"listen_address": sshListen,
 				"live_address":   sshLiveAddress,
-				"state":          proxyRuntimeState(sshEnabled, sshLiveAddress, sshLastError),
-				"last_error":     sshLastError,
+				"state":          sshGatewayProxyRuntimeState(sshEnabled, sshListen, sshLiveAddress, sshLastError),
+				"last_error":     sshGatewayProxyRuntimeError(sshEnabled, sshListen, sshLiveAddress, sshLastError),
 			},
 			"rdp_proxy": map[string]any{
 				"enabled":         rdpEnabled,
@@ -427,6 +428,44 @@ func proxyRuntimeState(enabled bool, liveAddress, lastError string) string {
 		return "running"
 	}
 	return "restart_required"
+}
+
+func sshGatewayProxyRuntimeState(enabled bool, listenAddress, liveAddress, lastError string) string {
+	if !enabled {
+		return "disabled"
+	}
+	if err := validateListenAddress(listenAddress); err != nil {
+		return "invalid_config"
+	}
+	if strings.TrimSpace(lastError) != "" {
+		return "error"
+	}
+	if strings.TrimSpace(liveAddress) != "" {
+		return "running"
+	}
+	if err := probeTCPListenAddress(listenAddress); err != nil {
+		return "port_unavailable"
+	}
+	return "restart_required"
+}
+
+func sshGatewayProxyRuntimeError(enabled bool, listenAddress, liveAddress, lastError string) string {
+	if !enabled {
+		return ""
+	}
+	if err := validateListenAddress(listenAddress); err != nil {
+		return err.Error()
+	}
+	if strings.TrimSpace(lastError) != "" {
+		return lastError
+	}
+	if strings.TrimSpace(liveAddress) != "" {
+		return ""
+	}
+	if err := probeTCPListenAddress(listenAddress); err != nil {
+		return err.Error()
+	}
+	return ""
 }
 
 func rdpProxyRuntimeState(enabled bool, listenAddress string, allowlist []string, liveAddress, lastError string) string {

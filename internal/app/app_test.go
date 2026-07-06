@@ -6557,6 +6557,34 @@ func TestProxyServiceRDPProxyReportsConfigErrors(t *testing.T) {
 	}
 }
 
+func TestProxyServiceSSHGatewayReportsConfigErrors(t *testing.T) {
+	handler, cookie := newTestHandler(t)
+
+	invalidRec := assertStatus(t, handler, http.MethodPost, "/api/admin/proxy-services", map[string]any{
+		"ssh_enabled":        true,
+		"ssh_listen_address": "not-a-listen-address",
+	}, cookie, http.StatusOK)
+	invalidBody := invalidRec.Body.String()
+	for _, want := range []string{`"state":"invalid_config"`, "address must be host:port", "not-a-listen-address"} {
+		if !strings.Contains(invalidBody, want) {
+			t.Fatalf("invalid ssh gateway response missing %s: %s", want, invalidBody)
+		}
+	}
+
+	listener, closeListener := startAppTestTCPListener(t)
+	defer closeListener()
+	occupiedRec := assertStatus(t, handler, http.MethodPost, "/api/admin/proxy-services", map[string]any{
+		"ssh_enabled":        true,
+		"ssh_listen_address": listener.Addr().String(),
+	}, cookie, http.StatusOK)
+	occupiedBody := occupiedRec.Body.String()
+	for _, want := range []string{`"state":"port_unavailable"`, listener.Addr().String()} {
+		if !strings.Contains(occupiedBody, want) {
+			t.Fatalf("occupied ssh gateway response missing %s: %s", want, occupiedBody)
+		}
+	}
+}
+
 func TestProxyServiceSettingsReloadSSHGatewayRuntime(t *testing.T) {
 	runtime := &fakeSSHGatewayRuntime{address: "127.0.0.1:22022"}
 	handler, cookie := newTestServer(t, func(cfg *Config) {

@@ -952,9 +952,14 @@ func (s *Server) handleStorageRename(w http.ResponseWriter, r *http.Request, roo
 		writeError(w, http.StatusNotFound, "source not found")
 		return
 	}
-	if _, err := os.Stat(destination); err == nil && !req.Overwrite {
-		writeError(w, http.StatusConflict, "destination exists")
-		return
+	if _, err := os.Stat(destination); err == nil {
+		if !req.Overwrite {
+			writeError(w, http.StatusConflict, "destination exists")
+			return
+		}
+		if !s.requireStoragePermission(w, r, storage.ID, "edit", destinationRel) {
+			return
+		}
 	}
 	if sameOrChildPath(source, destination) && sameOrChildPath(destination, source) {
 		writeError(w, http.StatusBadRequest, "source and destination are the same")
@@ -1006,9 +1011,14 @@ func (s *Server) handleStorageCopy(w http.ResponseWriter, r *http.Request, root 
 		writeError(w, http.StatusNotFound, "source not found")
 		return
 	}
-	if _, err := os.Stat(destination); err == nil && !req.Overwrite {
-		writeError(w, http.StatusConflict, "destination exists")
-		return
+	if _, err := os.Stat(destination); err == nil {
+		if !req.Overwrite {
+			writeError(w, http.StatusConflict, "destination exists")
+			return
+		}
+		if !s.requireStoragePermission(w, r, storage.ID, "edit", destinationRel) {
+			return
+		}
 	}
 	if sameOrChildPath(source, destination) && sameOrChildPath(destination, source) {
 		writeError(w, http.StatusBadRequest, "source and destination are the same")

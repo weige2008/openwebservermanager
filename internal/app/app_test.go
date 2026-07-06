@@ -4735,6 +4735,25 @@ func TestStorageAuthorizationStrategyPermissions(t *testing.T) {
 	}, adminCookie, http.StatusCreated)
 	assertStatus(t, handler, http.MethodPost, "/api/admin/storages/"+storage.ID+"/files-rename", map[string]any{"path": "open/rename-source.txt", "destination": "safe/rename-blocked.txt"}, userCookie, http.StatusForbidden)
 	assertStatus(t, handler, http.MethodPost, "/api/admin/storages/"+storage.ID+"/files-rename", map[string]any{"path": "open/rename-source.txt", "destination": "open/rename-ok.txt"}, userCookie, http.StatusOK)
+
+	assertStatus(t, handler, http.MethodPost, "/api/admin/storages/"+storage.ID+"/files-write", map[string]any{"path": "open/copy-source.txt", "content": "copy"}, adminCookie, http.StatusCreated)
+	assertStatus(t, handler, http.MethodPost, "/api/admin/storages/"+storage.ID+"/files-write", map[string]any{"path": "open/rename-overwrite-source.txt", "content": "rename"}, adminCookie, http.StatusCreated)
+	assertStatus(t, handler, http.MethodPost, "/api/admin/storages/"+storage.ID+"/files-write", map[string]any{"path": "safe/existing-copy.txt", "content": "existing"}, adminCookie, http.StatusCreated)
+	assertStatus(t, handler, http.MethodPost, "/api/admin/storages/"+storage.ID+"/files-write", map[string]any{"path": "safe/existing-rename.txt", "content": "existing"}, adminCookie, http.StatusCreated)
+	assertStatus(t, handler, http.MethodPost, "/api/admin/storages/"+storage.ID+"/files-write", map[string]any{"path": "open/existing-copy.txt", "content": "existing"}, adminCookie, http.StatusCreated)
+	assertStatus(t, handler, http.MethodPost, "/api/admin/storages/"+storage.ID+"/files-write", map[string]any{"path": "open/existing-rename.txt", "content": "existing"}, adminCookie, http.StatusCreated)
+	assertStatus(t, handler, http.MethodPost, "/api/admin/strategies", map[string]any{
+		"name":        "deny strategy-drive edit safe",
+		"type":        "file",
+		"status":      "enabled",
+		"target_id":   storage.ID,
+		"permissions": map[string]bool{"edit": false},
+		"metadata":    map[string]any{"path_prefix": "safe"},
+	}, adminCookie, http.StatusCreated)
+	assertStatus(t, handler, http.MethodPost, "/api/admin/storages/"+storage.ID+"/files-copy", map[string]any{"path": "open/copy-source.txt", "destination": "safe/existing-copy.txt", "overwrite": true}, userCookie, http.StatusForbidden)
+	assertStatus(t, handler, http.MethodPost, "/api/admin/storages/"+storage.ID+"/files-rename", map[string]any{"path": "open/rename-overwrite-source.txt", "destination": "safe/existing-rename.txt", "overwrite": true}, userCookie, http.StatusForbidden)
+	assertStatus(t, handler, http.MethodPost, "/api/admin/storages/"+storage.ID+"/files-copy", map[string]any{"path": "open/copy-source.txt", "destination": "open/existing-copy.txt", "overwrite": true}, userCookie, http.StatusCreated)
+	assertStatus(t, handler, http.MethodPost, "/api/admin/storages/"+storage.ID+"/files-rename", map[string]any{"path": "open/rename-overwrite-source.txt", "destination": "open/existing-rename.txt", "overwrite": true}, userCookie, http.StatusOK)
 }
 
 func TestStorageQuotaEnforcedAndUsageUpdated(t *testing.T) {

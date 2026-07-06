@@ -204,6 +204,18 @@ func nextCronRun(expr string, after time.Time) (time.Time, bool) {
 	if !ok || len(hours) == 0 {
 		return time.Time{}, false
 	}
+	daysOfMonth, dayOfMonthWildcard, ok := cronValuesWithWildcard(fields[3], 1, 31)
+	if !ok || len(daysOfMonth) == 0 {
+		return time.Time{}, false
+	}
+	months, _, ok := cronValuesWithWildcard(fields[4], 1, 12)
+	if !ok || len(months) == 0 {
+		return time.Time{}, false
+	}
+	daysOfWeek, dayOfWeekWildcard, ok := cronDayOfWeekValues(fields[5])
+	if !ok || len(daysOfWeek) == 0 {
+		return time.Time{}, false
+	}
 	start := after.UTC().Add(time.Second)
 	deadline := start.AddDate(1, 0, 0)
 	for candidate := time.Date(start.Year(), start.Month(), start.Day(), start.Hour(), start.Minute(), second, 0, time.UTC); candidate.Before(deadline); candidate = candidate.Add(time.Minute) {
@@ -211,6 +223,9 @@ func nextCronRun(expr string, after time.Time) (time.Time, bool) {
 			continue
 		}
 		if !containsInt(hours, candidate.Hour()) || !containsInt(minutes, candidate.Minute()) {
+			continue
+		}
+		if !cronDateMatches(candidate, daysOfMonth, dayOfMonthWildcard, months, daysOfWeek, dayOfWeekWildcard) {
 			continue
 		}
 		return candidate, true
@@ -227,13 +242,18 @@ func cronSingleValue(field string, min, max int) (int, bool) {
 }
 
 func cronValues(field string, min, max int) ([]int, bool) {
+	values, _, ok := cronValuesWithWildcard(field, min, max)
+	return values, ok
+}
+
+func cronValuesWithWildcard(field string, min, max int) ([]int, bool, bool) {
 	field = strings.TrimSpace(field)
 	if field == "*" || field == "?" {
 		values := make([]int, 0, max-min+1)
 		for value := min; value <= max; value++ {
 			values = append(values, value)
 		}
-		return values, true
+		return values, true, true
 	}
 	result := []int{}
 	for _, part := range strings.Split(field, ",") {
@@ -242,17 +262,17 @@ func cronValues(field string, min, max int) ([]int, bool) {
 		case strings.Contains(part, "/"):
 			pieces := strings.Split(part, "/")
 			if len(pieces) != 2 {
-				return nil, false
+				return nil, false, false
 			}
 			step, err := strconv.Atoi(strings.TrimSpace(pieces[1]))
 			if err != nil || step <= 0 {
-				return nil, false
+				return nil, false, false
 			}
 			start := min
 			if base := strings.TrimSpace(pieces[0]); base != "*" && base != "?" {
 				parsed, err := strconv.Atoi(base)
 				if err != nil || parsed < min || parsed > max {
-					return nil, false
+					return nil, false, false
 				}
 				start = parsed
 			}
@@ -262,15 +282,15 @@ func cronValues(field string, min, max int) ([]int, bool) {
 		case strings.Contains(part, "-"):
 			pieces := strings.Split(part, "-")
 			if len(pieces) != 2 {
-				return nil, false
+				return nil, false, false
 			}
 			start, err := strconv.Atoi(strings.TrimSpace(pieces[0]))
 			if err != nil {
-				return nil, false
+				return nil, false, false
 			}
 			end, err := strconv.Atoi(strings.TrimSpace(pieces[1]))
 			if err != nil || start < min || end > max || start > end {
-				return nil, false
+				return nil, false, false
 			}
 			for value := start; value <= end; value++ {
 				result = append(result, value)
@@ -278,15 +298,46 @@ func cronValues(field string, min, max int) ([]int, bool) {
 		default:
 			value, err := strconv.Atoi(part)
 			if err != nil || value < min || value > max {
-				return nil, false
+				return nil, false, false
 			}
 			result = append(result, value)
 		}
 	}
 	if len(result) == 0 {
-		return nil, false
+		return nil, false, false
 	}
-	return uniqueSortedInts(result), true
+	return uniqueSortedInts(result), false, true
+}
+
+func cronDayOfWeekValues(field string) ([]int, bool, bool) {
+	values, wildcard, ok := cronValuesWithWildcard(field, 0, 7)
+	if !ok {
+		return nil, false, false
+	}
+	for index, value := range values {
+		if value == 7 {
+			values[index] = 0
+		}
+	}
+	return uniqueSortedInts(values), wildcard, true
+}
+
+func cronDateMatches(candidate time.Time, daysOfMonth []int, dayOfMonthWildcard bool, months []int, daysOfWeek []int, dayOfWeekWildcard bool) bool {
+	if !containsInt(months, int(candidate.Month())) {
+		return false
+	}
+	dayOfMonthMatches := containsInt(daysOfMonth, candidate.Day())
+	dayOfWeekMatches := containsInt(daysOfWeek, int(candidate.Weekday()))
+	if !dayOfMonthWildcard && !dayOfWeekWildcard {
+		return dayOfMonthMatches || dayOfWeekMatches
+	}
+	if !dayOfMonthWildcard && !dayOfMonthMatches {
+		return false
+	}
+	if !dayOfWeekWildcard && !dayOfWeekMatches {
+		return false
+	}
+	return true
 }
 
 func uniqueSortedInts(values []int) []int {

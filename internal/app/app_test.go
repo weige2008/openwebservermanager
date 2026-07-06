@@ -7598,6 +7598,46 @@ func TestScheduledTaskScheduleParsing(t *testing.T) {
 		t.Fatalf("daily cron run = %s, want %s", next, want)
 	}
 
+	next, ok = nextCronRun("0 0 0 1 * ?", now)
+	if !ok {
+		t.Fatal("expected monthly cron to parse")
+	}
+	want = time.Date(2026, 8, 1, 0, 0, 0, 0, time.UTC)
+	if !next.Equal(want) {
+		t.Fatalf("monthly cron run = %s, want %s", next, want)
+	}
+
+	next, ok = nextCronRun("0 0 0 1 9 ?", now)
+	if !ok {
+		t.Fatal("expected month-filtered cron to parse")
+	}
+	want = time.Date(2026, 9, 1, 0, 0, 0, 0, time.UTC)
+	if !next.Equal(want) {
+		t.Fatalf("month-filtered cron run = %s, want %s", next, want)
+	}
+
+	next, ok = nextCronRun("0 30 9 ? * 1", time.Date(2026, 7, 7, 8, 0, 0, 0, time.UTC))
+	if !ok {
+		t.Fatal("expected weekday cron to parse")
+	}
+	want = time.Date(2026, 7, 13, 9, 30, 0, 0, time.UTC)
+	if !next.Equal(want) {
+		t.Fatalf("weekday cron run = %s, want %s", next, want)
+	}
+
+	next, ok = nextCronRun("0 0 8 ? * 7", time.Date(2026, 7, 4, 9, 0, 0, 0, time.UTC))
+	if !ok {
+		t.Fatal("expected sunday cron to parse")
+	}
+	want = time.Date(2026, 7, 5, 8, 0, 0, 0, time.UTC)
+	if !next.Equal(want) {
+		t.Fatalf("sunday cron run = %s, want %s", next, want)
+	}
+
+	if _, ok := nextCronRun("0 0 0 32 * ?", now); ok {
+		t.Fatal("invalid day-of-month cron unexpectedly parsed")
+	}
+
 	intervalNext, ok := nextScheduledTaskRunAfter(model.PlatformItem{Metadata: map[string]any{"interval_seconds": 30}}, now)
 	if !ok {
 		t.Fatal("expected interval schedule to parse")

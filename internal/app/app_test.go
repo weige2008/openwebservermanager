@@ -3705,6 +3705,7 @@ func TestAgentGatewayRegistrationHeartbeatAndTimeout(t *testing.T) {
 
 func TestResourceOperationEndpoints(t *testing.T) {
 	handler, cookie := newTestHandler(t)
+	server := handler.(*Server)
 
 	assetRec := assertStatus(t, handler, http.MethodPost, "/api/admin/assets", map[string]any{
 		"name":     "linux-export",
@@ -3810,6 +3811,25 @@ func TestResourceOperationEndpoints(t *testing.T) {
 	if cert.Metadata["has_private_key"] != true {
 		t.Fatalf("self-signed certificate response missing private key flag: %#v", cert.Metadata)
 	}
+	rawCert, ok, err := server.cfg.Store.GetPlatformItem("certificates", cert.ID)
+	if err != nil || !ok {
+		t.Fatalf("load raw self-signed certificate: ok=%v err=%v", ok, err)
+	}
+	if firstMetadataString(rawCert.Metadata, "private_key", "privateKey", "key", "private_key_pem") != "" {
+		t.Fatalf("raw self-signed certificate retained plaintext private key: %#v", rawCert.Metadata)
+	}
+	encryptedPrivateKey := firstMetadataString(rawCert.Metadata, "certificate_private_key_encrypted")
+	privateKeySet, _ := metadataBoolValue(rawCert.Metadata["private_key_set"])
+	if encryptedPrivateKey == "" || !privateKeySet || rawCert.Metadata["has_private_key"] != true {
+		t.Fatalf("raw self-signed certificate did not store encrypted private key state: %#v", rawCert.Metadata)
+	}
+	decryptedPrivateKey, err := server.cfg.Store.DecryptPlatformSecret(encryptedPrivateKey)
+	if err != nil {
+		t.Fatalf("decrypt raw self-signed certificate private key: %v", err)
+	}
+	if !strings.Contains(decryptedPrivateKey, "BEGIN RSA PRIVATE KEY") {
+		t.Fatal("decrypted self-signed private key did not contain PEM material")
+	}
 	for _, leaked := range []string{"PRIVATE KEY", `"private_key"`} {
 		if strings.Contains(certRec.Body.String(), leaked) {
 			t.Fatalf("self-signed certificate response leaked %s", leaked)
@@ -3852,6 +3872,15 @@ func TestResourceOperationEndpoints(t *testing.T) {
 	}, cookie, http.StatusCreated)
 	if !strings.Contains(uploadedCertRec.Body.String(), `"has_private_key":true`) {
 		t.Fatal("uploaded certificate response did not mark private key state")
+	}
+	var uploadedCert model.PlatformItem
+	decodeResponse(t, uploadedCertRec, &uploadedCert)
+	rawUploadedCert, ok, err := server.cfg.Store.GetPlatformItem("certificates", uploadedCert.ID)
+	if err != nil || !ok {
+		t.Fatalf("load raw uploaded certificate: ok=%v err=%v", ok, err)
+	}
+	if firstMetadataString(rawUploadedCert.Metadata, "private_key", "privateKey", "key", "private_key_pem") != "" || firstMetadataString(rawUploadedCert.Metadata, "certificate_private_key_encrypted") == "" {
+		t.Fatalf("raw uploaded certificate private key was not encrypted: %#v", rawUploadedCert.Metadata)
 	}
 	for _, leaked := range []string{"PRIVATE KEY", `"private_key"`} {
 		if strings.Contains(uploadedCertRec.Body.String(), leaked) {
@@ -3924,6 +3953,13 @@ func TestResourceOperationEndpoints(t *testing.T) {
 	}
 	if acmeCert.Metadata["certificate"] == "" || acmeCert.Metadata["expires_at"] == nil || acmeCert.Metadata["acme_http_url"] == "" {
 		t.Fatalf("acme response missing certificate metadata: %#v", acmeCert.Metadata)
+	}
+	rawACMECert, ok, err := server.cfg.Store.GetPlatformItem("certificates", acmeCert.ID)
+	if err != nil || !ok {
+		t.Fatalf("load raw acme certificate: ok=%v err=%v", ok, err)
+	}
+	if firstMetadataString(rawACMECert.Metadata, "private_key", "privateKey", "key", "private_key_pem") != "" || firstMetadataString(rawACMECert.Metadata, "certificate_private_key_encrypted") == "" {
+		t.Fatalf("raw acme certificate private key was not encrypted: %#v", rawACMECert.Metadata)
 	}
 	for _, leaked := range []string{"PRIVATE KEY", `"private_key"`, "dns-secret-token"} {
 		if strings.Contains(acmeRec.Body.String(), leaked) {
@@ -4634,12 +4670,31 @@ func TestBackupRestoreMigratesPlaintextPlatformSecrets(t *testing.T) {
 		CreatedAt: now,
 		UpdatedAt: now,
 	}
+	certPEM, certPrivateKeyPEM, err := makeSelfSignedCertificate(certificateRequest{Domain: "restore-cert.example.test", Days: 30})
+	if err != nil {
+		_ = db.Close()
+		t.Fatalf("make restore certificate: %v", err)
+	}
+	certificateItem := model.PlatformItem{
+		ID:     "restore_plain_certificate",
+		Name:   "restored plaintext certificate",
+		Type:   "self-signed",
+		Status: "issued",
+		Metadata: map[string]any{
+			"certificate":     string(certPEM),
+			"private_key":     string(certPrivateKeyPEM),
+			"has_private_key": true,
+		},
+		CreatedAt: now,
+		UpdatedAt: now,
+	}
 	for _, record := range []struct {
 		collection string
 		item       model.PlatformItem
 	}{
 		{collection: "database_assets", item: databaseAsset},
 		{collection: "system_settings", item: systemSetting},
+		{collection: "certificates", item: certificateItem},
 	} {
 		payload, err := json.Marshal(record.item)
 		if err != nil {
@@ -4684,12 +4739,12 @@ func TestBackupRestoreMigratesPlaintextPlatformSecrets(t *testing.T) {
 
 	restoreRec := assertMultipartStatus(t, handler, "/api/admin/backups/restore", nil, "legacy-plaintext-secrets.zip", backup.Bytes(), cookie, http.StatusOK)
 	restoreBody := restoreRec.Body.String()
-	for _, leaked := range []string{"restore-secret", "restore-smtp-secret", "restore-llm-secret", "restore-dns-secret", "postgres://restore_user"} {
+	for _, leaked := range []string{"restore-secret", "restore-smtp-secret", "restore-llm-secret", "restore-dns-secret", "postgres://restore_user", "PRIVATE KEY"} {
 		if strings.Contains(restoreBody, leaked) {
 			t.Fatalf("backup restore response leaked %q: %s", leaked, restoreBody)
 		}
 	}
-	if !strings.Contains(restoreBody, `"restored":true`) || !strings.Contains(restoreBody, `"migrated_platform_secrets":2`) {
+	if !strings.Contains(restoreBody, `"restored":true`) || !strings.Contains(restoreBody, `"migrated_platform_secrets":3`) {
 		t.Fatalf("backup restore response did not report migrated secrets: %s", restoreBody)
 	}
 
@@ -4744,6 +4799,25 @@ func TestBackupRestoreMigratesPlaintextPlatformSecrets(t *testing.T) {
 	llmAPIKey, ok, err := server.cfg.Store.SystemSettingLLMAPIKey(systemSetting.ID)
 	if err != nil || !ok || llmAPIKey != "restore-llm-secret" {
 		t.Fatalf("restored llm api key = %q ok=%v err=%v", llmAPIKey, ok, err)
+	}
+
+	rawCertificate, ok, err := server.cfg.Store.GetPlatformItem("certificates", certificateItem.ID)
+	if err != nil || !ok {
+		t.Fatalf("load restored certificate: ok=%v err=%v", ok, err)
+	}
+	if firstMetadataString(rawCertificate.Metadata, "private_key", "privateKey", "key", "private_key_pem") != "" {
+		t.Fatalf("restored certificate retained plaintext private key: %#v", rawCertificate.Metadata)
+	}
+	encryptedCertificateKey := firstMetadataString(rawCertificate.Metadata, "certificate_private_key_encrypted")
+	if encryptedCertificateKey == "" || rawCertificate.Metadata["has_private_key"] != true {
+		t.Fatalf("restored certificate did not encrypt private key: %#v", rawCertificate.Metadata)
+	}
+	decryptedCertificateKey, err := server.cfg.Store.DecryptPlatformSecret(encryptedCertificateKey)
+	if err != nil {
+		t.Fatalf("decrypt restored certificate private key: %v", err)
+	}
+	if strings.TrimSpace(decryptedCertificateKey) != strings.TrimSpace(string(certPrivateKeyPEM)) {
+		t.Fatal("restored certificate private key did not decrypt to original PEM")
 	}
 
 	databaseDetailRec := assertStatus(t, handler, http.MethodGet, "/api/admin/database-assets/"+databaseAsset.ID, nil, newCookie, http.StatusOK)

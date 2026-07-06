@@ -2064,6 +2064,10 @@ func (s *Server) handleCertificateBundleDownload(w http.ResponseWriter, r *http.
 		writeError(w, http.StatusNotFound, "certificate not found")
 		return
 	}
+	if err := s.decryptCertificatePrivateKey(&item); err != nil {
+		writeError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
 	bundle, err := certificateBundleZip(item)
 	if err != nil {
 		writeError(w, http.StatusNotFound, err.Error())
@@ -2073,6 +2077,24 @@ func (s *Server) handleCertificateBundleDownload(w http.ResponseWriter, r *http.
 	w.Header().Set("Content-Type", "application/zip")
 	w.Header().Set("Content-Disposition", "attachment; filename=\""+id+".zip\"")
 	_, _ = w.Write(bundle)
+}
+
+func (s *Server) decryptCertificatePrivateKey(item *model.PlatformItem) error {
+	if item.Metadata == nil || firstMetadataString(item.Metadata, "private_key", "privateKey", "key", "private_key_pem") != "" {
+		return nil
+	}
+	encrypted := firstMetadataString(item.Metadata, "certificate_private_key_encrypted")
+	if encrypted == "" {
+		return nil
+	}
+	privateKey, err := s.cfg.Store.DecryptPlatformSecret(encrypted)
+	if err != nil {
+		return fmt.Errorf("decrypt certificate private key: %w", err)
+	}
+	metadata := cloneMetadata(item.Metadata)
+	metadata["private_key"] = privateKey
+	item.Metadata = metadata
+	return nil
 }
 
 func certificateBundleZip(item model.PlatformItem) ([]byte, error) {
@@ -2297,9 +2319,15 @@ func sanitizeCertificateItem(item *model.PlatformItem) {
 			item.Metadata["mtls_client_ca_set"] = true
 		}
 	}
+	if _, ok := item.Metadata["private_key_set"]; !ok {
+		if firstMetadataString(item.Metadata, "private_key", "privateKey", "key", "private_key_pem", "certificate_private_key_encrypted") != "" {
+			item.Metadata["private_key_set"] = true
+		}
+	}
 	for _, key := range []string{
 		"private_key",
 		"privateKey",
+		"certificate_private_key_encrypted",
 		"mtls_client_ca",
 		"client_ca",
 		"dns_api_token",

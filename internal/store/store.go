@@ -862,6 +862,9 @@ func (s *Store) UpdatePlatformItem(collection, id string, req model.PlatformItem
 	existingAgentTokenHash, _ := item.Metadata["agent_token_hash"].(string)
 	existingCredentialSecrets := copyMetadataSecrets(item.Metadata, "encrypted_password", "encrypted_private_key", "encrypted_passphrase")
 	existingSystemSettingSecrets := copyMetadataSecrets(item.Metadata, "smtp_password_encrypted", "llm_api_key_encrypted", "oidc_client_secret_encrypted", "ldap_bind_password_encrypted", "wecom_agent_secret_encrypted", "dns_api_token_encrypted", "proxy_private_key_encrypted")
+	existingCertificateSecrets := copyMetadataSecrets(item.Metadata, "certificate_private_key_encrypted")
+	existingCertificatePlainPrivateKey := firstMetadataString(item.Metadata, certificatePrivateKeyPlainKeys...)
+	existingCertificateSecretState := copyMetadataValues(item.Metadata, "has_private_key", "private_key_set", "private_key_updated_at", "private_key_filename")
 	existingDatabaseAssetSecrets := copyMetadataSecrets(item.Metadata, "database_dsn_encrypted")
 	existingDatabaseAssetPlainDSN := firstMetadataString(item.Metadata, databaseAssetDSNPlainKeys...)
 	existingDatabaseAssetSecretState := copyMetadataValues(item.Metadata, "database_dsn_set", "database_dsn_updated_at")
@@ -933,6 +936,18 @@ func (s *Store) UpdatePlatformItem(collection, id string, req model.PlatformItem
 			}
 			restoreMetadataAnyValues(item.Metadata, existingSystemSettingSecretState)
 		}
+		if collection == "certificates" {
+			for key, value := range existingCertificateSecrets {
+				delete(item.Metadata, key)
+				if value != "" {
+					item.Metadata[key] = value
+				}
+			}
+			restoreMetadataAnyValues(item.Metadata, existingCertificateSecretState)
+			if existingCertificateSecrets["certificate_private_key_encrypted"] == "" && existingCertificatePlainPrivateKey != "" && firstMetadataString(item.Metadata, certificatePrivateKeyPlainKeys...) == "" {
+				item.Metadata["private_key"] = existingCertificatePlainPrivateKey
+			}
+		}
 		if collection == "database_assets" {
 			for key, value := range existingDatabaseAssetSecrets {
 				delete(item.Metadata, key)
@@ -974,6 +989,9 @@ func (s *Store) SavePlatformItem(collection string, item model.PlatformItem) (mo
 	item.UpdatedAt = time.Now().UTC()
 	if item.CreatedAt.IsZero() {
 		item.CreatedAt = item.UpdatedAt
+	}
+	if err := s.applyPlatformSecrets(collection, model.PlatformItemRequest{}, &item, false); err != nil {
+		return model.PlatformItem{}, err
 	}
 	return s.createPlatformItem(collection, item)
 }
@@ -1165,6 +1183,8 @@ func (s *Store) applyPlatformSecrets(collection string, req model.PlatformItemRe
 		return applyAgentGatewayPlatformSecret(item, creating)
 	case "credentials":
 		return s.applyCredentialPlatformSecret(req, item, creating)
+	case "certificates":
+		return s.applyCertificatePlatformSecret(item, creating)
 	case "database_assets":
 		return s.applyDatabaseAssetPlatformSecret(item, creating)
 	case "system_settings":
@@ -1311,6 +1331,38 @@ func (s *Store) applyCredentialPlatformSecret(req model.PlatformItemRequest, ite
 		}
 		item.Metadata["encrypted_passphrase"] = encrypted
 	}
+	return nil
+}
+
+var certificatePrivateKeyPlainKeys = []string{"private_key", "privateKey", "key", "private_key_pem", "plain_private_key"}
+
+func (s *Store) applyCertificatePlatformSecret(item *model.PlatformItem, creating bool) error {
+	if item.Metadata == nil {
+		item.Metadata = map[string]any{}
+	}
+	privateKey := firstMetadataString(item.Metadata, certificatePrivateKeyPlainKeys...)
+	for _, key := range certificatePrivateKeyPlainKeys {
+		delete(item.Metadata, key)
+	}
+	if privateKey == "" {
+		if creating {
+			delete(item.Metadata, "certificate_private_key_encrypted")
+			delete(item.Metadata, "private_key_set")
+			delete(item.Metadata, "private_key_updated_at")
+		}
+		return nil
+	}
+	if len(privateKey) > 256*1024 {
+		return errors.New("certificate private key is too large")
+	}
+	encrypted, err := s.cipher.EncryptString(privateKey)
+	if err != nil {
+		return err
+	}
+	item.Metadata["certificate_private_key_encrypted"] = encrypted
+	item.Metadata["has_private_key"] = true
+	item.Metadata["private_key_set"] = true
+	item.Metadata["private_key_updated_at"] = time.Now().UTC().Format(time.RFC3339Nano)
 	return nil
 }
 
@@ -1926,6 +1978,7 @@ var sensitiveMetadataKeys = map[string]struct{}{
 	"plain_password":                           {},
 	"plain_private_key":                        {},
 	"plain_passphrase":                         {},
+	"certificate_private_key_encrypted":        {},
 	"smtp_password":                            {},
 	"smtpPassword":                             {},
 	"plain_smtp_password":                      {},

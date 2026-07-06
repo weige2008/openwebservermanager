@@ -1051,7 +1051,7 @@ function BulkAuthorizeDialog({ collection, items, onClose }: { collection: strin
         </Field>
         {summary ? (
           <div className='rounded-lg border border-border bg-muted/30 p-3 text-xs text-muted-foreground'>
-            创建 {summary.created || 0}，跳过 {summary.skipped || 0}，总计 {summary.total || 0}
+            创建 {summary.created || 0}，更新 {summary.updated || 0}，跳过 {summary.skipped || 0}，总计 {summary.total || 0}
           </div>
         ) : null}
         <div className='flex justify-end gap-2'>

@@ -1206,6 +1206,35 @@ func TestBulkAuthorizationGrantsAccessAcrossResourceTypes(t *testing.T) {
 	if strings.Contains(accessBody, expiredAsset.ID) {
 		t.Fatalf("expired bulk authorization exposed asset: %s", accessBody)
 	}
+	renewRec := assertStatus(t, handler, http.MethodPost, "/api/admin/authorizations/assets/bulk", map[string]any{
+		"subject_ids": []string{user.ID},
+		"target_ids":  []string{expiredAsset.ID},
+		"expires_at":  time.Now().Add(time.Hour).UTC().Format(time.RFC3339),
+	}, adminCookie, http.StatusCreated)
+	if !strings.Contains(renewRec.Body.String(), `"updated":1`) || !strings.Contains(renewRec.Body.String(), `"created":0`) {
+		t.Fatalf("expired bulk authorization was not renewed: %s", renewRec.Body.String())
+	}
+	renewedAccessRec := assertStatus(t, handler, http.MethodGet, "/api/access/assets", nil, userCookie, http.StatusOK)
+	if !strings.Contains(renewedAccessRec.Body.String(), expiredAsset.ID) {
+		t.Fatalf("renewed bulk authorization did not expose asset: %s", renewedAccessRec.Body.String())
+	}
+	authorizationsRec := assertStatus(t, handler, http.MethodGet, "/api/admin/authorizations/assets", nil, adminCookie, http.StatusOK)
+	var authorizationsList struct {
+		Items []model.PlatformItem `json:"items"`
+	}
+	decodeResponse(t, authorizationsRec, &authorizationsList)
+	expiredGrantCount := 0
+	for _, item := range authorizationsList.Items {
+		if item.OwnerID == user.ID && item.TargetID == expiredAsset.ID {
+			expiredGrantCount++
+			if !authorizationRecordActive(item) {
+				t.Fatalf("renewed authorization should be active: %#v", item)
+			}
+		}
+	}
+	if expiredGrantCount != 1 {
+		t.Fatalf("renewed bulk authorization should update existing grant, got %d records", expiredGrantCount)
+	}
 	operationRec := assertStatus(t, handler, http.MethodGet, "/api/admin/audit/operation-logs", nil, adminCookie, http.StatusOK)
 	operationBody := operationRec.Body.String()
 	for _, want := range []string{"authorized_assets.bulk_create", "authorized_web_assets.bulk_create", "authorized_database_assets.bulk_create"} {

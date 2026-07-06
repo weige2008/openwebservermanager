@@ -478,9 +478,10 @@ func (s *Server) handleAuthorizationBulk(w http.ResponseWriter, r *http.Request,
 		writeError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
-	existingPairs := map[string]bool{}
+	existingPairs := map[string][]model.PlatformItem{}
 	for _, item := range existing {
-		existingPairs[authorizationBulkPairKey(item.OwnerID, item.TargetID)] = true
+		pairKey := authorizationBulkPairKey(item.OwnerID, item.TargetID)
+		existingPairs[pairKey] = append(existingPairs[pairKey], item)
 	}
 	status := strings.TrimSpace(req.Status)
 	if status == "" {
@@ -495,11 +496,13 @@ func (s *Server) handleAuthorizationBulk(w http.ResponseWriter, r *http.Request,
 		namePrefix = "Bulk authorization"
 	}
 	created := []model.PlatformItem{}
+	updated := []model.PlatformItem{}
 	skipped := []map[string]string{}
 	for _, subjectID := range subjects {
 		for _, targetID := range targets {
 			pairKey := authorizationBulkPairKey(subjectID, targetID)
-			if existingPairs[pairKey] {
+			existingForPair := existingPairs[pairKey]
+			if activeAuthorizationExists(existingForPair) {
 				skipped = append(skipped, map[string]string{"subject_id": subjectID, "target_id": targetID, "reason": "authorization already exists"})
 				continue
 			}
@@ -507,11 +510,12 @@ func (s *Server) handleAuthorizationBulk(w http.ResponseWriter, r *http.Request,
 			metadata["source"] = "bulk_authorization"
 			metadata["subject_id"] = subjectID
 			metadata["target_id"] = targetID
-			metadata["created_by"] = s.currentUserID(r)
+			currentUserID := s.currentUserID(r)
+			metadata["created_by"] = currentUserID
 			if strings.TrimSpace(req.ExpiresAt) != "" {
 				metadata["expires_at"] = strings.TrimSpace(req.ExpiresAt)
 			}
-			item, err := s.cfg.Store.CreatePlatformItem(collection, model.PlatformItemRequest{
+			itemReq := model.PlatformItemRequest{
 				Name:     namePrefix + " " + subjectID + " -> " + targetID,
 				Type:     authType,
 				Status:   status,
@@ -519,25 +523,48 @@ func (s *Server) handleAuthorizationBulk(w http.ResponseWriter, r *http.Request,
 				OwnerID:  subjectID,
 				TargetID: targetID,
 				Metadata: metadata,
-			})
+			}
+			if len(existingForPair) > 0 {
+				metadata["updated_by"] = currentUserID
+				item, err := s.cfg.Store.UpdatePlatformItem(collection, existingForPair[0].ID, itemReq)
+				if err != nil {
+					writeError(w, http.StatusInternalServerError, err.Error())
+					return
+				}
+				existingPairs[pairKey] = append(existingPairs[pairKey], item)
+				updated = append(updated, item)
+				continue
+			}
+			item, err := s.cfg.Store.CreatePlatformItem(collection, itemReq)
 			if err != nil {
 				writeError(w, http.StatusInternalServerError, err.Error())
 				return
 			}
-			existingPairs[pairKey] = true
+			existingPairs[pairKey] = append(existingPairs[pairKey], item)
 			created = append(created, item)
 		}
 	}
 	_ = s.audit(r, collection+".bulk_create", collection, protocol, "bulk created authorizations")
 	writeJSON(w, http.StatusCreated, map[string]any{
 		"created": created,
+		"updated": updated,
 		"skipped": skipped,
 		"summary": map[string]int{
 			"created": len(created),
+			"updated": len(updated),
 			"skipped": len(skipped),
 			"total":   len(subjects) * len(targets),
 		},
 	})
+}
+
+func activeAuthorizationExists(items []model.PlatformItem) bool {
+	for _, item := range items {
+		if authorizationRecordActive(item) {
+			return true
+		}
+	}
+	return false
 }
 
 func authorizationBulkCollection(route string) (string, model.Protocol, bool) {

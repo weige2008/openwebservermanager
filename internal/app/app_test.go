@@ -639,7 +639,7 @@ func TestAccessMFAWebAssetPreflightUnlocksProxy(t *testing.T) {
 func TestPasskeyRegistrationAndLogin(t *testing.T) {
 	handler, adminCookie := newTestHandler(t)
 
-	privateKey, credentialID := registerTestPasskey(t, handler, adminCookie, "admin")
+	privateKey, credentialID, passkey := registerTestPasskeyWithCredentialID(t, handler, adminCookie, "admin", []byte("admin-passkey-credential"))
 
 	listRec := assertStatus(t, handler, http.MethodGet, "/api/auth/passkeys", nil, adminCookie, http.StatusOK)
 	if strings.Contains(listRec.Body.String(), "public_key_x") || strings.Contains(listRec.Body.String(), "public_key_y") {
@@ -649,6 +649,7 @@ func TestPasskeyRegistrationAndLogin(t *testing.T) {
 	loginOptions := testPasskeyLoginOptions(t, handler, "admin")
 	assertionPayload := testPasskeyAssertionPayload(t, loginOptions.ChallengeID, loginOptions.PublicKey.Challenge, loginOptions.PublicKey.RPID, credentialID, privateKey, 2, false)
 	loginRec := assertStatus(t, handler, http.MethodPost, "/api/auth/passkeys/login/verify", assertionPayload, nil, http.StatusOK)
+	assertStatus(t, handler, http.MethodPost, "/api/auth/passkeys/login/verify", assertionPayload, nil, http.StatusUnauthorized)
 	cookies := loginRec.Result().Cookies()
 	if len(cookies) == 0 {
 		t.Fatal("passkey login did not set auth cookie")
@@ -663,6 +664,23 @@ func TestPasskeyRegistrationAndLogin(t *testing.T) {
 	badOptions := testPasskeyLoginOptions(t, handler, "admin")
 	badPayload := testPasskeyAssertionPayload(t, badOptions.ChallengeID, badOptions.PublicKey.Challenge, badOptions.PublicKey.RPID, credentialID, privateKey, 3, true)
 	assertStatus(t, handler, http.MethodPost, "/api/auth/passkeys/login/verify", badPayload, nil, http.StatusUnauthorized)
+
+	assertStatus(t, handler, http.MethodPost, "/api/admin/users", map[string]any{
+		"name":     "passkey-user",
+		"type":     "local",
+		"status":   "enabled",
+		"password": "password123",
+		"metadata": map[string]any{"role": "user"},
+	}, adminCookie, http.StatusCreated)
+	otherLoginRec := assertStatus(t, handler, http.MethodPost, "/api/auth/login", map[string]any{"username": "passkey-user", "password": "password123"}, nil, http.StatusOK)
+	otherCookie := otherLoginRec.Result().Cookies()[0]
+	_, _, otherPasskey := registerTestPasskeyWithCredentialID(t, handler, otherCookie, "passkey-user", []byte("other-passkey-credential"))
+
+	assertStatus(t, handler, http.MethodDelete, "/api/auth/passkeys/"+passkey.ID, nil, otherCookie, http.StatusNotFound)
+	assertStatus(t, handler, http.MethodDelete, "/api/auth/passkeys/"+otherPasskey.ID, nil, adminCookie, http.StatusNotFound)
+	assertStatus(t, handler, http.MethodDelete, "/api/auth/passkeys/"+passkey.ID, nil, adminCookie, http.StatusOK)
+	assertStatus(t, handler, http.MethodPost, "/api/auth/passkeys/login/options", map[string]any{"username": "admin"}, nil, http.StatusUnauthorized)
+	assertStatus(t, handler, http.MethodDelete, "/api/auth/passkeys/"+otherPasskey.ID, nil, otherCookie, http.StatusOK)
 }
 
 func TestUserImportCreatesSkipsAndUpdatesLoginUsers(t *testing.T) {
@@ -5664,6 +5682,12 @@ type testPasskeyRequestOptionsResponse struct {
 
 func registerTestPasskey(t *testing.T, handler http.Handler, cookie *http.Cookie, username string) (*ecdsa.PrivateKey, []byte) {
 	t.Helper()
+	privateKey, credentialID, _ := registerTestPasskeyWithCredentialID(t, handler, cookie, username, []byte("test-passkey-credential"))
+	return privateKey, credentialID
+}
+
+func registerTestPasskeyWithCredentialID(t *testing.T, handler http.Handler, cookie *http.Cookie, username string, credentialID []byte) (*ecdsa.PrivateKey, []byte, passkeyPublicItem) {
+	t.Helper()
 	optionsRec := assertStatus(t, handler, http.MethodPost, "/api/auth/passkeys/register/options", map[string]any{}, cookie, http.StatusOK)
 	var options testPasskeyCreationOptionsResponse
 	decodeResponse(t, optionsRec, &options)
@@ -5671,10 +5695,19 @@ func registerTestPasskey(t *testing.T, handler http.Handler, cookie *http.Cookie
 	if err != nil {
 		t.Fatalf("generate passkey key: %v", err)
 	}
-	credentialID := []byte("test-passkey-credential")
+	payload := testPasskeyRegistrationPayload(t, options, username, credentialID, privateKey)
+	verifyRec := assertStatus(t, handler, http.MethodPost, "/api/auth/passkeys/register/verify", payload, cookie, http.StatusCreated)
+	assertStatus(t, handler, http.MethodPost, "/api/auth/passkeys/register/verify", payload, cookie, http.StatusUnauthorized)
+	var item passkeyPublicItem
+	decodeResponse(t, verifyRec, &item)
+	return privateKey, credentialID, item
+}
+
+func testPasskeyRegistrationPayload(t *testing.T, options testPasskeyCreationOptionsResponse, username string, credentialID []byte, privateKey *ecdsa.PrivateKey) map[string]any {
+	t.Helper()
 	clientData := testPasskeyClientData(t, "webauthn.create", options.PublicKey.Challenge)
 	attestation := testPasskeyAttestation(t, options.PublicKey.RP.ID, credentialID, privateKey, 1)
-	payload := map[string]any{
+	return map[string]any{
 		"challenge_id": options.ChallengeID,
 		"name":         username + " test passkey",
 		"id":           passkeyBase64Encode(credentialID),
@@ -5685,8 +5718,6 @@ func registerTestPasskey(t *testing.T, handler http.Handler, cookie *http.Cookie
 			"attestation_object": passkeyBase64Encode(attestation),
 		},
 	}
-	assertStatus(t, handler, http.MethodPost, "/api/auth/passkeys/register/verify", payload, cookie, http.StatusCreated)
-	return privateKey, credentialID
 }
 
 func testPasskeyLoginOptions(t *testing.T, handler http.Handler, username string) testPasskeyRequestOptionsResponse {

@@ -7290,6 +7290,28 @@ func TestScheduledTaskRunners(t *testing.T) {
 	}, cookie, http.StatusCreated)
 	var headlessWebAsset model.PlatformItem
 	decodeResponse(t, headlessWebRec, &headlessWebAsset)
+	legacyListener, closeLegacyListener := startAppTestTCPListener(t)
+	defer closeLegacyListener()
+	legacyHost, legacyPortText, err := net.SplitHostPort(legacyListener.Addr().String())
+	if err != nil {
+		t.Fatalf("split legacy listener address: %v", err)
+	}
+	legacyPort, err := strconv.Atoi(legacyPortText)
+	if err != nil {
+		t.Fatalf("parse legacy listener port: %v", err)
+	}
+	legacyServer, err := srv.cfg.Store.CreateServer(model.Server{
+		Name:    "legacy status server",
+		Host:    legacyHost,
+		OS:      model.ServerOSLinux,
+		SSHPort: legacyPort,
+	})
+	if err != nil {
+		t.Fatalf("create legacy core server: %v", err)
+	}
+	if err := srv.cfg.Store.DeletePlatformItem("assets", legacyServer.ID); err != nil {
+		t.Fatalf("remove writable platform asset mirror: %v", err)
+	}
 	statusTaskRec := assertStatus(t, handler, http.MethodPost, "/api/admin/scheduled-tasks", map[string]any{
 		"name":     "Asset status",
 		"type":     "asset-status",
@@ -7301,6 +7323,9 @@ func TestScheduledTaskRunners(t *testing.T) {
 	statusRunRec := assertStatus(t, handler, http.MethodPost, "/api/admin/scheduled-tasks/"+statusTask.ID+"/run", nil, cookie, http.StatusAccepted)
 	if !strings.Contains(statusRunRec.Body.String(), "checked") || !strings.Contains(statusRunRec.Body.String(), "active") {
 		t.Fatal("asset status task did not report check result")
+	}
+	if !strings.Contains(statusRunRec.Body.String(), legacyServer.ID) || !strings.Contains(statusRunRec.Body.String(), `"source":"legacy_server"`) || !strings.Contains(statusRunRec.Body.String(), `"persisted":false`) {
+		t.Fatalf("asset status task did not include read-only legacy asset result: %s", statusRunRec.Body.String())
 	}
 	webListRec := assertStatus(t, handler, http.MethodGet, "/api/admin/websites", nil, cookie, http.StatusOK)
 	if !strings.Contains(webListRec.Body.String(), webAsset.ID) || !strings.Contains(webListRec.Body.String(), "last_check_status") {

@@ -426,21 +426,31 @@ func (s *Server) checkAssetStatuses(task model.PlatformItem) (map[string]any, er
 			nextMetadata["last_check_status"] = status
 			nextMetadata["last_check_detail"] = detail
 			nextMetadata["last_check_latency_ms"] = latency
-			_, err := s.cfg.Store.UpdatePlatformItem(collection, item.ID, model.PlatformItemRequest{
-				Status:   status,
-				Metadata: nextMetadata,
-			})
-			if err != nil {
-				return nil, err
+			persisted := true
+			if isLegacyMirroredAsset(collection, item) {
+				persisted = false
+			} else {
+				_, err := s.cfg.Store.UpdatePlatformItem(collection, item.ID, model.PlatformItemRequest{
+					Status:   status,
+					Metadata: nextMetadata,
+				})
+				if err != nil {
+					return nil, err
+				}
 			}
-			results = append(results, map[string]any{
+			result := map[string]any{
 				"id":         item.ID,
 				"name":       item.Name,
 				"collection": collection,
 				"status":     status,
 				"detail":     detail,
 				"latency_ms": latency,
-			})
+				"persisted":  persisted,
+			}
+			if !persisted {
+				result["source"] = "legacy_server"
+			}
+			results = append(results, result)
 		}
 	}
 	return map[string]any{
@@ -450,6 +460,10 @@ func (s *Server) checkAssetStatuses(task model.PlatformItem) (map[string]any, er
 		"skipped": skipped,
 		"results": results,
 	}, nil
+}
+
+func isLegacyMirroredAsset(collection string, item model.PlatformItem) bool {
+	return collection == "assets" && strings.EqualFold(firstMetadataString(item.Metadata, "source"), "legacy_server")
 }
 
 func (s *Server) checkAssetReachability(collection string, item model.PlatformItem, timeout time.Duration) (string, string) {

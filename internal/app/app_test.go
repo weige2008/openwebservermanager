@@ -3384,6 +3384,7 @@ func TestWeComIntegrationTokenTest(t *testing.T) {
 func TestExternalWeComLoginCreatesUserAndSession(t *testing.T) {
 	handler, adminCookie := newTestHandler(t)
 	var authorizeState string
+	var tokenEndpointCalls int
 	provider := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {
 		case "/authorize":
@@ -3400,6 +3401,7 @@ func TestExternalWeComLoginCreatesUserAndSession(t *testing.T) {
 			callback.RawQuery = values.Encode()
 			http.Redirect(w, r, callback.String(), http.StatusFound)
 		case "/gettoken":
+			tokenEndpointCalls++
 			if r.URL.Query().Get("corpid") != "ww-openweb" || r.URL.Query().Get("corpsecret") != "wecom-secret" {
 				http.Error(w, "bad token request", http.StatusUnauthorized)
 				return
@@ -3501,6 +3503,13 @@ func TestExternalWeComLoginCreatesUserAndSession(t *testing.T) {
 	cookies := callbackRec.Result().Cookies()
 	if len(cookies) == 0 {
 		t.Fatal("wecom callback did not set auth cookie")
+	}
+	if tokenEndpointCalls != 1 {
+		t.Fatalf("wecom token endpoint calls = %d, want 1", tokenEndpointCalls)
+	}
+	assertStatus(t, handler, http.MethodGet, callbackURL.RequestURI(), nil, nil, http.StatusBadRequest)
+	if tokenEndpointCalls != 1 {
+		t.Fatalf("replayed wecom callback reached token endpoint again: calls = %d", tokenEndpointCalls)
 	}
 	meRec := assertStatus(t, handler, http.MethodGet, "/api/auth/me", nil, cookies[0], http.StatusOK)
 	if !strings.Contains(meRec.Body.String(), `"username":"wecom-user-1"`) || !strings.Contains(meRec.Body.String(), `"role":"user"`) {

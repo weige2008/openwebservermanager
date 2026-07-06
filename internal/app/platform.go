@@ -215,9 +215,9 @@ func (s *Server) handleAccessAssets(w http.ResponseWriter, r *http.Request) {
 	assets := filterAuthorizedItems(platform, platform["assets"], platform["authorized_assets"], userID, isAdmin)
 	webAssets := filterAuthorizedItems(platform, platform["web_assets"], platform["authorized_web_assets"], userID, isAdmin)
 	databaseAssets := filterAuthorizedItems(platform, platform["database_assets"], platform["authorized_database_assets"], userID, isAdmin)
-	authorizations := platform["authorized_assets"]
+	authorizations := filterAuthorizationsForEnabledTargets(platform, platform["authorized_assets"])
 	if !isAdmin {
-		authorizations = filterAuthorizationsForUser(platform, authorizations, userID)
+		authorizations = filterAuthorizationsForUser(platform, platform["authorized_assets"], userID)
 	}
 	writeJSON(w, http.StatusOK, map[string]any{
 		"text":       filterPlatformByProtocol(assets, model.ProtocolSSH),
@@ -1300,12 +1300,16 @@ type accessAuthorizationContext struct {
 }
 
 func filterAuthorizedItems(platform map[string][]model.PlatformItem, items, authorizations []model.PlatformItem, userID string, isAdmin bool) []model.PlatformItem {
-	if isAdmin {
-		return items
-	}
 	ctx := accessAuthorizationContextFor(platform, userID)
 	result := []model.PlatformItem{}
 	for _, item := range items {
+		if !platformItemEnabled(item) {
+			continue
+		}
+		if isAdmin {
+			result = append(result, item)
+			continue
+		}
 		if itemAuthorizedByAny(platform, authorizations, item, ctx) {
 			result = append(result, item)
 		}
@@ -1563,12 +1567,33 @@ func emptyPlatformBootstrap() map[string][]model.PlatformItem {
 func filterAuthorizationsForUser(platform map[string][]model.PlatformItem, authorizations []model.PlatformItem, userID string) []model.PlatformItem {
 	ctx := accessAuthorizationContextFor(platform, userID)
 	result := []model.PlatformItem{}
-	for _, authorization := range authorizations {
-		if authorizationRecordActive(authorization) && authorizationSubjectMatches(ctx, authorization) {
+	for _, authorization := range filterAuthorizationsForEnabledTargets(platform, authorizations) {
+		if authorizationSubjectMatches(ctx, authorization) {
 			result = append(result, authorization)
 		}
 	}
 	return result
+}
+
+func filterAuthorizationsForEnabledTargets(platform map[string][]model.PlatformItem, authorizations []model.PlatformItem) []model.PlatformItem {
+	result := []model.PlatformItem{}
+	for _, authorization := range authorizations {
+		if authorizationRecordActive(authorization) && authorizationTargetsEnabledItem(platform, authorization) {
+			result = append(result, authorization)
+		}
+	}
+	return result
+}
+
+func authorizationTargetsEnabledItem(platform map[string][]model.PlatformItem, authorization model.PlatformItem) bool {
+	for _, items := range [][]model.PlatformItem{platform["assets"], platform["web_assets"], platform["database_assets"]} {
+		for _, item := range items {
+			if platformItemEnabled(item) && authorizationTargetMatches(platform, authorization, item) {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 func filterItemsByOwner(items []model.PlatformItem, userID string) []model.PlatformItem {
@@ -1622,6 +1647,9 @@ func findAccessAsset(platform map[string][]model.PlatformItem, protocol model.Pr
 	for _, item := range platform[collection] {
 		if item.ID != assetID {
 			continue
+		}
+		if !platformItemEnabled(item) {
+			return model.PlatformItem{}, false
 		}
 		if collection == "assets" && item.Protocol != protocol {
 			return model.PlatformItem{}, false

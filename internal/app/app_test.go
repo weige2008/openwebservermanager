@@ -202,6 +202,86 @@ func TestPlatformUserLoginAndAccessAuthorization(t *testing.T) {
 	}
 }
 
+func TestAccessPortalExcludesDisabledAssets(t *testing.T) {
+	handler, adminCookie := newTestHandler(t)
+
+	userRec := assertStatus(t, handler, http.MethodPost, "/api/admin/users", map[string]any{
+		"name":     "disabled-access-user",
+		"type":     "local",
+		"status":   "enabled",
+		"password": "password123",
+		"metadata": map[string]any{"role": "user"},
+	}, adminCookie, http.StatusCreated)
+	var user model.PlatformItem
+	decodeResponse(t, userRec, &user)
+
+	sshRec := assertStatus(t, handler, http.MethodPost, "/api/admin/assets", map[string]any{
+		"name":     "disabled-ssh-asset",
+		"type":     "linux",
+		"status":   "disabled",
+		"protocol": "ssh",
+		"host":     "127.0.0.1",
+		"port":     22,
+	}, adminCookie, http.StatusCreated)
+	var sshAsset model.PlatformItem
+	decodeResponse(t, sshRec, &sshAsset)
+	webRec := assertStatus(t, handler, http.MethodPost, "/api/admin/websites", map[string]any{
+		"name":     "disabled-web-asset",
+		"type":     "http",
+		"status":   "disabled",
+		"protocol": "http",
+		"host":     "https://disabled.example.test",
+	}, adminCookie, http.StatusCreated)
+	var webAsset model.PlatformItem
+	decodeResponse(t, webRec, &webAsset)
+	databaseRec := assertStatus(t, handler, http.MethodPost, "/api/admin/database-assets", map[string]any{
+		"name":     "disabled-database-asset",
+		"type":     "sqlite",
+		"status":   "offline",
+		"protocol": "database",
+		"metadata": map[string]any{"sqlite_path": "disabled-access.db"},
+	}, adminCookie, http.StatusCreated)
+	var databaseAsset model.PlatformItem
+	decodeResponse(t, databaseRec, &databaseAsset)
+
+	assertStatus(t, handler, http.MethodPost, "/api/admin/authorizations/assets", map[string]any{
+		"name":      "disabled user ssh",
+		"owner_id":  user.ID,
+		"target_id": sshAsset.ID,
+		"status":    "enabled",
+	}, adminCookie, http.StatusCreated)
+	assertStatus(t, handler, http.MethodPost, "/api/admin/authorizations/websites", map[string]any{
+		"name":      "disabled user web",
+		"owner_id":  user.ID,
+		"target_id": webAsset.ID,
+		"status":    "enabled",
+	}, adminCookie, http.StatusCreated)
+	assertStatus(t, handler, http.MethodPost, "/api/admin/authorizations/databases", map[string]any{
+		"name":      "disabled user database",
+		"owner_id":  user.ID,
+		"target_id": databaseAsset.ID,
+		"status":    "enabled",
+	}, adminCookie, http.StatusCreated)
+
+	loginRec := assertStatus(t, handler, http.MethodPost, "/api/auth/login", map[string]any{"username": "disabled-access-user", "password": "password123"}, nil, http.StatusOK)
+	userCookie := loginRec.Result().Cookies()[0]
+	accessRec := assertStatus(t, handler, http.MethodGet, "/api/access/assets", nil, userCookie, http.StatusOK)
+	accessBody := accessRec.Body.String()
+	for _, forbidden := range []string{sshAsset.ID, webAsset.ID, databaseAsset.ID} {
+		if strings.Contains(accessBody, forbidden) {
+			t.Fatalf("disabled asset leaked into access portal: %s", accessBody)
+		}
+	}
+	adminAccessRec := assertStatus(t, handler, http.MethodGet, "/api/access/assets", nil, adminCookie, http.StatusOK)
+	if strings.Contains(adminAccessRec.Body.String(), sshAsset.ID) || strings.Contains(adminAccessRec.Body.String(), webAsset.ID) || strings.Contains(adminAccessRec.Body.String(), databaseAsset.ID) {
+		t.Fatalf("disabled assets leaked into admin access portal: %s", adminAccessRec.Body.String())
+	}
+
+	assertStatus(t, handler, http.MethodPost, "/api/access/ssh/"+sshAsset.ID, map[string]any{"cols": 120, "rows": 32}, userCookie, http.StatusNotFound)
+	assertStatus(t, handler, http.MethodGet, "/api/access/http/"+webAsset.ID+"/proxy/", nil, userCookie, http.StatusNotFound)
+	assertStatus(t, handler, http.MethodPost, "/api/access/database/"+databaseAsset.ID+"/query", map[string]any{"sql": "SELECT 1"}, userCookie, http.StatusNotFound)
+}
+
 func TestAuthenticatedPasswordChange(t *testing.T) {
 	handler, adminCookie := newTestHandler(t)
 

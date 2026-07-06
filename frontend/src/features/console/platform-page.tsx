@@ -3158,6 +3158,48 @@ function MonitoringPage({ config }: { config: PlatformPageConfig }) {
     active_sessions: app.data.platform?.online_sessions?.length || 0,
     recordings: app.data.platform?.offline_sessions?.length || 0,
   }
+  const runtimeInfo = recordValue(stats.runtime)
+  const memoryInfo = recordValue(stats.memory)
+  const databaseInfo = recordValue(stats.database)
+  const storageInfo = recordValue(stats.storage)
+  const sshGatewayInfo = recordValue(stats.ssh_gateway)
+  const guacdInfo = recordValue(stats.guacd)
+  const agentGatewayInfo = recordValue(stats.agent_gateways)
+  const dataDirInfo = recordValue(storageInfo.data_dir)
+  const recordingsInfo = recordValue(storageInfo.recordings)
+  const drivesInfo = recordValue(storageInfo.drives)
+  const backupsInfo = recordValue(storageInfo.backups)
+  const metricCards = [
+    ['Status', metadataText(stats.status) || 'normal', metadataText(stats.status) === 'normal' ? 'success' : 'neutral'],
+    ['Users', formatNumberValue(stats.users), 'neutral'],
+    ['Assets', formatNumberValue(stats.assets), 'neutral'],
+    ['Active sessions', formatNumberValue(stats.active_sessions), 'success'],
+    ['Recordings', formatNumberValue(stats.recordings), 'neutral'],
+    ['Gateways', formatNumberValue(stats.gateways), 'neutral'],
+    ['Goroutines', formatNumberValue(stats.goroutines), 'neutral'],
+    ['Memory', formatBytesValue(stats.memory_alloc), 'neutral'],
+  ] as const
+  const runtimeRows: Array<[string, string]> = [
+    ['Uptime', `${formatNumberValue(stats.uptime_seconds)} s`],
+    ['Go', metadataText(runtimeInfo.go_version || stats.go_version) || '-'],
+    ['OS / Arch', `${metadataText(runtimeInfo.os || stats.os) || '-'} / ${metadataText(runtimeInfo.arch || stats.arch) || '-'}`],
+    ['CPU cores', formatNumberValue(runtimeInfo.cpu_cores || stats.cpu_cores || stats.cpu)],
+    ['Heap alloc', formatBytesValue(memoryInfo.heap_alloc || stats.memory_heap_alloc)],
+    ['GC count', formatNumberValue(memoryInfo.gc_count || stats.gc_count)],
+    ['DB pool', metadataText(databaseInfo.connection_pool_state) || '-'],
+    ['DB connections', `${formatNumberValue(databaseInfo.in_use)} in use / ${formatNumberValue(databaseInfo.idle)} idle`],
+  ]
+  const gatewayRows: Array<[string, string]> = [
+    ['SSH Gateway', `${metadataText(sshGatewayInfo.status) || 'disabled'} ${metadataText(sshGatewayInfo.address)}`.trim()],
+    ['guacd', `${metadataText(guacdInfo.status) || 'unavailable'} ${metadataText(guacdInfo.address)}`.trim()],
+    ['Agent gateways', `${formatNumberValue(agentGatewayInfo.online)} online / ${formatNumberValue(agentGatewayInfo.offline)} offline`],
+  ]
+  const storageRows: Array<[string, string]> = [
+    ['Data dir', `${formatBytesValue(dataDirInfo.bytes)} / ${formatNumberValue(dataDirInfo.files)} files`],
+    ['Recordings', `${formatBytesValue(recordingsInfo.bytes)} / ${formatNumberValue(recordingsInfo.files)} files`],
+    ['Drives', `${formatBytesValue(drivesInfo.bytes)} / ${formatNumberValue(drivesInfo.files)} files`],
+    ['Backups', `${formatBytesValue(backupsInfo.bytes)} / ${formatNumberValue(backupsInfo.files)} files`],
+  ]
   return (
     <Card>
       <CardHeader>
@@ -3167,17 +3209,38 @@ function MonitoringPage({ config }: { config: PlatformPageConfig }) {
         </div>
         <Button variant='outline' onClick={() => void load()}><RefreshCw className='size-4' />刷新</Button>
       </CardHeader>
-      <CardContent>
+      <CardContent className='grid gap-5'>
         <div className='grid gap-3 md:grid-cols-3 xl:grid-cols-4'>
-          {Object.entries(stats).map(([key, value]) => (
-            <div key={key} className='rounded-xl border border-border bg-background/60 p-4'>
-              <div className='text-xs font-medium text-muted-foreground'>{key}</div>
-              <div className={cn('mt-2 truncate font-mono text-xl font-semibold', value === 'normal' && 'text-success')}>{String(value)}</div>
+          {metricCards.map(([label, value, tone]) => (
+            <div key={label} className='rounded-xl border border-border bg-background/60 p-4'>
+              <div className='text-xs font-medium text-muted-foreground'>{label}</div>
+              <div className={cn('mt-2 truncate font-mono text-xl font-semibold', tone === 'success' && 'text-success')}>{value}</div>
             </div>
           ))}
         </div>
+        <div className='grid gap-3 lg:grid-cols-3'>
+          <MonitoringPanel title='Runtime / Database' rows={runtimeRows} />
+          <MonitoringPanel title='Gateways' rows={gatewayRows} />
+          <MonitoringPanel title='Storage' rows={storageRows} />
+        </div>
       </CardContent>
     </Card>
+  )
+}
+
+function MonitoringPanel({ title, rows }: { title: string; rows: Array<[string, string]> }) {
+  return (
+    <section className='rounded-xl border border-border bg-background/60 p-4'>
+      <h3 className='text-sm font-semibold'>{title}</h3>
+      <div className='mt-3 grid gap-2'>
+        {rows.map(([label, value]) => (
+          <div key={label} className='grid grid-cols-[7rem_minmax(0,1fr)] gap-3 text-sm'>
+            <span className='text-muted-foreground'>{label}</span>
+            <span className='truncate font-mono text-xs'>{value || '-'}</span>
+          </div>
+        ))}
+      </div>
+    </section>
   )
 }
 
@@ -3593,6 +3656,10 @@ function toggleString(items: string[], value: string) {
 
 function objectArrayValue(value: unknown) {
   return Array.isArray(value) ? value.filter((item): item is Record<string, unknown> => Boolean(item) && typeof item === 'object' && !Array.isArray(item)) : []
+}
+
+function recordValue(value: unknown): Record<string, unknown> {
+  return value && typeof value === 'object' && !Array.isArray(value) ? value as Record<string, unknown> : {}
 }
 
 function numberValue(value: unknown) {

@@ -15,6 +15,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"time"
 
 	"openwebservermanager/internal/guac"
 	"openwebservermanager/internal/model"
@@ -62,6 +63,7 @@ type Server struct {
 	auth     *authManager
 	oidc     *oidcManager
 	ldap     ldapAuthenticator
+	started  time.Time
 }
 
 func New(cfg Config) http.Handler {
@@ -84,6 +86,7 @@ func NewServer(cfg Config) *Server {
 		auth:     newAuthManager(),
 		oidc:     newOIDCManager(),
 		ldap:     ldapAuth,
+		started:  time.Now().UTC(),
 	}
 }
 

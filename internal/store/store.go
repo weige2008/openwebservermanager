@@ -133,6 +133,17 @@ func (s *Store) Path() string {
 	return s.path
 }
 
+func (s *Store) DatabasePath() string {
+	return strings.TrimSuffix(s.path, filepath.Ext(s.path)) + ".db"
+}
+
+func (s *Store) DBStats() sql.DBStats {
+	if s == nil || s.db == nil {
+		return sql.DBStats{}
+	}
+	return s.db.Stats()
+}
+
 func (s *Store) AdminConfigured() bool {
 	s.mu.RLock()
 	defer s.mu.RUnlock()

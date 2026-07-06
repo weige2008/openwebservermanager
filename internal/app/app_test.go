@@ -2282,7 +2282,23 @@ func TestExternalWeComLoginCreatesUserAndSession(t *testing.T) {
 
 func TestToolsAndMonitoringEndpoints(t *testing.T) {
 	handler, cookie := newTestHandler(t)
-	assertStatus(t, handler, http.MethodGet, "/api/system/monitoring", nil, cookie, http.StatusOK)
+	monitorRec := assertStatus(t, handler, http.MethodGet, "/api/system/monitoring", nil, cookie, http.StatusOK)
+	var monitor map[string]any
+	decodeResponse(t, monitorRec, &monitor)
+	for _, key := range []string{"runtime", "memory", "database", "storage", "sessions_state", "ssh_gateway", "guacd", "uptime_seconds", "cpu_cores"} {
+		if _, ok := monitor[key]; !ok {
+			t.Fatalf("monitoring response missing %s: %v", key, monitor)
+		}
+	}
+	if runtimeInfo, ok := monitor["runtime"].(map[string]any); !ok || runtimeInfo["go_version"] == "" || runtimeInfo["os"] == "" {
+		t.Fatalf("monitoring runtime info incomplete: %v", monitor["runtime"])
+	}
+	if databaseInfo, ok := monitor["database"].(map[string]any); !ok || databaseInfo["path"] == "" || databaseInfo["connection_pool_state"] == "" {
+		t.Fatalf("monitoring database info incomplete: %v", monitor["database"])
+	}
+	if storageInfo, ok := monitor["storage"].(map[string]any); !ok || storageInfo["data_dir"] == nil || storageInfo["total_bytes"] == nil {
+		t.Fatalf("monitoring storage info incomplete: %v", monitor["storage"])
+	}
 	assertStatus(t, handler, http.MethodPost, "/api/tools/ping", map[string]any{"target": "localhost", "count": 1, "mode": "icmp"}, cookie, http.StatusOK)
 	listener, closeListener := startAppTestTCPListener(t)
 	defer closeListener()

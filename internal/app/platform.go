@@ -2,6 +2,7 @@ package app
 
 import (
 	"context"
+	"database/sql"
 	"errors"
 	"net"
 	"net/http"
@@ -9,6 +10,7 @@ import (
 	"net/url"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"runtime"
 	"sort"
 	"strconv"
@@ -460,29 +462,187 @@ func (s *Server) handleSystemMonitoring(w http.ResponseWriter, _ *http.Request) 
 			offlineAgentGateways++
 		}
 	}
+	now := time.Now().UTC()
+	dbStats := s.cfg.Store.DBStats()
+	dataDir := strings.TrimSpace(s.cfg.DataDir)
+	if dataDir == "" {
+		dataDir = "data"
+	}
+	dataStorage := directoryUsage(dataDir)
+	recordingStorage := directoryUsage(filepath.Join(dataDir, "recordings"))
+	driveStorage := directoryUsage(filepath.Join(dataDir, "drives"))
+	backupStorage := directoryUsage(filepath.Join(dataDir, "backups"))
+	sshGateway := map[string]any{
+		"address": s.sshGatewayAddress(),
+		"status":  gatewayRuntimeStatus(s.sshGatewayAddress(), s.sshGatewayLastError()),
+	}
+	if errText := s.sshGatewayLastError(); errText != "" {
+		sshGateway["last_error"] = errText
+	}
+	guacdAddress := ""
+	if s.cfg.Guacd != nil {
+		guacdAddress = s.cfg.Guacd.Address()
+	}
 	writeJSON(w, http.StatusOK, map[string]any{
-		"status":          "normal",
-		"goroutines":      runtime.NumGoroutine(),
-		"cpu":             runtime.NumCPU(),
-		"memory_alloc":    mem.Alloc,
-		"servers":         len(servers),
-		"credentials":     len(credentials),
-		"sessions":        len(sessions),
-		"active_sessions": active,
-		"recordings":      recordings,
-		"audit_logs":      len(auditLogs),
-		"users":           len(platform["users"]),
-		"assets":          len(platform["assets"]),
-		"web_assets":      len(platform["web_assets"]),
-		"database_assets": len(platform["database_assets"]),
-		"gateways":        len(platform["agent_gateways"]) + len(platform["ssh_gateways"]),
+		"status":            "normal",
+		"started_at":        s.started,
+		"uptime_seconds":    int64(now.Sub(s.started).Seconds()),
+		"version":           s.cfg.Public.Version,
+		"go_version":        runtime.Version(),
+		"os":                runtime.GOOS,
+		"arch":              runtime.GOARCH,
+		"goroutines":        runtime.NumGoroutine(),
+		"cpu":               runtime.NumCPU(),
+		"cpu_cores":         runtime.NumCPU(),
+		"memory_alloc":      mem.Alloc,
+		"memory_sys":        mem.Sys,
+		"memory_heap_alloc": mem.HeapAlloc,
+		"memory_heap_sys":   mem.HeapSys,
+		"gc_count":          mem.NumGC,
+		"servers":           len(servers),
+		"credentials":       len(credentials),
+		"sessions":          len(sessions),
+		"active_sessions":   active,
+		"recordings":        recordings,
+		"audit_logs":        len(auditLogs),
+		"users":             len(platform["users"]),
+		"assets":            len(platform["assets"]),
+		"web_assets":        len(platform["web_assets"]),
+		"database_assets":   len(platform["database_assets"]),
+		"gateways":          len(platform["agent_gateways"]) + len(platform["ssh_gateways"]),
+		"runtime": map[string]any{
+			"started_at":     s.started,
+			"uptime_seconds": int64(now.Sub(s.started).Seconds()),
+			"go_version":     runtime.Version(),
+			"os":             runtime.GOOS,
+			"arch":           runtime.GOARCH,
+			"goroutines":     runtime.NumGoroutine(),
+			"cpu_cores":      runtime.NumCPU(),
+		},
+		"memory": map[string]any{
+			"alloc":      mem.Alloc,
+			"sys":        mem.Sys,
+			"heap_alloc": mem.HeapAlloc,
+			"heap_sys":   mem.HeapSys,
+			"gc_count":   mem.NumGC,
+		},
+		"database": map[string]any{
+			"path":                  s.cfg.Store.DatabasePath(),
+			"open_connections":      dbStats.OpenConnections,
+			"in_use":                dbStats.InUse,
+			"idle":                  dbStats.Idle,
+			"wait_count":            dbStats.WaitCount,
+			"wait_duration_ms":      dbStats.WaitDuration.Milliseconds(),
+			"max_idle_closed":       dbStats.MaxIdleClosed,
+			"max_idle_time_closed":  dbStats.MaxIdleTimeClosed,
+			"max_lifetime_closed":   dbStats.MaxLifetimeClosed,
+			"configured_max_open":   dbStats.MaxOpenConnections,
+			"connection_pool_state": databasePoolState(dbStats),
+		},
+		"storage": map[string]any{
+			"data_dir":     dataStorage,
+			"recordings":   recordingStorage,
+			"drives":       driveStorage,
+			"backups":      backupStorage,
+			"total_bytes":  dataStorage["bytes"],
+			"checked_path": dataDir,
+		},
+		"sessions_state": map[string]any{
+			"total":      len(sessions),
+			"active":     active,
+			"recordings": recordings,
+			"offline":    len(sessions) - active,
+		},
+		"ssh_gateway": sshGateway,
+		"guacd": map[string]any{
+			"address": guacdAddress,
+			"status":  guacdRuntimeStatus(guacdAddress),
+		},
 		"agent_gateways": map[string]any{
 			"total":   len(platform["agent_gateways"]),
 			"online":  onlineAgentGateways,
 			"offline": offlineAgentGateways,
 		},
-		"checked_at": time.Now().UTC(),
+		"checked_at": now,
 	})
+}
+
+func directoryUsage(path string) map[string]any {
+	result := map[string]any{
+		"path":       path,
+		"bytes":      int64(0),
+		"files":      0,
+		"dirs":       0,
+		"available":  false,
+		"last_error": "",
+	}
+	info, err := os.Stat(path)
+	if err != nil {
+		if !errors.Is(err, os.ErrNotExist) {
+			result["last_error"] = err.Error()
+		}
+		return result
+	}
+	result["available"] = true
+	if !info.IsDir() {
+		result["bytes"] = info.Size()
+		result["files"] = 1
+		return result
+	}
+	var bytes int64
+	files := 0
+	dirs := 0
+	walkErr := filepath.WalkDir(path, func(filePath string, entry os.DirEntry, walkErr error) error {
+		if walkErr != nil {
+			return nil
+		}
+		if entry.IsDir() {
+			dirs++
+			return nil
+		}
+		info, err := entry.Info()
+		if err != nil {
+			return nil
+		}
+		files++
+		bytes += info.Size()
+		_ = filePath
+		return nil
+	})
+	if walkErr != nil {
+		result["last_error"] = walkErr.Error()
+	}
+	result["bytes"] = bytes
+	result["files"] = files
+	result["dirs"] = dirs
+	return result
+}
+
+func databasePoolState(stats sql.DBStats) string {
+	if stats.OpenConnections == 0 {
+		return "idle"
+	}
+	if stats.MaxOpenConnections > 0 && stats.InUse >= stats.MaxOpenConnections {
+		return "saturated"
+	}
+	return "normal"
+}
+
+func gatewayRuntimeStatus(address, lastError string) string {
+	if strings.TrimSpace(lastError) != "" {
+		return "error"
+	}
+	if strings.TrimSpace(address) != "" {
+		return "running"
+	}
+	return "disabled"
+}
+
+func guacdRuntimeStatus(address string) string {
+	if strings.TrimSpace(address) != "" {
+		return "running"
+	}
+	return "unavailable"
 }
 
 type pingRequest struct {

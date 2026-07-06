@@ -5211,6 +5211,62 @@ func TestSMTPIntegrationTestEmail(t *testing.T) {
 	}, cookie, http.StatusNotFound)
 }
 
+func TestSMTPIntegrationTestFailureRedactsSecrets(t *testing.T) {
+	handler, cookie := newTestHandler(t)
+	authPayload := base64.StdEncoding.EncodeToString([]byte("\x00smtp-user\x00smtp-secret"))
+	smtpServer := newFailingSMTPAuthServer(t, "5.7.8 invalid login smtp-secret "+authPayload)
+	host, portText, err := net.SplitHostPort(smtpServer.addr)
+	if err != nil {
+		t.Fatalf("split smtp address: %v", err)
+	}
+	port, err := strconv.Atoi(portText)
+	if err != nil {
+		t.Fatalf("parse smtp port: %v", err)
+	}
+	settingRec := assertStatus(t, handler, http.MethodPost, "/api/admin/system-settings", map[string]any{
+		"name":     "Failing SMTP integration",
+		"type":     "integration",
+		"status":   "enabled",
+		"host":     host,
+		"port":     port,
+		"username": "smtp-user",
+		"password": "smtp-secret",
+		"metadata": map[string]any{
+			"smtp_host":     host,
+			"smtp_port":     port,
+			"smtp_from":     "sender@example.test",
+			"smtp_to":       "receiver@example.test",
+			"smtp_username": "smtp-user",
+		},
+	}, cookie, http.StatusCreated)
+	var setting model.PlatformItem
+	decodeResponse(t, settingRec, &setting)
+
+	failedRec := assertStatus(t, handler, http.MethodPost, "/api/admin/system-settings/smtp/test", map[string]any{
+		"setting_id": setting.ID,
+	}, cookie, http.StatusBadGateway)
+	responseBody := failedRec.Body.String()
+	for _, leaked := range []string{"smtp-secret", authPayload} {
+		if strings.Contains(responseBody, leaked) {
+			t.Fatalf("SMTP test failure response leaked secret %q: %s", leaked, responseBody)
+		}
+	}
+	if !strings.Contains(responseBody, "[redacted]") {
+		t.Fatalf("SMTP test failure response did not contain redaction marker: %s", responseBody)
+	}
+
+	logsRec := assertStatus(t, handler, http.MethodGet, "/api/admin/audit/operation-logs", nil, cookie, http.StatusOK)
+	logsBody := logsRec.Body.String()
+	for _, leaked := range []string{"smtp-secret", authPayload} {
+		if strings.Contains(logsBody, leaked) {
+			t.Fatalf("SMTP test failure operation log leaked secret %q: %s", leaked, logsBody)
+		}
+	}
+	if !strings.Contains(logsBody, "system_settings.smtp_test.failed") || !strings.Contains(logsBody, "[redacted]") {
+		t.Fatalf("SMTP test failure operation log missing expected redacted failure entry: %s", logsBody)
+	}
+}
+
 func TestLLMIntegrationTestPrompt(t *testing.T) {
 	handler, cookie := newTestHandler(t)
 	var gotAuth string
@@ -7323,6 +7379,32 @@ func newFakeSMTPServer(t *testing.T) fakeSMTPServer {
 	return server
 }
 
+func newFailingSMTPAuthServer(t *testing.T, failure string) fakeSMTPServer {
+	t.Helper()
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("listen failing smtp: %v", err)
+	}
+	server := fakeSMTPServer{
+		addr:     listener.Addr().String(),
+		messages: make(chan string, 1),
+		close: func() {
+			_ = listener.Close()
+		},
+	}
+	t.Cleanup(server.close)
+	go func() {
+		for {
+			conn, err := listener.Accept()
+			if err != nil {
+				return
+			}
+			go handleFailingSMTPAuthConnection(conn, failure)
+		}
+	}()
+	return server
+}
+
 func handleFakeSMTPConnection(conn net.Conn, messages chan<- string) {
 	defer conn.Close()
 	reader := bufio.NewReader(conn)
@@ -7383,6 +7465,49 @@ func handleFakeSMTPConnection(conn net.Conn, messages chan<- string) {
 			if !writeLine("354 end data with <CR><LF>.<CR><LF>") {
 				return
 			}
+		case strings.HasPrefix(command, "QUIT"):
+			_ = writeLine("221 bye")
+			return
+		default:
+			if !writeLine("250 ok") {
+				return
+			}
+		}
+	}
+}
+
+func handleFailingSMTPAuthConnection(conn net.Conn, failure string) {
+	defer conn.Close()
+	reader := bufio.NewReader(conn)
+	writer := bufio.NewWriter(conn)
+	writeLine := func(value string) bool {
+		if _, err := writer.WriteString(value + "\r\n"); err != nil {
+			return false
+		}
+		return writer.Flush() == nil
+	}
+	if !writeLine("220 fake.smtp.local ESMTP") {
+		return
+	}
+	for {
+		line, err := reader.ReadString('\n')
+		if err != nil {
+			return
+		}
+		trimmed := strings.TrimRight(line, "\r\n")
+		command := strings.ToUpper(trimmed)
+		switch {
+		case strings.HasPrefix(command, "EHLO"):
+			if !writeLine("250-fake.smtp.local") || !writeLine("250 AUTH PLAIN") {
+				return
+			}
+		case strings.HasPrefix(command, "HELO"):
+			if !writeLine("250 fake.smtp.local") {
+				return
+			}
+		case strings.HasPrefix(command, "AUTH "):
+			_ = writeLine("535 " + failure)
+			return
 		case strings.HasPrefix(command, "QUIT"):
 			_ = writeLine("221 bye")
 			return

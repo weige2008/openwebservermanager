@@ -3,6 +3,7 @@ package app
 import (
 	"bytes"
 	"crypto/tls"
+	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -113,8 +114,9 @@ func (s *Server) handleSMTPTest(w http.ResponseWriter, r *http.Request) {
 	}
 	started := time.Now()
 	if err := sendSMTPTestMail(cfg, subject, body); err != nil {
-		_ = s.audit(r, "system_settings.smtp_test.failed", item.ID, "", "SMTP test failed: "+err.Error())
-		writeError(w, http.StatusBadGateway, "send SMTP test email: "+err.Error())
+		errText := sanitizeSMTPTestText(cfg, err.Error())
+		_ = s.audit(r, "system_settings.smtp_test.failed", item.ID, "", "SMTP test failed: "+errText)
+		writeError(w, http.StatusBadGateway, "send SMTP test email: "+errText)
 		return
 	}
 	_ = s.audit(r, "system_settings.smtp_test", item.ID, "", "sent SMTP test email")
@@ -797,6 +799,34 @@ func sanitizeLLMTestText(cfg llmDeliveryConfig, text string) string {
 		"Bearer " + secret, "Bearer [redacted]",
 		secret, "[redacted]",
 		url.QueryEscape(secret), "[redacted]",
+	}
+	return strings.NewReplacer(replacements...).Replace(text)
+}
+
+func sanitizeSMTPTestText(cfg smtpDeliveryConfig, text string) string {
+	if text == "" {
+		return text
+	}
+	replacements := make([]string, 0, 12)
+	password := strings.TrimSpace(cfg.Password)
+	if password != "" {
+		replacements = append(replacements,
+			password, "[redacted]",
+			url.QueryEscape(password), "[redacted]",
+		)
+	}
+	username := strings.TrimSpace(cfg.Username)
+	if username != "" && password != "" {
+		authPayload := base64.StdEncoding.EncodeToString([]byte("\x00" + username + "\x00" + password))
+		replacements = append(replacements,
+			username+":"+password, username+":[redacted]",
+			url.QueryEscape(username+":"+password), url.QueryEscape(username+":[redacted]"),
+			authPayload, "[redacted]",
+			url.QueryEscape(authPayload), "[redacted]",
+		)
+	}
+	if len(replacements) == 0 {
+		return text
 	}
 	return strings.NewReplacer(replacements...).Replace(text)
 }

@@ -1,7 +1,7 @@
 import type { ColumnDef } from '@tanstack/react-table'
 import { useQuery } from '@tanstack/react-query'
 import { Link } from '@tanstack/react-router'
-import { ArrowUpRight, Copy, Download, FileDown, FileSearch, FolderPlus, MoveRight, Pencil, Play, Plus, RefreshCw, Save, ShieldCheck, TerminalSquare, Trash2, Upload } from 'lucide-react'
+import { ArrowUpRight, ChevronDown, ChevronRight, Copy, Download, FileDown, FileSearch, FolderPlus, MoveRight, Pencil, Play, Plus, RefreshCw, Save, ShieldCheck, TerminalSquare, Trash2, Upload } from 'lucide-react'
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 
 import { useApp } from '@/app/app-provider'
@@ -120,6 +120,14 @@ interface StorageUsage {
 interface DepartmentTreeNode {
   item: PlatformItem
   children: DepartmentTreeNode[]
+}
+
+interface AssetGroupTreeNode {
+  item: PlatformItem
+  children: AssetGroupTreeNode[]
+  directAssetCount: number
+  totalAssetCount: number
+  assetIDs: Set<string>
 }
 
 interface BackupInfo {
@@ -264,6 +272,7 @@ export function PlatformTablePage({ config }: { config: PlatformPageConfig }) {
   const [form, setForm] = useState<PlatformFormState>(initialForm)
   const [operation, setOperation] = useState<ResourceOperation | null>(null)
   const [departmentView, setDepartmentView] = useState<'table' | 'tree'>('table')
+  const [assetGroupView, setAssetGroupView] = useState<'table' | 'tree'>('table')
   const { requestAccessMFACode, accessMFADialog } = useAccessMFADialog()
   const { confirm, confirmDialog } = useConfirmDialog()
 
@@ -596,10 +605,26 @@ export function PlatformTablePage({ config }: { config: PlatformPageConfig }) {
                   {app.t('treeView', '树形视图')}
                 </Button>
               </div>
+            ) : config.collection === 'asset_groups' ? (
+              <div className='mb-4 flex flex-wrap gap-2'>
+                <Button size='sm' variant={assetGroupView === 'table' ? 'primary' : 'outline'} onClick={() => setAssetGroupView('table')}>
+                  {app.t('tableView', '表格视图')}
+                </Button>
+                <Button size='sm' variant={assetGroupView === 'tree' ? 'primary' : 'outline'} onClick={() => setAssetGroupView('tree')}>
+                  {app.t('treeView', '树形视图')}
+                </Button>
+              </div>
             ) : null}
             {config.collection === 'departments' && departmentView === 'tree' ? (
               <DepartmentTreeView
                 items={rows}
+                onEdit={startEdit}
+                onDelete={(item) => void remove(item)}
+              />
+            ) : config.collection === 'asset_groups' && assetGroupView === 'tree' ? (
+              <AssetGroupTreeView
+                groups={rows}
+                assets={app.data.platform?.assets || []}
                 onEdit={startEdit}
                 onDelete={(item) => void remove(item)}
               />
@@ -708,6 +733,98 @@ function DepartmentTreeBranch({ node, depth, onEdit, onDelete }: { node: Departm
         <div className='border-t border-border/60'>
           {node.children.map((child) => (
             <DepartmentTreeBranch key={child.item.id} node={child} depth={depth + 1} onEdit={onEdit} onDelete={onDelete} />
+          ))}
+        </div>
+      ) : null}
+    </div>
+  )
+}
+
+function AssetGroupTreeView({ groups, assets, onEdit, onDelete }: { groups: PlatformItem[]; assets: PlatformItem[]; onEdit: (item: PlatformItem) => void; onDelete: (item: PlatformItem) => void }) {
+  const app = useApp()
+  const tree = useMemo(() => buildAssetGroupTree(groups, assets), [groups, assets])
+
+  if (!groups.length) {
+    return (
+      <div className='rounded-xl border border-dashed border-border p-6 text-sm text-muted-foreground'>
+        {app.t('empty', '暂无数据')}
+      </div>
+    )
+  }
+
+  return (
+    <div className='overflow-hidden rounded-xl border border-border bg-background/60'>
+      <div className='flex flex-wrap items-center justify-between gap-2 border-b border-border px-3 py-2 text-sm'>
+        <div className='font-medium'>{app.t('assetGroupTree', '资产组树')}</div>
+        <div className='flex flex-wrap gap-2 text-xs text-muted-foreground'>
+          <span>{formatNumberValue(groups.length)} {app.t('assetGroups', '资产组')}</span>
+          <span>{formatNumberValue(assets.length)} {app.t('assets', '资产')}</span>
+        </div>
+      </div>
+      <div className='divide-y divide-border'>
+        {tree.map((node) => (
+          <AssetGroupTreeBranch key={node.item.id} node={node} depth={0} onEdit={onEdit} onDelete={onDelete} />
+        ))}
+      </div>
+    </div>
+  )
+}
+
+function AssetGroupTreeBranch({ node, depth, onEdit, onDelete }: { node: AssetGroupTreeNode; depth: number; onEdit: (item: PlatformItem) => void; onDelete: (item: PlatformItem) => void }) {
+  const app = useApp()
+  const item = node.item
+  const [expanded, setExpanded] = useState(() => !metadataBool(item.metadata?.collapsed))
+  const hasChildren = node.children.length > 0
+
+  useEffect(() => {
+    setExpanded(!metadataBool(item.metadata?.collapsed))
+  }, [item.id, item.metadata?.collapsed])
+
+  return (
+    <div>
+      <div className='grid gap-3 px-3 py-3 text-sm md:grid-cols-[minmax(0,1fr)_auto] md:items-center'>
+        <div className='min-w-0' style={{ paddingLeft: `${depth * 18}px` }}>
+          <div className='flex min-w-0 flex-wrap items-center gap-2'>
+            <Button
+              size='icon-sm'
+              variant='ghost'
+              className={cn('size-6', !hasChildren && 'invisible')}
+              disabled={!hasChildren}
+              aria-label={expanded ? app.t('collapse', '收起') : app.t('expand', '展开')}
+              onClick={() => setExpanded((current) => !current)}
+            >
+              {expanded ? <ChevronDown className='size-3.5' /> : <ChevronRight className='size-3.5' />}
+            </Button>
+            <strong className='truncate'>{item.name}</strong>
+            <Badge tone={statusTone(item.status)}>{item.status || '-'}</Badge>
+            <Badge tone='neutral'>{item.protocol || item.type || 'custom'}</Badge>
+            {metadataBool(item.metadata?.collapsed) ? <Badge tone='warning'>{app.t('collapsedByDefault', '默认折叠')}</Badge> : null}
+          </div>
+          <div className='mt-1 truncate text-xs text-muted-foreground'>
+            {assetGroupPathText(item) || item.description || item.id}
+          </div>
+          <div className='mt-2 flex flex-wrap gap-1.5 text-xs'>
+            <Badge tone='neutral'>{app.t('directAssets', '直接资产')}: {formatNumberValue(node.directAssetCount)}</Badge>
+            <Badge tone='neutral'>{app.t('totalAssets', '累计资产')}: {formatNumberValue(node.totalAssetCount)}</Badge>
+            <Badge tone='neutral'>{app.t('children', '子级')}: {formatNumberValue(node.children.length)}</Badge>
+            <Badge tone='neutral'>{app.t('sort', '排序')}: {formatNumberValue(metadataNumber(item.metadata?.sort))}</Badge>
+          </div>
+        </div>
+        <div className='flex flex-wrap justify-end gap-1.5'>
+          <Button size='sm' variant='outline' onClick={() => onEdit(item)}>
+            <Pencil className='size-3.5' />
+            {app.t('edit', '编辑')}
+          </Button>
+          <Button size='sm' variant='destructive' onClick={() => onDelete(item)}>
+            <Trash2 className='size-3.5' />
+            {app.t('delete', '删除')}
+          </Button>
+        </div>
+      </div>
+      {hasChildren && expanded ? (
+        <div className='border-t border-border/60'>
+          {node.children.map((child) => (
+            <AssetGroupTreeBranch key={child.item.id} node={child} depth={depth + 1} onEdit={onEdit} onDelete={onDelete} />
           ))}
         </div>
       ) : null}
@@ -4606,14 +4723,90 @@ function departmentTreeSort(left: PlatformItem, right: PlatformItem) {
   return left.name.localeCompare(right.name, undefined, { numeric: true, sensitivity: 'base' })
 }
 
+function buildAssetGroupTree(groups: PlatformItem[], assets: PlatformItem[]): AssetGroupTreeNode[] {
+  const idByKey = new Map<string, string>()
+  const byParent = new Map<string, PlatformItem[]>()
+  const visited = new Set<string>()
+
+  for (const group of groups) {
+    for (const value of [group.id, group.name]) {
+      const key = assetGroupKey(value)
+      if (key && !idByKey.has(key)) idByKey.set(key, group.id)
+    }
+  }
+
+  for (const group of groups) {
+    const parentKey = assetGroupKey(group.parent_id)
+    const parentID = parentKey ? idByKey.get(parentKey) || group.parent_id : ''
+    const safeParentID = parentID && parentID !== group.id ? parentID : ''
+    const siblings = byParent.get(safeParentID) || []
+    siblings.push(group)
+    byParent.set(safeParentID, siblings)
+  }
+
+  for (const siblings of byParent.values()) {
+    siblings.sort(assetGroupTreeSort)
+  }
+
+  const build = (parentID: string): AssetGroupTreeNode[] => {
+    const siblings = byParent.get(parentID) || []
+    return siblings
+      .filter((group) => {
+        if (visited.has(group.id)) return false
+        visited.add(group.id)
+        return true
+      })
+      .map((group) => buildAssetGroupNode(group, build(group.id), assets))
+  }
+
+  const roots = build('')
+  for (const group of [...groups].sort(assetGroupTreeSort)) {
+    if (!visited.has(group.id)) {
+      visited.add(group.id)
+      roots.push(buildAssetGroupNode(group, build(group.id), assets))
+    }
+  }
+  return roots
+}
+
+function buildAssetGroupNode(group: PlatformItem, children: AssetGroupTreeNode[], assets: PlatformItem[]): AssetGroupTreeNode {
+  const directAssetIDs = assetGroupAssetIDs(group, assets)
+  const assetIDs = new Set(directAssetIDs)
+  for (const child of children) {
+    for (const assetID of child.assetIDs) assetIDs.add(assetID)
+  }
+  return {
+    item: group,
+    children,
+    directAssetCount: directAssetIDs.size,
+    totalAssetCount: assetIDs.size,
+    assetIDs,
+  }
+}
+
+function assetGroupTreeSort(left: PlatformItem, right: PlatformItem) {
+  const leftSort = metadataNumber(left.metadata?.sort)
+  const rightSort = metadataNumber(right.metadata?.sort)
+  if (leftSort !== rightSort) return leftSort - rightSort
+  const leftType = left.type || left.protocol || ''
+  const rightType = right.type || right.protocol || ''
+  if (leftType !== rightType) return leftType.localeCompare(rightType, undefined, { numeric: true, sensitivity: 'base' })
+  return left.name.localeCompare(right.name, undefined, { numeric: true, sensitivity: 'base' })
+}
+
 function assetGroupParentName(item: PlatformItem, groups: PlatformItem[]) {
   if (!item.parent_id) return '-'
-  return groups.find((group) => group.id === item.parent_id || group.name === item.parent_id)?.name || item.parent_id
+  const parentKey = assetGroupKey(item.parent_id)
+  return groups.find((group) => assetGroupKey(group.id) === parentKey || assetGroupKey(group.name) === parentKey)?.name || item.parent_id
 }
 
 function assetGroupAssetCount(group: PlatformItem, assets: PlatformItem[]) {
-  const keys = new Set([group.id, group.name].filter(Boolean))
-  return assets.filter((asset) => assetMatchesGroupKey(asset, keys)).length
+  return assetGroupAssetIDs(group, assets).size
+}
+
+function assetGroupAssetIDs(group: PlatformItem, assets: PlatformItem[]) {
+  const keys = new Set([assetGroupKey(group.id), assetGroupKey(group.name)].filter(Boolean))
+  return new Set(assets.filter((asset) => assetMatchesGroupKey(asset, keys)).map((asset) => asset.id))
 }
 
 function assetMatchesGroupKey(asset: PlatformItem, keys: Set<string>) {
@@ -4623,11 +4816,19 @@ function assetMatchesGroupKey(asset: PlatformItem, keys: Set<string>) {
     metadataText(asset.metadata?.group_id),
     metadataText(asset.metadata?.asset_group_id),
   ].filter((candidate): candidate is string => Boolean(candidate))
-  if (candidates.some((candidate) => keys.has(candidate))) return true
+  if (candidates.some((candidate) => keys.has(assetGroupKey(candidate)))) return true
   return [
     ...stringArrayValue(asset.metadata?.group_ids),
     ...stringArrayValue(asset.metadata?.asset_group_ids),
-  ].some((candidate) => keys.has(candidate))
+  ].some((candidate) => keys.has(assetGroupKey(candidate)))
+}
+
+function assetGroupPathText(item: PlatformItem) {
+  return metadataText(item.metadata?.path) || metadataText(item.metadata?.full_path)
+}
+
+function assetGroupKey(value: unknown) {
+  return metadataText(value).trim().toLowerCase()
 }
 
 function metadataBool(value: unknown) {

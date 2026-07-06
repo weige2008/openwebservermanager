@@ -190,6 +190,8 @@ export function SettingsPage() {
   const [wecomSettings, setWeComSettings] = useState<WeComSettingsState>(() => defaultWeComSettings())
   const [wecomBusy, setWeComBusy] = useState(false)
   const [wecomTestBusy, setWeComTestBusy] = useState(false)
+  const [passwordForm, setPasswordForm] = useState({ currentPassword: '', newPassword: '', confirmPassword: '' })
+  const [passwordBusy, setPasswordBusy] = useState(false)
 
   const loadMFAStatus = async () => {
     setMFAStatus(await apiRequest<MFAStatus>('/api/auth/mfa/status'))
@@ -243,6 +245,33 @@ export function SettingsPage() {
       app.handleApiError(error)
     } finally {
       setMFABusy(false)
+    }
+  }
+
+  const changePassword = async () => {
+    if (passwordForm.newPassword !== passwordForm.confirmPassword) {
+      app.showToast(t('auth.passwordMismatch'))
+      return
+    }
+    if (passwordForm.newPassword.length < 8) {
+      app.showToast(t('settingsPage.passwordTooShort'))
+      return
+    }
+    setPasswordBusy(true)
+    try {
+      await apiRequest('/api/auth/password', {
+        method: 'POST',
+        body: JSON.stringify({
+          current_password: passwordForm.currentPassword,
+          new_password: passwordForm.newPassword,
+        }),
+      })
+      setPasswordForm({ currentPassword: '', newPassword: '', confirmPassword: '' })
+      app.showToast(t('settingsPage.passwordChanged'))
+    } catch (error) {
+      app.handleApiError(error)
+    } finally {
+      setPasswordBusy(false)
     }
   }
 
@@ -718,26 +747,78 @@ export function SettingsPage() {
           </div>
         </div>
 
-        <StaggerContainer className='grid gap-3 sm:grid-cols-2 xl:grid-cols-3'>
-          <StaggerItem>
-            <InfoTile label={t('profileDialog.userId')} value={app.auth?.id || '-'} />
-          </StaggerItem>
-          <StaggerItem>
-            <InfoTile label={t('profileDialog.sessionExpires')} value={formatDate(app.auth?.expires_at)} />
-          </StaggerItem>
-          <StaggerItem>
-            <InfoTile label={t('servers')} value={String(app.data.servers.length)} />
-          </StaggerItem>
-          <StaggerItem>
-            <InfoTile label={t('credentials')} value={String(app.data.credentials.length)} />
-          </StaggerItem>
-          <StaggerItem>
-            <InfoTile label={t('profileDialog.activeSessions')} value={String(activeSessions)} />
-          </StaggerItem>
-          <StaggerItem>
-            <InfoTile label={t('gateway')} value={app.data.guacd?.address || t('guacdOffline')} />
-          </StaggerItem>
-        </StaggerContainer>
+        <div className='grid gap-3'>
+          <StaggerContainer className='grid gap-3 sm:grid-cols-2 xl:grid-cols-3'>
+            <StaggerItem>
+              <InfoTile label={t('profileDialog.userId')} value={app.auth?.id || '-'} />
+            </StaggerItem>
+            <StaggerItem>
+              <InfoTile label={t('profileDialog.sessionExpires')} value={formatDate(app.auth?.expires_at)} />
+            </StaggerItem>
+            <StaggerItem>
+              <InfoTile label={t('servers')} value={String(app.data.servers.length)} />
+            </StaggerItem>
+            <StaggerItem>
+              <InfoTile label={t('credentials')} value={String(app.data.credentials.length)} />
+            </StaggerItem>
+            <StaggerItem>
+              <InfoTile label={t('profileDialog.activeSessions')} value={String(activeSessions)} />
+            </StaggerItem>
+            <StaggerItem>
+              <InfoTile label={t('gateway')} value={app.data.guacd?.address || t('guacdOffline')} />
+            </StaggerItem>
+          </StaggerContainer>
+          <form
+            className='grid gap-3 rounded-lg border border-border bg-background/70 p-3'
+            onSubmit={(event) => {
+              event.preventDefault()
+              void changePassword()
+            }}
+          >
+            <div>
+              <div className='text-sm font-medium'>{t('settingsPage.localPasswordTitle')}</div>
+              <p className='mt-1 text-xs leading-5 text-muted-foreground'>{t('settingsPage.localPasswordDescription')}</p>
+            </div>
+            <div className='grid gap-3 md:grid-cols-3'>
+              <Field label={t('settingsPage.currentPassword')}>
+                <Input
+                  type='password'
+                  value={passwordForm.currentPassword}
+                  onChange={(event) => setPasswordForm((current) => ({ ...current, currentPassword: event.currentTarget.value }))}
+                  autoComplete='current-password'
+                />
+              </Field>
+              <Field label={t('settingsPage.newPassword')}>
+                <Input
+                  type='password'
+                  value={passwordForm.newPassword}
+                  onChange={(event) => setPasswordForm((current) => ({ ...current, newPassword: event.currentTarget.value }))}
+                  autoComplete='new-password'
+                  minLength={8}
+                />
+              </Field>
+              <Field label={t('settingsPage.confirmPassword')}>
+                <Input
+                  type='password'
+                  value={passwordForm.confirmPassword}
+                  onChange={(event) => setPasswordForm((current) => ({ ...current, confirmPassword: event.currentTarget.value }))}
+                  autoComplete='new-password'
+                  minLength={8}
+                />
+              </Field>
+            </div>
+            <div className='flex justify-end'>
+              <Button
+                type='submit'
+                variant='primary'
+                disabled={passwordBusy || !passwordForm.currentPassword || !passwordForm.newPassword || !passwordForm.confirmPassword}
+              >
+                <KeyRound className='size-4' />
+                {passwordBusy ? t('saving') : t('settingsPage.changePassword')}
+              </Button>
+            </div>
+          </form>
+        </div>
       </CardStaggerItem>
 
       <CardStaggerItem className='grid gap-4 rounded-xl border border-border bg-card p-5 shadow-sm lg:grid-cols-[0.85fr_1.15fr]'>

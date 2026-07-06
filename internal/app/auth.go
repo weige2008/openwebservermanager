@@ -90,6 +90,11 @@ type loginRequest struct {
 	CaptchaAnswer string `json:"captcha_answer"`
 }
 
+type passwordChangeRequest struct {
+	CurrentPassword string `json:"current_password"`
+	NewPassword     string `json:"new_password"`
+}
+
 func newAuthManager() *authManager {
 	return &authManager{
 		sessions:             map[string]authSession{},
@@ -126,6 +131,23 @@ func (m *authManager) delete(token string) {
 	defer m.mu.Unlock()
 	delete(m.sessions, token)
 	delete(m.accessMFAGrants, token)
+}
+
+func (m *authManager) deleteUserSessionsExcept(userID, keepToken string) {
+	userID = strings.TrimSpace(userID)
+	keepToken = strings.TrimSpace(keepToken)
+	if userID == "" {
+		return
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	for token, session := range m.sessions {
+		if session.UserID != userID || token == keepToken {
+			continue
+		}
+		delete(m.sessions, token)
+		delete(m.accessMFAGrants, token)
+	}
 }
 
 func (m *authManager) hasUserSession(userID string) bool {
@@ -616,6 +638,48 @@ func (s *Server) handleMe(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"user": s.authUserPayload(session)})
+}
+
+func (s *Server) handlePasswordChange(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		writeError(w, http.StatusMethodNotAllowed, "method not allowed")
+		return
+	}
+	var req passwordChangeRequest
+	if !decodeJSON(w, r, &req) {
+		return
+	}
+	token, session, ok := s.auth.session(r)
+	if !ok {
+		writeError(w, http.StatusUnauthorized, "authentication required")
+		return
+	}
+	if ok, err := s.cfg.Store.VerifyUserPassword(session.UserID, req.CurrentPassword); err != nil {
+		writeError(w, http.StatusInternalServerError, err.Error())
+		return
+	} else if !ok {
+		_ = s.audit(r, "auth.password.change.failed", session.UserID, "", "current password is invalid")
+		writeError(w, http.StatusUnauthorized, "current password is invalid")
+		return
+	}
+	if len(req.NewPassword) < 8 {
+		writeError(w, http.StatusBadRequest, "password must be at least 8 characters")
+		return
+	}
+	user, err := s.cfg.Store.UpdateUserPassword(session.UserID, req.NewPassword)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	s.auth.deleteUserSessionsExcept(session.UserID, token)
+	s.auth.resetLoginFailuresFor(session.Username, s.clientIP(r))
+	_ = s.audit(r, "auth.password.change", session.UserID, "", "changed local password")
+	writeJSON(w, http.StatusOK, map[string]any{"user": s.authUserPayload(authSession{
+		UserID:    user.UserID,
+		Username:  user.Username,
+		Role:      user.Role,
+		ExpiresAt: session.ExpiresAt,
+	})})
 }
 
 func (s *Server) authCookie(r *http.Request, value string, maxAge int) *http.Cookie {

@@ -248,6 +248,92 @@ func (s *Store) VerifyPlatformUser(username, password string) (AdminPublic, bool
 	return AdminPublic{}, false, nil
 }
 
+func (s *Store) VerifyUserPassword(userID, password string) (bool, error) {
+	userID = strings.TrimSpace(userID)
+	if userID == "" || strings.TrimSpace(password) == "" {
+		return false, nil
+	}
+	s.mu.RLock()
+	admin := s.state.Admin
+	s.mu.RUnlock()
+	if admin != nil && admin.UserID == userID && admin.PasswordHash != "" {
+		return bcrypt.CompareHashAndPassword([]byte(admin.PasswordHash), []byte(password)) == nil, nil
+	}
+	item, ok, err := s.GetPlatformItem("users", userID)
+	if err != nil || !ok {
+		return false, err
+	}
+	hash, _ := item.Metadata["password_hash"].(string)
+	if hash == "" {
+		return false, nil
+	}
+	return bcrypt.CompareHashAndPassword([]byte(hash), []byte(password)) == nil, nil
+}
+
+func (s *Store) UpdateUserPassword(userID, password string) (AdminPublic, error) {
+	userID = strings.TrimSpace(userID)
+	if userID == "" {
+		return AdminPublic{}, errors.New("user id is required")
+	}
+	if len(password) < 8 {
+		return AdminPublic{}, errors.New("password must be at least 8 characters")
+	}
+	hash, err := bcrypt.GenerateFromPassword([]byte(password), bcrypt.DefaultCost)
+	if err != nil {
+		return AdminPublic{}, err
+	}
+	passwordHash := string(hash)
+	now := time.Now().UTC()
+
+	var legacyAdmin AdminPublic
+	updatedLegacy := false
+	s.mu.Lock()
+	if s.state.Admin != nil && s.state.Admin.UserID == userID {
+		s.state.Admin.PasswordHash = passwordHash
+		s.state.Admin.UpdatedAt = now
+		legacyAdmin = s.state.Admin.Public()
+		updatedLegacy = true
+		if err := s.saveLocked(); err != nil {
+			s.mu.Unlock()
+			return AdminPublic{}, err
+		}
+	}
+	s.mu.Unlock()
+
+	item, ok, err := s.GetPlatformItem("users", userID)
+	if err != nil {
+		return AdminPublic{}, err
+	}
+	if !ok {
+		if updatedLegacy {
+			return legacyAdmin, nil
+		}
+		return AdminPublic{}, os.ErrNotExist
+	}
+	if item.Metadata == nil {
+		item.Metadata = map[string]any{}
+	}
+	item.Metadata["password_hash"] = passwordHash
+	saved, err := s.SavePlatformItem("users", item)
+	if err != nil {
+		return AdminPublic{}, err
+	}
+	role, _ := saved.Metadata["role"].(string)
+	if role == "" {
+		role = "user"
+	}
+	if updatedLegacy && legacyAdmin.Role != "" {
+		role = legacyAdmin.Role
+	}
+	return AdminPublic{
+		UserID:    saved.ID,
+		Username:  saved.Name,
+		Role:      role,
+		CreatedAt: saved.CreatedAt,
+		UpdatedAt: saved.UpdatedAt,
+	}, nil
+}
+
 func (s *Store) RecordUserLogin(userID, clientIP, userAgent string) error {
 	item, ok, err := s.GetPlatformItem("users", userID)
 	if err != nil || !ok {

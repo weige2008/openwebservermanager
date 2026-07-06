@@ -202,6 +202,73 @@ func TestPlatformUserLoginAndAccessAuthorization(t *testing.T) {
 	}
 }
 
+func TestAuthenticatedPasswordChange(t *testing.T) {
+	handler, adminCookie := newTestHandler(t)
+
+	assertStatus(t, handler, http.MethodPost, "/api/auth/password", map[string]any{
+		"current_password": "password123",
+		"new_password":     "new-admin-password",
+	}, nil, http.StatusUnauthorized)
+
+	secondAdminLogin := assertStatus(t, handler, http.MethodPost, "/api/auth/login", map[string]any{
+		"username": "admin",
+		"password": "password123",
+	}, nil, http.StatusOK)
+	secondAdminCookie := secondAdminLogin.Result().Cookies()[0]
+
+	assertStatus(t, handler, http.MethodPost, "/api/auth/password", map[string]any{
+		"current_password": "wrong-password",
+		"new_password":     "new-admin-password",
+	}, adminCookie, http.StatusUnauthorized)
+	assertStatus(t, handler, http.MethodPost, "/api/auth/password", map[string]any{
+		"current_password": "password123",
+		"new_password":     "short",
+	}, adminCookie, http.StatusBadRequest)
+
+	changeRec := assertStatus(t, handler, http.MethodPost, "/api/auth/password", map[string]any{
+		"current_password": "password123",
+		"new_password":     "new-admin-password",
+	}, adminCookie, http.StatusOK)
+	if strings.Contains(changeRec.Body.String(), "password_hash") || strings.Contains(changeRec.Body.String(), "new-admin-password") {
+		t.Fatal("password change response leaked secret material")
+	}
+	assertStatus(t, handler, http.MethodGet, "/api/auth/me", nil, adminCookie, http.StatusOK)
+	assertStatus(t, handler, http.MethodGet, "/api/auth/me", nil, secondAdminCookie, http.StatusUnauthorized)
+	assertStatus(t, handler, http.MethodPost, "/api/auth/login", map[string]any{"username": "admin", "password": "password123"}, nil, http.StatusUnauthorized)
+	assertStatus(t, handler, http.MethodPost, "/api/auth/login", map[string]any{"username": "admin", "password": "new-admin-password"}, nil, http.StatusOK)
+
+	userRec := assertStatus(t, handler, http.MethodPost, "/api/admin/users", map[string]any{
+		"name":     "password-user",
+		"type":     "local",
+		"status":   "enabled",
+		"password": "password123",
+		"metadata": map[string]any{"role": "user"},
+	}, adminCookie, http.StatusCreated)
+	var user model.PlatformItem
+	decodeResponse(t, userRec, &user)
+	loginRec := assertStatus(t, handler, http.MethodPost, "/api/auth/login", map[string]any{"username": "password-user", "password": "password123"}, nil, http.StatusOK)
+	userCookie := loginRec.Result().Cookies()[0]
+
+	userChangeRec := assertStatus(t, handler, http.MethodPost, "/api/auth/password", map[string]any{
+		"current_password": "password123",
+		"new_password":     "new-user-password",
+	}, userCookie, http.StatusOK)
+	if strings.Contains(userChangeRec.Body.String(), "password_hash") || strings.Contains(userChangeRec.Body.String(), "new-user-password") {
+		t.Fatal("platform user password change response leaked secret material")
+	}
+	assertStatus(t, handler, http.MethodPost, "/api/auth/login", map[string]any{"username": "password-user", "password": "password123"}, nil, http.StatusUnauthorized)
+	assertStatus(t, handler, http.MethodPost, "/api/auth/login", map[string]any{"username": "password-user", "password": "new-user-password"}, nil, http.StatusOK)
+
+	usersRec := assertStatus(t, handler, http.MethodGet, "/api/admin/users", nil, adminCookie, http.StatusOK)
+	if strings.Contains(usersRec.Body.String(), "password_hash") || strings.Contains(usersRec.Body.String(), "new-user-password") || strings.Contains(usersRec.Body.String(), "new-admin-password") {
+		t.Fatal("user list leaked password material")
+	}
+	logsRec := assertStatus(t, handler, http.MethodGet, "/api/admin/audit/operation-logs", nil, adminCookie, http.StatusOK)
+	if !strings.Contains(logsRec.Body.String(), "auth.password.change") || !strings.Contains(logsRec.Body.String(), "auth.password.change.failed") {
+		t.Fatal("password change audit logs were not recorded")
+	}
+}
+
 func TestAccessMFARequiredForPortalConnections(t *testing.T) {
 	handler, adminCookie := newTestHandler(t)
 	srv := handler.(*Server)

@@ -167,6 +167,10 @@ func (s *Server) handleCollection(w http.ResponseWriter, r *http.Request, collec
 		_ = s.audit(r, collection+".update", item.ID, item.Protocol, "updated "+item.Name)
 		writeJSON(w, http.StatusOK, item)
 	case id != "" && r.Method == http.MethodDelete:
+		if collection == "login_locks" {
+			s.handleDeleteLoginLock(w, r, id)
+			return
+		}
 		if err := s.cfg.Store.DeletePlatformItem(collection, id); err != nil {
 			writeError(w, http.StatusNotFound, "record not found")
 			return
@@ -176,6 +180,29 @@ func (s *Server) handleCollection(w http.ResponseWriter, r *http.Request, collec
 	default:
 		writeError(w, http.StatusMethodNotAllowed, "method not allowed")
 	}
+}
+
+func (s *Server) handleDeleteLoginLock(w http.ResponseWriter, r *http.Request, id string) {
+	lock, ok, err := s.cfg.Store.GetPlatformItem("login_locks", id)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	if !ok {
+		writeError(w, http.StatusNotFound, "record not found")
+		return
+	}
+	if err := s.cfg.Store.DeletePlatformItem("login_locks", id); err != nil {
+		writeError(w, http.StatusNotFound, "record not found")
+		return
+	}
+	for _, account := range loginLockAccounts(lock) {
+		for _, clientIP := range loginLockClientIPs(lock) {
+			s.auth.resetLoginFailuresFor(account, clientIP)
+		}
+	}
+	_ = s.audit(r, "login_locks.unlock", id, "", "unlocked login lock")
+	writeJSON(w, http.StatusOK, map[string]bool{"ok": true})
 }
 
 func (s *Server) handleAccessAssets(w http.ResponseWriter, r *http.Request) {

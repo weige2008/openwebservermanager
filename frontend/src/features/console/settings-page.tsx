@@ -176,6 +176,8 @@ export function SettingsPage() {
   const [loginPolicies, setLoginPolicies] = useState<PlatformItem[]>([])
   const [loginPolicyForm, setLoginPolicyForm] = useState<LoginPolicyFormState>(defaultLoginPolicyForm)
   const [loginPolicyBusy, setLoginPolicyBusy] = useState(false)
+  const [loginLocks, setLoginLocks] = useState<PlatformItem[]>([])
+  const [loginLockBusy, setLoginLockBusy] = useState(false)
   const [oidcSettings, setOIDCSettings] = useState<OIDCSettingsState>(() => defaultOIDCSettings())
   const [oidcBusy, setOIDCBusy] = useState(false)
   const [oidcTestBusy, setOIDCTestBusy] = useState(false)
@@ -210,11 +212,17 @@ export function SettingsPage() {
     setLoginPolicies(result.items || [])
   }
 
+  const loadLoginLocks = async () => {
+    const result = await apiRequest<{ items: PlatformItem[] }>('/api/admin/login-locked')
+    setLoginLocks(result.items || [])
+  }
+
   useEffect(() => {
     void loadMFAStatus().catch(() => undefined)
     void loadPasskeys().catch(() => undefined)
     void loadLoginSecurity().catch(() => undefined)
     void loadLoginPolicies().catch(() => undefined)
+    void loadLoginLocks().catch(() => undefined)
   }, [])
 
   useEffect(() => {
@@ -448,6 +456,19 @@ export function SettingsPage() {
       app.handleApiError(error)
     } finally {
       setLoginPolicyBusy(false)
+    }
+  }
+
+  const unlockLoginLock = async (lock: PlatformItem) => {
+    setLoginLockBusy(true)
+    try {
+      await apiRequest(`/api/admin/login-locked/${lock.id}`, { method: 'DELETE' })
+      await loadLoginLocks()
+      app.showToast(t('settingsPage.loginLockUnlocked'))
+    } catch (error) {
+      app.handleApiError(error)
+    } finally {
+      setLoginLockBusy(false)
     }
   }
 
@@ -1114,6 +1135,43 @@ export function SettingsPage() {
               </div>
             )}
           </div>
+          <div className='grid gap-3 rounded-lg border border-border bg-background/70 p-3'>
+            <div className='flex flex-wrap items-center justify-between gap-2'>
+              <div>
+                <div className='text-sm font-medium'>{t('settingsPage.loginLocksTitle')}</div>
+                <p className='mt-1 text-xs leading-5 text-muted-foreground'>{t('settingsPage.loginLocksDescription')}</p>
+              </div>
+              <Badge tone={loginLocks.length > 0 ? 'danger' : 'neutral'}>
+                {t('settingsPage.loginLocksCount', { count: loginLocks.length })}
+              </Badge>
+            </div>
+            {loginLocks.length === 0 ? (
+              <div className='rounded-md border border-dashed border-border p-3 text-sm text-muted-foreground'>{t('settingsPage.loginLocksEmpty')}</div>
+            ) : (
+              <div className='divide-y divide-border overflow-hidden rounded-md border border-border bg-card/60'>
+                {loginLocks.map((lock) => (
+                  <div key={lock.id} className='grid gap-3 p-3 sm:grid-cols-[1fr_auto] sm:items-center'>
+                    <div className='min-w-0'>
+                      <div className='flex flex-wrap items-center gap-2'>
+                        <span className='truncate text-sm font-medium'>{loginLockAccount(lock)}</span>
+                        <Badge tone='danger'>{t('settingsPage.loginLockStatus')}</Badge>
+                      </div>
+                      <div className='mt-1 flex flex-wrap gap-x-4 gap-y-1 text-xs text-muted-foreground'>
+                        <span>{t('settingsPage.loginPolicyCIDR')}: {loginLockClientIP(lock)}</span>
+                        <span>{t('settingsPage.loginLockUntil')}: {loginLockUntil(lock)}</span>
+                        <span>{t('settingsPage.loginLockFailureCount')}: {loginLockFailureCount(lock)}</span>
+                      </div>
+                    </div>
+                    <div className='flex justify-end'>
+                      <Button variant='outline' size='sm' onClick={() => void unlockLoginLock(lock)} disabled={loginLockBusy}>
+                        {t('settingsPage.unlockLoginLock')}
+                      </Button>
+                    </div>
+                  </div>
+                ))}
+              </div>
+            )}
+          </div>
         </div>
       </CardStaggerItem>
 
@@ -1631,6 +1689,22 @@ function loginPolicyAccount(policy: PlatformItem) {
 
 function loginPolicyCIDR(policy: PlatformItem) {
   return metadataText(policy.metadata?.cidr) || metadataText(policy.metadata?.client_ip) || policy.host || policy.target_id || '*'
+}
+
+function loginLockAccount(lock: PlatformItem) {
+  return metadataText(lock.metadata?.account) || metadataText(lock.metadata?.username) || lock.username || lock.name || '*'
+}
+
+function loginLockClientIP(lock: PlatformItem) {
+  return metadataText(lock.metadata?.client_ip) || lock.host || '*'
+}
+
+function loginLockUntil(lock: PlatformItem) {
+  return metadataText(lock.metadata?.locked_until) || '-'
+}
+
+function loginLockFailureCount(lock: PlatformItem) {
+  return metadataText(lock.metadata?.failure_count) || '0'
 }
 
 function metadataTruthy(value: unknown) {

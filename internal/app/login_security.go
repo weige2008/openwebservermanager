@@ -156,6 +156,36 @@ func (s *Server) passwordLoginDisabled() bool {
 	return false
 }
 
+func loginLockAccounts(lock model.PlatformItem) []string {
+	values := []string{lock.Username, lock.Name}
+	values = append(values, metadataStrings(lock.Metadata["account"])...)
+	values = append(values, metadataStrings(lock.Metadata["username"])...)
+	return compactUniqueStrings(values)
+}
+
+func loginLockClientIPs(lock model.PlatformItem) []string {
+	values := []string{lock.Host}
+	values = append(values, metadataStrings(lock.Metadata["client_ip"])...)
+	return compactUniqueStrings(values)
+}
+
+func compactUniqueStrings(values []string) []string {
+	seen := map[string]bool{}
+	result := []string{}
+	for _, value := range values {
+		value = strings.TrimSpace(value)
+		if value == "" || seen[value] {
+			continue
+		}
+		seen[value] = true
+		result = append(result, value)
+	}
+	if len(result) == 0 {
+		return []string{""}
+	}
+	return result
+}
+
 func platformItemEnabled(item model.PlatformItem) bool {
 	status := strings.ToLower(strings.TrimSpace(item.Status))
 	return status == "" || status == "enabled" || status == "active" || status == "locked"

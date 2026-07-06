@@ -202,6 +202,29 @@ func (m *authManager) resetLoginFailures(key string) {
 	delete(m.failures, key)
 }
 
+func (m *authManager) resetLoginFailuresFor(username, clientIP string) {
+	username = strings.ToLower(strings.TrimSpace(username))
+	clientIP = strings.TrimSpace(clientIP)
+	if username == "" && clientIP == "" {
+		return
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if username != "" && clientIP != "" {
+		delete(m.failures, clientIP+":"+username)
+		return
+	}
+	for key := range m.failures {
+		if username != "" && strings.HasSuffix(key, ":"+username) {
+			delete(m.failures, key)
+			continue
+		}
+		if clientIP != "" && strings.HasPrefix(key, clientIP+":") {
+			delete(m.failures, key)
+		}
+	}
+}
+
 func (m *authManager) clearSessions() {
 	m.mu.Lock()
 	defer m.mu.Unlock()

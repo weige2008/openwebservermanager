@@ -1915,6 +1915,22 @@ func TestLoginSecurityPoliciesAndLocks(t *testing.T) {
 	if !strings.Contains(locksRec.Body.String(), "lock-user") {
 		t.Fatal("login lock record was not created after repeated failures")
 	}
+	var locks struct {
+		Items []model.PlatformItem `json:"items"`
+	}
+	decodeResponse(t, locksRec, &locks)
+	var lockID string
+	for _, lock := range locks.Items {
+		if lock.Name == "lock-user" {
+			lockID = lock.ID
+			break
+		}
+	}
+	if lockID == "" {
+		t.Fatal("lock-user lock id was not returned")
+	}
+	assertStatus(t, handler, http.MethodDelete, "/api/admin/login-locked/"+lockID, nil, adminCookie, http.StatusOK)
+	assertStatus(t, handler, http.MethodPost, "/api/auth/login", map[string]any{"username": "lock-user", "password": "password123"}, nil, http.StatusOK)
 
 	assertStatus(t, handler, http.MethodPost, "/api/admin/users", map[string]any{
 		"name":     "policy-user",

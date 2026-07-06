@@ -195,15 +195,7 @@ func sanitizedExternalProviderError(err error, secrets ...string) error {
 	if err == nil {
 		return nil
 	}
-	text := err.Error()
-	for _, secret := range secrets {
-		secret = strings.TrimSpace(secret)
-		if secret == "" {
-			continue
-		}
-		text = strings.ReplaceAll(text, secret, "[redacted]")
-	}
-	return errors.New(text)
+	return errors.New(redactSecretVariants(err.Error(), secrets...))
 }
 
 func (s *Server) exchangeExternalOIDCCode(r *http.Request, provider externalOIDCProvider, code string) (map[string]any, error) {

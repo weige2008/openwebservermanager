@@ -555,13 +555,7 @@ func testExternalOIDCAuthorizationEndpoint(provider externalOIDCProvider, redire
 }
 
 func sanitizedOIDCTestError(provider externalOIDCProvider, err error) string {
-	text := err.Error()
-	for _, secret := range []string{provider.ClientSecret} {
-		if strings.TrimSpace(secret) != "" {
-			text = strings.ReplaceAll(text, secret, "[redacted]")
-		}
-	}
-	return text
+	return redactSecretVariants(err.Error(), provider.ClientSecret)
 }
 
 func testExternalWeComAccessToken(provider externalWeComProvider) (int, error) {
@@ -586,10 +580,21 @@ func testExternalWeComAccessToken(provider externalWeComProvider) (int, error) {
 }
 
 func sanitizedWeComTestError(provider externalWeComProvider, err error) string {
-	text := err.Error()
-	for _, secret := range []string{provider.AgentSecret} {
-		if strings.TrimSpace(secret) != "" {
-			text = strings.ReplaceAll(text, secret, "[redacted]")
+	return redactSecretVariants(err.Error(), provider.AgentSecret)
+}
+
+func redactSecretVariants(text string, secrets ...string) string {
+	for _, secret := range secrets {
+		secret = strings.TrimSpace(secret)
+		if secret == "" {
+			continue
+		}
+		variants := []string{secret, url.QueryEscape(secret), url.PathEscape(secret)}
+		for _, variant := range variants {
+			if variant == "" {
+				continue
+			}
+			text = strings.ReplaceAll(text, variant, "[redacted]")
 		}
 	}
 	return text

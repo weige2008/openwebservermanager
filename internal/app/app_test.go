@@ -4096,6 +4096,8 @@ func TestExternalOIDCCallbackAutoCreateDisabledIsAudited(t *testing.T) {
 func TestExternalOIDCCallbackTokenFailureIsAuditedAndRedacted(t *testing.T) {
 	handler, adminCookie := newTestHandler(t)
 	srv := handler.(*Server)
+	clientSecret := "openweb secret+/=?:&"
+	escapedClientSecret := url.QueryEscape(clientSecret)
 	var tokenEndpointCalls int
 	provider := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path != "/token" {
@@ -4103,7 +4105,7 @@ func TestExternalOIDCCallbackTokenFailureIsAuditedAndRedacted(t *testing.T) {
 			return
 		}
 		tokenEndpointCalls++
-		http.Error(w, "provider down with openweb-secret", http.StatusBadGateway)
+		http.Error(w, "provider down with "+clientSecret+" and "+escapedClientSecret, http.StatusBadGateway)
 	}))
 	defer provider.Close()
 
@@ -4119,7 +4121,7 @@ func TestExternalOIDCCallbackTokenFailureIsAuditedAndRedacted(t *testing.T) {
 			"oidc_token_endpoint":         provider.URL + "/token",
 			"oidc_userinfo_endpoint":      provider.URL + "/userinfo",
 			"oidc_client_id":              "openweb-client",
-			"oidc_client_secret":          "openweb-secret",
+			"oidc_client_secret":          clientSecret,
 			"oidc_scopes":                 []string{"openid", "profile"},
 		},
 	}, adminCookie, http.StatusCreated)
@@ -4128,24 +4130,26 @@ func TestExternalOIDCCallbackTokenFailureIsAuditedAndRedacted(t *testing.T) {
 		t.Fatalf("create external oidc state: %v", err)
 	}
 	failedRec := assertStatus(t, handler, http.MethodGet, "/api/auth/oidc/callback?state="+url.QueryEscape(state)+"&code=broken-code", nil, nil, http.StatusBadGateway)
-	if !strings.Contains(failedRec.Body.String(), "provider down") || strings.Contains(failedRec.Body.String(), "openweb-secret") {
+	if !strings.Contains(failedRec.Body.String(), "provider down") || strings.Contains(failedRec.Body.String(), clientSecret) || strings.Contains(failedRec.Body.String(), escapedClientSecret) {
 		t.Fatalf("oidc token failure response missing sanitized reason or leaked secret: %s", failedRec.Body.String())
 	}
 	if tokenEndpointCalls != 1 {
 		t.Fatalf("oidc token endpoint calls = %d, want 1", tokenEndpointCalls)
 	}
 	loginLogsRec := assertStatus(t, handler, http.MethodGet, "/api/admin/audit/login-logs", nil, adminCookie, http.StatusOK)
-	if !strings.Contains(loginLogsRec.Body.String(), `"type":"oidc"`) || !strings.Contains(loginLogsRec.Body.String(), `"status":"failed"`) || !strings.Contains(loginLogsRec.Body.String(), "broken-sso") || !strings.Contains(loginLogsRec.Body.String(), "provider down") || strings.Contains(loginLogsRec.Body.String(), "openweb-secret") {
+	if !strings.Contains(loginLogsRec.Body.String(), `"type":"oidc"`) || !strings.Contains(loginLogsRec.Body.String(), `"status":"failed"`) || !strings.Contains(loginLogsRec.Body.String(), "broken-sso") || !strings.Contains(loginLogsRec.Body.String(), "provider down") || strings.Contains(loginLogsRec.Body.String(), clientSecret) || strings.Contains(loginLogsRec.Body.String(), escapedClientSecret) {
 		t.Fatalf("oidc token failure log missing details or leaked secret: %s", loginLogsRec.Body.String())
 	}
 	operationLogsRec := assertStatus(t, handler, http.MethodGet, "/api/admin/audit/operation-logs", nil, adminCookie, http.StatusOK)
-	if !strings.Contains(operationLogsRec.Body.String(), "auth.oidc.login_failed") || strings.Contains(operationLogsRec.Body.String(), "openweb-secret") {
+	if !strings.Contains(operationLogsRec.Body.String(), "auth.oidc.login_failed") || strings.Contains(operationLogsRec.Body.String(), clientSecret) || strings.Contains(operationLogsRec.Body.String(), escapedClientSecret) {
 		t.Fatalf("oidc token failure audit missing or leaked secret: %s", operationLogsRec.Body.String())
 	}
 }
 
 func TestOIDCIntegrationAuthorizationEndpointTest(t *testing.T) {
 	handler, adminCookie := newTestHandler(t)
+	clientSecret := "openweb secret+/=?:&"
+	escapedClientSecret := url.QueryEscape(clientSecret)
 	var gotClientID string
 	var gotRedirectURI string
 	var gotScope string
@@ -4168,7 +4172,7 @@ func TestOIDCIntegrationAuthorizationEndpointTest(t *testing.T) {
 			}
 			http.Redirect(w, r, "/login", http.StatusFound)
 		case "/bad-authorize":
-			http.Error(w, "invalid client secret openweb-secret", http.StatusBadRequest)
+			http.Error(w, "invalid client secret "+clientSecret+" encoded "+escapedClientSecret, http.StatusBadRequest)
 		default:
 			http.NotFound(w, r)
 		}
@@ -4187,7 +4191,7 @@ func TestOIDCIntegrationAuthorizationEndpointTest(t *testing.T) {
 			"oidc_token_endpoint":         provider.URL + "/token",
 			"oidc_userinfo_endpoint":      provider.URL + "/userinfo",
 			"oidc_client_id":              "openweb-client",
-			"oidc_client_secret":          "openweb-secret",
+			"oidc_client_secret":          clientSecret,
 			"oidc_scopes":                 []string{"openid", "profile", "email"},
 			"oidc_role":                   "user",
 		},
@@ -4196,7 +4200,7 @@ func TestOIDCIntegrationAuthorizationEndpointTest(t *testing.T) {
 	decodeResponse(t, settingRec, &setting)
 
 	settingsRec := assertStatus(t, handler, http.MethodGet, "/api/admin/system-settings", nil, adminCookie, http.StatusOK)
-	for _, leaked := range []string{"openweb-secret", "oidc_client_secret_encrypted", "client_secret_encrypted"} {
+	for _, leaked := range []string{clientSecret, escapedClientSecret, "oidc_client_secret_encrypted", "client_secret_encrypted"} {
 		if strings.Contains(settingsRec.Body.String(), leaked) {
 			t.Fatalf("oidc settings leaked sensitive value %q: %s", leaked, settingsRec.Body.String())
 		}
@@ -4213,7 +4217,7 @@ func TestOIDCIntegrationAuthorizationEndpointTest(t *testing.T) {
 			t.Fatalf("oidc test response missing %q: %s", expected, body)
 		}
 	}
-	for _, leaked := range []string{"openweb-secret", "client_secret", "oidc_client_secret_encrypted", "client_secret_encrypted"} {
+	for _, leaked := range []string{clientSecret, escapedClientSecret, "client_secret", "oidc_client_secret_encrypted", "client_secret_encrypted"} {
 		if strings.Contains(body, leaked) {
 			t.Fatalf("oidc test response leaked sensitive value %q: %s", leaked, body)
 		}
@@ -4243,7 +4247,7 @@ func TestOIDCIntegrationAuthorizationEndpointTest(t *testing.T) {
 			"oidc_authorization_endpoint": provider.URL + "/bad-authorize",
 			"oidc_token_endpoint":         provider.URL + "/token",
 			"oidc_client_id":              "openweb-client",
-			"oidc_client_secret":          "openweb-secret",
+			"oidc_client_secret":          clientSecret,
 		},
 	}, adminCookie, http.StatusCreated)
 	var badSetting model.PlatformItem
@@ -4251,11 +4255,11 @@ func TestOIDCIntegrationAuthorizationEndpointTest(t *testing.T) {
 	failedRec := assertStatus(t, handler, http.MethodPost, "/api/admin/system-settings/oidc/test", map[string]any{
 		"setting_id": badSetting.ID,
 	}, adminCookie, http.StatusBadGateway)
-	if strings.Contains(failedRec.Body.String(), "openweb-secret") {
+	if strings.Contains(failedRec.Body.String(), clientSecret) || strings.Contains(failedRec.Body.String(), escapedClientSecret) {
 		t.Fatalf("oidc failed test leaked secret: %s", failedRec.Body.String())
 	}
 	logsRec := assertStatus(t, handler, http.MethodGet, "/api/admin/audit/operation-logs", nil, adminCookie, http.StatusOK)
-	if !strings.Contains(logsRec.Body.String(), "system_settings.oidc_test") || !strings.Contains(logsRec.Body.String(), "system_settings.oidc_test.failed") || strings.Contains(logsRec.Body.String(), "openweb-secret") {
+	if !strings.Contains(logsRec.Body.String(), "system_settings.oidc_test") || !strings.Contains(logsRec.Body.String(), "system_settings.oidc_test.failed") || strings.Contains(logsRec.Body.String(), clientSecret) || strings.Contains(logsRec.Body.String(), escapedClientSecret) {
 		t.Fatalf("oidc test operation logs missing entries or leaked secret: %s", logsRec.Body.String())
 	}
 }
@@ -4657,6 +4661,8 @@ func TestLDAPIntegrationTestFailureRedactsSecrets(t *testing.T) {
 
 func TestWeComIntegrationTokenTest(t *testing.T) {
 	handler, adminCookie := newTestHandler(t)
+	badSecret := "bad secret+/=?:&"
+	escapedBadSecret := url.QueryEscape(badSecret)
 	var gotCorpID string
 	var gotSecret string
 	var tokenCalls int
@@ -4669,7 +4675,7 @@ func TestWeComIntegrationTokenTest(t *testing.T) {
 		gotCorpID = r.URL.Query().Get("corpid")
 		gotSecret = r.URL.Query().Get("corpsecret")
 		if gotCorpID != "ww-openweb" || gotSecret != "wecom-secret" {
-			writeJSON(w, http.StatusOK, map[string]any{"errcode": 40014, "errmsg": "invalid " + gotSecret})
+			writeJSON(w, http.StatusOK, map[string]any{"errcode": 40014, "errmsg": "invalid " + gotSecret + " query " + r.URL.RawQuery})
 			return
 		}
 		writeJSON(w, http.StatusOK, map[string]any{"errcode": 0, "access_token": "wecom-access", "expires_in": 7200})
@@ -4740,7 +4746,7 @@ func TestWeComIntegrationTokenTest(t *testing.T) {
 			"wecom_provider_id":       "bad-wecom",
 			"wecom_provider_name":     "Bad WeCom",
 			"wecom_corp_id":           "ww-openweb",
-			"wecom_agent_secret":      "bad-secret",
+			"wecom_agent_secret":      badSecret,
 			"wecom_token_endpoint":    provider.URL + "/gettoken",
 			"wecom_userinfo_endpoint": provider.URL + "/getuserinfo",
 		},
@@ -4750,11 +4756,11 @@ func TestWeComIntegrationTokenTest(t *testing.T) {
 	failedRec := assertStatus(t, handler, http.MethodPost, "/api/admin/system-settings/wecom/test", map[string]any{
 		"setting_id": badSetting.ID,
 	}, adminCookie, http.StatusBadGateway)
-	if strings.Contains(failedRec.Body.String(), "bad-secret") {
+	if strings.Contains(failedRec.Body.String(), badSecret) || strings.Contains(failedRec.Body.String(), escapedBadSecret) {
 		t.Fatalf("wecom failed test leaked secret: %s", failedRec.Body.String())
 	}
 	logsRec := assertStatus(t, handler, http.MethodGet, "/api/admin/audit/operation-logs", nil, adminCookie, http.StatusOK)
-	if !strings.Contains(logsRec.Body.String(), "system_settings.wecom_test") || !strings.Contains(logsRec.Body.String(), "system_settings.wecom_test.failed") || strings.Contains(logsRec.Body.String(), "bad-secret") {
+	if !strings.Contains(logsRec.Body.String(), "system_settings.wecom_test") || !strings.Contains(logsRec.Body.String(), "system_settings.wecom_test.failed") || strings.Contains(logsRec.Body.String(), badSecret) || strings.Contains(logsRec.Body.String(), escapedBadSecret) {
 		t.Fatalf("wecom test operation logs missing entries or leaked secret: %s", logsRec.Body.String())
 	}
 }
@@ -4974,6 +4980,8 @@ func TestExternalWeComCallbackAutoCreateDisabledIsAudited(t *testing.T) {
 func TestExternalWeComCallbackTokenFailureIsAuditedAndRedacted(t *testing.T) {
 	handler, adminCookie := newTestHandler(t)
 	srv := handler.(*Server)
+	agentSecret := "wecom secret+/=?:&"
+	escapedAgentSecret := url.QueryEscape(agentSecret)
 	var tokenEndpointCalls int
 	provider := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path != "/gettoken" {
@@ -4981,7 +4989,7 @@ func TestExternalWeComCallbackTokenFailureIsAuditedAndRedacted(t *testing.T) {
 			return
 		}
 		tokenEndpointCalls++
-		writeJSON(w, http.StatusOK, map[string]any{"errcode": 40001, "errmsg": "bad corpsecret wecom-secret"})
+		writeJSON(w, http.StatusOK, map[string]any{"errcode": 40001, "errmsg": "bad corpsecret " + agentSecret + " query " + r.URL.RawQuery})
 	}))
 	defer provider.Close()
 
@@ -4995,7 +5003,7 @@ func TestExternalWeComCallbackTokenFailureIsAuditedAndRedacted(t *testing.T) {
 			"wecom_provider_name":      "Broken WeCom",
 			"wecom_corp_id":            "ww-openweb",
 			"wecom_agent_id":           "100001",
-			"wecom_agent_secret":       "wecom-secret",
+			"wecom_agent_secret":       agentSecret,
 			"wecom_authorize_endpoint": provider.URL + "/authorize",
 			"wecom_token_endpoint":     provider.URL + "/gettoken",
 			"wecom_userinfo_endpoint":  provider.URL + "/getuserinfo",
@@ -5007,18 +5015,18 @@ func TestExternalWeComCallbackTokenFailureIsAuditedAndRedacted(t *testing.T) {
 		t.Fatalf("create external wecom state: %v", err)
 	}
 	failedRec := assertStatus(t, handler, http.MethodGet, "/api/auth/wecom/callback?state="+url.QueryEscape(state)+"&code=broken-code", nil, nil, http.StatusBadGateway)
-	if !strings.Contains(failedRec.Body.String(), "bad corpsecret") || strings.Contains(failedRec.Body.String(), "wecom-secret") {
+	if !strings.Contains(failedRec.Body.String(), "bad corpsecret") || strings.Contains(failedRec.Body.String(), agentSecret) || strings.Contains(failedRec.Body.String(), escapedAgentSecret) {
 		t.Fatalf("wecom token failure response missing sanitized reason or leaked secret: %s", failedRec.Body.String())
 	}
 	if tokenEndpointCalls != 1 {
 		t.Fatalf("wecom token endpoint calls = %d, want 1", tokenEndpointCalls)
 	}
 	loginLogsRec := assertStatus(t, handler, http.MethodGet, "/api/admin/audit/login-logs", nil, adminCookie, http.StatusOK)
-	if !strings.Contains(loginLogsRec.Body.String(), `"type":"wecom"`) || !strings.Contains(loginLogsRec.Body.String(), `"status":"failed"`) || !strings.Contains(loginLogsRec.Body.String(), "broken-wecom") || !strings.Contains(loginLogsRec.Body.String(), "bad corpsecret") || strings.Contains(loginLogsRec.Body.String(), "wecom-secret") {
+	if !strings.Contains(loginLogsRec.Body.String(), `"type":"wecom"`) || !strings.Contains(loginLogsRec.Body.String(), `"status":"failed"`) || !strings.Contains(loginLogsRec.Body.String(), "broken-wecom") || !strings.Contains(loginLogsRec.Body.String(), "bad corpsecret") || strings.Contains(loginLogsRec.Body.String(), agentSecret) || strings.Contains(loginLogsRec.Body.String(), escapedAgentSecret) {
 		t.Fatalf("wecom token failure log missing details or leaked secret: %s", loginLogsRec.Body.String())
 	}
 	operationLogsRec := assertStatus(t, handler, http.MethodGet, "/api/admin/audit/operation-logs", nil, adminCookie, http.StatusOK)
-	if !strings.Contains(operationLogsRec.Body.String(), "auth.wecom.login_failed") || strings.Contains(operationLogsRec.Body.String(), "wecom-secret") {
+	if !strings.Contains(operationLogsRec.Body.String(), "auth.wecom.login_failed") || strings.Contains(operationLogsRec.Body.String(), agentSecret) || strings.Contains(operationLogsRec.Body.String(), escapedAgentSecret) {
 		t.Fatalf("wecom token failure audit missing or leaked secret: %s", operationLogsRec.Body.String())
 	}
 }

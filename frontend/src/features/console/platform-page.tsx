@@ -921,6 +921,15 @@ function ResourceHeaderActions({ config, rows, onOperation }: { config: Platform
     }
   }
 
+  const exportUsers = async (format: 'json' | 'csv') => {
+    try {
+      await downloadResponse(`/api/admin/users/export?format=${format}`, `openwebservermanager-users.${format}`)
+      app.showToast('用户已导出')
+    } catch (error) {
+      app.handleApiError(error)
+    }
+  }
+
   if (config.apiPath?.startsWith('/api/admin/audit/')) {
     return (
       <>
@@ -970,10 +979,20 @@ function ResourceHeaderActions({ config, rows, onOperation }: { config: Platform
 
   if (config.collection === 'users') {
     return (
-      <Button variant='outline' onClick={() => onOperation({ type: 'user-import' })}>
-        <Upload className='size-4' />
-        导入
-      </Button>
+      <>
+        <Button variant='outline' onClick={() => void exportUsers('json')}>
+          <Download className='size-4' />
+          JSON
+        </Button>
+        <Button variant='outline' onClick={() => void exportUsers('csv')}>
+          <Download className='size-4' />
+          CSV
+        </Button>
+        <Button variant='outline' onClick={() => onOperation({ type: 'user-import' })}>
+          <Upload className='size-4' />
+          导入
+        </Button>
+      </>
     )
   }
 

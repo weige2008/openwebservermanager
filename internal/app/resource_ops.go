@@ -140,6 +140,9 @@ func (s *Server) handleResourceOperation(w http.ResponseWriter, r *http.Request,
 	case path == "admin/assets/export":
 		s.handleAssetExport(w, r)
 		return true
+	case path == "admin/users/export":
+		s.handleUserExport(w, r)
+		return true
 	case path == "admin/assets/import":
 		s.handleAssetImport(w, r)
 		return true
@@ -325,6 +328,61 @@ func writeAssetExportCSV(w io.Writer, items []model.PlatformItem) {
 			item.ParentID,
 			item.TargetID,
 			strings.Join(item.Tags, ","),
+			item.Description,
+			string(metadata),
+		})
+	}
+	writer.Flush()
+}
+
+func (s *Server) handleUserExport(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		writeError(w, http.StatusMethodNotAllowed, "method not allowed")
+		return
+	}
+	items, err := s.cfg.Store.ListPlatformItems("users")
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	exportedAt := time.Now().UTC()
+	_ = s.audit(r, "users.export", "users", "", "exported users")
+	format := strings.ToLower(strings.TrimSpace(r.URL.Query().Get("format")))
+	if format == "" {
+		format = "json"
+	}
+	switch format {
+	case "json":
+		w.Header().Set("Content-Disposition", `attachment; filename="`+auditExportFilename("users", exportedAt, "json")+`"`)
+		writeJSON(w, http.StatusOK, map[string]any{"items": items, "exported_at": exportedAt})
+	case "csv":
+		w.Header().Set("Content-Disposition", `attachment; filename="`+auditExportFilename("users", exportedAt, "csv")+`"`)
+		w.Header().Set("Content-Type", "text/csv; charset=utf-8")
+		w.WriteHeader(http.StatusOK)
+		writeUserExportCSV(w, items)
+	default:
+		writeError(w, http.StatusBadRequest, "unsupported export format")
+	}
+}
+
+func writeUserExportCSV(w io.Writer, items []model.PlatformItem) {
+	writer := csv.NewWriter(w)
+	_ = writer.Write([]string{"name", "type", "status", "role", "group", "owner_id", "department_id", "tags", "online", "last_login_at", "last_login_ip", "description", "metadata_json"})
+	for _, item := range items {
+		metadata, _ := json.Marshal(item.Metadata)
+		online, _ := metadataBoolValue(item.Metadata["online"])
+		_ = writer.Write([]string{
+			item.Name,
+			item.Type,
+			item.Status,
+			firstMetadataString(item.Metadata, "role"),
+			item.Group,
+			item.OwnerID,
+			firstMetadataString(item.Metadata, "department_id", "departmentId", "department"),
+			strings.Join(item.Tags, ","),
+			strconv.FormatBool(online),
+			firstMetadataString(item.Metadata, "last_login_at"),
+			firstMetadataString(item.Metadata, "last_login_ip"),
 			item.Description,
 			string(metadata),
 		})

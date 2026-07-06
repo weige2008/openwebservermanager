@@ -989,7 +989,7 @@ func TestUserImportCreatesSkipsAndUpdatesLoginUsers(t *testing.T) {
 				"type":     "local",
 				"status":   "enabled",
 				"password": "password123",
-				"metadata": map[string]any{"role": "user"},
+				"metadata": map[string]any{"role": "user", "mfa_secret": "raw-mfa-secret", "mfa_recovery_codes": []string{"raw-recovery-code"}},
 			},
 			{
 				"name":     "disabled-import-user",
@@ -1055,6 +1055,41 @@ func TestUserImportCreatesSkipsAndUpdatesLoginUsers(t *testing.T) {
 	csvLoginRec := assertStatus(t, handler, http.MethodPost, "/api/auth/login", map[string]any{"username": "csv-user", "password": "password123"}, nil, http.StatusOK)
 	if !strings.Contains(csvLoginRec.Body.String(), `"role":"auditor"`) {
 		t.Fatalf("csv imported user did not login with role: %s", csvLoginRec.Body.String())
+	}
+	exportJSONRec := assertStatus(t, handler, http.MethodGet, "/api/admin/users/export", nil, adminCookie, http.StatusOK)
+	exportJSONBody := exportJSONRec.Body.String()
+	for _, leaked := range []string{"password_hash", "raw-mfa-secret", "raw-recovery-code"} {
+		if strings.Contains(exportJSONBody, leaked) {
+			t.Fatalf("user json export leaked %q: %s", leaked, exportJSONBody)
+		}
+	}
+	if !strings.Contains(exportJSONBody, "csv-user") || !strings.Contains(exportJSONBody, `"role":"auditor"`) {
+		t.Fatalf("user json export missing imported users: %s", exportJSONBody)
+	}
+	exportCSVRec := assertStatus(t, handler, http.MethodGet, "/api/admin/users/export?format=csv", nil, adminCookie, http.StatusOK)
+	if contentType := exportCSVRec.Header().Get("Content-Type"); !strings.Contains(contentType, "text/csv") {
+		t.Fatalf("user csv export content type = %q", contentType)
+	}
+	for _, leaked := range []string{"password_hash", "raw-mfa-secret", "raw-recovery-code"} {
+		if strings.Contains(exportCSVRec.Body.String(), leaked) {
+			t.Fatalf("user csv export leaked %q: %s", leaked, exportCSVRec.Body.String())
+		}
+	}
+	userRows, err := csv.NewReader(strings.NewReader(exportCSVRec.Body.String())).ReadAll()
+	if err != nil {
+		t.Fatalf("parse user csv export: %v", err)
+	}
+	if len(userRows) < 2 || strings.Join(userRows[0], ",") != "name,type,status,role,group,owner_id,department_id,tags,online,last_login_at,last_login_ip,description,metadata_json" {
+		t.Fatalf("user csv export header/rows invalid: %#v", userRows)
+	}
+	foundCSVUser := false
+	for _, row := range userRows[1:] {
+		if len(row) >= 13 && row[0] == "csv-user" {
+			foundCSVUser = row[1] == "local" && row[2] == "enabled" && row[3] == "auditor" && row[4] == "ops" && row[7] == "csv,import"
+		}
+	}
+	if !foundCSVUser {
+		t.Fatalf("user csv export missing csv-user row: %#v", userRows)
 	}
 
 	usersRec := assertStatus(t, handler, http.MethodGet, "/api/admin/users", nil, adminCookie, http.StatusOK)

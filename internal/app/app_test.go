@@ -2895,6 +2895,7 @@ func TestSMTPIntegrationTestEmail(t *testing.T) {
 
 func TestProxyServiceSettingsPersistStatusAndSyncSSHGateway(t *testing.T) {
 	handler, cookie := newTestHandler(t)
+	databaseListen := freeLocalTCPAddress(t)
 
 	initialRec := assertStatus(t, handler, http.MethodGet, "/api/admin/proxy-services", nil, cookie, http.StatusOK)
 	if !strings.Contains(initialRec.Body.String(), "ssh_gateway") || !strings.Contains(initialRec.Body.String(), "database_proxy") {
@@ -2910,11 +2911,11 @@ func TestProxyServiceSettingsPersistStatusAndSyncSSHGateway(t *testing.T) {
 		"rdp_enabled":                true,
 		"rdp_listen_address":         "127.0.0.1:23389",
 		"database_enabled":           true,
-		"database_listen_address":    "127.0.0.1:23306",
+		"database_listen_address":    databaseListen,
 		"database_forward_allowlist": []string{"db.internal:3306"},
 	}, cookie, http.StatusOK)
 	saveBody := saveRec.Body.String()
-	for _, want := range []string{"proxy_private_key_set", "127.0.0.1:22022", "db.internal:5432", "restart_required", "rdp_proxy", "database_proxy"} {
+	for _, want := range []string{"proxy_private_key_set", "127.0.0.1:22022", databaseListen, "db.internal:5432", "restart_required", "rdp_proxy", "database_proxy", `"state":"ready"`, `"allowlist_count":1`} {
 		if !strings.Contains(saveBody, want) {
 			t.Fatalf("proxy service response missing %s: %s", want, saveBody)
 		}
@@ -2949,7 +2950,7 @@ func TestProxyServiceSettingsPersistStatusAndSyncSSHGateway(t *testing.T) {
 		"ssh_listen_address":      "127.0.0.1:22022",
 		"rdp_enabled":             false,
 		"database_enabled":        false,
-		"database_listen_address": "127.0.0.1:23306",
+		"database_listen_address": databaseListen,
 	}, cookie, http.StatusOK)
 	if !strings.Contains(disableRec.Body.String(), `"state":"disabled"`) {
 		t.Fatalf("disabled proxy services did not report disabled state: %s", disableRec.Body.String())
@@ -2962,6 +2963,36 @@ func TestProxyServiceSettingsPersistStatusAndSyncSSHGateway(t *testing.T) {
 	logsRec := assertStatus(t, handler, http.MethodGet, "/api/admin/audit/operation-logs", nil, cookie, http.StatusOK)
 	if !strings.Contains(logsRec.Body.String(), "proxy_services.update") {
 		t.Fatalf("proxy service update was not audited: %s", logsRec.Body.String())
+	}
+}
+
+func TestProxyServiceDatabaseProxyReportsConfigErrors(t *testing.T) {
+	handler, cookie := newTestHandler(t)
+
+	invalidRec := assertStatus(t, handler, http.MethodPost, "/api/admin/proxy-services", map[string]any{
+		"database_enabled":           true,
+		"database_listen_address":    "127.0.0.1:23306",
+		"database_forward_allowlist": []string{"missing-port"},
+	}, cookie, http.StatusOK)
+	invalidBody := invalidRec.Body.String()
+	for _, want := range []string{`"state":"invalid_config"`, "invalid database proxy allowlist entry", "missing-port"} {
+		if !strings.Contains(invalidBody, want) {
+			t.Fatalf("invalid database proxy response missing %s: %s", want, invalidBody)
+		}
+	}
+
+	listener, closeListener := startAppTestTCPListener(t)
+	defer closeListener()
+	occupiedRec := assertStatus(t, handler, http.MethodPost, "/api/admin/proxy-services", map[string]any{
+		"database_enabled":           true,
+		"database_listen_address":    listener.Addr().String(),
+		"database_forward_allowlist": []string{"db.internal:3306"},
+	}, cookie, http.StatusOK)
+	occupiedBody := occupiedRec.Body.String()
+	for _, want := range []string{`"state":"port_unavailable"`, listener.Addr().String()} {
+		if !strings.Contains(occupiedBody, want) {
+			t.Fatalf("occupied database proxy response missing %s: %s", want, occupiedBody)
+		}
 	}
 }
 
@@ -3932,6 +3963,19 @@ func startAppTestTCPListener(t *testing.T) (net.Listener, func()) {
 		_ = listener.Close()
 		<-done
 	}
+}
+
+func freeLocalTCPAddress(t *testing.T) string {
+	t.Helper()
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("listen free tcp address: %v", err)
+	}
+	address := listener.Addr().String()
+	if err := listener.Close(); err != nil {
+		t.Fatalf("close free tcp listener: %v", err)
+	}
+	return address
 }
 
 func waitForCondition(t *testing.T, timeout time.Duration, condition func() bool) {

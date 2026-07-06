@@ -1,6 +1,8 @@
 package app
 
 import (
+	"errors"
+	"fmt"
 	"net"
 	"net/http"
 	"strconv"
@@ -194,9 +196,11 @@ func (s *Server) proxyServicesResponse(item model.PlatformItem) map[string]any {
 				"state":          rdpProxyRuntimeState(rdpEnabled, guacdAddress),
 			},
 			"database_proxy": map[string]any{
-				"enabled":        databaseEnabled,
-				"listen_address": firstMetadataString(metadata, "database_listen_address"),
-				"state":          configuredRuntimeState(databaseEnabled),
+				"enabled":         databaseEnabled,
+				"listen_address":  firstMetadataString(metadata, "database_listen_address"),
+				"allowlist_count": len(metadataStrings(metadata["database_forward_allowlist"])),
+				"state":           databaseProxyRuntimeState(databaseEnabled, firstMetadataString(metadata, "database_listen_address"), metadataStrings(metadata["database_forward_allowlist"])),
+				"last_error":      databaseProxyRuntimeError(databaseEnabled, firstMetadataString(metadata, "database_listen_address"), metadataStrings(metadata["database_forward_allowlist"])),
 			},
 		},
 	}
@@ -277,13 +281,16 @@ func normalizeListenAddress(value, fallback string) string {
 	if err == nil && strings.TrimSpace(host) != "" && strings.TrimSpace(port) != "" {
 		return net.JoinHostPort(strings.TrimSpace(host), strings.TrimSpace(port))
 	}
+	if err == nil && strings.TrimSpace(port) != "" {
+		return net.JoinHostPort("0.0.0.0", strings.TrimSpace(port))
+	}
 	if strings.Count(value, ":") == 1 && !strings.HasPrefix(value, ":") {
 		return value
 	}
 	if strings.HasPrefix(value, ":") {
 		return "0.0.0.0" + value
 	}
-	return fallback
+	return value
 }
 
 func splitListenAddress(value, fallbackHost string, fallbackPort int) (string, int) {
@@ -334,11 +341,80 @@ func rdpProxyRuntimeState(enabled bool, guacdAddress string) string {
 	return "guacd_unavailable"
 }
 
-func configuredRuntimeState(enabled bool) string {
-	if enabled {
-		return "configured"
+func databaseProxyRuntimeState(enabled bool, listenAddress string, allowlist []string) string {
+	if !enabled {
+		return "disabled"
 	}
-	return "disabled"
+	if err := validateDatabaseProxyConfig(listenAddress, allowlist); err != nil {
+		return "invalid_config"
+	}
+	if err := probeTCPListenAddress(listenAddress); err != nil {
+		return "port_unavailable"
+	}
+	return "ready"
+}
+
+func databaseProxyRuntimeError(enabled bool, listenAddress string, allowlist []string) string {
+	if !enabled {
+		return ""
+	}
+	if err := validateDatabaseProxyConfig(listenAddress, allowlist); err != nil {
+		return err.Error()
+	}
+	if err := probeTCPListenAddress(listenAddress); err != nil {
+		return err.Error()
+	}
+	return ""
+}
+
+func validateDatabaseProxyConfig(listenAddress string, allowlist []string) error {
+	if err := validateListenAddress(listenAddress); err != nil {
+		return err
+	}
+	if len(allowlist) == 0 {
+		return errors.New("database proxy forward allowlist is required")
+	}
+	for _, entry := range allowlist {
+		if err := validateHostPort(entry); err != nil {
+			return fmt.Errorf("invalid database proxy allowlist entry %q: %w", entry, err)
+		}
+	}
+	return nil
+}
+
+func validateListenAddress(value string) error {
+	if strings.TrimSpace(value) == "" {
+		return errors.New("listen address is required")
+	}
+	return validateHostPort(value)
+}
+
+func validateHostPort(value string) error {
+	host, portText, err := net.SplitHostPort(strings.TrimSpace(value))
+	if err != nil {
+		if strings.Count(value, ":") != 1 || strings.HasPrefix(value, ":") {
+			return errors.New("address must be host:port")
+		}
+		parts := strings.SplitN(value, ":", 2)
+		host = parts[0]
+		portText = parts[1]
+	}
+	if strings.TrimSpace(host) == "" {
+		return errors.New("host is required")
+	}
+	port, err := strconv.Atoi(strings.TrimSpace(portText))
+	if err != nil || port <= 0 || port > 65535 {
+		return errors.New("port must be between 1 and 65535")
+	}
+	return nil
+}
+
+func probeTCPListenAddress(value string) error {
+	listener, err := net.Listen("tcp", value)
+	if err != nil {
+		return err
+	}
+	return listener.Close()
 }
 
 func proxyMetadataBool(value any) bool {

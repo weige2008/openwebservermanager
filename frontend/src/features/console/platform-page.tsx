@@ -2714,6 +2714,12 @@ export function PlatformSettingsPage({ config }: { config: PlatformPageConfig })
                   <Field label={app.t('forwardAllowlist', 'Forward allowlist')}>
                     <Textarea className='min-h-24 font-mono text-xs' value={proxyForm.databaseForwardAllowlist} onChange={(event) => patchProxyForm({ databaseForwardAllowlist: event.currentTarget.value })} placeholder={'db.internal:3306\n10.0.0.10:5432'} />
                   </Field>
+                  <div className='rounded-lg border border-border bg-background/60 p-3 text-xs text-muted-foreground'>
+                    <div>{app.t('state', 'State')}: {metadataText(proxyStatus.database_proxy?.state) || '-'}</div>
+                    <div>{app.t('listenAddress', 'Listen address')}: {metadataText(proxyStatus.database_proxy?.listen_address) || '-'}</div>
+                    <div>{app.t('forwardAllowlist', 'Forward allowlist')}: {metadataText(proxyStatus.database_proxy?.allowlist_count) || '0'}</div>
+                    {metadataText(proxyStatus.database_proxy?.last_error) ? <div className='text-destructive'>{metadataText(proxyStatus.database_proxy?.last_error)}</div> : null}
+                  </div>
                 </div>
               </div>
               <div className='grid gap-3 md:grid-cols-[1fr_auto] md:items-end'>
@@ -2924,7 +2930,7 @@ function metadataListText(value: unknown) {
 
 function proxyStateTone(status: Record<string, unknown> | undefined) {
   const state = metadataText(status?.state)
-  if (['running', 'online', 'configured'].includes(state)) return 'success'
+  if (['running', 'online', 'configured', 'ready'].includes(state)) return 'success'
   if (state === 'disabled' || !state) return 'neutral'
   return 'warning'
 }

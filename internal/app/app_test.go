@@ -2474,6 +2474,90 @@ func TestExternalLDAPLoginCreatesUserAndSession(t *testing.T) {
 	}
 }
 
+func TestLDAPIntegrationTestLogin(t *testing.T) {
+	handler, adminCookie := newTestHandler(t)
+	srv := handler.(*Server)
+	fakeLDAP := &fakeLDAPAuthenticator{
+		users: map[string]fakeLDAPUser{
+			"ldap-probe": {
+				password: "directory-password",
+				claims: externalLDAPClaims{
+					Subject:     "uid=ldap-probe,ou=people,dc=example,dc=test",
+					DN:          "uid=ldap-probe,ou=people,dc=example,dc=test",
+					Username:    "ldap-probe",
+					DisplayName: "LDAP Probe",
+					Email:       "ldap-probe@example.test",
+					Groups:      []string{"cn=ops,ou=groups,dc=example,dc=test"},
+				},
+			},
+		},
+	}
+	srv.ldap = fakeLDAP
+
+	settingRec := assertStatus(t, handler, http.MethodPost, "/api/admin/system-settings", map[string]any{
+		"name":   "LDAP identity",
+		"type":   "identity",
+		"status": "enabled",
+		"metadata": map[string]any{
+			"ldap_enabled":                true,
+			"ldap_provider_id":            "corp-ldap",
+			"ldap_provider_name":          "Corp LDAP",
+			"ldap_url":                    "ldap://directory.example.test:389",
+			"ldap_bind_dn":                "cn=reader,dc=example,dc=test",
+			"ldap_bind_password":          "directory-secret",
+			"ldap_base_dn":                "ou=people,dc=example,dc=test",
+			"ldap_user_filter":            "(uid={username})",
+			"ldap_username_attribute":     "uid",
+			"ldap_display_name_attribute": "cn",
+			"ldap_email_attribute":        "mail",
+			"ldap_role":                   "user",
+			"ldap_auto_create":            true,
+		},
+	}, adminCookie, http.StatusCreated)
+	var setting model.PlatformItem
+	decodeResponse(t, settingRec, &setting)
+
+	testRec := assertStatus(t, handler, http.MethodPost, "/api/admin/system-settings/ldap/test", map[string]any{
+		"setting_id": setting.ID,
+		"username":   "ldap-probe",
+		"password":   "directory-password",
+	}, adminCookie, http.StatusOK)
+	if fakeLDAP.calls != 1 {
+		t.Fatalf("ldap authenticator calls = %d, want 1", fakeLDAP.calls)
+	}
+	if fakeLDAP.lastProvider.ID != "corp-ldap" || fakeLDAP.lastProvider.BindPassword != "directory-secret" || fakeLDAP.lastProvider.BaseDN != "ou=people,dc=example,dc=test" {
+		t.Fatalf("ldap provider was not parsed/decrypted correctly: %#v", fakeLDAP.lastProvider)
+	}
+	body := testRec.Body.String()
+	for _, expected := range []string{`"ok":true`, `"provider_id":"corp-ldap"`, `"username":"ldap-probe"`, `"display_name":"LDAP Probe"`, `"email":"ldap-probe@example.test"`, "cn=ops"} {
+		if !strings.Contains(body, expected) {
+			t.Fatalf("ldap test response missing %q: %s", expected, body)
+		}
+	}
+	for _, leaked := range []string{"directory-secret", "directory-password", "ldap_bind_password_encrypted", "bind_password_encrypted"} {
+		if strings.Contains(body, leaked) {
+			t.Fatalf("ldap test response leaked sensitive value %q: %s", leaked, body)
+		}
+	}
+	usersRec := assertStatus(t, handler, http.MethodGet, "/api/admin/users", nil, adminCookie, http.StatusOK)
+	if strings.Contains(usersRec.Body.String(), "ldap-probe") {
+		t.Fatalf("ldap test unexpectedly created a user: %s", usersRec.Body.String())
+	}
+
+	assertStatus(t, handler, http.MethodPost, "/api/admin/system-settings/ldap/test", map[string]any{
+		"setting_id": setting.ID,
+		"username":   "ldap-probe",
+		"password":   "wrong-password",
+	}, adminCookie, http.StatusUnauthorized)
+	if fakeLDAP.calls != 2 {
+		t.Fatalf("ldap authenticator calls after failed probe = %d, want 2", fakeLDAP.calls)
+	}
+	logsRec := assertStatus(t, handler, http.MethodGet, "/api/admin/audit/operation-logs", nil, adminCookie, http.StatusOK)
+	if !strings.Contains(logsRec.Body.String(), "system_settings.ldap_test") || !strings.Contains(logsRec.Body.String(), "system_settings.ldap_test.failed") {
+		t.Fatalf("ldap test operation logs missing success or failure entries: %s", logsRec.Body.String())
+	}
+}
+
 func TestExternalWeComLoginCreatesUserAndSession(t *testing.T) {
 	handler, adminCookie := newTestHandler(t)
 	var authorizeState string

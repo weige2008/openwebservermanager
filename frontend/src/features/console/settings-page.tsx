@@ -139,6 +139,9 @@ export function SettingsPage() {
   const [loginSecurityBusy, setLoginSecurityBusy] = useState(false)
   const [ldapSettings, setLDAPSettings] = useState<LDAPSettingsState>(() => defaultLDAPSettings())
   const [ldapBusy, setLDAPBusy] = useState(false)
+  const [ldapTestUsername, setLDAPTestUsername] = useState('')
+  const [ldapTestPassword, setLDAPTestPassword] = useState('')
+  const [ldapTestBusy, setLDAPTestBusy] = useState(false)
   const [wecomSettings, setWeComSettings] = useState<WeComSettingsState>(() => defaultWeComSettings())
   const [wecomBusy, setWeComBusy] = useState(false)
 
@@ -357,6 +360,26 @@ export function SettingsPage() {
       app.handleApiError(error)
     } finally {
       setLDAPBusy(false)
+    }
+  }
+
+  const testLDAPSettings = async () => {
+    setLDAPTestBusy(true)
+    try {
+      await apiRequest('/api/admin/system-settings/ldap/test', {
+        method: 'POST',
+        body: JSON.stringify({
+          setting_id: ldapSettings.setting?.id,
+          username: ldapTestUsername.trim(),
+          password: ldapTestPassword,
+        }),
+      })
+      setLDAPTestPassword('')
+      app.showToast(t('settingsPage.ldapTestSucceeded', { defaultValue: 'LDAP test login succeeded' }))
+    } catch (error) {
+      app.handleApiError(error)
+    } finally {
+      setLDAPTestBusy(false)
     }
   }
 
@@ -688,6 +711,29 @@ export function SettingsPage() {
             />
             <span>{t('settingsPage.ldapAutoCreate', { defaultValue: 'Create LDAP users on first successful login' })}</span>
           </label>
+          <div className='grid gap-3 rounded-lg border border-border bg-background/70 p-3'>
+            <div>
+              <div className='text-sm font-medium'>{t('settingsPage.ldapTestTitle', { defaultValue: 'Test LDAP login' })}</div>
+              <p className='mt-1 text-xs leading-5 text-muted-foreground'>{t('settingsPage.ldapTestDescription', { defaultValue: 'Validate the saved LDAP provider with a directory username and password. Test credentials are never stored.' })}</p>
+            </div>
+            <div className='grid gap-3 md:grid-cols-2'>
+              <Field label={t('settingsPage.ldapTestUsername', { defaultValue: 'Test username' })}>
+                <Input value={ldapTestUsername} onChange={(event) => setLDAPTestUsername(event.currentTarget.value)} autoComplete='username' />
+              </Field>
+              <Field label={t('settingsPage.ldapTestPassword', { defaultValue: 'Test password' })}>
+                <Input type='password' value={ldapTestPassword} onChange={(event) => setLDAPTestPassword(event.currentTarget.value)} autoComplete='current-password' />
+              </Field>
+            </div>
+            <div className='flex justify-end'>
+              <Button
+                variant='outline'
+                onClick={() => void testLDAPSettings()}
+                disabled={ldapTestBusy || !ldapSettings.setting?.id || !ldapTestUsername.trim() || !ldapTestPassword}
+              >
+                {ldapTestBusy ? t('testing') : t('settingsPage.testLDAP', { defaultValue: 'Test LDAP' })}
+              </Button>
+            </div>
+          </div>
           <div className='flex justify-end'>
             <Button variant='primary' onClick={() => void saveLDAPSettings()} disabled={ldapBusy || (ldapSettings.enabled && (!ldapSettings.url.trim() || !ldapSettings.baseDN.trim()))}>
               {ldapBusy ? t('saving') : t('save')}

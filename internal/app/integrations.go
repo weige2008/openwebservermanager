@@ -31,6 +31,13 @@ type llmTestRequest struct {
 	Prompt    string `json:"prompt"`
 }
 
+type ldapTestRequest struct {
+	SettingID  string `json:"setting_id"`
+	ProviderID string `json:"provider_id"`
+	Username   string `json:"username"`
+	Password   string `json:"password"`
+}
+
 type smtpDeliveryConfig struct {
 	SettingID          string
 	Host               string
@@ -171,6 +178,64 @@ func (s *Server) handleLLMTest(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
+func (s *Server) handleLDAPTest(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		writeError(w, http.StatusMethodNotAllowed, "method not allowed")
+		return
+	}
+	var req ldapTestRequest
+	if !decodeJSON(w, r, &req) {
+		return
+	}
+	username := strings.TrimSpace(req.Username)
+	if username == "" || req.Password == "" {
+		writeError(w, http.StatusBadRequest, "ldap test username and password are required")
+		return
+	}
+	item, providers, ok, err := s.ldapTestSetting(req.SettingID)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	if !ok {
+		writeError(w, http.StatusNotFound, "LDAP identity setting not found")
+		return
+	}
+	provider, ok := selectLDAPTestProvider(providers, req.ProviderID)
+	if !ok {
+		writeError(w, http.StatusBadRequest, "LDAP provider is not configured")
+		return
+	}
+	started := time.Now()
+	claims, authenticated, err := s.ldap.Authenticate(r.Context(), provider, username, req.Password)
+	if err != nil {
+		_ = s.audit(r, "system_settings.ldap_test.failed", item.ID, "", "LDAP test failed: "+err.Error())
+		writeError(w, http.StatusBadGateway, "test LDAP login: "+err.Error())
+		return
+	}
+	if !authenticated {
+		_ = s.audit(r, "system_settings.ldap_test.failed", item.ID, "", "LDAP test credentials rejected")
+		writeError(w, http.StatusUnauthorized, "LDAP test credentials were rejected")
+		return
+	}
+	_ = s.audit(r, "system_settings.ldap_test", item.ID, "", "LDAP test login succeeded")
+	writeJSON(w, http.StatusOK, map[string]any{
+		"ok":           true,
+		"message":      "LDAP test login succeeded",
+		"setting_id":   item.ID,
+		"provider_id":  provider.ID,
+		"provider":     provider.Name,
+		"subject":      claims.Subject,
+		"dn":           claims.DN,
+		"username":     claims.Username,
+		"display_name": claims.DisplayName,
+		"email":        claims.Email,
+		"groups":       claims.Groups,
+		"duration_ms":  time.Since(started).Milliseconds(),
+		"tested_at":    time.Now().UTC(),
+	})
+}
+
 func (s *Server) smtpIntegrationSetting(id string) (model.PlatformItem, bool, error) {
 	if strings.TrimSpace(id) != "" {
 		return s.cfg.Store.GetPlatformItem("system_settings", strings.TrimSpace(id))
@@ -193,6 +258,65 @@ func (s *Server) smtpIntegrationSetting(id string) (model.PlatformItem, bool, er
 		}
 	}
 	return model.PlatformItem{}, false, nil
+}
+
+func (s *Server) ldapTestSetting(id string) (model.PlatformItem, []externalLDAPProvider, bool, error) {
+	if strings.TrimSpace(id) != "" {
+		item, ok, err := s.cfg.Store.GetPlatformItem("system_settings", strings.TrimSpace(id))
+		if err != nil || !ok {
+			return model.PlatformItem{}, nil, ok, err
+		}
+		providers, err := s.externalLDAPProvidersFromMetadata(item.Metadata)
+		if err != nil {
+			return model.PlatformItem{}, nil, false, err
+		}
+		return item, providers, true, nil
+	}
+	items, err := s.cfg.Store.ListPlatformItems("system_settings")
+	if err != nil {
+		return model.PlatformItem{}, nil, false, err
+	}
+	sort.SliceStable(items, func(i, j int) bool {
+		return items[i].UpdatedAt.After(items[j].UpdatedAt)
+	})
+	for _, item := range items {
+		if !strings.EqualFold(strings.TrimSpace(item.Type), "identity") || !platformItemEnabled(item) {
+			continue
+		}
+		providers, err := s.externalLDAPProvidersFromMetadata(item.Metadata)
+		if err != nil {
+			return model.PlatformItem{}, nil, false, err
+		}
+		if len(providers) > 0 {
+			return item, providers, true, nil
+		}
+	}
+	for _, item := range items {
+		if !strings.EqualFold(strings.TrimSpace(item.Type), "identity") {
+			continue
+		}
+		providers, err := s.externalLDAPProvidersFromMetadata(item.Metadata)
+		if err != nil {
+			return model.PlatformItem{}, nil, false, err
+		}
+		if len(providers) > 0 {
+			return item, providers, true, nil
+		}
+	}
+	return model.PlatformItem{}, nil, false, nil
+}
+
+func selectLDAPTestProvider(providers []externalLDAPProvider, id string) (externalLDAPProvider, bool) {
+	id = strings.TrimSpace(id)
+	if id == "" && len(providers) > 0 {
+		return providers[0], true
+	}
+	for _, provider := range providers {
+		if provider.ID == id {
+			return provider, true
+		}
+	}
+	return externalLDAPProvider{}, false
 }
 
 func smtpDeliveryConfigFromSetting(item model.PlatformItem, password, toOverride string) (smtpDeliveryConfig, error) {

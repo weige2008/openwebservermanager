@@ -2302,6 +2302,37 @@ func TestDatabaseAssetQueryRequiresAuthorizationAndLogs(t *testing.T) {
 	if !strings.Contains(operationLogsRec.Body.String(), "sql_work_order.execute.failed") {
 		t.Fatalf("failed sql work order execution was not audited: %s", operationLogsRec.Body.String())
 	}
+
+	sshCredentialRec := assertStatus(t, handler, http.MethodPost, "/api/admin/credentials", map[string]any{
+		"name":     "database should reject ssh credential",
+		"type":     "ssh_password",
+		"status":   "enabled",
+		"username": "root",
+		"password": "ssh-secret",
+	}, adminCookie, http.StatusCreated)
+	var sshCredential model.PlatformItem
+	decodeResponse(t, sshCredentialRec, &sshCredential)
+	wrongDatabaseRec := assertStatus(t, handler, http.MethodPost, "/api/admin/database-assets", map[string]any{
+		"name":     "wrong-credential-db",
+		"type":     "sqlite",
+		"status":   "enabled",
+		"protocol": "database",
+		"metadata": map[string]any{"sqlite_path": "wrong-credential.db", "credential_id": sshCredential.ID},
+	}, adminCookie, http.StatusCreated)
+	var wrongDatabaseAsset model.PlatformItem
+	decodeResponse(t, wrongDatabaseRec, &wrongDatabaseAsset)
+	assertStatus(t, handler, http.MethodPost, "/api/admin/authorizations/databases", map[string]any{
+		"name":      "database-user wrong credential db",
+		"owner_id":  user.ID,
+		"target_id": wrongDatabaseAsset.ID,
+		"status":    "enabled",
+	}, adminCookie, http.StatusCreated)
+	wrongCredentialQueryRec := assertStatus(t, handler, http.MethodPost, "/api/access/database/"+wrongDatabaseAsset.ID+"/query", map[string]any{
+		"sql": "SELECT 1",
+	}, userCookie, http.StatusBadRequest)
+	if !strings.Contains(wrongCredentialQueryRec.Body.String(), "not compatible") {
+		t.Fatalf("wrong database credential response did not explain compatibility: %s", wrongCredentialQueryRec.Body.String())
+	}
 }
 
 func TestDatabaseAssetConnectionBuildsExternalDriverDSN(t *testing.T) {
@@ -2392,6 +2423,28 @@ func TestDatabaseAssetConnectionBuildsExternalDriverDSN(t *testing.T) {
 	}
 	if strings.Contains(assetRec.Body.String(), "credential-secret") {
 		t.Fatal("database asset response leaked credential secret")
+	}
+	wrongCredentialRec := assertStatus(t, handler, http.MethodPost, "/api/admin/credentials", map[string]any{
+		"name":     "ssh credential must not be used by database",
+		"type":     "ssh_password",
+		"status":   "enabled",
+		"username": "ssh_user",
+		"password": "ssh-secret",
+	}, adminCookie, http.StatusCreated)
+	var wrongCredential model.PlatformItem
+	decodeResponse(t, wrongCredentialRec, &wrongCredential)
+	wrongAssetRec := assertStatus(t, handler, http.MethodPost, "/api/admin/database-assets", map[string]any{
+		"name":     "wrong credential postgres",
+		"type":     "postgres",
+		"status":   "enabled",
+		"protocol": "database",
+		"host":     "postgres.internal",
+		"metadata": map[string]any{"database": "app", "credential_id": wrongCredential.ID},
+	}, adminCookie, http.StatusCreated)
+	var wrongAsset model.PlatformItem
+	decodeResponse(t, wrongAssetRec, &wrongAsset)
+	if _, err := server.databaseAssetConnection(wrongAsset); err == nil || !strings.Contains(err.Error(), "not compatible") {
+		t.Fatalf("database asset accepted non-database credential: %v", err)
 	}
 }
 

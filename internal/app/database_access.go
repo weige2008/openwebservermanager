@@ -291,11 +291,23 @@ func (s *Server) databaseAssetSecret(asset model.PlatformItem) (databaseAssetSec
 	if !platformCredentialEnabled(credential) {
 		return databaseAssetSecret{}, fmt.Errorf("database credential %s is disabled", credentialID)
 	}
+	if !databaseCredentialCompatible(credential) {
+		return databaseAssetSecret{}, fmt.Errorf("database credential %s is not compatible with database assets", credentialID)
+	}
 	if credential.Username != "" {
 		secret.Username = credential.Username
 	}
 	secret.Password = credentialSecret.Password
 	return secret, nil
+}
+
+func databaseCredentialCompatible(credential model.PlatformItem) bool {
+	switch strings.ToLower(strings.TrimSpace(credential.Type)) {
+	case string(model.CredentialDatabase), "database":
+		return true
+	default:
+		return false
+	}
 }
 
 func databaseAssetDriverAndDSN(dataDir string, asset model.PlatformItem, secret databaseAssetSecret) (string, string, error) {

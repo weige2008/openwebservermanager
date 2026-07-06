@@ -337,6 +337,9 @@ func (s *Server) backupRetentionDays() int {
 	items, err := s.cfg.Store.ListPlatformItems("scheduled_tasks")
 	if err == nil {
 		for _, item := range items {
+			if !scheduledTaskEnabled(item) {
+				continue
+			}
 			if !strings.EqualFold(normalizeScheduledTaskType(item.Type), "backup") {
 				continue
 			}

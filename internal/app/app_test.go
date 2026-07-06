@@ -5786,6 +5786,19 @@ func TestBackupDeleteAndRetention(t *testing.T) {
 		t.Fatalf("age old backup: %v", err)
 	}
 	assertStatus(t, handler, http.MethodPost, "/api/admin/scheduled-tasks", map[string]any{
+		"name":     "Disabled retention backup",
+		"type":     "backup",
+		"status":   "disabled",
+		"metadata": map[string]any{"retention_days": 1},
+	}, cookie, http.StatusCreated)
+	disabledRetentionRec := assertStatus(t, handler, http.MethodPost, "/api/admin/backups", nil, cookie, http.StatusCreated)
+	if strings.Contains(disabledRetentionRec.Body.String(), `"retention_deleted":1`) {
+		t.Fatalf("disabled backup retention task deleted backups: %s", disabledRetentionRec.Body.String())
+	}
+	if _, err := os.Stat(oldPath); err != nil {
+		t.Fatalf("disabled backup retention task should not delete old backup: %v", err)
+	}
+	assertStatus(t, handler, http.MethodPost, "/api/admin/scheduled-tasks", map[string]any{
 		"name":     "Retained backup",
 		"type":     "backup",
 		"status":   "enabled",

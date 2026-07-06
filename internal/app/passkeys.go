@@ -459,6 +459,17 @@ func (s *Server) handlePasskeyLoginVerify(w http.ResponseWriter, r *http.Request
 		writeError(w, http.StatusUnauthorized, "passkey login challenge expired")
 		return
 	}
+	currentUser, ok, err := s.passkeyUserByID(challenge.User.UserID)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	if !ok {
+		s.auth.deletePasskeyLoginChallenge(challengeID)
+		s.recordPasskeyLoginFailure(w, r, challenge.Username, challenge.ClientIP, challenge.FailureKey, "passkey account is disabled or no longer exists")
+		return
+	}
+	challenge.User = currentUser
 	clientDataJSON, err := passkeyBase64Decode(req.Response.ClientDataJSON)
 	if err != nil {
 		s.recordPasskeyLoginFailure(w, r, challenge.Username, challenge.ClientIP, challenge.FailureKey, "invalid passkey client data")
@@ -613,19 +624,38 @@ func (s *Server) passkeyUserByUsername(username string) (store.AdminPublic, bool
 		if !strings.EqualFold(item.Name, username) && !strings.EqualFold(item.Username, username) {
 			continue
 		}
-		role := strings.TrimSpace(passkeyMetadataText(item.Metadata["role"]))
-		if role == "" {
-			role = "user"
-		}
-		return store.AdminPublic{
-			UserID:    item.ID,
-			Username:  item.Name,
-			Role:      role,
-			CreatedAt: item.CreatedAt,
-			UpdatedAt: item.UpdatedAt,
-		}, true, nil
+		return passkeyAuthUserFromItem(item), true, nil
 	}
 	return store.AdminPublic{}, false, nil
+}
+
+func (s *Server) passkeyUserByID(userID string) (store.AdminPublic, bool, error) {
+	userID = strings.TrimSpace(userID)
+	if userID == "" {
+		return store.AdminPublic{}, false, nil
+	}
+	item, ok, err := s.cfg.Store.GetPlatformItem("users", userID)
+	if err != nil || !ok {
+		return store.AdminPublic{}, false, err
+	}
+	if !platformItemEnabled(item) || strings.EqualFold(strings.TrimSpace(item.Status), "disabled") {
+		return store.AdminPublic{}, false, nil
+	}
+	return passkeyAuthUserFromItem(item), true, nil
+}
+
+func passkeyAuthUserFromItem(item model.PlatformItem) store.AdminPublic {
+	role := strings.TrimSpace(passkeyMetadataText(item.Metadata["role"]))
+	if role == "" {
+		role = "user"
+	}
+	return store.AdminPublic{
+		UserID:    item.ID,
+		Username:  item.Name,
+		Role:      role,
+		CreatedAt: item.CreatedAt,
+		UpdatedAt: item.UpdatedAt,
+	}
 }
 
 func publicPasskeyItem(item model.PlatformItem) passkeyPublicItem {

@@ -683,6 +683,32 @@ func TestPasskeyRegistrationAndLogin(t *testing.T) {
 	assertStatus(t, handler, http.MethodDelete, "/api/auth/passkeys/"+passkey.ID, nil, adminCookie, http.StatusOK)
 	assertStatus(t, handler, http.MethodPost, "/api/auth/passkeys/login/options", map[string]any{"username": "admin"}, nil, http.StatusUnauthorized)
 	assertStatus(t, handler, http.MethodDelete, "/api/auth/passkeys/"+otherPasskey.ID, nil, otherCookie, http.StatusOK)
+
+	disabledUserRec := assertStatus(t, handler, http.MethodPost, "/api/admin/users", map[string]any{
+		"name":     "disabled-passkey-user",
+		"type":     "local",
+		"status":   "enabled",
+		"password": "password123",
+		"metadata": map[string]any{"role": "user"},
+	}, adminCookie, http.StatusCreated)
+	var disabledUser model.PlatformItem
+	decodeResponse(t, disabledUserRec, &disabledUser)
+	disabledLoginRec := assertStatus(t, handler, http.MethodPost, "/api/auth/login", map[string]any{"username": "disabled-passkey-user", "password": "password123"}, nil, http.StatusOK)
+	disabledCookie := disabledLoginRec.Result().Cookies()[0]
+	disabledPrivateKey, disabledCredentialID, _ := registerTestPasskeyWithCredentialID(t, handler, disabledCookie, "disabled-passkey-user", []byte("disabled-passkey-credential"))
+	disabledOptions := testPasskeyLoginOptions(t, handler, "disabled-passkey-user")
+	assertStatus(t, handler, http.MethodPatch, "/api/admin/users/"+disabledUser.ID, map[string]any{
+		"status": "disabled",
+	}, adminCookie, http.StatusOK)
+	disabledPayload := testPasskeyAssertionPayload(t, disabledOptions.ChallengeID, disabledOptions.PublicKey.Challenge, disabledOptions.PublicKey.RPID, disabledCredentialID, disabledPrivateKey, 2, false)
+	disabledVerifyRec := assertStatus(t, handler, http.MethodPost, "/api/auth/passkeys/login/verify", disabledPayload, nil, http.StatusUnauthorized)
+	if len(disabledVerifyRec.Result().Cookies()) > 0 {
+		t.Fatal("disabled passkey user received a session cookie")
+	}
+	disabledLogsRec := assertStatus(t, handler, http.MethodGet, "/api/admin/audit/login-logs", nil, adminCookie, http.StatusOK)
+	if !strings.Contains(disabledLogsRec.Body.String(), "passkey account is disabled or no longer exists") {
+		t.Fatalf("disabled passkey login was not audited: %s", disabledLogsRec.Body.String())
+	}
 }
 
 func TestUserImportCreatesSkipsAndUpdatesLoginUsers(t *testing.T) {

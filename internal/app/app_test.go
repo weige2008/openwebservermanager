@@ -2675,6 +2675,10 @@ func TestTOTPLoginMFASetupChallengeRecoveryAndDisable(t *testing.T) {
 		"token":    token,
 		"mfa_code": totpCode(secret, time.Now().UTC()),
 	}, nil, http.StatusOK)
+	assertStatus(t, handler, http.MethodPost, "/api/auth/mfa/complete-login", map[string]any{
+		"token":    token,
+		"mfa_code": totpCode(secret, time.Now().UTC()),
+	}, nil, http.StatusUnauthorized)
 	if len(completeRec.Result().Cookies()) == 0 {
 		t.Fatal("MFA completion did not set auth cookie")
 	}
@@ -2734,6 +2738,10 @@ func TestForcedMFAEnrollmentDuringLogin(t *testing.T) {
 		"token":    token,
 		"mfa_code": totpCode(secret, time.Now().UTC()),
 	}, nil, http.StatusOK)
+	assertStatus(t, handler, http.MethodPost, "/api/auth/mfa/complete-login", map[string]any{
+		"token":    token,
+		"mfa_code": totpCode(secret, time.Now().UTC()),
+	}, nil, http.StatusUnauthorized)
 
 	nextLoginRec := assertStatus(t, handler, http.MethodPost, "/api/auth/login", map[string]any{"username": "admin", "password": "password123"}, nil, http.StatusAccepted)
 	if !strings.Contains(nextLoginRec.Body.String(), `"mfa_required":true`) {

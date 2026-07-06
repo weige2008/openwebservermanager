@@ -496,6 +496,11 @@ func isLegacyMirroredAsset(collection string, item model.PlatformItem) bool {
 func (s *Server) checkAssetReachability(collection string, item model.PlatformItem, timeout time.Duration) (string, string) {
 	switch collection {
 	case "web_assets":
+		if raw, ok, err := s.cfg.Store.GetPlatformItem("web_assets", item.ID); err != nil {
+			return "offline", err.Error()
+		} else if ok {
+			item = raw
+		}
 		target, err := webAssetTargetURL(item)
 		if err != nil {
 			return "offline", err.Error()

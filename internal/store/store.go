@@ -9,6 +9,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"net/url"
 	"os"
 	"path/filepath"
 	"sort"
@@ -2112,6 +2113,9 @@ func sanitizePlatformItem(item *model.PlatformItem) {
 	if item.Module == "database_assets" || item.Protocol == model.ProtocolDatabase {
 		sanitizeDatabaseAssetMetadata(item.Metadata)
 	}
+	if item.Module == "web_assets" || item.Protocol == model.ProtocolHTTP {
+		sanitizeWebAssetMetadata(item.Metadata)
+	}
 	sanitizeMetadataValue(item.Metadata)
 }
 
@@ -2126,6 +2130,24 @@ func sanitizeDatabaseAssetMetadata(metadata map[string]any) {
 	delete(metadata, "database_dsn_encrypted")
 	if dsnSet {
 		metadata["database_dsn_set"] = true
+	}
+}
+
+func sanitizeWebAssetMetadata(metadata map[string]any) {
+	for _, key := range []string{"target_url", "upstream", "url", "target", "address"} {
+		raw, _ := metadata[key].(string)
+		trimmed := strings.TrimSpace(raw)
+		if trimmed == "" {
+			continue
+		}
+		parsed, err := url.Parse(trimmed)
+		if err != nil || parsed.User == nil {
+			continue
+		}
+		parsed.User = nil
+		metadata[key] = parsed.String()
+		metadata[key+"_credentials_set"] = true
+		metadata["upstream_credentials_set"] = true
 	}
 }
 

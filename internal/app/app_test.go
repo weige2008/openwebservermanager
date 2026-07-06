@@ -2488,8 +2488,22 @@ func TestWebAssetProxyRequiresAuthorizationAndLogs(t *testing.T) {
 		"status":   "enabled",
 		"metadata": map[string]any{"target_url": upstreamTarget.String()},
 	}, adminCookie, http.StatusCreated)
+	webCreateBody := webRec.Body.String()
+	if strings.Contains(webCreateBody, "proxy-user") || strings.Contains(webCreateBody, "proxy-secret") || !strings.Contains(webCreateBody, "target_url_credentials_set") {
+		t.Fatalf("web asset create response did not redact upstream credentials: %s", webCreateBody)
+	}
 	var webAsset model.PlatformItem
 	decodeResponse(t, webRec, &webAsset)
+	if targetURL := firstMetadataString(webAsset.Metadata, "target_url"); strings.Contains(targetURL, "@") || strings.Contains(targetURL, "proxy-user") || strings.Contains(targetURL, "proxy-secret") {
+		t.Fatalf("web asset create payload retained upstream userinfo: %#v", webAsset.Metadata)
+	}
+	rawWebAsset, ok, err := handler.(*Server).cfg.Store.GetPlatformItem("web_assets", webAsset.ID)
+	if err != nil || !ok {
+		t.Fatalf("load raw web asset: ok=%v err=%v", ok, err)
+	}
+	if rawTargetURL := firstMetadataString(rawWebAsset.Metadata, "target_url"); !strings.Contains(rawTargetURL, "proxy-user") || !strings.Contains(rawTargetURL, "proxy-secret") {
+		t.Fatalf("raw web asset did not retain proxy credentials for server-side use: %#v", rawWebAsset.Metadata)
+	}
 	loginRec := assertStatus(t, handler, http.MethodPost, "/api/auth/login", map[string]any{"username": "web-user", "password": "password123"}, nil, http.StatusOK)
 	userCookie := loginRec.Result().Cookies()[0]
 
@@ -2500,6 +2514,16 @@ func TestWebAssetProxyRequiresAuthorizationAndLogs(t *testing.T) {
 		"target_id": webAsset.ID,
 		"status":    "enabled",
 	}, adminCookie, http.StatusCreated)
+	for _, rec := range []*httptest.ResponseRecorder{
+		assertStatus(t, handler, http.MethodGet, "/api/admin/websites", nil, adminCookie, http.StatusOK),
+		assertStatus(t, handler, http.MethodGet, "/api/admin/websites/"+webAsset.ID, nil, adminCookie, http.StatusOK),
+		assertStatus(t, handler, http.MethodGet, "/api/access/assets", nil, userCookie, http.StatusOK),
+	} {
+		body := rec.Body.String()
+		if strings.Contains(body, "proxy-user") || strings.Contains(body, "proxy-secret") || strings.Contains(body, "proxy-user:proxy-secret") {
+			t.Fatalf("web asset API leaked upstream credentials: %s", body)
+		}
+	}
 	proxyRec := assertStatusWithHeaders(t, handler, http.MethodGet, "/api/access/http/"+webAsset.ID+"/proxy/hello?x=1", nil, userCookie, map[string]string{
 		"Connection":  "X-Remove-Me",
 		"Cookie":      authCookieName + "=invalid; upstream_theme=dark",

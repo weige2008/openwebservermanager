@@ -369,7 +369,11 @@ func (s *Server) handleAccessAction(w http.ResponseWriter, r *http.Request) {
 		if !s.requireAccessMFA(w, r, accessMFAInputFromRequest(r)) {
 			return
 		}
-		s.handleWebAssetProxy(w, r, asset, userID, strings.Join(parts[3:], "/"))
+		proxyAsset, ok := s.rawWebAssetForProxy(w, asset)
+		if !ok {
+			return
+		}
+		s.handleWebAssetProxy(w, r, proxyAsset, userID, strings.Join(parts[3:], "/"))
 		return
 	}
 	if len(parts) >= 3 && (parts[2] == "query" || parts[2] == "execute") {
@@ -543,6 +547,19 @@ func (s *Server) handleWebAssetProxy(w http.ResponseWriter, r *http.Request, ass
 		Metadata:    metadata,
 	})
 	_ = s.audit(r, "access.web.proxy", asset.ID, model.ProtocolHTTP, "proxied web asset request")
+}
+
+func (s *Server) rawWebAssetForProxy(w http.ResponseWriter, asset model.PlatformItem) (model.PlatformItem, bool) {
+	raw, ok, err := s.cfg.Store.GetPlatformItem("web_assets", asset.ID)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err.Error())
+		return model.PlatformItem{}, false
+	}
+	if !ok || !platformAccessItemEnabled(raw) {
+		writeError(w, http.StatusNotFound, "asset not found")
+		return model.PlatformItem{}, false
+	}
+	return raw, true
 }
 
 type statusCaptureWriter struct {

@@ -51,6 +51,13 @@ const defaultPublicConfig: PublicConfig = {
   version: 'dev',
   github_url: 'https://github.com/weige2008/openwebservermanager',
   copyright: 'Copyright (c) 2026 weige2008. All rights reserved.',
+  logo_url: '',
+  asset_logo_url: '',
+  icp_number: '',
+  about_title: '',
+  about_description: '',
+  about_body: '',
+  footer_text: '',
   nav_links: [
     { title: 'product', href: '/#product' },
     { title: 'connections', href: '/#connections' },
@@ -199,6 +206,7 @@ export function AppProvider({ children }: { children: ReactNode }) {
   const refresh = useCallback(
     async (silent = false) => {
       await queryClient.invalidateQueries({ queryKey: ['auth-status'] })
+      await queryClient.invalidateQueries({ queryKey: ['public-config'] })
       await queryClient.invalidateQueries({ queryKey: ['bootstrap'] })
       if (!silent) toast.success(t('dataRefreshed'))
     },
@@ -234,8 +242,16 @@ export function AppProvider({ children }: { children: ReactNode }) {
     ? {
         site_name: publicConfigQuery.data.site_name || defaultPublicConfig.site_name,
         version: publicConfigQuery.data.version || defaultPublicConfig.version,
+        commit: publicConfigQuery.data.commit || defaultPublicConfig.commit,
         github_url: publicConfigQuery.data.github_url || defaultPublicConfig.github_url,
         copyright: publicConfigQuery.data.copyright || defaultPublicConfig.copyright,
+        logo_url: publicConfigQuery.data.logo_url || '',
+        asset_logo_url: publicConfigQuery.data.asset_logo_url || '',
+        icp_number: publicConfigQuery.data.icp_number || '',
+        about_title: publicConfigQuery.data.about_title || '',
+        about_description: publicConfigQuery.data.about_description || '',
+        about_body: publicConfigQuery.data.about_body || '',
+        footer_text: publicConfigQuery.data.footer_text || '',
         nav_links: publicConfigQuery.data.nav_links?.length ? publicConfigQuery.data.nav_links : defaultPublicConfig.nav_links,
       }
     : defaultPublicConfig

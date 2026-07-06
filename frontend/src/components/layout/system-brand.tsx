@@ -1,6 +1,7 @@
 import { Link } from '@tanstack/react-router'
 import { useTranslation } from 'react-i18next'
 
+import { useApp } from '@/app/app-provider'
 import { cn } from '@/lib/utils'
 
 import { BrandLogo } from './brand-logo'
@@ -14,8 +15,9 @@ export function SystemBrand({
   clickable?: boolean
   variant?: 'inline' | 'auth'
 }) {
+  const app = useApp()
   const { t } = useTranslation()
-  const siteName = t('productName')
+  const siteName = app.publicConfig.site_name || t('productName')
 
   const content = (
     <span
@@ -26,7 +28,7 @@ export function SystemBrand({
         className
       )}
     >
-      <BrandLogo className={variant === 'auth' ? 'size-9' : 'size-6'} title={siteName} />
+      <BrandLogo className={variant === 'auth' ? 'size-9' : 'size-6'} title={siteName} src={app.publicConfig.logo_url} />
       <span className={cn('min-w-0 text-left leading-tight whitespace-normal break-words', variant === 'inline' ? 'max-w-[8.5rem] sm:max-w-[11rem]' : 'max-w-[18rem]')}>
         {siteName}
       </span>

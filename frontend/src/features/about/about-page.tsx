@@ -37,7 +37,10 @@ export function AboutContent() {
   const app = useApp()
   const { t } = useTranslation()
   const version = app.publicConfig.version || 'dev'
-  const productName = t('productName')
+  const productName = app.publicConfig.site_name || t('productName')
+  const aboutTitle = app.publicConfig.about_title || t('aboutPage.title', { productName })
+  const aboutDescription = app.publicConfig.about_description || t('aboutPage.description', { productName })
+  const aboutBody = app.publicConfig.about_body || t('aboutPage.boundaryBody')
 
   return (
     <CardStaggerContainer className='grid gap-4'>
@@ -45,8 +48,8 @@ export function AboutContent() {
         <div className='flex flex-wrap items-start justify-between gap-4'>
           <div>
             <p className='text-xs font-medium tracking-[0.14em] text-muted-foreground uppercase'>{t('about')}</p>
-            <h1 className='mt-2 text-2xl font-semibold tracking-tight md:text-3xl'>{t('aboutPage.title', { productName })}</h1>
-            <p className='mt-3 max-w-3xl text-sm leading-6 text-muted-foreground'>{t('aboutPage.description', { productName })}</p>
+            <h1 className='mt-2 text-2xl font-semibold tracking-tight md:text-3xl'>{aboutTitle}</h1>
+            <p className='mt-3 max-w-3xl text-sm leading-6 text-muted-foreground'>{aboutDescription}</p>
           </div>
           <div className='rounded-lg border border-border bg-muted/30 px-3 py-2 font-mono text-xs'>
             {t('version')} {version}
@@ -72,11 +75,12 @@ export function AboutContent() {
       <CardStaggerItem className='grid gap-4 rounded-xl border border-border bg-card p-5 shadow-sm lg:grid-cols-[1fr_0.9fr]'>
         <div>
           <h2 className='text-base font-semibold'>{t('aboutPage.boundaryTitle')}</h2>
-          <p className='mt-2 text-sm leading-6 text-muted-foreground'>{t('aboutPage.boundaryBody')}</p>
+          <p className='mt-2 whitespace-pre-line text-sm leading-6 text-muted-foreground'>{aboutBody}</p>
         </div>
         <div className='grid gap-2 rounded-lg border border-border bg-muted/25 p-3 text-sm'>
           <InfoRow label={t('github')} value={app.publicConfig.github_url || 'https://github.com/weige2008/openwebservermanager'} />
           <InfoRow label={t('version')} value={version} />
+          {app.publicConfig.icp_number ? <InfoRow label='ICP' value={app.publicConfig.icp_number} /> : null}
           <InfoRow label={t('copyright')} value={app.publicConfig.copyright || 'Copyright (c) 2026 weige2008. All rights reserved.'} />
         </div>
       </CardStaggerItem>
@@ -124,7 +128,10 @@ function AboutFooter() {
     <footer className='border-t border-border bg-background'>
       <div className='mx-auto flex w-[min(72rem,calc(100%-2rem))] flex-col gap-3 py-6 text-xs text-muted-foreground sm:flex-row sm:items-center sm:justify-between'>
         <SystemBrand clickable />
-        <span>{app.publicConfig.copyright || 'Copyright (c) 2026 weige2008. All rights reserved.'}</span>
+        <span className='flex flex-wrap gap-3'>
+          {app.publicConfig.icp_number ? <span>{app.publicConfig.icp_number}</span> : null}
+          <span>{app.publicConfig.copyright || 'Copyright (c) 2026 weige2008. All rights reserved.'}</span>
+        </span>
       </div>
     </footer>
   )

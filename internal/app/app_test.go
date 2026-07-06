@@ -199,6 +199,49 @@ func TestAdminLicenseRequiresAdminPermission(t *testing.T) {
 	assertStatus(t, handler, http.MethodPut, "/api/admin/license", map[string]any{"licensee": "denied"}, userCookie, http.StatusForbidden)
 }
 
+func TestPublicConfigUsesBrandingSettings(t *testing.T) {
+	handler, adminCookie := newTestHandler(t)
+
+	assertStatus(t, handler, http.MethodPost, "/api/admin/system-settings", map[string]any{
+		"name":        "Custom branding",
+		"type":        "branding",
+		"status":      "enabled",
+		"description": "custom public branding",
+		"metadata": map[string]any{
+			"site_name":         "Ops Portal",
+			"logo_url":          "/brand.svg",
+			"asset_logo_url":    "/asset.svg",
+			"github_url":        "https://example.test/repo",
+			"copyright":         "Copyright 2026 Ops",
+			"icp_number":        "Test ICP 0001",
+			"about_title":       "About Ops Portal",
+			"about_description": "Managed access workspace",
+			"about_body":        "Public about copy",
+			"footer_text":       "Footer copy",
+			"nav_links": []map[string]any{
+				{"title": "product", "href": "/#product"},
+				{"title": "Docs", "href": "https://docs.example.test", "external": true},
+			},
+		},
+	}, adminCookie, http.StatusCreated)
+
+	rec := assertStatus(t, handler, http.MethodGet, "/api/public/config", nil, nil, http.StatusOK)
+	var cfg PublicConfig
+	decodeResponse(t, rec, &cfg)
+	if cfg.SiteName != "Ops Portal" || cfg.LogoURL != "/brand.svg" || cfg.AssetLogoURL != "/asset.svg" {
+		t.Fatalf("public config did not apply logo/name branding: %+v", cfg)
+	}
+	if cfg.GitHubURL != "https://example.test/repo" || cfg.Copyright != "Copyright 2026 Ops" || cfg.ICPNumber != "Test ICP 0001" {
+		t.Fatalf("public config did not apply repository/footer branding: %+v", cfg)
+	}
+	if cfg.AboutTitle != "About Ops Portal" || cfg.AboutDescription != "Managed access workspace" || cfg.AboutBody != "Public about copy" || cfg.FooterText != "Footer copy" {
+		t.Fatalf("public config did not apply about branding: %+v", cfg)
+	}
+	if len(cfg.NavLinks) != 2 || cfg.NavLinks[1].Title != "Docs" || !cfg.NavLinks[1].External {
+		t.Fatalf("public config did not apply nav links: %+v", cfg.NavLinks)
+	}
+}
+
 func TestPlatformCollectionDetailRedactsSensitiveMetadata(t *testing.T) {
 	handler, cookie := newTestHandler(t)
 

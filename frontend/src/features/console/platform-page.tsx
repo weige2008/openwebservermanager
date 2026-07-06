@@ -17,7 +17,7 @@ import { ApiError, apiRequest } from '@/lib/api'
 import { copyText } from '@/lib/clipboard'
 import { platformDescription, platformLabel, platformPages, type PlatformPageConfig } from '@/lib/platform'
 import { cn, formatDate } from '@/lib/utils'
-import type { ConnectionSession, PlatformItem, Protocol } from '@/types'
+import type { ConnectionSession, PlatformItem, Protocol, PublicConfig } from '@/types'
 
 interface PlatformFormState {
   name: string
@@ -183,6 +183,20 @@ interface ProxyServicesStatus {
   ssh_gateway?: Record<string, unknown>
   rdp_proxy?: Record<string, unknown>
   database_proxy?: Record<string, unknown>
+}
+
+interface BrandingForm {
+  siteName: string
+  logoUrl: string
+  assetLogoUrl: string
+  githubUrl: string
+  copyright: string
+  icpNumber: string
+  aboutTitle: string
+  aboutDescription: string
+  aboutBody: string
+  footerText: string
+  navLinks: string
 }
 
 interface SSHExecResult {
@@ -2706,18 +2720,25 @@ export function PlatformSettingsPage({ config }: { config: PlatformPageConfig })
   const label = platformLabel(config, app.locale)
   const description = platformDescription(config, app.locale)
   const Icon = config.icon
+  const brandingSetting = useMemo(() => items.find((item) => (item.type || '').toLowerCase() === 'branding'), [items])
   const accessSetting = useMemo(() => items.find((item) => (item.type || '').toLowerCase() === 'access'), [items])
   const integration = useMemo(() => items.find((item) => (item.type || '').toLowerCase() === 'integration'), [items])
   const proxySetting = useMemo(() => items.find((item) => (item.type || '').toLowerCase() === 'proxy'), [items])
+  const [brandingForm, setBrandingForm] = useState<BrandingForm>(() => brandingFormFromItem(brandingSetting, app.publicConfig))
   const [accessForm, setAccessForm] = useState<DesktopAccessForm>(() => desktopAccessFormFromItem(accessSetting))
   const [form, setForm] = useState<SMTPIntegrationForm>(() => smtpIntegrationFormFromItem(integration))
   const [proxyForm, setProxyForm] = useState<ProxyServicesForm>(() => proxyServicesFormFromItem(proxySetting))
   const [proxyStatus, setProxyStatus] = useState<ProxyServicesStatus>({})
+  const [savingBranding, setSavingBranding] = useState(false)
   const [savingAccess, setSavingAccess] = useState(false)
   const [savingProxy, setSavingProxy] = useState(false)
   const [saving, setSaving] = useState(false)
   const [testing, setTesting] = useState(false)
   const [testingLLM, setTestingLLM] = useState(false)
+
+  useEffect(() => {
+    setBrandingForm(brandingFormFromItem(brandingSetting, app.publicConfig))
+  }, [brandingSetting?.id, brandingSetting?.updated_at, app.publicConfig.site_name, app.publicConfig.logo_url])
 
   useEffect(() => {
     setAccessForm(desktopAccessFormFromItem(accessSetting))
@@ -2750,8 +2771,31 @@ export function PlatformSettingsPage({ config }: { config: PlatformPageConfig })
   }, [])
 
   const patchAccessForm = (next: Partial<DesktopAccessForm>) => setAccessForm((current) => ({ ...current, ...next }))
+  const patchBrandingForm = (next: Partial<BrandingForm>) => setBrandingForm((current) => ({ ...current, ...next }))
   const patchForm = (next: Partial<SMTPIntegrationForm>) => setForm((current) => ({ ...current, ...next }))
   const patchProxyForm = (next: Partial<ProxyServicesForm>) => setProxyForm((current) => ({ ...current, ...next }))
+
+  const saveBrandingSettings = async () => {
+    setSavingBranding(true)
+    try {
+      await apiRequest<PlatformItem>(brandingSetting?.id ? `/api/admin/system-settings/${brandingSetting.id}` : '/api/admin/system-settings', {
+        method: brandingSetting?.id ? 'PATCH' : 'POST',
+        body: JSON.stringify({
+          name: brandingSetting?.name || 'System branding',
+          type: 'branding',
+          status: 'enabled',
+          metadata: brandingMetadataFromForm(brandingForm, brandingSetting?.metadata),
+          description: 'Public branding, logo, ICP record, footer, navigation, and about page content.',
+        }),
+      })
+      await app.refresh(true)
+      app.showToast(app.t('saved', 'Saved'))
+    } catch (error) {
+      app.handleApiError(error)
+    } finally {
+      setSavingBranding(false)
+    }
+  }
 
   const saveAccessSettings = async () => {
     setSavingAccess(true)
@@ -2885,6 +2929,63 @@ export function PlatformSettingsPage({ config }: { config: PlatformPageConfig })
             <Button variant='outline' onClick={() => void app.refresh()}><RefreshCw className='size-4' />{app.t('refresh', '刷新')}</Button>
           </CardHeader>
           <CardContent className='grid gap-5'>
+            <section className='grid gap-4 rounded-xl border border-border bg-background/60 p-4'>
+              <div className='flex flex-wrap items-start justify-between gap-3'>
+                <div>
+                  <h3 className='text-sm font-semibold'>{app.t('brandingSettings', 'Branding and about')}</h3>
+                  <p className='mt-1 text-xs leading-5 text-muted-foreground'>
+                    {app.t('brandingSettingsDescription', 'Configure the public product name, logo URLs, footer, ICP record, navigation links, and about page copy. These settings are served by /api/public/config.')}
+                  </p>
+                </div>
+                <Badge tone={brandingSetting ? 'success' : 'neutral'}>{brandingSetting ? app.t('configured', 'Configured') : app.t('notConfigured', 'Not configured')}</Badge>
+              </div>
+              <div className='grid gap-3 md:grid-cols-2 xl:grid-cols-4'>
+                <Field label={app.t('systemName', 'System name')}>
+                  <Input value={brandingForm.siteName} onChange={(event) => patchBrandingForm({ siteName: event.currentTarget.value })} placeholder='Open Web Server Manager' />
+                </Field>
+                <Field label={app.t('logoUrl', 'Logo URL')}>
+                  <Input value={brandingForm.logoUrl} onChange={(event) => patchBrandingForm({ logoUrl: event.currentTarget.value })} placeholder='/logo.svg or https://example.com/logo.png' />
+                </Field>
+                <Field label={app.t('assetLogoUrl', 'Asset logo URL')}>
+                  <Input value={brandingForm.assetLogoUrl} onChange={(event) => patchBrandingForm({ assetLogoUrl: event.currentTarget.value })} placeholder='/logo.svg' />
+                </Field>
+                <Field label={app.t('icpNumber', 'ICP record')}>
+                  <Input value={brandingForm.icpNumber} onChange={(event) => patchBrandingForm({ icpNumber: event.currentTarget.value })} placeholder='京ICP备00000000号-1' />
+                </Field>
+                <Field label={app.t('github', 'GitHub')}>
+                  <Input value={brandingForm.githubUrl} onChange={(event) => patchBrandingForm({ githubUrl: event.currentTarget.value })} placeholder='https://github.com/weige2008/openwebservermanager' />
+                </Field>
+                <Field className='xl:col-span-3' label={app.t('copyright', 'Copyright')}>
+                  <Input value={brandingForm.copyright} onChange={(event) => patchBrandingForm({ copyright: event.currentTarget.value })} placeholder='Copyright (c) 2026 ...' />
+                </Field>
+                <Field className='md:col-span-2' label={app.t('aboutTitle', 'About title')}>
+                  <Input value={brandingForm.aboutTitle} onChange={(event) => patchBrandingForm({ aboutTitle: event.currentTarget.value })} placeholder='About Open Web Server Manager' />
+                </Field>
+                <Field className='md:col-span-2' label={app.t('aboutDescription', 'About description')}>
+                  <Input value={brandingForm.aboutDescription} onChange={(event) => patchBrandingForm({ aboutDescription: event.currentTarget.value })} placeholder='Self-hosted browser workspace for server access.' />
+                </Field>
+              </div>
+              <div className='grid gap-3 lg:grid-cols-2'>
+                <Field label={app.t('aboutBody', 'About body')}>
+                  <Textarea className='min-h-36' value={brandingForm.aboutBody} onChange={(event) => patchBrandingForm({ aboutBody: event.currentTarget.value })} placeholder='Public about page body text.' />
+                </Field>
+                <div className='grid gap-3'>
+                  <Field label={app.t('footerText', 'Footer text')}>
+                    <Textarea className='min-h-20' value={brandingForm.footerText} onChange={(event) => patchBrandingForm({ footerText: event.currentTarget.value })} placeholder='Footer summary shown on the homepage.' />
+                  </Field>
+                  <Field label={app.t('navLinks', 'Navigation links JSON')}>
+                    <Textarea className='min-h-28 font-mono text-xs' value={brandingForm.navLinks} onChange={(event) => patchBrandingForm({ navLinks: event.currentTarget.value })} placeholder='[{"title":"product","href":"/#product"}]' />
+                  </Field>
+                </div>
+              </div>
+              <div className='flex justify-end'>
+                <Button variant='outline' onClick={() => void saveBrandingSettings()} disabled={savingBranding || !brandingForm.siteName.trim()}>
+                  <Save className='size-4' />
+                  {savingBranding ? app.t('saving', 'Saving') : app.t('save', 'Save')}
+                </Button>
+              </div>
+            </section>
+
             <section className='grid gap-4 rounded-xl border border-border bg-background/60 p-4'>
               <div className='flex flex-wrap items-start justify-between gap-3'>
                 <div>
@@ -3172,6 +3273,84 @@ function smtpIntegrationFormFromItem(item?: PlatformItem): SMTPIntegrationForm {
     llmApiKey: '',
     llmApiKeySet: metadataBool(metadata.llm_api_key_set),
   }
+}
+
+function brandingFormFromItem(item: PlatformItem | undefined, publicConfig: PublicConfig): BrandingForm {
+  const metadata = item?.metadata || {}
+  const navLinks = metadata.nav_links ?? metadata.nav_links_json ?? publicConfig.nav_links
+  return {
+    siteName: metadataText(metadata.site_name) || metadataText(metadata.system_name) || publicConfig.site_name || '',
+    logoUrl: metadataText(metadata.logo_url) || metadataText(metadata.system_icon) || publicConfig.logo_url || '',
+    assetLogoUrl: metadataText(metadata.asset_logo_url) || metadataText(metadata.asset_logo) || publicConfig.asset_logo_url || '',
+    githubUrl: metadataText(metadata.github_url) || publicConfig.github_url || '',
+    copyright: metadataText(metadata.copyright) || publicConfig.copyright || '',
+    icpNumber: metadataText(metadata.icp_number) || metadataText(metadata.icp) || publicConfig.icp_number || '',
+    aboutTitle: metadataText(metadata.about_title) || publicConfig.about_title || '',
+    aboutDescription: metadataText(metadata.about_description) || publicConfig.about_description || '',
+    aboutBody: metadataText(metadata.about_body) || metadataText(metadata.about_content) || publicConfig.about_body || '',
+    footerText: metadataText(metadata.footer_text) || publicConfig.footer_text || '',
+    navLinks: formatNavLinksForForm(navLinks),
+  }
+}
+
+function brandingMetadataFromForm(form: BrandingForm, previous?: Record<string, unknown>) {
+  return {
+    ...(previous || {}),
+    site_name: form.siteName.trim(),
+    logo_url: form.logoUrl.trim(),
+    asset_logo_url: form.assetLogoUrl.trim(),
+    github_url: form.githubUrl.trim(),
+    copyright: form.copyright.trim(),
+    icp_number: form.icpNumber.trim(),
+    about_title: form.aboutTitle.trim(),
+    about_description: form.aboutDescription.trim(),
+    about_body: form.aboutBody.trim(),
+    footer_text: form.footerText.trim(),
+    nav_links: parseNavLinksForm(form.navLinks),
+  }
+}
+
+function formatNavLinksForForm(value: unknown) {
+  if (!value) {
+    return JSON.stringify([
+      { title: 'product', href: '/#product' },
+      { title: 'connections', href: '/#connections' },
+      { title: 'security', href: '/#security' },
+      { title: 'deploy', href: '/#deploy' },
+      { title: 'about', href: '/about' },
+    ], null, 2)
+  }
+  if (typeof value === 'string') {
+    const trimmed = value.trim()
+    if (!trimmed) return formatNavLinksForForm(null)
+    try {
+      return JSON.stringify(JSON.parse(trimmed), null, 2)
+    } catch {
+      return trimmed
+    }
+  }
+  return JSON.stringify(value, null, 2)
+}
+
+function parseNavLinksForm(value: string) {
+  const trimmed = value.trim()
+  if (!trimmed) return []
+  try {
+    const parsed = JSON.parse(trimmed) as unknown
+    if (Array.isArray(parsed)) {
+      return parsed.map((item) => {
+        const raw = item as Record<string, unknown>
+        return {
+          title: metadataText(raw.title) || metadataText(raw.label) || metadataText(raw.name),
+          href: metadataText(raw.href) || metadataText(raw.url) || metadataText(raw.path),
+          external: metadataBool(raw.external),
+        }
+      }).filter((item) => item.title && item.href)
+    }
+  } catch {
+    return []
+  }
+  return []
 }
 
 function proxyServicesFormFromItem(item?: PlatformItem): ProxyServicesForm {

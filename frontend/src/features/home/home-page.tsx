@@ -136,7 +136,7 @@ export function HomePage() {
   const authenticated = Boolean(auth)
   const entryTo = authenticated ? '/app' : '/login'
   const entryText = authenticated ? t('enterConsole') : setupRequired ? t('initializeAdmin') : t('signInConsole')
-  const siteName = t('productName')
+  const siteName = publicConfig.site_name || t('productName')
   const githubUrl = publicConfig.github_url || 'https://github.com/weige2008/openwebservermanager'
   const copyright = publicConfig.copyright || 'Copyright (c) 2026 weige2008. All rights reserved.'
 
@@ -153,7 +153,17 @@ export function HomePage() {
         <SecurityAndWorkflow copy={copy} />
         <CtaSection authenticated={authenticated} copy={copy} entryText={entryText} entryTo={entryTo} />
       </main>
-      <PublicFooter siteName={siteName} entryTo={entryTo} entryText={entryText} copy={copy} githubUrl={githubUrl} copyright={copyright} />
+      <PublicFooter
+        siteName={siteName}
+        entryTo={entryTo}
+        entryText={entryText}
+        copy={copy}
+        githubUrl={githubUrl}
+        copyright={copyright}
+        logoUrl={publicConfig.logo_url}
+        footerText={publicConfig.footer_text}
+        icpNumber={publicConfig.icp_number}
+      />
     </div>
   )
 }
@@ -959,6 +969,9 @@ function PublicFooter({
   copy,
   githubUrl,
   copyright,
+  logoUrl,
+  footerText,
+  icpNumber,
 }: {
   siteName: string
   entryTo: string
@@ -966,6 +979,9 @@ function PublicFooter({
   copy: HomeCopy
   githubUrl: string
   copyright: string
+  logoUrl?: string
+  footerText?: string
+  icpNumber?: string
 }) {
   const { t } = useTranslation()
 
@@ -974,10 +990,10 @@ function PublicFooter({
       <div className='mx-auto grid w-[min(72rem,calc(100%-2rem))] gap-8 py-10 md:grid-cols-[1.2fr_0.8fr_0.8fr]'>
         <div>
           <div className='inline-flex items-center gap-2 text-sm font-semibold'>
-            <BrandLogo className='size-7' title={siteName} />
+            <BrandLogo className='size-7' title={siteName} src={logoUrl} />
             {siteName}
           </div>
-          <p className='mt-3 max-w-sm text-sm leading-6 text-muted-foreground'>{copy.footerBody}</p>
+          <p className='mt-3 max-w-sm text-sm leading-6 text-muted-foreground'>{footerText || copy.footerBody}</p>
         </div>
         <FooterColumn
           title={copy.footerProduct}
@@ -1000,6 +1016,7 @@ function PublicFooter({
       <div className='mx-auto flex w-[min(72rem,calc(100%-2rem))] flex-col gap-2 border-t border-border py-5 text-xs text-muted-foreground sm:flex-row sm:items-center sm:justify-between'>
         <span>{copyright}</span>
         <span className='flex flex-wrap items-center gap-3'>
+          {icpNumber ? <span>{icpNumber}</span> : null}
           <a href={githubUrl} target='_blank' rel='noreferrer' className='transition-colors hover:text-foreground'>
             {t('github')}
           </a>

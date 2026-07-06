@@ -1,6 +1,18 @@
 import { cn } from '@/lib/utils'
 
-export function BrandLogo({ className, title = 'openwebservermanager' }: { className?: string; title?: string }) {
+export function BrandLogo({ className, title = 'openwebservermanager', src }: { className?: string; title?: string; src?: string }) {
+  if (src) {
+    return (
+      <img
+        src={src}
+        alt={title}
+        className={cn('size-6 shrink-0 rounded-md object-cover', className)}
+        loading='lazy'
+        decoding='async'
+      />
+    )
+  }
+
   return (
     <svg
       viewBox='0 0 40 40'

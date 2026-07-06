@@ -61,12 +61,19 @@ type rdpProxyRuntime interface {
 }
 
 type PublicConfig struct {
-	SiteName  string          `json:"site_name"`
-	Version   string          `json:"version"`
-	Commit    string          `json:"commit,omitempty"`
-	GitHubURL string          `json:"github_url"`
-	Copyright string          `json:"copyright"`
-	NavLinks  []PublicNavLink `json:"nav_links"`
+	SiteName         string          `json:"site_name"`
+	Version          string          `json:"version"`
+	Commit           string          `json:"commit,omitempty"`
+	GitHubURL        string          `json:"github_url"`
+	Copyright        string          `json:"copyright"`
+	LogoURL          string          `json:"logo_url,omitempty"`
+	AssetLogoURL     string          `json:"asset_logo_url,omitempty"`
+	ICPNumber        string          `json:"icp_number,omitempty"`
+	AboutTitle       string          `json:"about_title,omitempty"`
+	AboutDescription string          `json:"about_description,omitempty"`
+	AboutBody        string          `json:"about_body,omitempty"`
+	FooterText       string          `json:"footer_text,omitempty"`
+	NavLinks         []PublicNavLink `json:"nav_links"`
 }
 
 type PublicNavLink struct {
@@ -234,29 +241,7 @@ func (s *Server) serveAPI(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handlePublicConfig(w http.ResponseWriter, _ *http.Request) {
-	cfg := s.cfg.Public
-	if cfg.SiteName == "" {
-		cfg.SiteName = "Open Web Server Manager"
-	}
-	if cfg.Version == "" {
-		cfg.Version = "dev"
-	}
-	if cfg.GitHubURL == "" {
-		cfg.GitHubURL = "https://github.com/weige2008/openwebservermanager"
-	}
-	if cfg.Copyright == "" {
-		cfg.Copyright = "Copyright (c) 2026 weige2008. All rights reserved."
-	}
-	if len(cfg.NavLinks) == 0 {
-		cfg.NavLinks = []PublicNavLink{
-			{Title: "product", Href: "/#product"},
-			{Title: "connections", Href: "/#connections"},
-			{Title: "security", Href: "/#security"},
-			{Title: "deploy", Href: "/#deploy"},
-			{Title: "about", Href: "/about"},
-		}
-	}
-	writeJSON(w, http.StatusOK, cfg)
+	writeJSON(w, http.StatusOK, s.publicConfig())
 }
 
 func (s *Server) handleBootstrap(w http.ResponseWriter, r *http.Request) {

@@ -142,6 +142,13 @@ export interface PublicConfig {
   commit?: string
   github_url?: string
   copyright?: string
+  logo_url?: string
+  asset_logo_url?: string
+  icp_number?: string
+  about_title?: string
+  about_description?: string
+  about_body?: string
+  footer_text?: string
   nav_links: PublicNavLink[]
 }
 

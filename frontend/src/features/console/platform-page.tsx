@@ -28,6 +28,8 @@ interface PlatformFormState {
   port: string
   username: string
   password: string
+  oidcClientSecretSet: boolean
+  oidcClientSecretClear: boolean
   private_key: string
   passphrase: string
   group: string
@@ -60,6 +62,8 @@ const initialForm: PlatformFormState = {
   port: '',
   username: '',
   password: '',
+  oidcClientSecretSet: false,
+  oidcClientSecretClear: false,
   private_key: '',
   passphrase: '',
   group: '',
@@ -3433,6 +3437,7 @@ function PlatformItemDialog({
                     onChange({
                       type: nextType,
                       password: nextType === 'public' ? '' : form.password,
+                      oidcClientSecretClear: nextType === 'public' ? false : form.oidcClientSecretClear,
                       metadata: metadataWithValue(form.metadata, 'token_endpoint_auth_method', nextType === 'public' ? 'none' : 'client_secret_basic'),
                     })
                   }}
@@ -3455,9 +3460,22 @@ function PlatformItemDialog({
                   placeholder={editingId ? app.t('keepCurrentSecret', 'Leave blank to keep current secret') : ''}
                   autoComplete='new-password'
                   disabled={(form.type || 'confidential') === 'public'}
-                  onChange={(event) => onChange({ password: event.currentTarget.value })}
+                  onChange={(event) => onChange({ password: event.currentTarget.value, oidcClientSecretClear: false })}
                 />
               </Field>
+              {editingId && (form.type || 'confidential') !== 'public' && form.oidcClientSecretSet ? (
+                <div className='grid gap-2 rounded-lg border border-border bg-muted/20 p-3 sm:col-span-2'>
+                  <div className='flex flex-wrap items-center justify-between gap-2'>
+                    <span className='text-sm font-medium'>{app.t('oidcClientSecret', 'Client secret')}</span>
+                    <Badge tone='success'>{app.t('passwordSaved')}</Badge>
+                  </div>
+                  <CheckboxRow
+                    checked={form.oidcClientSecretClear}
+                    onChange={(checked) => onChange({ oidcClientSecretClear: checked, password: checked ? '' : form.password })}
+                    label={app.t('clearOIDCClientSecret', 'Clear saved OIDC client secret on save')}
+                  />
+                </div>
+              ) : null}
               <Field label={app.t('oidcAuthMethod', 'Token auth method')}>
                 <Select
                   value={metadataFormText(form.metadata, 'token_endpoint_auth_method') || ((form.type || 'confidential') === 'public' ? 'none' : 'client_secret_basic')}
@@ -3667,6 +3685,8 @@ function formFromPlatformItem(item: PlatformItem): PlatformFormState {
     port: item.port ? String(item.port) : '',
     username: item.username || '',
     password: '',
+    oidcClientSecretSet: metadataBool(item.metadata?.client_secret_set),
+    oidcClientSecretClear: false,
     private_key: '',
     passphrase: '',
     group: item.group || '',
@@ -3685,6 +3705,9 @@ function platformRequestFromForm(form: PlatformFormState) {
   if (form.metadata.trim()) {
     metadata = JSON.parse(form.metadata)
   }
+  if (form.oidcClientSecretClear) {
+    metadata = { ...(metadata ?? {}), client_secret_clear: true }
+  }
   return {
     name: form.name,
     type: form.type,
@@ -3693,7 +3716,7 @@ function platformRequestFromForm(form: PlatformFormState) {
     host: form.host,
     port: form.port ? Number(form.port) : 0,
     username: form.username,
-    password: form.password || undefined,
+    password: form.oidcClientSecretClear ? undefined : form.password || undefined,
     private_key: form.private_key || undefined,
     passphrase: form.passphrase || undefined,
     group: form.group,

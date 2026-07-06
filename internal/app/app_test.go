@@ -4042,6 +4042,65 @@ func TestOIDCProviderAuthorizationCodeFlow(t *testing.T) {
 	}, http.StatusUnauthorized)
 	assertFormStatus(t, handler, "/api/oidc/userinfo", url.Values{"access_token": {"invalid"}}, nil, nil, http.StatusUnauthorized)
 
+	clearedClientRec := assertStatus(t, handler, http.MethodPatch, "/api/admin/oidc-clients/"+client.ID, map[string]any{
+		"name":   "openweb-test",
+		"type":   "confidential",
+		"status": "enabled",
+		"metadata": map[string]any{
+			"client_id":                  "openweb-test",
+			"redirect_uris":              []string{"https://client.example/callback"},
+			"scopes":                     []string{"openid", "profile", "email"},
+			"token_endpoint_auth_method": "client_secret_basic",
+			"client_secret_clear":        true,
+		},
+	}, adminCookie, http.StatusOK)
+	if strings.Contains(clearedClientRec.Body.String(), "client-secret") || strings.Contains(clearedClientRec.Body.String(), "client_secret_hash") || strings.Contains(clearedClientRec.Body.String(), "client_secret_set") || strings.Contains(clearedClientRec.Body.String(), "client_secret_clear") {
+		t.Fatalf("cleared oidc client response leaked or retained secret state: %s", clearedClientRec.Body.String())
+	}
+	rawClearedClient, ok, err := srv.cfg.Store.GetPlatformItem("oidc_clients", client.ID)
+	if err != nil || !ok {
+		t.Fatalf("load cleared oidc client: ok=%v err=%v", ok, err)
+	}
+	for _, key := range []string{"client_secret_hash", "client_secret_set", "client_secret_clear", "clear_client_secret"} {
+		if _, exists := rawClearedClient.Metadata[key]; exists {
+			t.Fatalf("cleared confidential oidc client retained %s: %#v", key, rawClearedClient.Metadata)
+		}
+	}
+
+	clearedCodeVerifier := "cleared-verifier-1234567890"
+	clearedChallengeRaw := sha256.Sum256([]byte(clearedCodeVerifier))
+	clearedCodeChallenge := base64.RawURLEncoding.EncodeToString(clearedChallengeRaw[:])
+	clearedAuthorizePath := "/api/oidc/authorize?" + url.Values{
+		"response_type":         {"code"},
+		"client_id":             {"openweb-test"},
+		"redirect_uri":          {redirectURI},
+		"scope":                 {"openid profile"},
+		"state":                 {"state-cleared"},
+		"nonce":                 {"nonce-cleared"},
+		"code_challenge":        {clearedCodeChallenge},
+		"code_challenge_method": {"S256"},
+	}.Encode()
+	clearedAuthorizeRec := assertStatus(t, handler, http.MethodGet, clearedAuthorizePath, nil, adminCookie, http.StatusFound)
+	clearedLocation, err := url.Parse(clearedAuthorizeRec.Header().Get("Location"))
+	if err != nil {
+		t.Fatalf("parse cleared authorize redirect: %v", err)
+	}
+	clearedCode := clearedLocation.Query().Get("code")
+	if clearedCode == "" {
+		t.Fatal("cleared authorize redirect did not include code")
+	}
+	clearedTokenForm := url.Values{
+		"grant_type":    {"authorization_code"},
+		"client_id":     {"openweb-test"},
+		"code":          {clearedCode},
+		"redirect_uri":  {redirectURI},
+		"code_verifier": {clearedCodeVerifier},
+	}
+	assertFormStatus(t, handler, "/api/oidc/token", clearedTokenForm, nil, map[string]string{
+		"Authorization": "Basic " + base64.StdEncoding.EncodeToString([]byte("openweb-test:client-secret")),
+	}, http.StatusUnauthorized)
+	assertFormStatus(t, handler, "/api/oidc/token", clearedTokenForm, nil, nil, http.StatusUnauthorized)
+
 	publicClientRec := assertStatus(t, handler, http.MethodPatch, "/api/admin/oidc-clients/"+client.ID, map[string]any{
 		"name":   "openweb-test",
 		"type":   "public",

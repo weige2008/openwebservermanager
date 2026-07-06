@@ -19,9 +19,11 @@ const websocketGUID = "258EAFA5-E914-47DA-95CA-C5AB0DC85B11"
 const maxFramePayload = 16 * 1024 * 1024
 
 type Conn struct {
-	conn net.Conn
-	r    *bufio.Reader
-	mu   sync.Mutex
+	conn        net.Conn
+	r           *bufio.Reader
+	mu          sync.Mutex
+	fragOpcode  byte
+	fragPayload []byte
 }
 
 func Upgrade(w http.ResponseWriter, r *http.Request) (*Conn, error) {
@@ -131,64 +133,116 @@ func (c *Conn) ReadJSON(v any) error {
 }
 
 func (c *Conn) ReadFrame() (byte, []byte, error) {
+	for {
+		opcode, fin, payload, err := c.readFrame()
+		if err != nil {
+			return 0, nil, err
+		}
+
+		switch {
+		case opcode == 0:
+			if c.fragOpcode == 0 {
+				return 0, nil, errors.New("websocket continuation frame without fragmented message")
+			}
+			if err := c.appendFragment(payload); err != nil {
+				return 0, nil, err
+			}
+			if fin {
+				op, complete := c.fragOpcode, c.fragPayload
+				c.fragOpcode = 0
+				c.fragPayload = nil
+				return op, complete, nil
+			}
+		case opcode == 1 || opcode == 2:
+			if c.fragOpcode != 0 {
+				return 0, nil, errors.New("websocket data frame received before fragmented message completed")
+			}
+			if fin {
+				return opcode, payload, nil
+			}
+			c.fragOpcode = opcode
+			c.fragPayload = append(c.fragPayload[:0], payload...)
+		case opcode >= 8:
+			return opcode, payload, nil
+		default:
+			return 0, nil, fmt.Errorf("unsupported websocket opcode: %d", opcode)
+		}
+	}
+}
+
+func (c *Conn) readFrame() (byte, bool, []byte, error) {
 	first, err := c.r.ReadByte()
 	if err != nil {
-		return 0, nil, err
+		return 0, false, nil, err
 	}
 	second, err := c.r.ReadByte()
 	if err != nil {
-		return 0, nil, err
+		return 0, false, nil, err
 	}
 
 	fin := first&0x80 != 0
+	if first&0x70 != 0 {
+		return 0, false, nil, errors.New("websocket reserved bits are not supported")
+	}
 	opcode := first & 0x0f
 	masked := second&0x80 != 0
 	length := uint64(second & 0x7f)
 	if !masked {
-		return 0, nil, errors.New("client websocket frames must be masked")
+		return 0, false, nil, errors.New("client websocket frames must be masked")
 	}
-	if !fin {
-		return 0, nil, errors.New("fragmented websocket frames are not supported")
+	if opcode >= 8 && !fin {
+		return 0, false, nil, errors.New("websocket control frames must not be fragmented")
 	}
 	if opcode >= 8 && length > 125 {
-		return 0, nil, errors.New("websocket control frame too large")
+		return 0, false, nil, errors.New("websocket control frame too large")
 	}
 
 	switch length {
 	case 126:
 		var ext [2]byte
 		if _, err := io.ReadFull(c.r, ext[:]); err != nil {
-			return 0, nil, err
+			return 0, false, nil, err
 		}
 		length = uint64(binary.BigEndian.Uint16(ext[:]))
 	case 127:
 		var ext [8]byte
 		if _, err := io.ReadFull(c.r, ext[:]); err != nil {
-			return 0, nil, err
+			return 0, false, nil, err
 		}
 		length = binary.BigEndian.Uint64(ext[:])
 	}
 	if length > maxFramePayload {
-		return 0, nil, fmt.Errorf("websocket frame too large: %d", length)
+		return 0, false, nil, fmt.Errorf("websocket frame too large: %d", length)
+	}
+	if opcode >= 8 && length > 125 {
+		return 0, false, nil, errors.New("websocket control frame too large")
 	}
 
 	var mask [4]byte
 	if masked {
 		if _, err := io.ReadFull(c.r, mask[:]); err != nil {
-			return 0, nil, err
+			return 0, false, nil, err
 		}
 	}
 
 	payload := make([]byte, int(length))
 	if _, err := io.ReadFull(c.r, payload); err != nil {
-		return 0, nil, err
+		return 0, false, nil, err
 	}
 	if masked {
 		for i := range payload {
 			payload[i] ^= mask[i%4]
 		}
 	}
-	return opcode, payload, nil
+	return opcode, fin, payload, nil
+}
+
+func (c *Conn) appendFragment(payload []byte) error {
+	if len(c.fragPayload)+len(payload) > maxFramePayload {
+		return fmt.Errorf("websocket fragmented message too large: %d", len(c.fragPayload)+len(payload))
+	}
+	c.fragPayload = append(c.fragPayload, payload...)
+	return nil
 }
 
 func (c *Conn) writeFrame(opcode byte, payload []byte) error {

@@ -3920,6 +3920,7 @@ func TestForcedMFAEnrollmentDuringLogin(t *testing.T) {
 
 func TestOIDCProviderAuthorizationCodeFlow(t *testing.T) {
 	handler, adminCookie := newTestHandler(t)
+	srv := handler.(*Server)
 
 	clientRec := assertStatus(t, handler, http.MethodPost, "/api/admin/oidc-clients", map[string]any{
 		"name":     "openweb-test",
@@ -3932,8 +3933,23 @@ func TestOIDCProviderAuthorizationCodeFlow(t *testing.T) {
 			"scopes":        []string{"openid", "profile", "email"},
 		},
 	}, adminCookie, http.StatusCreated)
-	if strings.Contains(clientRec.Body.String(), "client_secret") || strings.Contains(clientRec.Body.String(), "client_secret_hash") {
+	if strings.Contains(clientRec.Body.String(), "client-secret") || strings.Contains(clientRec.Body.String(), "client_secret_hash") {
 		t.Fatal("oidc client secret leaked in create response")
+	}
+	if !strings.Contains(clientRec.Body.String(), `"client_secret_set":true`) {
+		t.Fatalf("oidc client create response did not expose secret-set state: %s", clientRec.Body.String())
+	}
+	var client model.PlatformItem
+	decodeResponse(t, clientRec, &client)
+	rawClient, ok, err := srv.cfg.Store.GetPlatformItem("oidc_clients", client.ID)
+	if err != nil || !ok {
+		t.Fatalf("load oidc client: ok=%v err=%v", ok, err)
+	}
+	if firstMetadataString(rawClient.Metadata, "client_secret_hash") == "" {
+		t.Fatalf("confidential oidc client did not persist client secret hash: %#v", rawClient.Metadata)
+	}
+	if secretSet, ok := metadataBoolValue(rawClient.Metadata["client_secret_set"]); !ok || !secretSet {
+		t.Fatalf("confidential oidc client did not expose secret-set metadata: %#v", rawClient.Metadata)
 	}
 
 	discoveryRec := assertStatus(t, handler, http.MethodGet, "/.well-known/openid-configuration", nil, nil, http.StatusOK)
@@ -4025,6 +4041,70 @@ func TestOIDCProviderAuthorizationCodeFlow(t *testing.T) {
 		"Authorization": "Bearer invalid",
 	}, http.StatusUnauthorized)
 	assertFormStatus(t, handler, "/api/oidc/userinfo", url.Values{"access_token": {"invalid"}}, nil, nil, http.StatusUnauthorized)
+
+	publicClientRec := assertStatus(t, handler, http.MethodPatch, "/api/admin/oidc-clients/"+client.ID, map[string]any{
+		"name":   "openweb-test",
+		"type":   "public",
+		"status": "enabled",
+		"metadata": map[string]any{
+			"client_id":                  "openweb-test",
+			"redirect_uris":              []string{"https://client.example/callback"},
+			"scopes":                     []string{"openid", "profile", "email"},
+			"token_endpoint_auth_method": "none",
+		},
+	}, adminCookie, http.StatusOK)
+	if strings.Contains(publicClientRec.Body.String(), "client-secret") || strings.Contains(publicClientRec.Body.String(), "client_secret_hash") || strings.Contains(publicClientRec.Body.String(), "client_secret_set") {
+		t.Fatalf("public oidc client response leaked or retained secret state: %s", publicClientRec.Body.String())
+	}
+	rawPublicClient, ok, err := srv.cfg.Store.GetPlatformItem("oidc_clients", client.ID)
+	if err != nil || !ok {
+		t.Fatalf("load public oidc client: ok=%v err=%v", ok, err)
+	}
+	if firstMetadataString(rawPublicClient.Metadata, "client_secret_hash") != "" {
+		t.Fatalf("public oidc client retained old secret hash: %#v", rawPublicClient.Metadata)
+	}
+	if secretSet, ok := metadataBoolValue(rawPublicClient.Metadata["client_secret_set"]); ok && secretSet {
+		t.Fatalf("public oidc client retained secret-set metadata: %#v", rawPublicClient.Metadata)
+	}
+
+	publicCodeVerifier := "public-verifier-1234567890"
+	publicChallengeRaw := sha256.Sum256([]byte(publicCodeVerifier))
+	publicCodeChallenge := base64.RawURLEncoding.EncodeToString(publicChallengeRaw[:])
+	publicAuthorizePath := "/api/oidc/authorize?" + url.Values{
+		"response_type":         {"code"},
+		"client_id":             {"openweb-test"},
+		"redirect_uri":          {redirectURI},
+		"scope":                 {"openid profile"},
+		"state":                 {"state-public"},
+		"nonce":                 {"nonce-public"},
+		"code_challenge":        {publicCodeChallenge},
+		"code_challenge_method": {"S256"},
+	}.Encode()
+	publicAuthorizeRec := assertStatus(t, handler, http.MethodGet, publicAuthorizePath, nil, adminCookie, http.StatusFound)
+	publicLocation, err := url.Parse(publicAuthorizeRec.Header().Get("Location"))
+	if err != nil {
+		t.Fatalf("parse public authorize redirect: %v", err)
+	}
+	publicCode := publicLocation.Query().Get("code")
+	if publicCode == "" {
+		t.Fatal("public authorize redirect did not include code")
+	}
+	publicTokenForm := url.Values{
+		"grant_type":    {"authorization_code"},
+		"client_id":     {"openweb-test"},
+		"code":          {publicCode},
+		"redirect_uri":  {redirectURI},
+		"code_verifier": {publicCodeVerifier},
+	}
+	assertFormStatus(t, handler, "/api/oidc/token", publicTokenForm, nil, map[string]string{
+		"Authorization": "Basic " + base64.StdEncoding.EncodeToString([]byte("openweb-test:client-secret")),
+	}, http.StatusUnauthorized)
+	publicTokenRec := assertFormStatus(t, handler, "/api/oidc/token", publicTokenForm, nil, nil, http.StatusOK)
+	var publicTokenResponse map[string]any
+	decodeResponse(t, publicTokenRec, &publicTokenResponse)
+	if publicTokenResponse["access_token"] == "" || publicTokenResponse["token_type"] != "Bearer" {
+		t.Fatalf("public oidc client token response missing access token: %v", publicTokenResponse)
+	}
 }
 
 func TestOIDCUserInfoRejectsDisabledClientAndUser(t *testing.T) {

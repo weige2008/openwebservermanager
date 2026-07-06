@@ -1488,13 +1488,30 @@ func applyOIDCClientPlatformSecret(req model.PlatformItemRequest, item *model.Pl
 		}
 		delete(item.Metadata, key)
 	}
+	clearRequested := metadataBoolByKeys(item.Metadata, "client_secret_clear", "clear_client_secret")
+	delete(item.Metadata, "client_secret_clear")
+	delete(item.Metadata, "clear_client_secret")
+	clientType := strings.ToLower(strings.TrimSpace(item.Type))
+	authMethod := strings.ToLower(firstMetadataString(item.Metadata, "token_endpoint_auth_method", "auth_method", "authMethod"))
+	secretNotRequired := clientType == "public" || authMethod == "none"
+	if clearRequested || secretNotRequired {
+		delete(item.Metadata, "client_secret_hash")
+		delete(item.Metadata, "client_secret_set")
+		return nil
+	}
 	if secret == "" {
 		if creating {
 			delete(item.Metadata, "client_secret_hash")
+			delete(item.Metadata, "client_secret_set")
+		} else if firstMetadataString(item.Metadata, "client_secret_hash") != "" {
+			item.Metadata["client_secret_set"] = true
+		} else {
+			delete(item.Metadata, "client_secret_set")
 		}
 		return nil
 	}
 	delete(item.Metadata, "client_secret_hash")
+	delete(item.Metadata, "client_secret_set")
 	if len(secret) > 4096 {
 		return errors.New("client secret is too large")
 	}
@@ -1503,6 +1520,7 @@ func applyOIDCClientPlatformSecret(req model.PlatformItemRequest, item *model.Pl
 		return err
 	}
 	item.Metadata["client_secret_hash"] = string(hash)
+	item.Metadata["client_secret_set"] = true
 	return nil
 }
 

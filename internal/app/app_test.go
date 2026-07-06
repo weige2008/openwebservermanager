@@ -7948,7 +7948,33 @@ func TestAuditSessionOperations(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(rdpSession.RecordingPath, "recording.guac"), []byte("frames"), 0o660); err != nil {
 		t.Fatalf("write fake recording: %v", err)
 	}
-	assertStatus(t, handler, http.MethodPost, "/api/connections/"+rdpSession.ID+"/close", nil, adminCookie, http.StatusOK)
+	closeRDPRec := assertStatus(t, handler, http.MethodPost, "/api/connections/"+rdpSession.ID+"/close", nil, adminCookie, http.StatusOK)
+	var closedRDP model.ConnectionSession
+	decodeResponse(t, closeRDPRec, &closedRDP)
+	if closedRDP.RecordingSize != int64(len("frames")) {
+		t.Fatalf("closed rdp recording size = %d, want %d", closedRDP.RecordingSize, len("frames"))
+	}
+	offlineSessionsRec := assertStatus(t, handler, http.MethodGet, "/api/admin/audit/offline-sessions", nil, adminCookie, http.StatusOK)
+	if !strings.Contains(offlineSessionsRec.Body.String(), `"recording_size":6`) {
+		t.Fatalf("offline session index did not include recording size: %s", offlineSessionsRec.Body.String())
+	}
+
+	rdpAuditSessionRec := assertStatus(t, handler, http.MethodPost, "/api/connections/rdp", map[string]any{
+		"server_id":         windows.ID,
+		"credential_id":     rdpCred.ID,
+		"recording_enabled": true,
+	}, adminCookie, http.StatusCreated)
+	var rdpAuditSession model.ConnectionSession
+	decodeResponse(t, rdpAuditSessionRec, &rdpAuditSession)
+	if err := os.WriteFile(filepath.Join(rdpAuditSession.RecordingPath, "recording.guac"), []byte("auditor frames"), 0o660); err != nil {
+		t.Fatalf("write auditor recording: %v", err)
+	}
+	forceDisconnectRec := assertStatus(t, handler, http.MethodPost, "/api/admin/audit/online-sessions/"+rdpAuditSession.ID+"/disconnect", nil, adminCookie, http.StatusOK)
+	var forceDisconnected model.ConnectionSession
+	decodeResponse(t, forceDisconnectRec, &forceDisconnected)
+	if forceDisconnected.RecordingSize != int64(len("auditor frames")) {
+		t.Fatalf("auditor-disconnected recording size = %d, want %d", forceDisconnected.RecordingSize, len("auditor frames"))
+	}
 
 	assertStatus(t, handler, http.MethodPost, "/api/admin/users", map[string]any{
 		"name":     "recording-auditor",

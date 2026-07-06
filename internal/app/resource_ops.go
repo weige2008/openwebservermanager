@@ -3183,6 +3183,10 @@ func (s *Server) handleAuditSessionDisconnect(w http.ResponseWriter, r *http.Req
 			writeError(w, http.StatusForbidden, "session access denied")
 			return
 		}
+		if err := s.refreshSessionRecordingSize(id); err != nil {
+			writeError(w, http.StatusInternalServerError, err.Error())
+			return
+		}
 		closed, err := s.cfg.Store.CloseSession(id, "closed by auditor")
 		if err != nil {
 			writeError(w, http.StatusInternalServerError, err.Error())
@@ -3209,6 +3213,9 @@ func (s *Server) handleAuditSessionDisconnect(w http.ResponseWriter, r *http.Req
 	}
 	item.Metadata["ended_at"] = now
 	item.Metadata["close_reason"] = "closed by auditor"
+	if size, ok := s.recordingSizeFromMetadata(item.Metadata); ok {
+		item.Metadata["recording_size"] = size
+	}
 	_ = s.cfg.Store.DeletePlatformItem("online_sessions", id)
 	offline, err := s.cfg.Store.SavePlatformItem("offline_sessions", item)
 	if err != nil {
@@ -3331,6 +3338,19 @@ func (s *Server) validateRecordingPath(w http.ResponseWriter, recordingPath stri
 		return auditRecording{}, false
 	}
 	return auditRecording{path: recordingPath, protocol: protocol}, true
+}
+
+func (s *Server) recordingSizeFromMetadata(metadata map[string]any) (int64, bool) {
+	recordingPath := firstMetadataString(metadata, "recording_path")
+	if recordingPath == "" {
+		return 0, false
+	}
+	if err := ensureChildPath(filepath.Join(s.cfg.DataDir, "recordings"), recordingPath); err != nil {
+		return 0, false
+	}
+	usage := directoryUsage(recordingPath)
+	size, ok := usage["bytes"].(int64)
+	return size, ok
 }
 
 func (s *Server) serveRecordingZip(w http.ResponseWriter, _ *http.Request, id, recordingPath string) {

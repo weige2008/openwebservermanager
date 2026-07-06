@@ -596,6 +596,10 @@ func (s *Server) handleClose(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusForbidden, "session access denied")
 		return
 	}
+	if err := s.refreshSessionRecordingSize(id); err != nil {
+		writeError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
 	session, err := s.cfg.Store.CloseSession(id, "closed by user")
 	if err != nil {
 		if errors.Is(err, os.ErrNotExist) {
@@ -607,6 +611,22 @@ func (s *Server) handleClose(w http.ResponseWriter, r *http.Request) {
 	}
 	_ = s.audit(r, "connection.close", session.ID, session.Protocol, "closed session")
 	writeJSON(w, http.StatusOK, session)
+}
+
+func (s *Server) refreshSessionRecordingSize(id string) error {
+	session, ok := s.cfg.Store.GetSession(id)
+	if !ok || strings.TrimSpace(session.RecordingPath) == "" {
+		return nil
+	}
+	if err := ensureChildPath(filepath.Join(s.cfg.DataDir, "recordings"), session.RecordingPath); err != nil {
+		return err
+	}
+	usage := directoryUsage(session.RecordingPath)
+	size, _ := usage["bytes"].(int64)
+	_, err := s.cfg.Store.UpdateSession(id, func(item *model.ConnectionSession) {
+		item.RecordingSize = size
+	})
+	return err
 }
 
 func (s *Server) connectionParts(w http.ResponseWriter, r *http.Request, sessionID string, protocol model.Protocol) (model.ConnectionSession, model.Server, model.Credential, store.CredentialSecret, bool) {

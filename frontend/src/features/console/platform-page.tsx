@@ -3152,6 +3152,20 @@ function PlatformItemDialog({
                   onChange={(event) => onChange({ metadata: metadataWithValue(form.metadata, 'target_url', event.currentTarget.value) })}
                 />
               </Field>
+              {(metadataBoolFromForm(form.metadata, 'web_upstream_url_set') || metadataBoolFromForm(form.metadata, 'upstream_credentials_set')) ? (
+                <div className='sm:col-span-2 grid gap-2 rounded-lg border border-border bg-muted/20 p-3'>
+                  <div className='flex flex-wrap items-center justify-between gap-2'>
+                    <span className='text-sm font-medium'>{app.t('upstreamCredentials', 'Upstream credentials')}</span>
+                    <Badge tone='success'>{app.t('passwordSaved')}</Badge>
+                  </div>
+                  <CheckboxRow
+                    checked={metadataBoolFromForm(form.metadata, 'web_upstream_credentials_clear')}
+                    onChange={(checked) => onChange({ metadata: metadataWithWebAssetCredentialClear(form.metadata, checked) })}
+                    label={app.t('clearUpstreamCredentials', 'Clear saved upstream credentials on save')}
+                  />
+                  <p className='text-xs text-muted-foreground'>{app.t('clearUpstreamCredentialsHint', 'The target URL can stay the same; saving removes stored upstream userinfo from the backend.')}</p>
+                </div>
+              ) : null}
               <Field label={app.t('hostDomain', 'Host / domain')}>
                 <Input placeholder='app.example.com' value={form.host} onChange={(event) => onChange({ host: event.currentTarget.value })} />
               </Field>
@@ -5472,6 +5486,17 @@ function metadataWithWebAssetCertificate(metadata: string, value: string) {
     delete next[key]
   }
   if (value.trim()) next.certificate_id = value.trim()
+  return JSON.stringify(next, null, 2)
+}
+
+function metadataWithWebAssetCredentialClear(metadata: string, clear: boolean) {
+  const next = metadataObject(metadata)
+  if (clear) {
+    next.web_upstream_credentials_clear = true
+  } else {
+    delete next.web_upstream_credentials_clear
+    delete next.clear_upstream_credentials
+  }
   return JSON.stringify(next, null, 2)
 }
 

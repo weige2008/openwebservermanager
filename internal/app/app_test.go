@@ -2428,8 +2428,19 @@ func TestWebAssetProxyRequiresAuthorizationAndLogs(t *testing.T) {
 			t.Fatal("upstream did not receive proxy identity headers")
 		}
 		username, password, ok := r.BasicAuth()
-		if !ok || username != "proxy-user" || password != "proxy-secret" {
-			t.Fatalf("upstream basic auth = %q/%q ok=%v, want proxy-user/proxy-secret", username, password, ok)
+		switch r.URL.Path {
+		case "/root/newauth":
+			if !ok || username != "proxy-user-2" || password != "proxy-secret-2" {
+				t.Fatalf("upstream basic auth = %q/%q ok=%v, want proxy-user-2/proxy-secret-2", username, password, ok)
+			}
+		case "/root/noauth":
+			if ok || username != "" || password != "" {
+				t.Fatalf("upstream basic auth = %q/%q ok=%v, want no upstream credentials", username, password, ok)
+			}
+		default:
+			if !ok || username != "proxy-user" || password != "proxy-secret" {
+				t.Fatalf("upstream basic auth = %q/%q ok=%v, want proxy-user/proxy-secret", username, password, ok)
+			}
 		}
 		if _, err := r.Cookie(authCookieName); err == nil {
 			t.Fatal("upstream received internal auth cookie")
@@ -2462,8 +2473,12 @@ func TestWebAssetProxyRequiresAuthorizationAndLogs(t *testing.T) {
 				t.Fatalf("upstream fail query = %q, want x=2", r.URL.RawQuery)
 			}
 			http.Error(w, "upstream failed", http.StatusInternalServerError)
+		case "/root/newauth":
+			_, _ = w.Write([]byte("new credentials ok"))
+		case "/root/noauth":
+			_, _ = w.Write([]byte("cleared credentials ok"))
 		default:
-			t.Fatalf("upstream path = %q, want /root/hello, /root/redirect or /root/fail", r.URL.Path)
+			t.Fatalf("upstream path = %q, want /root/hello, /root/redirect, /root/fail, /root/newauth or /root/noauth", r.URL.Path)
 		}
 	}))
 	defer upstream.Close()
@@ -2539,6 +2554,7 @@ func TestWebAssetProxyRequiresAuthorizationAndLogs(t *testing.T) {
 	if firstMetadataString(rawWebAsset.Metadata, "web_upstream_url_encrypted") == "" {
 		t.Fatalf("web asset patch with unchanged redacted URL dropped encrypted upstream credentials: %#v", rawWebAsset.Metadata)
 	}
+	preservedEncryptedUpstream := firstMetadataString(rawWebAsset.Metadata, "web_upstream_url_encrypted")
 	loginRec := assertStatus(t, handler, http.MethodPost, "/api/auth/login", map[string]any{"username": "web-user", "password": "password123"}, nil, http.StatusOK)
 	userCookie := loginRec.Result().Cookies()[0]
 
@@ -2656,6 +2672,70 @@ func TestWebAssetProxyRequiresAuthorizationAndLogs(t *testing.T) {
 		if !strings.Contains(statsBody, want) {
 			t.Fatalf("access stats did not include %q", want)
 		}
+	}
+
+	replacementTarget := upstreamTarget
+	replacementTarget.User = url.UserPassword("proxy-user-2", "proxy-secret-2")
+	replaceRec := assertStatus(t, handler, http.MethodPatch, "/api/admin/websites/"+webAsset.ID, map[string]any{
+		"metadata": map[string]any{
+			"target_url": replacementTarget.String(),
+			"display":    "patched with replacement credentials",
+		},
+	}, adminCookie, http.StatusOK)
+	replaceBody := replaceRec.Body.String()
+	for _, leaked := range []string{"proxy-user-2", "proxy-secret-2", "web_upstream_url_encrypted"} {
+		if strings.Contains(replaceBody, leaked) {
+			t.Fatalf("web asset replacement response leaked %q: %s", leaked, replaceBody)
+		}
+	}
+	var replacedWebAsset model.PlatformItem
+	decodeResponse(t, replaceRec, &replacedWebAsset)
+	rawWebAsset, ok, err = server.cfg.Store.GetPlatformItem("web_assets", webAsset.ID)
+	if err != nil || !ok {
+		t.Fatalf("reload raw web asset after replacement: ok=%v err=%v", ok, err)
+	}
+	replacedEncryptedUpstream := firstMetadataString(rawWebAsset.Metadata, "web_upstream_url_encrypted")
+	if replacedEncryptedUpstream == "" || replacedEncryptedUpstream == preservedEncryptedUpstream {
+		t.Fatalf("web asset replacement did not rotate encrypted upstream credentials: %#v", rawWebAsset.Metadata)
+	}
+	decryptedUpstream, err = server.cfg.Store.DecryptPlatformSecret(replacedEncryptedUpstream)
+	if err != nil {
+		t.Fatalf("decrypt replaced web asset upstream: %v", err)
+	}
+	if decryptedUpstream != replacementTarget.String() {
+		t.Fatalf("decrypted replaced web upstream = %q, want %q", decryptedUpstream, replacementTarget.String())
+	}
+	replaceProxyRec := assertStatus(t, handler, http.MethodGet, "/api/access/http/"+webAsset.ID+"/proxy/newauth?x=1", nil, userCookie, http.StatusOK)
+	if replaceProxyRec.Body.String() != "new credentials ok" {
+		t.Fatalf("replacement credential proxy body = %q", replaceProxyRec.Body.String())
+	}
+
+	clearRec := assertStatus(t, handler, http.MethodPatch, "/api/admin/websites/"+webAsset.ID, map[string]any{
+		"metadata": map[string]any{
+			"target_url":                     firstMetadataString(replacedWebAsset.Metadata, "target_url"),
+			"display":                        "patched with cleared credentials",
+			"web_upstream_credentials_clear": true,
+		},
+	}, adminCookie, http.StatusOK)
+	clearBody := clearRec.Body.String()
+	for _, leaked := range []string{"proxy-user", "proxy-secret", "proxy-user-2", "proxy-secret-2", "web_upstream_url_encrypted", "web_upstream_credentials_clear", "target_url_credentials_set"} {
+		if strings.Contains(clearBody, leaked) {
+			t.Fatalf("web asset clear response leaked %q: %s", leaked, clearBody)
+		}
+	}
+	rawWebAsset, ok, err = server.cfg.Store.GetPlatformItem("web_assets", webAsset.ID)
+	if err != nil || !ok {
+		t.Fatalf("reload raw web asset after clearing upstream credentials: ok=%v err=%v", ok, err)
+	}
+	upstreamURLSet, _ := metadataBoolValue(rawWebAsset.Metadata["web_upstream_url_set"])
+	upstreamCredentialsSet, _ := metadataBoolValue(rawWebAsset.Metadata["upstream_credentials_set"])
+	targetURLCredentialsSet, _ := metadataBoolValue(rawWebAsset.Metadata["target_url_credentials_set"])
+	if firstMetadataString(rawWebAsset.Metadata, "web_upstream_url_encrypted") != "" || upstreamURLSet || upstreamCredentialsSet || targetURLCredentialsSet {
+		t.Fatalf("web asset clear retained upstream credential state: %#v", rawWebAsset.Metadata)
+	}
+	clearProxyRec := assertStatus(t, handler, http.MethodGet, "/api/access/http/"+webAsset.ID+"/proxy/noauth?x=1", nil, userCookie, http.StatusOK)
+	if clearProxyRec.Body.String() != "cleared credentials ok" {
+		t.Fatalf("cleared credential proxy body = %q", clearProxyRec.Body.String())
 	}
 }
 

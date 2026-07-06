@@ -1,7 +1,7 @@
 import type { ColumnDef } from '@tanstack/react-table'
 import { Link } from '@tanstack/react-router'
 import { ArrowUpRight, Copy, Download, FileDown, FileSearch, FolderPlus, MoveRight, Pencil, Play, Plus, RefreshCw, Save, ShieldCheck, TerminalSquare, Trash2, Upload } from 'lucide-react'
-import { useEffect, useMemo, useState } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 
 import { useApp } from '@/app/app-provider'
 import { DataTable } from '@/components/data-table/data-table'
@@ -205,6 +205,8 @@ interface PingToolResponse {
   }
 }
 
+type RequestAccessMFACode = () => Promise<string>
+
 export function PlatformPage({ config }: { config: PlatformPageConfig }) {
   if (config.kind === 'tools') return <ToolsPage config={config} />
   if (config.kind === 'monitor') return <MonitoringPage config={config} />
@@ -225,6 +227,7 @@ export function PlatformTablePage({ config }: { config: PlatformPageConfig }) {
   const [editing, setEditing] = useState<PlatformItem | null>(null)
   const [form, setForm] = useState<PlatformFormState>(initialForm)
   const [operation, setOperation] = useState<ResourceOperation | null>(null)
+  const { requestAccessMFACode, accessMFADialog } = useAccessMFADialog()
 
   const columns = useMemo<ColumnDef<PlatformItem>[]>(
     () => [
@@ -519,7 +522,8 @@ export function PlatformTablePage({ config }: { config: PlatformPageConfig }) {
         onChange={(next) => setForm((current) => ({ ...current, ...next }))}
         onSave={() => void save()}
       />
-      <ResourceOperationDialog operation={operation} onOpenChange={setOperation} />
+      <ResourceOperationDialog operation={operation} onOpenChange={setOperation} requestAccessMFACode={requestAccessMFACode} />
+      {accessMFADialog}
     </CardStaggerContainer>
   )
 }
@@ -805,7 +809,15 @@ function ResourceRowActions({ config, item, onOperation }: { config: PlatformPag
   return null
 }
 
-function ResourceOperationDialog({ operation, onOpenChange }: { operation: ResourceOperation | null; onOpenChange: (operation: ResourceOperation | null) => void }) {
+function ResourceOperationDialog({
+  operation,
+  onOpenChange,
+  requestAccessMFACode,
+}: {
+  operation: ResourceOperation | null
+  onOpenChange: (operation: ResourceOperation | null) => void
+  requestAccessMFACode: RequestAccessMFACode
+}) {
   if (!operation) return null
   if (operation.type === 'asset-import') return <AssetImportDialog onClose={() => onOpenChange(null)} />
   if (operation.type === 'user-import') return <UserImportDialog onClose={() => onOpenChange(null)} />
@@ -819,7 +831,7 @@ function ResourceOperationDialog({ operation, onOpenChange }: { operation: Resou
   if (operation.type === 'certificate-mtls') return <CertificateMTLSDialog item={operation.item} onClose={() => onOpenChange(null)} />
   if (operation.type === 'storage-files') return <StorageFilesDialog item={operation.item} onClose={() => onOpenChange(null)} />
   if (operation.type === 'task-logs') return <TaskLogsDialog item={operation.item} onClose={() => onOpenChange(null)} />
-  return <SQLExecuteDialog item={operation.item} onClose={() => onOpenChange(null)} />
+  return <SQLExecuteDialog item={operation.item} onClose={() => onOpenChange(null)} requestAccessMFACode={requestAccessMFACode} />
 }
 
 function AssetImportDialog({ onClose }: { onClose: () => void }) {
@@ -1687,7 +1699,7 @@ function TaskLogsDialog({ item, onClose }: { item: PlatformItem; onClose: () => 
   )
 }
 
-function SSHExecDialog({ item, onClose }: { item: PlatformItem; onClose: () => void }) {
+function SSHExecDialog({ item, onClose, requestAccessMFACode }: { item: PlatformItem; onClose: () => void; requestAccessMFACode: RequestAccessMFACode }) {
   const app = useApp()
   const [command, setCommand] = useState(stringValue(item.metadata?.command) || 'uptime')
   const [timeoutSeconds, setTimeoutSeconds] = useState('30')
@@ -1710,7 +1722,7 @@ function SSHExecDialog({ item, onClose }: { item: PlatformItem; onClose: () => v
         data = await runCommand()
       } catch (error) {
         if (!isAccessMFARequiredError(error)) throw error
-        const mfaCode = promptAccessMFACode(app.t)
+        const mfaCode = await requestAccessMFACode()
         if (!mfaCode) return
         data = await runCommand(mfaCode)
       }
@@ -1766,6 +1778,7 @@ function SSHExecDialog({ item, onClose }: { item: PlatformItem; onClose: () => v
 function SQLExecuteDialog({
   item,
   onClose,
+  requestAccessMFACode,
   endpoint,
   workOrderEndpoint,
   initialSQL,
@@ -1775,6 +1788,7 @@ function SQLExecuteDialog({
 }: {
   item: PlatformItem
   onClose: () => void
+  requestAccessMFACode: RequestAccessMFACode
   endpoint?: string
   workOrderEndpoint?: string
   initialSQL?: string
@@ -1801,7 +1815,7 @@ function SQLExecuteDialog({
         data = await executeSQL()
       } catch (error) {
         if (!isAccessMFARequiredError(error)) throw error
-        const mfaCode = promptAccessMFACode(app.t)
+        const mfaCode = await requestAccessMFACode()
         if (!mfaCode) return
         data = await executeSQL(mfaCode)
       }
@@ -1828,7 +1842,7 @@ function SQLExecuteDialog({
         data = await createWorkOrder()
       } catch (error) {
         if (!isAccessMFARequiredError(error)) throw error
-        const mfaCode = promptAccessMFACode(app.t)
+        const mfaCode = await requestAccessMFACode()
         if (!mfaCode) return
         data = await createWorkOrder(mfaCode)
       }
@@ -3159,11 +3173,74 @@ function isAccessMFARequiredError(error: unknown) {
   return data.mfa_required === true && (metadataText(data.mfa_scope) === '' || metadataText(data.mfa_scope) === 'access')
 }
 
-function promptAccessMFACode(t: (key: string, fallback?: string) => string) {
-  return window.prompt(t('accessMFAPrompt', 'Enter MFA code or recovery code'))?.trim() || ''
+function useAccessMFADialog() {
+  const app = useApp()
+  const resolverRef = useRef<((code: string) => void) | null>(null)
+  const [open, setOpen] = useState(false)
+  const [code, setCode] = useState('')
+
+  const resolveCode = useCallback((value: string) => {
+    const resolver = resolverRef.current
+    resolverRef.current = null
+    setOpen(false)
+    setCode('')
+    resolver?.(value.trim())
+  }, [])
+
+  const requestAccessMFACode = useCallback<RequestAccessMFACode>(() => {
+    if (resolverRef.current) resolverRef.current('')
+    return new Promise((resolve) => {
+      resolverRef.current = resolve
+      setCode('')
+      setOpen(true)
+    })
+  }, [])
+
+  const accessMFADialog = (
+    <DialogShell
+      open={open}
+      onOpenChange={(nextOpen) => {
+        if (!nextOpen) resolveCode('')
+      }}
+      compact
+      title={app.t('accessMFATitle', 'Access MFA verification')}
+      description={app.t('accessMFADescription', 'Enter a current authenticator code or a recovery code before opening the asset session.')}
+    >
+      <form
+        className='grid gap-4'
+        onSubmit={(event) => {
+          event.preventDefault()
+          if (!code.trim()) return
+          resolveCode(code)
+        }}
+      >
+        <Field label={app.t('accessMFACodeLabel', 'MFA code')}>
+          <Input
+            autoFocus
+            autoComplete='one-time-code'
+            inputMode='text'
+            value={code}
+            onChange={(event) => setCode(event.currentTarget.value)}
+            placeholder={app.t('accessMFACodePlaceholder', '123456 or recovery code')}
+          />
+        </Field>
+        <div className='flex justify-end gap-2'>
+          <Button type='button' variant='outline' onClick={() => resolveCode('')}>
+            {app.t('cancel', 'Cancel')}
+          </Button>
+          <Button type='submit' variant='primary' disabled={!code.trim()}>
+            <ShieldCheck className='size-4' />
+            {app.t('verify', 'Verify')}
+          </Button>
+        </div>
+      </form>
+    </DialogShell>
+  )
+
+  return { requestAccessMFACode, accessMFADialog }
 }
 
-async function ensureAccessMFA(path: string, t: (key: string, fallback?: string) => string) {
+async function ensureAccessMFA(path: string, requestAccessMFACode: RequestAccessMFACode) {
   const verify = (mfaCode = '') => apiRequest<{ ok?: boolean }>(path, {
     method: 'POST',
     body: JSON.stringify(mfaCode ? { mfa_code: mfaCode } : {}),
@@ -3173,7 +3250,7 @@ async function ensureAccessMFA(path: string, t: (key: string, fallback?: string)
     return true
   } catch (error) {
     if (!isAccessMFARequiredError(error)) throw error
-    const mfaCode = promptAccessMFACode(t)
+    const mfaCode = await requestAccessMFACode()
     if (!mfaCode) return false
     await verify(mfaCode)
     return true
@@ -3186,6 +3263,7 @@ export function AccessPortalPage() {
   const webAssets = app.data.platform?.web_assets || []
   const databaseAssets = app.data.platform?.database_assets || []
   const [databaseQueryItem, setDatabaseQueryItem] = useState<PlatformItem | null>(null)
+  const { requestAccessMFACode, accessMFADialog } = useAccessMFADialog()
   const textAssets = assets.filter((item) => item.protocol === 'ssh')
   const desktopAssets = assets.filter((item) => item.protocol === 'rdp' || item.protocol === 'vnc')
   return (
@@ -3203,13 +3281,14 @@ export function AccessPortalPage() {
           </Link>
         </div>
       </section>
-      <AccessSection title='文本协议' items={textAssets} />
-      <AccessSection title='图形协议' items={desktopAssets} />
-      <AccessSection title='Web资产' items={webAssets} protocol='http' />
-      <AccessSection title='数据库资产' items={databaseAssets} protocol='database' onDatabaseQuery={setDatabaseQueryItem} />
+      <AccessSection title='文本协议' items={textAssets} requestAccessMFACode={requestAccessMFACode} />
+      <AccessSection title='图形协议' items={desktopAssets} requestAccessMFACode={requestAccessMFACode} />
+      <AccessSection title='Web资产' items={webAssets} protocol='http' requestAccessMFACode={requestAccessMFACode} />
+      <AccessSection title='数据库资产' items={databaseAssets} protocol='database' onDatabaseQuery={setDatabaseQueryItem} requestAccessMFACode={requestAccessMFACode} />
       {databaseQueryItem ? (
         <SQLExecuteDialog
           item={databaseQueryItem}
+          requestAccessMFACode={requestAccessMFACode}
           endpoint={`/api/access/database/${databaseQueryItem.id}/query`}
           workOrderEndpoint={`/api/access/database/${databaseQueryItem.id}/work-orders`}
           initialSQL={stringValue(databaseQueryItem.metadata?.sql) || 'SELECT name FROM sqlite_master WHERE type = "table";'}
@@ -3219,6 +3298,7 @@ export function AccessPortalPage() {
           onClose={() => setDatabaseQueryItem(null)}
         />
       ) : null}
+      {accessMFADialog}
     </div>
   )
 }
@@ -3228,11 +3308,13 @@ function AccessSection({
   items,
   protocol,
   onDatabaseQuery,
+  requestAccessMFACode,
 }: {
   title: string
   items: PlatformItem[]
   protocol?: string
   onDatabaseQuery?: (item: PlatformItem) => void
+  requestAccessMFACode: RequestAccessMFACode
 }) {
   const app = useApp()
   const [sshExecItem, setSSHExecItem] = useState<PlatformItem | null>(null)
@@ -3240,7 +3322,7 @@ function AccessSection({
     const accessProtocol = (protocol || item.protocol || 'ssh') as Protocol
     if (accessProtocol === 'http') {
       try {
-        if (!(await ensureAccessMFA(`/api/access/http/${item.id}/mfa`, app.t))) return
+        if (!(await ensureAccessMFA(`/api/access/http/${item.id}/mfa`, requestAccessMFACode))) return
         window.open(`/api/access/http/${item.id}/proxy/`, '_blank', 'noopener,noreferrer')
       } catch (error) {
         app.handleApiError(error)
@@ -3273,7 +3355,7 @@ function AccessSection({
         session = await createSession()
       } catch (error) {
         if (!isAccessMFARequiredError(error)) throw error
-        const mfaCode = promptAccessMFACode(app.t)
+        const mfaCode = await requestAccessMFACode()
         if (!mfaCode) return
         session = await createSession(mfaCode)
       }
@@ -3318,7 +3400,7 @@ function AccessSection({
       ) : (
         <div className='rounded-xl border border-dashed border-border p-6 text-sm text-muted-foreground'>暂无授权资源。</div>
       )}
-      {sshExecItem ? <SSHExecDialog item={sshExecItem} onClose={() => setSSHExecItem(null)} /> : null}
+      {sshExecItem ? <SSHExecDialog item={sshExecItem} onClose={() => setSSHExecItem(null)} requestAccessMFACode={requestAccessMFACode} /> : null}
     </section>
   )
 }

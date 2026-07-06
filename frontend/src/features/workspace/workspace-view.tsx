@@ -7,7 +7,8 @@ import { useTranslation } from 'react-i18next'
 import { useApp } from '@/app/app-provider'
 import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
-import { Select } from '@/components/ui/field'
+import { DialogShell } from '@/components/ui/dialog'
+import { Field, Select, Textarea } from '@/components/ui/field'
 import { apiRequest } from '@/lib/api'
 import { base64ToText, textToBase64 } from '@/lib/codec'
 import { statusLabel } from '@/lib/utils'
@@ -32,6 +33,11 @@ export function WorkspaceView() {
       missingGuacamole: t('workspace.missingGuacamole'),
       rdpFailed: t('workspace.rdpFailed'),
       clipboardPrompt: t('workspace.clipboardPrompt'),
+      clipboardDialogDescription: t('workspace.clipboardDialogDescription'),
+      clipboardTextLabel: t('workspace.clipboardTextLabel'),
+      clipboardTextPlaceholder: t('workspace.clipboardTextPlaceholder'),
+      sendClipboard: t('workspace.sendClipboard'),
+      cancel: t('cancel'),
       clipboardSent: t('workspace.clipboardSent'),
       fileSent: t('workspace.fileSent'),
     }),
@@ -258,12 +264,35 @@ function RDPWorkspace({
     missingGuacamole: string
     rdpFailed: string
     clipboardPrompt: string
+    clipboardDialogDescription: string
+    clipboardTextLabel: string
+    clipboardTextPlaceholder: string
+    sendClipboard: string
+    cancel: string
     clipboardSent: string
     fileSent: string
   }
 }) {
   const containerRef = useRef<HTMLDivElement | null>(null)
   const clientRef = useRef<any>(null)
+  const [clipboardDialogOpen, setClipboardDialogOpen] = useState(false)
+  const [clipboardText, setClipboardText] = useState('')
+
+  const sendClipboardText = () => {
+    const client = clientRef.current
+    const Guacamole = window.Guacamole
+    if (!client || !Guacamole) {
+      showToast(messages.rdpFailed)
+      return
+    }
+    const stream = client.createClipboardStream('text/plain')
+    const writer = new Guacamole.StringWriter(stream)
+    writer.sendText(clipboardText)
+    writer.sendEnd()
+    setClipboardDialogOpen(false)
+    setClipboardText('')
+    showToast(messages.clipboardSent)
+  }
 
   useEffect(() => {
     const container = containerRef.current
@@ -336,13 +365,8 @@ function RDPWorkspace({
     }
 
     const onClipboard = () => {
-      const text = window.prompt(messages.clipboardPrompt)
-      if (text == null) return
-      const stream = client.createClipboardStream('text/plain')
-      const writer = new Guacamole.StringWriter(stream)
-      writer.sendText(text)
-      writer.sendEnd()
-      showToast(messages.clipboardSent)
+      setClipboardText('')
+      setClipboardDialogOpen(true)
     }
     const onUpload = () => {
       const input = document.createElement('input')
@@ -425,19 +449,55 @@ function RDPWorkspace({
   const watermarkText = session.watermark_enabled ? session.watermark_text?.trim() : ''
 
   return (
-    <div className='relative h-[calc(100vh-52px)] overflow-hidden bg-black max-md:h-[calc(100vh-120px)]'>
-      <div ref={containerRef} className='size-full' />
-      {watermarkText ? (
-        <div
-          className='pointer-events-none absolute inset-0 z-10 grid place-items-center text-center font-semibold uppercase tracking-wider'
-          style={{
-            color: session.watermark_color || 'rgba(255,255,255,0.18)',
-            fontSize: `${session.watermark_font_size || 28}px`,
+    <>
+      <div className='relative h-[calc(100vh-52px)] overflow-hidden bg-black max-md:h-[calc(100vh-120px)]'>
+        <div ref={containerRef} className='size-full' />
+        {watermarkText ? (
+          <div
+            className='pointer-events-none absolute inset-0 z-10 grid place-items-center text-center font-semibold uppercase tracking-wider'
+            style={{
+              color: session.watermark_color || 'rgba(255,255,255,0.18)',
+              fontSize: `${session.watermark_font_size || 28}px`,
+            }}
+          >
+            {watermarkText}
+          </div>
+        ) : null}
+      </div>
+      <DialogShell
+        open={clipboardDialogOpen}
+        onOpenChange={setClipboardDialogOpen}
+        compact
+        title={messages.clipboardPrompt}
+        description={messages.clipboardDialogDescription}
+      >
+        <form
+          className='grid gap-4'
+          onSubmit={(event) => {
+            event.preventDefault()
+            sendClipboardText()
           }}
         >
-          {watermarkText}
-        </div>
-      ) : null}
-    </div>
+          <Field label={messages.clipboardTextLabel}>
+            <Textarea
+              autoFocus
+              className='min-h-36'
+              value={clipboardText}
+              onChange={(event) => setClipboardText(event.currentTarget.value)}
+              placeholder={messages.clipboardTextPlaceholder}
+            />
+          </Field>
+          <div className='flex justify-end gap-2'>
+            <Button type='button' variant='outline' onClick={() => setClipboardDialogOpen(false)}>
+              {messages.cancel}
+            </Button>
+            <Button type='submit' variant='primary'>
+              <Clipboard className='size-4' />
+              {messages.sendClipboard}
+            </Button>
+          </div>
+        </form>
+      </DialogShell>
+    </>
   )
 }

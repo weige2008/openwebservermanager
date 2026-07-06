@@ -783,7 +783,9 @@ func gatewayAssetAuthorized(platform map[string][]model.PlatformItem, asset mode
 			continue
 		}
 		addGatewayAuthKeys(userKeys, user.ID, user.Name, user.Username, user.OwnerID, user.ParentID, user.Group)
-		addGatewayMetadataKeys(userKeys, user.Metadata, "department_id", "department_ids", "dept_id", "dept_ids", "group_id", "group_ids")
+		addGatewayMetadataKeys(userKeys, user.Metadata, "department_id", "department_ids", "departmentId", "department", "departments", "dept_id", "dept_ids", "dept", "depts", "group_id", "group_ids", "groupId")
+		expandGatewayRelatedKeys(platform["departments"], userKeys)
+		break
 	}
 	for _, authorization := range platform["authorized_assets"] {
 		if !gatewayAuthorizationActive(authorization) || !gatewayAuthorizationSubjectMatches(authorization, userKeys) {
@@ -812,7 +814,7 @@ func gatewayAuthorizationActive(authorization model.PlatformItem) bool {
 func gatewayAuthorizationSubjectMatches(authorization model.PlatformItem, userKeys map[string]bool) bool {
 	keys := map[string]bool{}
 	addGatewayAuthKeys(keys, authorization.OwnerID, authorization.Username, authorization.ParentID, authorization.Group)
-	addGatewayMetadataKeys(keys, authorization.Metadata, "subject_id", "subject_ids", "user_id", "user_ids", "username", "usernames", "department_id", "department_ids", "dept_id", "dept_ids")
+	addGatewayMetadataKeys(keys, authorization.Metadata, "subject_id", "subject_ids", "subjectId", "user_id", "user_ids", "userId", "username", "usernames", "account", "accounts", "owner_id", "owner_ids", "ownerId", "department_id", "department_ids", "departmentId", "department", "departments", "dept_id", "dept_ids", "dept", "depts")
 	return gatewayKeysOverlap(userKeys, keys)
 }
 

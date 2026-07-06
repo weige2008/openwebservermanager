@@ -367,6 +367,146 @@ func TestNativeSSHGatewayRejectsExpiredAuthorization(t *testing.T) {
 	}
 }
 
+func TestNativeSSHGatewayDepartmentAndAssetGroupAuthorization(t *testing.T) {
+	targetAddr, closeTarget := startFakeSSHServer(t, "remote", "target-secret")
+	defer closeTarget()
+
+	st := newGatewayTestStore(t)
+	parentDept, err := st.CreatePlatformItem("departments", model.PlatformItemRequest{
+		Name:   "Engineering",
+		Type:   "department",
+		Status: "enabled",
+	})
+	if err != nil {
+		t.Fatalf("create parent department: %v", err)
+	}
+	childDept, err := st.CreatePlatformItem("departments", model.PlatformItemRequest{
+		Name:     "Platform",
+		Type:     "department",
+		Status:   "enabled",
+		ParentID: parentDept.ID,
+	})
+	if err != nil {
+		t.Fatalf("create child department: %v", err)
+	}
+	userRec, err := st.CreatePlatformItem("users", model.PlatformItemRequest{
+		Name:     "gateway-department-user",
+		Type:     "local",
+		Status:   "enabled",
+		Password: "password123",
+		ParentID: childDept.ID,
+		Metadata: map[string]any{"role": "user"},
+	})
+	if err != nil {
+		t.Fatalf("create user: %v", err)
+	}
+	parentGroup, err := st.CreatePlatformItem("asset_groups", model.PlatformItemRequest{
+		Name:   "Linux Fleet",
+		Type:   "ssh",
+		Status: "enabled",
+	})
+	if err != nil {
+		t.Fatalf("create parent group: %v", err)
+	}
+	childGroup, err := st.CreatePlatformItem("asset_groups", model.PlatformItemRequest{
+		Name:     "Production Linux",
+		Type:     "ssh",
+		Status:   "enabled",
+		ParentID: parentGroup.ID,
+	})
+	if err != nil {
+		t.Fatalf("create child group: %v", err)
+	}
+	host, portText, err := net.SplitHostPort(targetAddr)
+	if err != nil {
+		t.Fatalf("split target addr: %v", err)
+	}
+	port := mustAtoi(t, portText)
+	assetRec, err := st.CreatePlatformItem("assets", model.PlatformItemRequest{
+		Name:     "department-group-ssh",
+		Status:   "enabled",
+		Protocol: model.ProtocolSSH,
+		Host:     host,
+		Port:     port,
+		Group:    childGroup.ID,
+	})
+	if err != nil {
+		t.Fatalf("create grouped asset: %v", err)
+	}
+	if _, err := st.CreatePlatformItem("credentials", model.PlatformItemRequest{
+		Name:     "department target password",
+		Type:     string(model.CredentialSSHPassword),
+		Status:   "encrypted",
+		Username: "remote",
+		Password: "target-secret",
+		TargetID: assetRec.ID,
+	}); err != nil {
+		t.Fatalf("create credential: %v", err)
+	}
+	if _, err := st.CreatePlatformItem("authorized_assets", model.PlatformItemRequest{
+		Name:     "engineering linux fleet",
+		Type:     "department_group",
+		Status:   "enabled",
+		OwnerID:  parentDept.ID,
+		TargetID: parentGroup.ID,
+	}); err != nil {
+		t.Fatalf("create department group authorization: %v", err)
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	gatewayDataDir := mustTempDir(t)
+	defer removeTempDir(gatewayDataDir)
+	gateway, err := StartGateway(ctx, GatewayConfig{
+		Enabled:        true,
+		Address:        "127.0.0.1:0",
+		DataDir:        gatewayDataDir,
+		KnownHostsPath: filepath.Join(gatewayDataDir, "known_hosts"),
+		Store:          st,
+	})
+	if err != nil {
+		t.Fatalf("start gateway: %v", err)
+	}
+	defer gateway.Close()
+
+	client, err := ssh.Dial("tcp", gateway.Address(), &ssh.ClientConfig{
+		User:            userRec.Name,
+		Auth:            []ssh.AuthMethod{ssh.Password("password123")},
+		HostKeyCallback: ssh.InsecureIgnoreHostKey(),
+		Timeout:         5 * time.Second,
+	})
+	if err != nil {
+		t.Fatalf("dial gateway: %v", err)
+	}
+	defer client.Close()
+	session, err := client.NewSession()
+	if err != nil {
+		t.Fatalf("new gateway session: %v", err)
+	}
+	defer session.Close()
+	stdout, err := session.StdoutPipe()
+	if err != nil {
+		t.Fatalf("stdout pipe: %v", err)
+	}
+	stdin, err := session.StdinPipe()
+	if err != nil {
+		t.Fatalf("stdin pipe: %v", err)
+	}
+	if err := session.RequestPty("xterm-256color", 24, 80, ssh.TerminalModes{ssh.ECHO: 1}); err != nil {
+		t.Fatalf("request pty: %v", err)
+	}
+	if err := session.Shell(); err != nil {
+		t.Fatalf("start gateway shell: %v", err)
+	}
+	if _, err := io.WriteString(stdin, "1\r"); err != nil {
+		t.Fatalf("select asset: %v", err)
+	}
+	output := readUntilContains(t, stdout, "target-shell", 5*time.Second)
+	if !strings.Contains(output, assetRec.Name) || !strings.Contains(output, "target-shell") {
+		t.Fatalf("department and asset group authorization did not reach target: %q", output)
+	}
+}
+
 func TestNativeSSHGatewayChineseAdminDirectAssetLoginWithoutGrant(t *testing.T) {
 	targetAddr, closeTarget := startFakeSSHServer(t, "remote", "target-secret")
 	defer closeTarget()

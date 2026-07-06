@@ -3077,6 +3077,57 @@ func TestExternalOIDCCallbackAutoCreateDisabledIsAudited(t *testing.T) {
 	}
 }
 
+func TestExternalOIDCCallbackTokenFailureIsAuditedAndRedacted(t *testing.T) {
+	handler, adminCookie := newTestHandler(t)
+	srv := handler.(*Server)
+	var tokenEndpointCalls int
+	provider := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/token" {
+			http.NotFound(w, r)
+			return
+		}
+		tokenEndpointCalls++
+		http.Error(w, "provider down with openweb-secret", http.StatusBadGateway)
+	}))
+	defer provider.Close()
+
+	assertStatus(t, handler, http.MethodPost, "/api/admin/system-settings", map[string]any{
+		"name":   "External OIDC token failure",
+		"type":   "identity",
+		"status": "enabled",
+		"metadata": map[string]any{
+			"oidc_login_enabled":          true,
+			"oidc_provider_id":            "broken-sso",
+			"oidc_provider_name":          "Broken SSO",
+			"oidc_authorization_endpoint": provider.URL + "/authorize",
+			"oidc_token_endpoint":         provider.URL + "/token",
+			"oidc_userinfo_endpoint":      provider.URL + "/userinfo",
+			"oidc_client_id":              "openweb-client",
+			"oidc_client_secret":          "openweb-secret",
+			"oidc_scopes":                 []string{"openid", "profile"},
+		},
+	}, adminCookie, http.StatusCreated)
+	state, _, err := srv.auth.createExternalOIDCState("broken-sso", "/app/access")
+	if err != nil {
+		t.Fatalf("create external oidc state: %v", err)
+	}
+	failedRec := assertStatus(t, handler, http.MethodGet, "/api/auth/oidc/callback?state="+url.QueryEscape(state)+"&code=broken-code", nil, nil, http.StatusBadGateway)
+	if !strings.Contains(failedRec.Body.String(), "provider down") || strings.Contains(failedRec.Body.String(), "openweb-secret") {
+		t.Fatalf("oidc token failure response missing sanitized reason or leaked secret: %s", failedRec.Body.String())
+	}
+	if tokenEndpointCalls != 1 {
+		t.Fatalf("oidc token endpoint calls = %d, want 1", tokenEndpointCalls)
+	}
+	loginLogsRec := assertStatus(t, handler, http.MethodGet, "/api/admin/audit/login-logs", nil, adminCookie, http.StatusOK)
+	if !strings.Contains(loginLogsRec.Body.String(), `"type":"oidc"`) || !strings.Contains(loginLogsRec.Body.String(), `"status":"failed"`) || !strings.Contains(loginLogsRec.Body.String(), "broken-sso") || !strings.Contains(loginLogsRec.Body.String(), "provider down") || strings.Contains(loginLogsRec.Body.String(), "openweb-secret") {
+		t.Fatalf("oidc token failure log missing details or leaked secret: %s", loginLogsRec.Body.String())
+	}
+	operationLogsRec := assertStatus(t, handler, http.MethodGet, "/api/admin/audit/operation-logs", nil, adminCookie, http.StatusOK)
+	if !strings.Contains(operationLogsRec.Body.String(), "auth.oidc.login_failed") || strings.Contains(operationLogsRec.Body.String(), "openweb-secret") {
+		t.Fatalf("oidc token failure audit missing or leaked secret: %s", operationLogsRec.Body.String())
+	}
+}
+
 func TestOIDCIntegrationAuthorizationEndpointTest(t *testing.T) {
 	handler, adminCookie := newTestHandler(t)
 	var gotClientID string
@@ -3756,6 +3807,58 @@ func TestExternalWeComCallbackAutoCreateDisabledIsAudited(t *testing.T) {
 	operationLogsRec := assertStatus(t, handler, http.MethodGet, "/api/admin/audit/operation-logs", nil, adminCookie, http.StatusOK)
 	if !strings.Contains(operationLogsRec.Body.String(), "auth.wecom.login_failed") {
 		t.Fatalf("wecom failed login audit missing: %s", operationLogsRec.Body.String())
+	}
+}
+
+func TestExternalWeComCallbackTokenFailureIsAuditedAndRedacted(t *testing.T) {
+	handler, adminCookie := newTestHandler(t)
+	srv := handler.(*Server)
+	var tokenEndpointCalls int
+	provider := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/gettoken" {
+			http.NotFound(w, r)
+			return
+		}
+		tokenEndpointCalls++
+		writeJSON(w, http.StatusOK, map[string]any{"errcode": 40001, "errmsg": "bad corpsecret wecom-secret"})
+	}))
+	defer provider.Close()
+
+	assertStatus(t, handler, http.MethodPost, "/api/admin/system-settings", map[string]any{
+		"name":   "Enterprise WeChat token failure",
+		"type":   "identity",
+		"status": "enabled",
+		"metadata": map[string]any{
+			"wecom_enabled":            true,
+			"wecom_provider_id":        "broken-wecom",
+			"wecom_provider_name":      "Broken WeCom",
+			"wecom_corp_id":            "ww-openweb",
+			"wecom_agent_id":           "100001",
+			"wecom_agent_secret":       "wecom-secret",
+			"wecom_authorize_endpoint": provider.URL + "/authorize",
+			"wecom_token_endpoint":     provider.URL + "/gettoken",
+			"wecom_userinfo_endpoint":  provider.URL + "/getuserinfo",
+			"wecom_role":               "user",
+		},
+	}, adminCookie, http.StatusCreated)
+	state, err := srv.auth.createExternalWeComState("broken-wecom", "/app/access")
+	if err != nil {
+		t.Fatalf("create external wecom state: %v", err)
+	}
+	failedRec := assertStatus(t, handler, http.MethodGet, "/api/auth/wecom/callback?state="+url.QueryEscape(state)+"&code=broken-code", nil, nil, http.StatusBadGateway)
+	if !strings.Contains(failedRec.Body.String(), "bad corpsecret") || strings.Contains(failedRec.Body.String(), "wecom-secret") {
+		t.Fatalf("wecom token failure response missing sanitized reason or leaked secret: %s", failedRec.Body.String())
+	}
+	if tokenEndpointCalls != 1 {
+		t.Fatalf("wecom token endpoint calls = %d, want 1", tokenEndpointCalls)
+	}
+	loginLogsRec := assertStatus(t, handler, http.MethodGet, "/api/admin/audit/login-logs", nil, adminCookie, http.StatusOK)
+	if !strings.Contains(loginLogsRec.Body.String(), `"type":"wecom"`) || !strings.Contains(loginLogsRec.Body.String(), `"status":"failed"`) || !strings.Contains(loginLogsRec.Body.String(), "broken-wecom") || !strings.Contains(loginLogsRec.Body.String(), "bad corpsecret") || strings.Contains(loginLogsRec.Body.String(), "wecom-secret") {
+		t.Fatalf("wecom token failure log missing details or leaked secret: %s", loginLogsRec.Body.String())
+	}
+	operationLogsRec := assertStatus(t, handler, http.MethodGet, "/api/admin/audit/operation-logs", nil, adminCookie, http.StatusOK)
+	if !strings.Contains(operationLogsRec.Body.String(), "auth.wecom.login_failed") || strings.Contains(operationLogsRec.Body.String(), "wecom-secret") {
+		t.Fatalf("wecom token failure audit missing or leaked secret: %s", operationLogsRec.Body.String())
 	}
 }
 

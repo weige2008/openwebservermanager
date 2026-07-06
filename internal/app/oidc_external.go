@@ -116,16 +116,22 @@ func (s *Server) handleExternalOIDCCallback(w http.ResponseWriter, r *http.Reque
 	}
 	code := strings.TrimSpace(r.URL.Query().Get("code"))
 	if code == "" {
-		writeError(w, http.StatusBadRequest, "code is required")
+		err := errors.New("code is required")
+		s.recordExternalOIDCLoginFailure(r, provider, nil, err)
+		writeError(w, http.StatusBadRequest, err.Error())
 		return
 	}
 	claims, err := s.exchangeExternalOIDCCode(r, provider, code)
 	if err != nil {
-		writeError(w, http.StatusBadGateway, err.Error())
+		safeErr := sanitizedExternalProviderError(err, provider.ClientSecret)
+		s.recordExternalOIDCLoginFailure(r, provider, nil, safeErr)
+		writeError(w, http.StatusBadGateway, safeErr.Error())
 		return
 	}
 	if nonce := firstMetadataString(claims, "nonce"); nonce != "" && nonce != state.Nonce {
-		writeError(w, http.StatusBadRequest, "oidc nonce mismatch")
+		err := errors.New("oidc nonce mismatch")
+		s.recordExternalOIDCLoginFailure(r, provider, claims, err)
+		writeError(w, http.StatusBadRequest, err.Error())
 		return
 	}
 	user, err := s.upsertExternalOIDCUser(provider, claims)
@@ -183,6 +189,21 @@ func (s *Server) recordExternalOIDCLoginFailure(r *http.Request, provider extern
 		},
 	})
 	_ = s.audit(r, "auth.oidc.login_failed", provider.ID, "oidc", detail)
+}
+
+func sanitizedExternalProviderError(err error, secrets ...string) error {
+	if err == nil {
+		return nil
+	}
+	text := err.Error()
+	for _, secret := range secrets {
+		secret = strings.TrimSpace(secret)
+		if secret == "" {
+			continue
+		}
+		text = strings.ReplaceAll(text, secret, "[redacted]")
+	}
+	return errors.New(text)
 }
 
 func (s *Server) exchangeExternalOIDCCode(r *http.Request, provider externalOIDCProvider, code string) (map[string]any, error) {

@@ -137,12 +137,16 @@ func (s *Server) handleExternalWeComCallback(w http.ResponseWriter, r *http.Requ
 	}
 	code := strings.TrimSpace(r.URL.Query().Get("code"))
 	if code == "" {
-		writeError(w, http.StatusBadRequest, "code is required")
+		err := errors.New("code is required")
+		s.recordExternalWeComLoginFailure(r, provider, externalWeComClaims{}, err)
+		writeError(w, http.StatusBadRequest, err.Error())
 		return
 	}
 	claims, err := s.fetchExternalWeComClaims(provider, code)
 	if err != nil {
-		writeError(w, http.StatusBadGateway, err.Error())
+		safeErr := sanitizedExternalProviderError(err, provider.AgentSecret)
+		s.recordExternalWeComLoginFailure(r, provider, externalWeComClaims{}, safeErr)
+		writeError(w, http.StatusBadGateway, safeErr.Error())
 		return
 	}
 	user, err := s.upsertExternalWeComUser(provider, claims)

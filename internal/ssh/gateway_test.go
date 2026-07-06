@@ -209,6 +209,164 @@ func TestNativeSSHGatewayDirectAssetLogin(t *testing.T) {
 	}
 }
 
+func TestNativeSSHGatewayRejectsExpiredAuthorization(t *testing.T) {
+	targetAddr, closeTarget := startFakeSSHServer(t, "remote", "target-secret")
+	defer closeTarget()
+
+	st := newGatewayTestStore(t)
+	userRec, err := st.CreatePlatformItem("users", model.PlatformItemRequest{
+		Name:     "gateway-expiry-user",
+		Type:     "local",
+		Status:   "enabled",
+		Password: "password123",
+		Metadata: map[string]any{"role": "user"},
+	})
+	if err != nil {
+		t.Fatalf("create user: %v", err)
+	}
+	host, portText, err := net.SplitHostPort(targetAddr)
+	if err != nil {
+		t.Fatalf("split target addr: %v", err)
+	}
+	port := mustAtoi(t, portText)
+	activeAsset, err := st.CreatePlatformItem("assets", model.PlatformItemRequest{
+		Name:     "future-grant-ssh",
+		Status:   "enabled",
+		Protocol: model.ProtocolSSH,
+		Host:     host,
+		Port:     port,
+	})
+	if err != nil {
+		t.Fatalf("create active asset: %v", err)
+	}
+	expiredAsset, err := st.CreatePlatformItem("assets", model.PlatformItemRequest{
+		Name:     "expired-grant-ssh",
+		Status:   "enabled",
+		Protocol: model.ProtocolSSH,
+		Host:     host,
+		Port:     port,
+	})
+	if err != nil {
+		t.Fatalf("create expired asset: %v", err)
+	}
+	for _, asset := range []model.PlatformItem{activeAsset, expiredAsset} {
+		if _, err := st.CreatePlatformItem("credentials", model.PlatformItemRequest{
+			Name:     asset.Name + " password",
+			Type:     string(model.CredentialSSHPassword),
+			Status:   "encrypted",
+			Username: "remote",
+			Password: "target-secret",
+			TargetID: asset.ID,
+		}); err != nil {
+			t.Fatalf("create credential for %s: %v", asset.Name, err)
+		}
+	}
+	if _, err := st.CreatePlatformItem("authorized_assets", model.PlatformItemRequest{
+		Name:     "future grant",
+		Status:   "enabled",
+		OwnerID:  userRec.ID,
+		TargetID: activeAsset.ID,
+		Metadata: map[string]any{"expires_at": time.Now().UTC().Add(time.Hour).Format(time.RFC3339)},
+	}); err != nil {
+		t.Fatalf("create future grant: %v", err)
+	}
+	if _, err := st.CreatePlatformItem("authorized_assets", model.PlatformItemRequest{
+		Name:     "expired grant",
+		Status:   "enabled",
+		OwnerID:  userRec.ID,
+		TargetID: expiredAsset.ID,
+		Metadata: map[string]any{"expires_at": time.Now().UTC().Add(-time.Hour).Format(time.RFC3339)},
+	}); err != nil {
+		t.Fatalf("create expired grant: %v", err)
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	gatewayDataDir := mustTempDir(t)
+	defer removeTempDir(gatewayDataDir)
+	gateway, err := StartGateway(ctx, GatewayConfig{
+		Enabled:        true,
+		Address:        "127.0.0.1:0",
+		DataDir:        gatewayDataDir,
+		KnownHostsPath: filepath.Join(gatewayDataDir, "known_hosts"),
+		Store:          st,
+	})
+	if err != nil {
+		t.Fatalf("start gateway: %v", err)
+	}
+	defer gateway.Close()
+
+	client, err := ssh.Dial("tcp", gateway.Address(), &ssh.ClientConfig{
+		User:            "gateway-expiry-user",
+		Auth:            []ssh.AuthMethod{ssh.Password("password123")},
+		HostKeyCallback: ssh.InsecureIgnoreHostKey(),
+		Timeout:         5 * time.Second,
+	})
+	if err != nil {
+		t.Fatalf("dial gateway: %v", err)
+	}
+	defer client.Close()
+	session, err := client.NewSession()
+	if err != nil {
+		t.Fatalf("new gateway session: %v", err)
+	}
+	defer session.Close()
+	stdout, err := session.StdoutPipe()
+	if err != nil {
+		t.Fatalf("stdout pipe: %v", err)
+	}
+	stdin, err := session.StdinPipe()
+	if err != nil {
+		t.Fatalf("stdin pipe: %v", err)
+	}
+	if err := session.RequestPty("xterm-256color", 24, 80, ssh.TerminalModes{ssh.ECHO: 1}); err != nil {
+		t.Fatalf("request pty: %v", err)
+	}
+	if err := session.Shell(); err != nil {
+		t.Fatalf("start gateway shell: %v", err)
+	}
+	if _, err := io.WriteString(stdin, "1\r"); err != nil {
+		t.Fatalf("select asset: %v", err)
+	}
+	output := readUntilContains(t, stdout, "target-shell", 5*time.Second)
+	if !strings.Contains(output, activeAsset.Name) {
+		t.Fatalf("gateway menu did not show active future grant: %q", output)
+	}
+	if strings.Contains(output, expiredAsset.Name) {
+		t.Fatalf("gateway menu exposed expired authorization: %q", output)
+	}
+
+	directClient, err := ssh.Dial("tcp", gateway.Address(), &ssh.ClientConfig{
+		User:            "gateway-expiry-user#" + expiredAsset.Name,
+		Auth:            []ssh.AuthMethod{ssh.Password("password123")},
+		HostKeyCallback: ssh.InsecureIgnoreHostKey(),
+		Timeout:         5 * time.Second,
+	})
+	if err != nil {
+		t.Fatalf("dial gateway direct expired asset: %v", err)
+	}
+	defer directClient.Close()
+	directSession, err := directClient.NewSession()
+	if err != nil {
+		t.Fatalf("new direct gateway session: %v", err)
+	}
+	defer directSession.Close()
+	directStdout, err := directSession.StdoutPipe()
+	if err != nil {
+		t.Fatalf("direct stdout pipe: %v", err)
+	}
+	if err := directSession.RequestPty("xterm-256color", 24, 80, ssh.TerminalModes{ssh.ECHO: 1}); err != nil {
+		t.Fatalf("request direct pty: %v", err)
+	}
+	if err := directSession.Shell(); err != nil {
+		t.Fatalf("start direct gateway shell: %v", err)
+	}
+	directOutput := readUntilContains(t, directStdout, "is not authorized or does not exist", 5*time.Second)
+	if strings.Contains(directOutput, "target-shell") {
+		t.Fatalf("direct login used expired authorization: %q", directOutput)
+	}
+}
+
 func TestNativeSSHGatewayChineseAdminDirectAssetLoginWithoutGrant(t *testing.T) {
 	targetAddr, closeTarget := startFakeSSHServer(t, "remote", "target-secret")
 	defer closeTarget()

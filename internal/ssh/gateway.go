@@ -786,7 +786,7 @@ func gatewayAssetAuthorized(platform map[string][]model.PlatformItem, asset mode
 		addGatewayMetadataKeys(userKeys, user.Metadata, "department_id", "department_ids", "dept_id", "dept_ids", "group_id", "group_ids")
 	}
 	for _, authorization := range platform["authorized_assets"] {
-		if !platformItemEnabled(authorization) || !gatewayAuthorizationSubjectMatches(authorization, userKeys) {
+		if !gatewayAuthorizationActive(authorization) || !gatewayAuthorizationSubjectMatches(authorization, userKeys) {
 			continue
 		}
 		if gatewayAuthorizationTargetMatches(platform, authorization, asset) {
@@ -794,6 +794,19 @@ func gatewayAssetAuthorized(platform map[string][]model.PlatformItem, asset mode
 		}
 	}
 	return false
+}
+
+func gatewayAuthorizationActive(authorization model.PlatformItem) bool {
+	if !platformItemEnabled(authorization) {
+		return false
+	}
+	for _, key := range []string{"expires_at", "expire_at", "expiresAt", "expired_at", "valid_until", "not_after"} {
+		expiresAt, ok := gatewayMetadataTime(authorization.Metadata[key])
+		if ok && !expiresAt.IsZero() && !time.Now().UTC().Before(expiresAt) {
+			return false
+		}
+	}
+	return true
 }
 
 func gatewayAuthorizationSubjectMatches(authorization model.PlatformItem, userKeys map[string]bool) bool {
@@ -991,6 +1004,31 @@ func gatewayMetadataBool(value any) (bool, bool) {
 		}
 		return false, false
 	}
+}
+
+func gatewayMetadataTime(value any) (time.Time, bool) {
+	switch typed := value.(type) {
+	case time.Time:
+		return typed.UTC(), true
+	case string:
+		text := strings.TrimSpace(typed)
+		if text == "" {
+			return time.Time{}, false
+		}
+		for _, layout := range []string{time.RFC3339Nano, time.RFC3339, "2006-01-02 15:04:05"} {
+			parsed, err := time.Parse(layout, text)
+			if err == nil {
+				return parsed.UTC(), true
+			}
+		}
+	case float64:
+		return time.Unix(int64(typed), 0).UTC(), true
+	case int:
+		return time.Unix(int64(typed), 0).UTC(), true
+	case int64:
+		return time.Unix(typed, 0).UTC(), true
+	}
+	return time.Time{}, false
 }
 
 func userFromPermissions(permissions *ssh.Permissions) gatewayUser {

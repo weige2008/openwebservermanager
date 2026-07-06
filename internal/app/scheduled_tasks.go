@@ -391,6 +391,10 @@ func (s *Server) renewDueSelfSignedCertificates(task model.PlatformItem) (map[st
 			skipped++
 			continue
 		}
+		if !certificateRenewalStatusAllowed(item) {
+			skipped++
+			continue
+		}
 		expiresAt, ok := metadataTime(item.Metadata["expires_at"])
 		if ok && expiresAt.After(threshold) {
 			skipped++
@@ -439,6 +443,15 @@ func (s *Server) renewDueSelfSignedCertificates(task model.PlatformItem) (map[st
 		"skipped_count": skipped,
 		"results":       results,
 	}, nil
+}
+
+func certificateRenewalStatusAllowed(item model.PlatformItem) bool {
+	switch strings.ToLower(strings.TrimSpace(item.Status)) {
+	case "", "enabled", "active", "issued", "valid", "locked":
+		return true
+	default:
+		return false
+	}
 }
 
 func metadataIntDefault(value any, fallback int) int {

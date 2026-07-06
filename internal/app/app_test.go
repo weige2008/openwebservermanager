@@ -5930,6 +5930,19 @@ func TestScheduledTaskRunners(t *testing.T) {
 		"status":   cert.Status,
 		"metadata": cert.Metadata,
 	}, cookie, http.StatusOK)
+	disabledCertRec := assertStatus(t, handler, http.MethodPost, "/api/admin/certificates/self-signed", map[string]any{
+		"name":   "disabled-renew-cert",
+		"domain": "disabled-renew.example.test",
+		"days":   1,
+	}, cookie, http.StatusCreated)
+	var disabledCert model.PlatformItem
+	decodeResponse(t, disabledCertRec, &disabledCert)
+	disabledCert.Metadata["expires_at"] = time.Now().Add(-time.Hour).UTC().Format(time.RFC3339)
+	assertStatus(t, handler, http.MethodPatch, "/api/admin/certificates/"+disabledCert.ID, map[string]any{
+		"name":     disabledCert.Name,
+		"status":   "disabled",
+		"metadata": disabledCert.Metadata,
+	}, cookie, http.StatusOK)
 	renewTaskRec := assertStatus(t, handler, http.MethodPost, "/api/admin/scheduled-tasks", map[string]any{
 		"name":     "Renew certs",
 		"type":     "certificate-renewal",
@@ -5941,6 +5954,16 @@ func TestScheduledTaskRunners(t *testing.T) {
 	renewRunRec := assertStatus(t, handler, http.MethodPost, "/api/admin/scheduled-tasks/"+renewTask.ID+"/run", nil, cookie, http.StatusAccepted)
 	if !strings.Contains(renewRunRec.Body.String(), "renewed_count") || !strings.Contains(renewRunRec.Body.String(), cert.ID) {
 		t.Fatal("certificate renewal task did not renew due certificate")
+	}
+	if strings.Contains(renewRunRec.Body.String(), disabledCert.ID) {
+		t.Fatal("certificate renewal task renewed a disabled certificate")
+	}
+	storedDisabledCert, ok, err := srv.cfg.Store.GetPlatformItem("certificates", disabledCert.ID)
+	if err != nil || !ok {
+		t.Fatalf("load disabled certificate after renewal: ok=%v err=%v", ok, err)
+	}
+	if storedDisabledCert.Status != "disabled" || storedDisabledCert.Metadata["renewed_at"] != nil {
+		t.Fatalf("disabled certificate was changed by renewal task: %#v", storedDisabledCert)
 	}
 }
 

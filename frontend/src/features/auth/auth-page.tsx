@@ -8,6 +8,7 @@ import { AuthLayout } from '@/components/layout/auth-layout'
 import { Button } from '@/components/ui/button'
 import { Field, Input } from '@/components/ui/field'
 import { apiRequest } from '@/lib/api'
+import { copyText } from '@/lib/clipboard'
 import {
   decodePasskeyRequestOptions,
   passkeyAssertionPayload,
@@ -394,25 +395,4 @@ export function AuthPage() {
       ) : null}
     </AuthLayout>
   )
-}
-
-async function copyText(text: string) {
-  if (navigator.clipboard?.writeText) {
-    await navigator.clipboard.writeText(text)
-    return
-  }
-  const textarea = document.createElement('textarea')
-  textarea.value = text
-  textarea.setAttribute('readonly', 'true')
-  textarea.style.position = 'fixed'
-  textarea.style.top = '-1000px'
-  textarea.style.left = '-1000px'
-  document.body.appendChild(textarea)
-  textarea.select()
-  try {
-    const copied = document.execCommand('copy')
-    if (!copied) throw new Error('copy command failed')
-  } finally {
-    textarea.remove()
-  }
 }

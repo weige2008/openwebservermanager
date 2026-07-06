@@ -12,6 +12,7 @@ import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/com
 import { DialogShell } from '@/components/ui/dialog'
 import { Field, Input, Select, Textarea } from '@/components/ui/field'
 import { ApiError, apiRequest } from '@/lib/api'
+import { copyText } from '@/lib/clipboard'
 import { platformDescription, platformLabel, platformPages, type PlatformPageConfig } from '@/lib/platform'
 import { cn, formatDate } from '@/lib/utils'
 import type { ConnectionSession, PlatformItem, Protocol } from '@/types'
@@ -1027,8 +1028,12 @@ function AgentGatewayTokenDialog({ item, onClose }: { item: PlatformItem; onClos
   const heartbeatPayload = JSON.stringify({ registration_token: token, latency_ms: 12, cpu_percent: 8.5, memory_used_bytes: 268435456, memory_total_bytes: 1073741824 }, null, 2)
 
   const copy = async (value: string, message = '已复制') => {
-    await navigator.clipboard.writeText(value)
-    app.showToast(message)
+    try {
+      await copyText(value)
+      app.showToast(message)
+    } catch (error) {
+      app.handleApiError(error)
+    }
   }
 
   return (

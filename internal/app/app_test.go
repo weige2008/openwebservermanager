@@ -2507,7 +2507,12 @@ func TestDatabaseAssetQueryRequiresAuthorizationAndLogs(t *testing.T) {
 	if !strings.Contains(selfApproveRec.Body.String(), "self-approved") {
 		t.Fatalf("self approval denial did not explain reason: %s", selfApproveRec.Body.String())
 	}
-	assertStatus(t, handler, http.MethodPost, "/api/admin/sql-work-orders/"+workOrder.ID+"/approve", map[string]any{"note": "approved for test"}, adminCookie, http.StatusOK)
+	approveRec := assertStatus(t, handler, http.MethodPost, "/api/admin/sql-work-orders/"+workOrder.ID+"/approve", map[string]any{"note": "approved for test"}, adminCookie, http.StatusOK)
+	var approvedOrder model.PlatformItem
+	decodeResponse(t, approveRec, &approvedOrder)
+	if got := firstMetadataString(approvedOrder.Metadata, "approval_note"); got != "approved for test" {
+		t.Fatalf("approval_note = %q, want approved for test", got)
+	}
 	assertStatus(t, handler, http.MethodPost, "/api/admin/sql-work-orders/"+workOrder.ID+"/reject", map[string]any{"note": "too late"}, adminCookie, http.StatusConflict)
 	assertStatus(t, handler, http.MethodPost, "/api/admin/sql-work-orders/"+workOrder.ID+"/execute", map[string]any{
 		"sql": "DROP TABLE servers",
@@ -2528,7 +2533,12 @@ func TestDatabaseAssetQueryRequiresAuthorizationAndLogs(t *testing.T) {
 	}, userCookie, http.StatusCreated)
 	var rejectedOrder model.PlatformItem
 	decodeResponse(t, rejectedRec, &rejectedOrder)
-	assertStatus(t, handler, http.MethodPost, "/api/admin/sql-work-orders/"+rejectedOrder.ID+"/reject", map[string]any{"note": "not allowed"}, adminCookie, http.StatusOK)
+	rejectRec := assertStatus(t, handler, http.MethodPost, "/api/admin/sql-work-orders/"+rejectedOrder.ID+"/reject", map[string]any{"note": "not allowed"}, adminCookie, http.StatusOK)
+	var rejectedDecision model.PlatformItem
+	decodeResponse(t, rejectRec, &rejectedDecision)
+	if got := firstMetadataString(rejectedDecision.Metadata, "rejection_note"); got != "not allowed" {
+		t.Fatalf("rejection_note = %q, want not allowed", got)
+	}
 	assertStatus(t, handler, http.MethodPost, "/api/admin/sql-work-orders/"+rejectedOrder.ID+"/approve", map[string]any{"note": "revive rejected"}, adminCookie, http.StatusConflict)
 	assertStatus(t, handler, http.MethodPost, "/api/admin/sql-work-orders/"+rejectedOrder.ID+"/execute", map[string]any{}, adminCookie, http.StatusConflict)
 

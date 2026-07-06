@@ -96,6 +96,7 @@ type ResourceOperation =
   | { type: 'storage-files'; item: PlatformItem }
   | { type: 'task-logs'; item: PlatformItem }
   | { type: 'sql-execute'; item: PlatformItem }
+  | { type: 'sql-decision'; item: PlatformItem; decision: 'approve' | 'reject' }
 
 interface StorageEntry {
   name: string
@@ -284,6 +285,25 @@ export function PlatformTablePage({ config }: { config: PlatformPageConfig }) {
         header: app.t('status'),
         cell: ({ row }) => <Badge tone={statusTone(row.original.status)}>{row.original.status || '-'}</Badge>,
       },
+      ...(config.collection === 'sql_work_orders' ? [
+        {
+          header: 'SQL / Reason',
+          cell: ({ row }) => (
+            <div className='grid max-w-96 gap-1'>
+              <span className='truncate font-mono text-xs'>{metadataText(row.original.metadata?.sql) || row.original.description || '-'}</span>
+              <span className='truncate text-xs text-muted-foreground'>{metadataText(row.original.metadata?.reason) || row.original.description || '-'}</span>
+            </div>
+          ),
+        },
+        {
+          header: 'Decision',
+          cell: ({ row }) => <SQLWorkOrderDecisionSummary item={row.original} />,
+        },
+        {
+          header: 'Execution',
+          cell: ({ row }) => <SQLWorkOrderExecutionSummary item={row.original} />,
+        },
+      ] satisfies ColumnDef<PlatformItem>[] : []),
       ...(config.collection === 'certificates' ? [
         {
           header: app.t('expiresAt', 'Expires at'),
@@ -782,33 +802,6 @@ function ResourceRowActions({ config, item, onOperation }: { config: PlatformPag
     }
   }
 
-  const approveSQLWorkOrder = async () => {
-    try {
-      await apiRequest(`/api/admin/sql-work-orders/${item.id}/approve`, { method: 'POST', body: '{}' })
-      await app.refresh(true)
-      app.showToast('SQL 工单已批准')
-    } catch (error) {
-      app.handleApiError(error)
-    }
-  }
-
-  const rejectSQLWorkOrder = async () => {
-    const confirmed = await confirm({
-      title: `拒绝 ${item.name || item.id}?`,
-      description: '该 SQL 工单会被标记为拒绝，申请人需要重新提交。',
-      confirmText: '拒绝',
-      destructive: true,
-    })
-    if (!confirmed) return
-    try {
-      await apiRequest(`/api/admin/sql-work-orders/${item.id}/reject`, { method: 'POST', body: '{}' })
-      await app.refresh(true)
-      app.showToast('SQL 工单已拒绝')
-    } catch (error) {
-      app.handleApiError(error)
-    }
-  }
-
   if (config.collection === 'online_sessions') {
     return (
       <>
@@ -899,18 +892,17 @@ function ResourceRowActions({ config, item, onOperation }: { config: PlatformPag
 
   if (config.collection === 'sql_work_orders') {
     const status = (item.status || '').toLowerCase()
-    if (status === 'pending' || status === 'submitted' || status === 'requested' || status === 'failed') {
+    if (status === 'pending' || status === 'submitted' || status === 'requested') {
       return (
         <>
-          <Button size='sm' variant='outline' onClick={() => void approveSQLWorkOrder()}>
+          <Button size='sm' variant='outline' onClick={() => onOperation({ type: 'sql-decision', item, decision: 'approve' })}>
             <Save className='size-3.5' />
             批准
           </Button>
-          <Button size='sm' variant='destructive' onClick={() => void rejectSQLWorkOrder()}>
+          <Button size='sm' variant='destructive' onClick={() => onOperation({ type: 'sql-decision', item, decision: 'reject' })}>
             <Trash2 className='size-3.5' />
             拒绝
           </Button>
-          {confirmDialog}
         </>
       )
     }
@@ -948,6 +940,7 @@ function ResourceOperationDialog({
   if (operation.type === 'certificate-mtls') return <CertificateMTLSDialog item={operation.item} onClose={() => onOpenChange(null)} />
   if (operation.type === 'storage-files') return <StorageFilesDialog item={operation.item} onClose={() => onOpenChange(null)} />
   if (operation.type === 'task-logs') return <TaskLogsDialog item={operation.item} onClose={() => onOpenChange(null)} />
+  if (operation.type === 'sql-decision') return <SQLWorkOrderDecisionDialog item={operation.item} decision={operation.decision} onClose={() => onOpenChange(null)} />
   return <SQLExecuteDialog item={operation.item} onClose={() => onOpenChange(null)} requestAccessMFACode={requestAccessMFACode} />
 }
 
@@ -1949,6 +1942,120 @@ function SSHExecDialog({ item, onClose, requestAccessMFACode }: { item: Platform
       </div>
     </DialogShell>
   )
+}
+
+function SQLWorkOrderDecisionDialog({
+  item,
+  decision,
+  onClose,
+}: {
+  item: PlatformItem
+  decision: 'approve' | 'reject'
+  onClose: () => void
+}) {
+  const app = useApp()
+  const [note, setNote] = useState('')
+  const [saving, setSaving] = useState(false)
+  const approving = decision === 'approve'
+
+  const submit = async () => {
+    setSaving(true)
+    try {
+      await apiRequest(`/api/admin/sql-work-orders/${item.id}/${approving ? 'approve' : 'reject'}`, {
+        method: 'POST',
+        body: JSON.stringify({ note }),
+      })
+      await app.refresh(true)
+      app.showToast(approving ? 'SQL 工单已批准' : 'SQL 工单已拒绝')
+      onClose()
+    } catch (error) {
+      app.handleApiError(error)
+    } finally {
+      setSaving(false)
+    }
+  }
+
+  return (
+    <DialogShell
+      open
+      onOpenChange={(open) => !open && onClose()}
+      title={`${approving ? '批准' : '拒绝'} ${item.name || item.id}`}
+      description='审批意见会写入 SQL 工单元数据，并保留在操作审计中。'
+      compact
+    >
+      <div className='grid gap-4'>
+        <div className='rounded-lg border border-border bg-muted/20 p-3 text-xs'>
+          <div className='font-medium text-foreground'>SQL</div>
+          <pre className='mt-2 max-h-36 overflow-auto whitespace-pre-wrap rounded-md bg-background p-2 font-mono'>{metadataText(item.metadata?.sql) || '-'}</pre>
+          {metadataText(item.metadata?.reason) ? (
+            <p className='mt-2 text-muted-foreground'>申请原因：{metadataText(item.metadata?.reason)}</p>
+          ) : null}
+        </div>
+        <Field label={approving ? '审批意见' : '拒绝原因'}>
+          <Textarea
+            autoFocus
+            className='min-h-28'
+            value={note}
+            onChange={(event) => setNote(event.currentTarget.value)}
+            placeholder={approving ? '例如：窗口期内允许执行，已确认影响范围。' : '例如：缺少回滚方案或影响范围说明。'}
+          />
+        </Field>
+        <div className='flex justify-end gap-2'>
+          <Button variant='outline' onClick={onClose}>取消</Button>
+          <Button variant={approving ? 'primary' : 'destructive'} onClick={() => void submit()} disabled={saving}>
+            {saving ? '提交中' : approving ? '批准' : '拒绝'}
+          </Button>
+        </div>
+      </div>
+    </DialogShell>
+  )
+}
+
+function SQLWorkOrderDecisionSummary({ item }: { item: PlatformItem }) {
+  const approvedBy = metadataText(item.metadata?.approved_by)
+  const rejectedBy = metadataText(item.metadata?.rejected_by)
+  const approvalNote = metadataText(item.metadata?.approval_note)
+  const rejectionNote = metadataText(item.metadata?.rejection_note)
+  if (approvedBy) {
+    return (
+      <div className='grid max-w-56 gap-1 text-xs'>
+        <span>批准：{approvedBy}</span>
+        <span className='text-muted-foreground'>{formatDate(metadataText(item.metadata?.approved_at))}</span>
+        {approvalNote ? <span className='truncate text-muted-foreground'>{approvalNote}</span> : null}
+      </div>
+    )
+  }
+  if (rejectedBy) {
+    return (
+      <div className='grid max-w-56 gap-1 text-xs'>
+        <span>拒绝：{rejectedBy}</span>
+        <span className='text-muted-foreground'>{formatDate(metadataText(item.metadata?.rejected_at))}</span>
+        {rejectionNote ? <span className='truncate text-muted-foreground'>{rejectionNote}</span> : null}
+      </div>
+    )
+  }
+  return <span className='text-xs text-muted-foreground'>待审批</span>
+}
+
+function SQLWorkOrderExecutionSummary({ item }: { item: PlatformItem }) {
+  const executedBy = metadataText(item.metadata?.executed_by)
+  const error = metadataText(item.metadata?.execution_error)
+  const logID = metadataText(item.metadata?.sql_log_id)
+  if (error) {
+    return <span className='block max-w-56 truncate text-xs text-destructive'>{error}</span>
+  }
+  if (executedBy || logID) {
+    return (
+      <div className='grid max-w-56 gap-1 text-xs'>
+        <span>执行：{executedBy || '-'}</span>
+        <span className='text-muted-foreground'>{formatDate(metadataText(item.metadata?.executed_at))}</span>
+        <span className='text-muted-foreground'>
+          {formatNumberValue(item.metadata?.rows_affected)} rows / {formatNumberValue(item.metadata?.duration_ms)} ms
+        </span>
+      </div>
+    )
+  }
+  return <span className='text-xs text-muted-foreground'>未执行</span>
 }
 
 function SQLExecuteDialog({
@@ -4500,7 +4607,7 @@ function downloadBlob(filename: string, blob: Blob) {
 
 function statusTone(status?: string) {
   const value = (status || '').toLowerCase()
-  if (['active', 'enabled', 'success', 'normal', 'encrypted'].includes(value)) return 'success' as const
+  if (['active', 'enabled', 'success', 'normal', 'encrypted', 'approved', 'executed'].includes(value)) return 'success' as const
   if (['pending', 'disabled', 'offline'].includes(value)) return 'warning' as const
   if (['failed', 'locked', 'denied'].includes(value)) return 'danger' as const
   return 'neutral' as const

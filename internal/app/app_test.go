@@ -14,6 +14,7 @@ import (
 	"crypto/tls"
 	"crypto/x509"
 	"crypto/x509/pkix"
+	"database/sql"
 	"encoding/base64"
 	"encoding/binary"
 	"encoding/json"
@@ -42,6 +43,7 @@ import (
 
 	"github.com/fxamacker/cbor/v2"
 	cryptossh "golang.org/x/crypto/ssh"
+	_ "modernc.org/sqlite"
 )
 
 func TestEnsureChildPathRejectsEscape(t *testing.T) {
@@ -4578,6 +4580,194 @@ func TestBackupListDownloadAndRestore(t *testing.T) {
 	logsRec := assertStatus(t, handler, http.MethodGet, "/api/admin/audit/operation-logs", nil, newCookie, http.StatusOK)
 	if !strings.Contains(logsRec.Body.String(), "backup.restore") {
 		t.Fatal("backup restore did not write operation log")
+	}
+}
+
+func TestBackupRestoreMigratesPlaintextPlatformSecrets(t *testing.T) {
+	handler, cookie := newTestHandler(t)
+	server := handler.(*Server)
+
+	tempDir := t.TempDir()
+	sqlitePath := filepath.Join(tempDir, "store.db")
+	db, err := sql.Open("sqlite", sqlitePath)
+	if err != nil {
+		t.Fatalf("open restore sqlite: %v", err)
+	}
+	if _, err := db.Exec(`CREATE TABLE platform_records (
+		collection TEXT NOT NULL,
+		id TEXT NOT NULL,
+		payload TEXT NOT NULL,
+		created_at TEXT NOT NULL,
+		updated_at TEXT NOT NULL,
+		PRIMARY KEY (collection, id)
+	)`); err != nil {
+		_ = db.Close()
+		t.Fatalf("create restore platform table: %v", err)
+	}
+	now := time.Now().UTC()
+	createdAt := now.Format(time.RFC3339Nano)
+	dsn := "postgres://restore_user:restore-secret@postgres.internal:5432/app?sslmode=disable"
+	databaseAsset := model.PlatformItem{
+		ID:        "restore_plain_database_asset",
+		Name:      "restored plaintext database",
+		Type:      "postgres",
+		Status:    "enabled",
+		Protocol:  model.ProtocolDatabase,
+		Metadata:  map[string]any{"dsn": dsn},
+		CreatedAt: now,
+		UpdatedAt: now,
+	}
+	systemSetting := model.PlatformItem{
+		ID:     "restore_plain_system_setting",
+		Name:   "restored plaintext integrations",
+		Type:   "integrations",
+		Status: "enabled",
+		Metadata: map[string]any{
+			"smtp_host":     "smtp.internal",
+			"smtp_password": "restore-smtp-secret",
+			"llm_api_key":   "restore-llm-secret",
+			"dns": map[string]any{
+				"provider":      "cloudflare",
+				"dns_api_token": "restore-dns-secret",
+			},
+		},
+		CreatedAt: now,
+		UpdatedAt: now,
+	}
+	for _, record := range []struct {
+		collection string
+		item       model.PlatformItem
+	}{
+		{collection: "database_assets", item: databaseAsset},
+		{collection: "system_settings", item: systemSetting},
+	} {
+		payload, err := json.Marshal(record.item)
+		if err != nil {
+			_ = db.Close()
+			t.Fatalf("encode restore payload: %v", err)
+		}
+		if _, err := db.Exec(`INSERT INTO platform_records(collection, id, payload, created_at, updated_at) VALUES (?, ?, ?, ?, ?)`, record.collection, record.item.ID, string(payload), createdAt, createdAt); err != nil {
+			_ = db.Close()
+			t.Fatalf("insert restore platform record: %v", err)
+		}
+	}
+	if err := db.Close(); err != nil {
+		t.Fatalf("close restore sqlite: %v", err)
+	}
+
+	var backup bytes.Buffer
+	zipWriter := zip.NewWriter(&backup)
+	manifestFile, err := zipWriter.Create("manifest.json")
+	if err != nil {
+		t.Fatalf("create restore manifest entry: %v", err)
+	}
+	if err := json.NewEncoder(manifestFile).Encode(map[string]any{
+		"version":    "legacy-plaintext-platform-secrets",
+		"created_at": createdAt,
+	}); err != nil {
+		t.Fatalf("write restore manifest: %v", err)
+	}
+	storeFile, err := zipWriter.Create("store.db")
+	if err != nil {
+		t.Fatalf("create restore sqlite entry: %v", err)
+	}
+	sqliteRaw, err := os.ReadFile(sqlitePath)
+	if err != nil {
+		t.Fatalf("read restore sqlite: %v", err)
+	}
+	if _, err := storeFile.Write(sqliteRaw); err != nil {
+		t.Fatalf("write restore sqlite entry: %v", err)
+	}
+	if err := zipWriter.Close(); err != nil {
+		t.Fatalf("close restore zip: %v", err)
+	}
+
+	restoreRec := assertMultipartStatus(t, handler, "/api/admin/backups/restore", nil, "legacy-plaintext-secrets.zip", backup.Bytes(), cookie, http.StatusOK)
+	restoreBody := restoreRec.Body.String()
+	for _, leaked := range []string{"restore-secret", "restore-smtp-secret", "restore-llm-secret", "restore-dns-secret", "postgres://restore_user"} {
+		if strings.Contains(restoreBody, leaked) {
+			t.Fatalf("backup restore response leaked %q: %s", leaked, restoreBody)
+		}
+	}
+	if !strings.Contains(restoreBody, `"restored":true`) || !strings.Contains(restoreBody, `"migrated_platform_secrets":2`) {
+		t.Fatalf("backup restore response did not report migrated secrets: %s", restoreBody)
+	}
+
+	loginRec := assertStatus(t, handler, http.MethodPost, "/api/auth/login", map[string]any{"username": "admin", "password": "password123"}, nil, http.StatusOK)
+	newCookie := loginRec.Result().Cookies()[0]
+
+	rawDatabaseAsset, ok, err := server.cfg.Store.GetPlatformItem("database_assets", databaseAsset.ID)
+	if err != nil || !ok {
+		t.Fatalf("load restored database asset: ok=%v err=%v", ok, err)
+	}
+	if firstMetadataString(rawDatabaseAsset.Metadata, "dsn", "connection_string", "connectionString", "database_url", "databaseUrl", "url") != "" {
+		t.Fatalf("restored database asset retained plaintext dsn: %#v", rawDatabaseAsset.Metadata)
+	}
+	dsnSet, _ := metadataBoolValue(rawDatabaseAsset.Metadata["database_dsn_set"])
+	if firstMetadataString(rawDatabaseAsset.Metadata, "database_dsn_encrypted") == "" || !dsnSet {
+		t.Fatalf("restored database asset did not encrypt dsn: %#v", rawDatabaseAsset.Metadata)
+	}
+	connection, err := server.databaseAssetConnection(rawDatabaseAsset)
+	if err != nil {
+		t.Fatalf("restored database asset connection: %v", err)
+	}
+	parsed, err := url.Parse(connection.DSN)
+	if err != nil {
+		t.Fatalf("parse restored database dsn: %v", err)
+	}
+	password, _ := parsed.User.Password()
+	if parsed.User.Username() != "restore_user" || password != "restore-secret" {
+		t.Fatalf("restored database dsn was not decryptable: %q", connection.DSN)
+	}
+
+	rawSystemSetting, ok, err := server.cfg.Store.GetPlatformItem("system_settings", systemSetting.ID)
+	if err != nil || !ok {
+		t.Fatalf("load restored system setting: ok=%v err=%v", ok, err)
+	}
+	if firstMetadataString(rawSystemSetting.Metadata, "smtp_password", "smtpPassword", "plain_smtp_password", "llm_api_key", "llmApiKey", "plain_llm_api_key") != "" {
+		t.Fatalf("restored system setting retained plaintext secret: %#v", rawSystemSetting.Metadata)
+	}
+	if firstMetadataString(rawSystemSetting.Metadata, "smtp_password_encrypted") == "" || firstMetadataString(rawSystemSetting.Metadata, "llm_api_key_encrypted") == "" {
+		t.Fatalf("restored system setting did not encrypt top-level secrets: %#v", rawSystemSetting.Metadata)
+	}
+	rawSystemSettingJSON, err := json.Marshal(rawSystemSetting.Metadata)
+	if err != nil {
+		t.Fatalf("encode restored system setting metadata: %v", err)
+	}
+	if strings.Contains(string(rawSystemSettingJSON), "restore-dns-secret") || !strings.Contains(string(rawSystemSettingJSON), "dns_api_token_encrypted") {
+		t.Fatalf("restored nested dns secret was not encrypted: %s", string(rawSystemSettingJSON))
+	}
+	smtpPassword, ok, err := server.cfg.Store.SystemSettingSMTPPassword(systemSetting.ID)
+	if err != nil || !ok || smtpPassword != "restore-smtp-secret" {
+		t.Fatalf("restored smtp password = %q ok=%v err=%v", smtpPassword, ok, err)
+	}
+	llmAPIKey, ok, err := server.cfg.Store.SystemSettingLLMAPIKey(systemSetting.ID)
+	if err != nil || !ok || llmAPIKey != "restore-llm-secret" {
+		t.Fatalf("restored llm api key = %q ok=%v err=%v", llmAPIKey, ok, err)
+	}
+
+	databaseDetailRec := assertStatus(t, handler, http.MethodGet, "/api/admin/database-assets/"+databaseAsset.ID, nil, newCookie, http.StatusOK)
+	databaseDetailBody := databaseDetailRec.Body.String()
+	for _, leaked := range []string{"restore-secret", "postgres://restore_user", `"dsn":`, "database_dsn_encrypted"} {
+		if strings.Contains(databaseDetailBody, leaked) {
+			t.Fatalf("database detail leaked %q: %s", leaked, databaseDetailBody)
+		}
+	}
+	if !strings.Contains(databaseDetailBody, "database_dsn_set") {
+		t.Fatalf("database detail did not expose dsn presence flag: %s", databaseDetailBody)
+	}
+
+	settingsDetailRec := assertStatus(t, handler, http.MethodGet, "/api/admin/system-settings/"+systemSetting.ID, nil, newCookie, http.StatusOK)
+	settingsDetailBody := settingsDetailRec.Body.String()
+	for _, leaked := range []string{"restore-smtp-secret", "restore-llm-secret", "restore-dns-secret", "smtp_password_encrypted", "llm_api_key_encrypted", "dns_api_token_encrypted"} {
+		if strings.Contains(settingsDetailBody, leaked) {
+			t.Fatalf("system setting detail leaked %q: %s", leaked, settingsDetailBody)
+		}
+	}
+	for _, expected := range []string{"smtp_password_set", "llm_api_key_set", "dns_api_token_set"} {
+		if !strings.Contains(settingsDetailBody, expected) {
+			t.Fatalf("system setting detail did not expose %q: %s", expected, settingsDetailBody)
+		}
 	}
 }
 

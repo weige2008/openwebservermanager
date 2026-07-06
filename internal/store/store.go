@@ -1,6 +1,7 @@
 package store
 
 import (
+	"bytes"
 	"crypto/rand"
 	"crypto/sha256"
 	"database/sql"
@@ -67,9 +68,10 @@ type AdminPublic struct {
 }
 
 type RestoreSummary struct {
-	LegacyStateRestored bool           `json:"legacy_state_restored"`
-	PlatformRecords     int            `json:"platform_records"`
-	RecordsByCollection map[string]int `json:"records_by_collection"`
+	LegacyStateRestored     bool           `json:"legacy_state_restored"`
+	PlatformRecords         int            `json:"platform_records"`
+	RecordsByCollection     map[string]int `json:"records_by_collection"`
+	MigratedPlatformSecrets int            `json:"migrated_platform_secrets,omitempty"`
 }
 
 type platformRecordSnapshot struct {
@@ -78,6 +80,7 @@ type platformRecordSnapshot struct {
 	Payload    string
 	CreatedAt  string
 	UpdatedAt  string
+	Migrated   bool
 }
 
 var ErrAdminAlreadyConfigured = errors.New("admin already configured")
@@ -1003,7 +1006,7 @@ func (s *Store) RestoreSnapshot(legacyRaw []byte, sqlitePath string) (RestoreSum
 	var records []platformRecordSnapshot
 	var err error
 	if sqlitePath != "" {
-		records, err = readPlatformRecordSnapshot(sqlitePath)
+		records, err = s.readPlatformRecordSnapshot(sqlitePath)
 		if err != nil {
 			return RestoreSummary{}, err
 		}
@@ -1046,6 +1049,9 @@ func (s *Store) RestoreSnapshot(legacyRaw []byte, sqlitePath string) (RestoreSum
 			}
 			summary.PlatformRecords++
 			summary.RecordsByCollection[record.Collection]++
+			if record.Migrated {
+				summary.MigratedPlatformSecrets++
+			}
 		}
 		if err := stmt.Close(); err != nil {
 			_ = tx.Rollback()
@@ -1058,7 +1064,7 @@ func (s *Store) RestoreSnapshot(legacyRaw []byte, sqlitePath string) (RestoreSum
 	return summary, nil
 }
 
-func readPlatformRecordSnapshot(sqlitePath string) ([]platformRecordSnapshot, error) {
+func (s *Store) readPlatformRecordSnapshot(sqlitePath string) ([]platformRecordSnapshot, error) {
 	db, err := sql.Open("sqlite", sqlitePath)
 	if err != nil {
 		return nil, fmt.Errorf("open backup sqlite store: %w", err)
@@ -1086,12 +1092,47 @@ func readPlatformRecordSnapshot(sqlitePath string) ([]platformRecordSnapshot, er
 		if err := json.Unmarshal([]byte(record.Payload), &item); err != nil {
 			return nil, fmt.Errorf("decode backup platform record %s/%s: %w", record.Collection, record.ID, err)
 		}
+		normalized, migrated, err := s.normalizeRestoredPlatformRecord(record.Collection, record.ID, item)
+		if err != nil {
+			return nil, err
+		}
+		record.Payload = normalized
+		record.Migrated = migrated
 		records = append(records, record)
 	}
 	if err := rows.Err(); err != nil {
 		return nil, err
 	}
 	return records, nil
+}
+
+func (s *Store) normalizeRestoredPlatformRecord(collection, id string, item model.PlatformItem) (string, bool, error) {
+	if item.ID == "" {
+		item.ID = id
+	}
+	if item.ID != id {
+		return "", false, fmt.Errorf("backup platform record %s/%s payload id mismatch %q", collection, id, item.ID)
+	}
+	item.Module = collection
+	if item.Metadata == nil {
+		item.Metadata = map[string]any{}
+	}
+	before, err := json.Marshal(item.Metadata)
+	if err != nil {
+		return "", false, fmt.Errorf("encode backup platform record metadata %s/%s: %w", collection, id, err)
+	}
+	if err := s.applyPlatformSecrets(collection, model.PlatformItemRequest{}, &item, false); err != nil {
+		return "", false, fmt.Errorf("migrate backup platform record secrets %s/%s: %w", collection, id, err)
+	}
+	after, err := json.Marshal(item.Metadata)
+	if err != nil {
+		return "", false, fmt.Errorf("encode migrated backup platform record metadata %s/%s: %w", collection, id, err)
+	}
+	payload, err := json.Marshal(item)
+	if err != nil {
+		return "", false, fmt.Errorf("encode backup platform record %s/%s: %w", collection, id, err)
+	}
+	return string(payload), !bytes.Equal(before, after), nil
 }
 
 func platformCollectionSet() map[string]bool {

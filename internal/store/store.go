@@ -1783,28 +1783,25 @@ func (s *Store) applySystemSettingPlatformSecret(req model.PlatformItemRequest, 
 		smtpPassword = firstMetadataString(item.Metadata, "smtp_password", "smtpPassword", "plain_smtp_password")
 	}
 	llmAPIKey := firstMetadataString(item.Metadata, "llm_api_key", "llmApiKey", "plain_llm_api_key")
+	smtpPasswordClear := metadataBool(item.Metadata["smtp_password_clear"]) || metadataBool(item.Metadata["clear_smtp_password"])
+	llmAPIKeyClear := metadataBool(item.Metadata["llm_api_key_clear"]) || metadataBool(item.Metadata["clear_llm_api_key"])
 	for _, key := range []string{
 		"smtp_password",
 		"smtpPassword",
 		"plain_smtp_password",
+		"smtp_password_clear",
+		"clear_smtp_password",
 		"llm_api_key",
 		"llmApiKey",
 		"plain_llm_api_key",
+		"llm_api_key_clear",
+		"clear_llm_api_key",
 	} {
 		delete(item.Metadata, key)
 	}
 	now := time.Now().UTC().Format(time.RFC3339Nano)
 	if err := s.encryptSystemSettingExternalSecrets(item.Metadata, now, creating); err != nil {
 		return err
-	}
-	if smtpPassword == "" && llmAPIKey == "" {
-		if creating {
-			delete(item.Metadata, "smtp_password_encrypted")
-			delete(item.Metadata, "smtp_password_set")
-			delete(item.Metadata, "llm_api_key_encrypted")
-			delete(item.Metadata, "llm_api_key_set")
-		}
-		return nil
 	}
 	if len(smtpPassword) > 32*1024 || len(llmAPIKey) > 32*1024 {
 		return errors.New("system setting secret is too large")
@@ -1817,6 +1814,10 @@ func (s *Store) applySystemSettingPlatformSecret(req model.PlatformItemRequest, 
 		item.Metadata["smtp_password_encrypted"] = encrypted
 		item.Metadata["smtp_password_set"] = true
 		item.Metadata["smtp_password_updated_at"] = now
+	} else if creating || smtpPasswordClear {
+		delete(item.Metadata, "smtp_password_encrypted")
+		delete(item.Metadata, "smtp_password_set")
+		delete(item.Metadata, "smtp_password_updated_at")
 	}
 	if llmAPIKey != "" {
 		encrypted, err := s.cipher.EncryptString(llmAPIKey)
@@ -1826,6 +1827,10 @@ func (s *Store) applySystemSettingPlatformSecret(req model.PlatformItemRequest, 
 		item.Metadata["llm_api_key_encrypted"] = encrypted
 		item.Metadata["llm_api_key_set"] = true
 		item.Metadata["llm_api_key_updated_at"] = now
+	} else if creating || llmAPIKeyClear {
+		delete(item.Metadata, "llm_api_key_encrypted")
+		delete(item.Metadata, "llm_api_key_set")
+		delete(item.Metadata, "llm_api_key_updated_at")
 	}
 	return nil
 }
@@ -2392,10 +2397,14 @@ var sensitiveMetadataKeys = map[string]struct{}{
 	"smtp_password":                            {},
 	"smtpPassword":                             {},
 	"plain_smtp_password":                      {},
+	"smtp_password_clear":                      {},
+	"clear_smtp_password":                      {},
 	"smtp_password_encrypted":                  {},
 	"llm_api_key":                              {},
 	"llmApiKey":                                {},
 	"plain_llm_api_key":                        {},
+	"llm_api_key_clear":                        {},
+	"clear_llm_api_key":                        {},
 	"llm_api_key_encrypted":                    {},
 	"oidc_client_secret":                       {},
 	"oidcClientSecret":                         {},

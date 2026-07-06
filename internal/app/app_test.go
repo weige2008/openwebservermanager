@@ -6586,9 +6586,69 @@ func TestSMTPIntegrationTestEmail(t *testing.T) {
 	case <-time.After(2 * time.Second):
 		t.Fatal("SMTP server did not receive test email")
 	}
+	select {
+	case authCommand := <-smtpServer.auths:
+		if !strings.HasPrefix(authCommand, "AUTH ") {
+			t.Fatalf("SMTP server recorded unexpected auth command: %q", authCommand)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("SMTP server did not receive initial AUTH command")
+	}
 	logsRec := assertStatus(t, handler, http.MethodGet, "/api/admin/audit/operation-logs", nil, cookie, http.StatusOK)
 	if !strings.Contains(logsRec.Body.String(), "system_settings.smtp_test") {
 		t.Fatal("SMTP test did not write operation log")
+	}
+	clearRec := assertStatus(t, handler, http.MethodPatch, "/api/admin/system-settings/"+setting.ID, map[string]any{
+		"name":     "Notification integrations",
+		"type":     "integration",
+		"status":   "enabled",
+		"host":     host,
+		"port":     port,
+		"username": "smtp-user",
+		"metadata": map[string]any{
+			"smtp_host":           host,
+			"smtp_port":           port,
+			"smtp_from":           "sender@example.test",
+			"smtp_to":             "receiver@example.test",
+			"smtp_username":       "smtp-user",
+			"smtp_password_clear": true,
+		},
+	}, cookie, http.StatusOK)
+	clearBody := clearRec.Body.String()
+	for _, leaked := range []string{"smtp-secret", "smtp_password_encrypted", "smtp_password_clear", "smtp_password_set"} {
+		if strings.Contains(clearBody, leaked) {
+			t.Fatalf("SMTP password clear response leaked retained state %q: %s", leaked, clearBody)
+		}
+	}
+	rawSetting, ok, err := handler.(*Server).cfg.Store.GetPlatformItem("system_settings", setting.ID)
+	if err != nil || !ok {
+		t.Fatalf("load cleared SMTP setting: ok=%v err=%v", ok, err)
+	}
+	if firstMetadataString(rawSetting.Metadata, "smtp_password_encrypted") != "" {
+		t.Fatalf("cleared SMTP setting retained encrypted password: %#v", rawSetting.Metadata)
+	}
+	password, ok, err := handler.(*Server).cfg.Store.SystemSettingSMTPPassword(setting.ID)
+	if err != nil || !ok || password != "" {
+		t.Fatalf("cleared SMTP password = %q ok=%v err=%v", password, ok, err)
+	}
+	assertStatus(t, handler, http.MethodPost, "/api/admin/system-settings/smtp/test", map[string]any{
+		"setting_id": setting.ID,
+		"to":         "receiver@example.test",
+		"subject":    "SMTP probe without auth",
+		"body":       "anonymous delivery works",
+	}, cookie, http.StatusOK)
+	select {
+	case message := <-smtpServer.messages:
+		if !strings.Contains(message, "Subject: SMTP probe without auth") || !strings.Contains(message, "anonymous delivery works") {
+			t.Fatalf("SMTP message after password clear missing expected content:\n%s", message)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("SMTP server did not receive test email after password clear")
+	}
+	select {
+	case authCommand := <-smtpServer.auths:
+		t.Fatalf("SMTP server received AUTH after password clear: %q", authCommand)
+	case <-time.After(150 * time.Millisecond):
 	}
 	smtpServer.close()
 	failedRec := assertStatus(t, handler, http.MethodPost, "/api/admin/system-settings/smtp/test", map[string]any{
@@ -6727,6 +6787,45 @@ func TestLLMIntegrationTestPrompt(t *testing.T) {
 	if !strings.Contains(logsRec.Body.String(), "system_settings.llm_test") {
 		t.Fatal("LLM test did not write operation log")
 	}
+	clearRec := assertStatus(t, handler, http.MethodPatch, "/api/admin/system-settings/"+setting.ID, map[string]any{
+		"name":   "LLM integrations",
+		"type":   "integration",
+		"status": "enabled",
+		"metadata": map[string]any{
+			"llm_provider":      "openai-compatible",
+			"llm_base_url":      llmServer.URL + "/v1",
+			"llm_model":         "test-model",
+			"llm_api_key_clear": true,
+		},
+	}, cookie, http.StatusOK)
+	clearBody := clearRec.Body.String()
+	for _, leaked := range []string{"llm-secret", "llm_api_key_encrypted", "llm_api_key_clear", "llm_api_key_set"} {
+		if strings.Contains(clearBody, leaked) {
+			t.Fatalf("LLM API key clear response leaked retained state %q: %s", leaked, clearBody)
+		}
+	}
+	rawSetting, ok, err := handler.(*Server).cfg.Store.GetPlatformItem("system_settings", setting.ID)
+	if err != nil || !ok {
+		t.Fatalf("load cleared LLM setting: ok=%v err=%v", ok, err)
+	}
+	if firstMetadataString(rawSetting.Metadata, "llm_api_key_encrypted") != "" {
+		t.Fatalf("cleared LLM setting retained encrypted API key: %#v", rawSetting.Metadata)
+	}
+	apiKey, ok, err := handler.(*Server).cfg.Store.SystemSettingLLMAPIKey(setting.ID)
+	if err != nil || !ok || apiKey != "" {
+		t.Fatalf("cleared LLM API key = %q ok=%v err=%v", apiKey, ok, err)
+	}
+	gotAuth = "unexpected"
+	clearTestRec := assertStatus(t, handler, http.MethodPost, "/api/admin/system-settings/llm/test", map[string]any{
+		"setting_id": setting.ID,
+		"prompt":     "ping",
+	}, cookie, http.StatusOK)
+	if gotAuth != "" {
+		t.Fatalf("LLM provider received Authorization after API key clear: %q", gotAuth)
+	}
+	if !strings.Contains(clearTestRec.Body.String(), "pong") || strings.Contains(clearTestRec.Body.String(), "llm-secret") {
+		t.Fatalf("LLM test after key clear missing completion or leaked secret: %s", clearTestRec.Body.String())
+	}
 	assertStatus(t, handler, http.MethodPatch, "/api/admin/system-settings/"+setting.ID, map[string]any{
 		"status": "disabled",
 	}, cookie, http.StatusOK)
@@ -6734,7 +6833,7 @@ func TestLLMIntegrationTestPrompt(t *testing.T) {
 		"setting_id": setting.ID,
 		"prompt":     "ping",
 	}, cookie, http.StatusNotFound)
-	if llmCalls != 1 {
+	if llmCalls != 2 {
 		t.Fatalf("disabled llm setting should not call provider endpoint, calls=%d", llmCalls)
 	}
 
@@ -9267,6 +9366,7 @@ func (f *fakeLDAPAuthenticator) Authenticate(ctx context.Context, provider exter
 type fakeSMTPServer struct {
 	addr     string
 	messages chan string
+	auths    chan string
 	close    func()
 }
 
@@ -9279,6 +9379,7 @@ func newFakeSMTPServer(t *testing.T) fakeSMTPServer {
 	server := fakeSMTPServer{
 		addr:     listener.Addr().String(),
 		messages: make(chan string, 4),
+		auths:    make(chan string, 4),
 		close: func() {
 			_ = listener.Close()
 		},
@@ -9290,7 +9391,7 @@ func newFakeSMTPServer(t *testing.T) fakeSMTPServer {
 			if err != nil {
 				return
 			}
-			go handleFakeSMTPConnection(conn, server.messages)
+			go handleFakeSMTPConnection(conn, server.messages, server.auths)
 		}
 	}()
 	return server
@@ -9305,6 +9406,7 @@ func newFailingSMTPAuthServer(t *testing.T, failure string) fakeSMTPServer {
 	server := fakeSMTPServer{
 		addr:     listener.Addr().String(),
 		messages: make(chan string, 1),
+		auths:    make(chan string, 1),
 		close: func() {
 			_ = listener.Close()
 		},
@@ -9322,7 +9424,7 @@ func newFailingSMTPAuthServer(t *testing.T, failure string) fakeSMTPServer {
 	return server
 }
 
-func handleFakeSMTPConnection(conn net.Conn, messages chan<- string) {
+func handleFakeSMTPConnection(conn net.Conn, messages chan<- string, auths chan<- string) {
 	defer conn.Close()
 	reader := bufio.NewReader(conn)
 	writer := bufio.NewWriter(conn)
@@ -9370,6 +9472,10 @@ func handleFakeSMTPConnection(conn net.Conn, messages chan<- string) {
 				return
 			}
 		case strings.HasPrefix(command, "AUTH "):
+			select {
+			case auths <- trimmed:
+			default:
+			}
 			if !writeLine("235 authenticated") {
 				return
 			}

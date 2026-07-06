@@ -191,6 +191,7 @@ interface SMTPIntegrationForm {
   username: string
   password: string
   passwordSet: boolean
+  passwordClear: boolean
   from: string
   to: string
   testTo: string
@@ -199,6 +200,7 @@ interface SMTPIntegrationForm {
   llmModel: string
   llmApiKey: string
   llmApiKeySet: boolean
+  llmApiKeyClear: boolean
 }
 
 interface DesktopAccessForm {
@@ -3843,8 +3845,10 @@ export function PlatformSettingsPage({ config }: { config: PlatformPageConfig })
       patchForm({
         password: '',
         passwordSet: Boolean(saved.metadata?.smtp_password_set),
+        passwordClear: false,
         llmApiKey: '',
         llmApiKeySet: Boolean(saved.metadata?.llm_api_key_set),
+        llmApiKeyClear: false,
       })
       await app.refresh(true)
       if (!silent) app.showToast(app.t('saved', 'Saved'))
@@ -4162,7 +4166,7 @@ export function PlatformSettingsPage({ config }: { config: PlatformPageConfig })
                   <Input value={form.username} onChange={(event) => patchForm({ username: event.currentTarget.value })} autoComplete='username' />
                 </Field>
                 <Field label={app.t('password', 'Password')}>
-                  <Input type='password' value={form.password} onChange={(event) => patchForm({ password: event.currentTarget.value })} placeholder={form.passwordSet ? 'Leave blank to keep current password' : ''} autoComplete='new-password' />
+                  <Input type='password' value={form.password} onChange={(event) => patchForm({ password: event.currentTarget.value, passwordClear: false })} placeholder={form.passwordSet ? app.t('leaveBlankToKeepSecret', 'Leave blank to keep current secret') : ''} autoComplete='new-password' />
                 </Field>
                 <Field label={app.t('smtpFrom', 'Sender')}>
                   <Input value={form.from} onChange={(event) => patchForm({ from: event.currentTarget.value })} placeholder='ops@example.com' />
@@ -4182,6 +4186,13 @@ export function PlatformSettingsPage({ config }: { config: PlatformPageConfig })
                   />
                   <span>{app.t('smtpInsecureSkipVerify', 'Allow insecure TLS certificate verification')}</span>
                 </label>
+                {form.passwordSet ? (
+                  <CheckboxRow
+                    checked={form.passwordClear}
+                    onChange={(passwordClear) => patchForm({ passwordClear, password: passwordClear ? '' : form.password })}
+                    label={app.t('clearSMTPPassword', 'Clear saved SMTP password on save')}
+                  />
+                ) : null}
               </div>
               <div className='flex flex-wrap justify-end gap-2'>
                 <Button variant='outline' onClick={() => void saveIntegration()} disabled={saving || testing || !form.host.trim() || !form.from.trim()}>
@@ -4216,8 +4227,15 @@ export function PlatformSettingsPage({ config }: { config: PlatformPageConfig })
                   <Input value={form.llmModel} onChange={(event) => patchForm({ llmModel: event.currentTarget.value })} placeholder='gpt-4.1-mini' />
                 </Field>
                 <Field className='md:col-span-2 xl:col-span-4' label={app.t('apiKey', 'API key')}>
-                  <Input type='password' value={form.llmApiKey} onChange={(event) => patchForm({ llmApiKey: event.currentTarget.value })} placeholder={form.llmApiKeySet ? 'Leave blank to keep current API key' : ''} autoComplete='new-password' />
+                  <Input type='password' value={form.llmApiKey} onChange={(event) => patchForm({ llmApiKey: event.currentTarget.value, llmApiKeyClear: false })} placeholder={form.llmApiKeySet ? app.t('leaveBlankToKeepSecret', 'Leave blank to keep current secret') : ''} autoComplete='new-password' />
                 </Field>
+                {form.llmApiKeySet ? (
+                  <CheckboxRow
+                    checked={form.llmApiKeyClear}
+                    onChange={(llmApiKeyClear) => patchForm({ llmApiKeyClear, llmApiKey: llmApiKeyClear ? '' : form.llmApiKey })}
+                    label={app.t('clearLLMApiKey', 'Clear saved LLM API key on save')}
+                  />
+                ) : null}
               </div>
               <div className='flex flex-wrap justify-end gap-2'>
                 <Button variant='outline' onClick={() => void saveIntegration()} disabled={saving || testing || testingLLM}>
@@ -4268,6 +4286,7 @@ function smtpIntegrationFormFromItem(item?: PlatformItem): SMTPIntegrationForm {
     username: metadataText(metadata.smtp_username) || item?.username || '',
     password: '',
     passwordSet: metadataBool(metadata.smtp_password_set),
+    passwordClear: false,
     from: metadataText(metadata.smtp_from) || metadataText(metadata.from) || '',
     to: metadataText(metadata.smtp_to) || metadataText(metadata.to) || '',
     testTo: metadataText(metadata.smtp_test_to) || metadataText(metadata.test_to) || '',
@@ -4276,6 +4295,7 @@ function smtpIntegrationFormFromItem(item?: PlatformItem): SMTPIntegrationForm {
     llmModel: metadataText(metadata.llm_model),
     llmApiKey: '',
     llmApiKeySet: metadataBool(metadata.llm_api_key_set),
+    llmApiKeyClear: false,
   }
 }
 
@@ -4471,10 +4491,12 @@ function integrationMetadataFromForm(form: SMTPIntegrationForm, existing?: Recor
   metadata.smtp_start_tls = form.security === 'starttls'
   metadata.smtp_server_name = form.serverName.trim()
   metadata.smtp_insecure_skip_verify = form.insecureSkipVerify
+  if (form.passwordClear) metadata.smtp_password_clear = true
   metadata.llm_provider = form.llmProvider.trim()
   metadata.llm_base_url = form.llmBaseUrl.trim()
   metadata.llm_model = form.llmModel.trim()
   if (form.llmApiKey.trim()) metadata.llm_api_key = form.llmApiKey.trim()
+  if (form.llmApiKeyClear) metadata.llm_api_key_clear = true
   return metadata
 }
 

@@ -1300,10 +1300,13 @@ function BulkAuthorizeDialog({ collection, items, onClose }: { collection: strin
   const app = useApp()
   const [subjectIDs, setSubjectIDs] = useState('')
   const [targetIDs, setTargetIDs] = useState(items.map((item) => item.id).join('\n'))
+  const [selectedGroupID, setSelectedGroupID] = useState('')
   const [expiresAt, setExpiresAt] = useState('')
   const [saving, setSaving] = useState(false)
   const [summary, setSummary] = useState<Record<string, number> | null>(null)
   const route = authorizationBulkRoute(collection)
+  const groupOptions = useMemo(() => authorizationGroupOptions(collection, app.data.platform?.asset_groups || []), [app.data.platform?.asset_groups, collection])
+  const targetHelp = authorizationTargetHelp(collection)
 
   const submit = async () => {
     setSaving(true)
@@ -1328,14 +1331,35 @@ function BulkAuthorizeDialog({ collection, items, onClose }: { collection: strin
     }
   }
 
+  const appendGroupTarget = () => {
+    if (!selectedGroupID) return
+    setTargetIDs((current) => appendUniqueLine(current, selectedGroupID))
+  }
+
   return (
-    <DialogShell open onOpenChange={(open) => !open && onClose()} title='批量授权' description='按用户、部门或资产组 ID 批量生成授权记录；重复的主体/目标组合会自动跳过。'>
+    <DialogShell open onOpenChange={(open) => !open && onClose()} title='批量授权' description='按用户、部门、资产或资产组 ID 批量生成授权记录；重复的主体/目标组合会自动跳过。'>
       <div className='grid gap-4'>
         <Field label='主体 ID'>
           <Textarea className='min-h-32 font-mono text-xs' value={subjectIDs} onChange={(event) => setSubjectIDs(event.currentTarget.value)} placeholder='每行一个用户 ID、用户名、部门 ID 或部门名称' />
         </Field>
+        {groupOptions.length ? (
+          <div className='grid gap-2 rounded-lg border border-border bg-muted/20 p-3 sm:grid-cols-[minmax(0,1fr)_auto] sm:items-end'>
+            <Field label='追加资产组'>
+              <Select value={selectedGroupID} onChange={(event) => setSelectedGroupID(event.currentTarget.value)}>
+                <option value=''>选择一个资产组</option>
+                {groupOptions.map((group) => (
+                  <option key={group.id} value={group.id}>{group.name} · {group.protocol || group.type || 'custom'}</option>
+                ))}
+              </Select>
+            </Field>
+            <Button variant='outline' onClick={appendGroupTarget} disabled={!selectedGroupID}>
+              <FolderPlus className='size-4' />
+              追加
+            </Button>
+          </div>
+        ) : null}
         <Field label='目标资源 ID'>
-          <Textarea className='min-h-40 font-mono text-xs' value={targetIDs} onChange={(event) => setTargetIDs(event.currentTarget.value)} />
+          <Textarea className='min-h-40 font-mono text-xs' value={targetIDs} onChange={(event) => setTargetIDs(event.currentTarget.value)} placeholder={targetHelp} />
         </Field>
         <Field label='失效时间'>
           <Input value={expiresAt} onChange={(event) => setExpiresAt(event.currentTarget.value)} placeholder='2026-12-31T23:59:59Z，可留空' />
@@ -1361,6 +1385,29 @@ function authorizationBulkRoute(collection: string) {
   if (collection === 'web_assets') return 'websites'
   if (collection === 'database_assets') return 'databases'
   return 'assets'
+}
+
+function authorizationTargetHelp(collection: string) {
+  if (collection === 'web_assets') return '每行一个 Web 资产 ID、Web 资产名称、资产组 ID 或资产组名称'
+  if (collection === 'database_assets') return '每行一个数据库资产 ID、数据库资产名称、资产组 ID 或资产组名称'
+  return '每行一个资产 ID、资产名称、资产组 ID 或资产组名称'
+}
+
+function authorizationGroupOptions(collection: string, groups: PlatformItem[]) {
+  const score = (group: PlatformItem) => {
+    const kind = `${group.type || ''} ${group.protocol || ''}`.toLowerCase()
+    if (collection === 'web_assets') return kind.includes('web') || kind.includes('http') ? 0 : 1
+    if (collection === 'database_assets') return kind.includes('database') || kind.includes('db') || kind.includes('sql') ? 0 : 1
+    return kind.includes('ssh') || kind.includes('rdp') || kind.includes('vnc') || kind.includes('desktop') || kind.includes('text') ? 0 : 1
+  }
+  return [...groups].sort((left, right) => score(left) - score(right) || assetGroupTreeSort(left, right))
+}
+
+function appendUniqueLine(current: string, value: string) {
+  const lines = splitLines(current)
+  const key = value.trim().toLowerCase()
+  if (!key || lines.some((line) => line.toLowerCase() === key)) return current
+  return [...lines, value.trim()].join('\n')
 }
 
 function AgentGatewayTokenDialog({ item, onClose }: { item: PlatformItem; onClose: () => void }) {

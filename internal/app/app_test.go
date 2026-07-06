@@ -1855,6 +1855,115 @@ func TestAccessAuthorizationSupportsDepartmentsGroupsAndExpiry(t *testing.T) {
 	assertStatus(t, handler, http.MethodPost, "/api/access/ssh/"+expiredAsset.ID, nil, userCookie, http.StatusForbidden)
 }
 
+func TestAccessAuthorizationSupportsWebAndDatabaseAssetGroups(t *testing.T) {
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/app/health" {
+			t.Fatalf("upstream path = %q, want /app/health", r.URL.Path)
+		}
+		_, _ = w.Write([]byte("group web ok"))
+	}))
+	defer upstream.Close()
+
+	handler, adminCookie := newTestHandler(t)
+	userRec := assertStatus(t, handler, http.MethodPost, "/api/admin/users", map[string]any{
+		"name":     "group-resource-user",
+		"type":     "local",
+		"status":   "enabled",
+		"password": "password123",
+		"metadata": map[string]any{"role": "user"},
+	}, adminCookie, http.StatusCreated)
+	var user model.PlatformItem
+	decodeResponse(t, userRec, &user)
+
+	parentWebGroupRec := assertStatus(t, handler, http.MethodPost, "/api/admin/asset-groups", map[string]any{
+		"name":     "Web Fleet",
+		"type":     "web",
+		"protocol": "http",
+		"status":   "enabled",
+	}, adminCookie, http.StatusCreated)
+	var parentWebGroup model.PlatformItem
+	decodeResponse(t, parentWebGroupRec, &parentWebGroup)
+	childWebGroupRec := assertStatus(t, handler, http.MethodPost, "/api/admin/asset-groups", map[string]any{
+		"name":      "Production Web",
+		"type":      "web",
+		"protocol":  "http",
+		"status":    "enabled",
+		"parent_id": parentWebGroup.ID,
+	}, adminCookie, http.StatusCreated)
+	var childWebGroup model.PlatformItem
+	decodeResponse(t, childWebGroupRec, &childWebGroup)
+	parentDBGroupRec := assertStatus(t, handler, http.MethodPost, "/api/admin/asset-groups", map[string]any{
+		"name":     "Database Fleet",
+		"type":     "database",
+		"protocol": "database",
+		"status":   "enabled",
+	}, adminCookie, http.StatusCreated)
+	var parentDBGroup model.PlatformItem
+	decodeResponse(t, parentDBGroupRec, &parentDBGroup)
+	childDBGroupRec := assertStatus(t, handler, http.MethodPost, "/api/admin/asset-groups", map[string]any{
+		"name":      "Production Database",
+		"type":      "database",
+		"protocol":  "database",
+		"status":    "enabled",
+		"parent_id": parentDBGroup.ID,
+	}, adminCookie, http.StatusCreated)
+	var childDBGroup model.PlatformItem
+	decodeResponse(t, childDBGroupRec, &childDBGroup)
+
+	webRec := assertStatus(t, handler, http.MethodPost, "/api/admin/websites", map[string]any{
+		"name":     "group-web",
+		"type":     "http",
+		"status":   "enabled",
+		"protocol": "http",
+		"group":    childWebGroup.ID,
+		"metadata": map[string]any{"target_url": upstream.URL + "/app"},
+	}, adminCookie, http.StatusCreated)
+	var webAsset model.PlatformItem
+	decodeResponse(t, webRec, &webAsset)
+	dbRec := assertStatus(t, handler, http.MethodPost, "/api/admin/database-assets", map[string]any{
+		"name":     "group-db",
+		"type":     "sqlite",
+		"status":   "enabled",
+		"protocol": "database",
+		"group":    childDBGroup.ID,
+		"metadata": map[string]any{"sqlite_path": "group-auth.db", "row_limit": 10},
+	}, adminCookie, http.StatusCreated)
+	var databaseAsset model.PlatformItem
+	decodeResponse(t, dbRec, &databaseAsset)
+
+	loginRec := assertStatus(t, handler, http.MethodPost, "/api/auth/login", map[string]any{"username": "group-resource-user", "password": "password123"}, nil, http.StatusOK)
+	userCookie := loginRec.Result().Cookies()[0]
+	assertStatus(t, handler, http.MethodGet, "/api/access/http/"+webAsset.ID+"/proxy/health", nil, userCookie, http.StatusForbidden)
+	assertStatus(t, handler, http.MethodPost, "/api/access/database/"+databaseAsset.ID+"/query", map[string]any{"sql": "SELECT 7 AS grouped_answer"}, userCookie, http.StatusForbidden)
+
+	assertStatus(t, handler, http.MethodPost, "/api/admin/authorizations/websites", map[string]any{
+		"name":      "web group grant",
+		"owner_id":  user.ID,
+		"target_id": parentWebGroup.ID,
+		"status":    "enabled",
+	}, adminCookie, http.StatusCreated)
+	assertStatus(t, handler, http.MethodPost, "/api/admin/authorizations/databases", map[string]any{
+		"name":      "database group grant",
+		"owner_id":  user.ID,
+		"target_id": parentDBGroup.ID,
+		"status":    "enabled",
+	}, adminCookie, http.StatusCreated)
+
+	accessRec := assertStatus(t, handler, http.MethodGet, "/api/access/assets", nil, userCookie, http.StatusOK)
+	accessBody := accessRec.Body.String()
+	if !strings.Contains(accessBody, webAsset.ID) || !strings.Contains(accessBody, databaseAsset.ID) {
+		t.Fatalf("group authorization did not expose web/database assets: %s", accessBody)
+	}
+	proxyRec := assertStatus(t, handler, http.MethodGet, "/api/access/http/"+webAsset.ID+"/proxy/health", nil, userCookie, http.StatusOK)
+	if proxyRec.Body.String() != "group web ok" {
+		t.Fatalf("group-authorized web proxy body = %q", proxyRec.Body.String())
+	}
+	queryRec := assertStatus(t, handler, http.MethodPost, "/api/access/database/"+databaseAsset.ID+"/query", map[string]any{"sql": "SELECT 7 AS grouped_answer"}, userCookie, http.StatusOK)
+	if !strings.Contains(queryRec.Body.String(), "grouped_answer") || !strings.Contains(queryRec.Body.String(), "7") {
+		t.Fatalf("group-authorized database query response = %s", queryRec.Body.String())
+	}
+}
+
 func TestBulkAuthorizationGrantsAccessAcrossResourceTypes(t *testing.T) {
 	handler, adminCookie := newTestHandler(t)
 

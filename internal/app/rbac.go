@@ -5,16 +5,17 @@ import (
 	"strings"
 
 	"openwebservermanager/internal/model"
+	"openwebservermanager/internal/roles"
 )
 
-type roleKind string
+type roleKind = roles.Kind
 
 const (
-	roleSuperAdmin roleKind = "super_admin"
-	roleAdmin      roleKind = "admin"
-	roleAuditor    roleKind = "auditor"
-	roleUser       roleKind = "user"
-	roleCustom     roleKind = "custom"
+	roleSuperAdmin roleKind = roles.SuperAdmin
+	roleAdmin      roleKind = roles.Admin
+	roleAuditor    roleKind = roles.Auditor
+	roleUser       roleKind = roles.User
+	roleCustom     roleKind = roles.Custom
 )
 
 type roleDecision struct {
@@ -114,21 +115,7 @@ func (s *Server) roleDecision(rawRole string) roleDecision {
 }
 
 func normalizeBuiltInRole(rawRole string) roleKind {
-	value := strings.ToLower(strings.TrimSpace(rawRole))
-	value = strings.ReplaceAll(value, "-", "_")
-	value = strings.ReplaceAll(value, " ", "_")
-	switch value {
-	case "super_admin", "superadmin", "root", "owner", "超级管理员", "瓒呯骇绠＄悊鍛":
-		return roleSuperAdmin
-	case "admin", "administrator", "管理员", "绠＄悊鍛":
-		return roleAdmin
-	case "auditor", "audit", "审计员", "瀹¤鍛":
-		return roleAuditor
-	case "user", "member", "普通用户", "鏅€氱敤鎴":
-		return roleUser
-	default:
-		return roleCustom
-	}
+	return roles.Normalize(rawRole)
 }
 
 func roleMatches(role model.PlatformItem, roleKey string) bool {

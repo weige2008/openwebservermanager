@@ -22,6 +22,7 @@ import (
 	"golang.org/x/crypto/ssh"
 
 	"openwebservermanager/internal/model"
+	"openwebservermanager/internal/roles"
 	"openwebservermanager/internal/store"
 )
 
@@ -1034,10 +1035,7 @@ func splitGatewayUsernameAt(raw, separator string) (string, string, bool) {
 }
 
 func gatewayRoleIsAdmin(role string) bool {
-	value := strings.ToLower(strings.TrimSpace(role))
-	value = strings.ReplaceAll(value, "-", "_")
-	value = strings.ReplaceAll(value, " ", "_")
-	return value == "admin" || value == "administrator" || value == "super_admin" || value == "superadmin" || value == "root" || value == "owner"
+	return roles.IsAdmin(role)
 }
 
 func platformItemEnabled(item model.PlatformItem) bool {

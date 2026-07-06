@@ -209,6 +209,132 @@ func TestNativeSSHGatewayDirectAssetLogin(t *testing.T) {
 	}
 }
 
+func TestNativeSSHGatewayChineseAdminDirectAssetLoginWithoutGrant(t *testing.T) {
+	targetAddr, closeTarget := startFakeSSHServer(t, "remote", "target-secret")
+	defer closeTarget()
+
+	st := newGatewayTestStore(t)
+	if _, err := st.CreatePlatformItem("users", model.PlatformItemRequest{
+		Name:     "chinese-admin",
+		Type:     "local",
+		Status:   "enabled",
+		Password: "password123",
+		Metadata: map[string]any{"role": "超级管理员"},
+	}); err != nil {
+		t.Fatalf("create chinese admin: %v", err)
+	}
+	if _, err := st.CreatePlatformItem("users", model.PlatformItemRequest{
+		Name:     "chinese-auditor",
+		Type:     "local",
+		Status:   "enabled",
+		Password: "password123",
+		Metadata: map[string]any{"role": "审计员"},
+	}); err != nil {
+		t.Fatalf("create chinese auditor: %v", err)
+	}
+	host, portText, err := net.SplitHostPort(targetAddr)
+	if err != nil {
+		t.Fatalf("split target addr: %v", err)
+	}
+	port := mustAtoi(t, portText)
+	assetRec, err := st.CreatePlatformItem("assets", model.PlatformItemRequest{
+		Name:     "ungranted-ssh",
+		Status:   "enabled",
+		Protocol: model.ProtocolSSH,
+		Host:     host,
+		Port:     port,
+	})
+	if err != nil {
+		t.Fatalf("create asset: %v", err)
+	}
+	if _, err := st.CreatePlatformItem("credentials", model.PlatformItemRequest{
+		Name:     "remote-password",
+		Type:     string(model.CredentialSSHPassword),
+		Status:   "encrypted",
+		Username: "remote",
+		Password: "target-secret",
+		TargetID: assetRec.ID,
+	}); err != nil {
+		t.Fatalf("create credential: %v", err)
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	gatewayDataDir := mustTempDir(t)
+	defer removeTempDir(gatewayDataDir)
+	gateway, err := StartGateway(ctx, GatewayConfig{
+		Enabled:        true,
+		Address:        "127.0.0.1:0",
+		DataDir:        gatewayDataDir,
+		KnownHostsPath: filepath.Join(gatewayDataDir, "known_hosts"),
+		Store:          st,
+	})
+	if err != nil {
+		t.Fatalf("start gateway: %v", err)
+	}
+	defer gateway.Close()
+
+	adminClient, err := ssh.Dial("tcp", gateway.Address(), &ssh.ClientConfig{
+		User:            "chinese-admin#" + assetRec.Name,
+		Auth:            []ssh.AuthMethod{ssh.Password("password123")},
+		HostKeyCallback: ssh.InsecureIgnoreHostKey(),
+		Timeout:         5 * time.Second,
+	})
+	if err != nil {
+		t.Fatalf("dial gateway as chinese admin: %v", err)
+	}
+	defer adminClient.Close()
+	adminSession, err := adminClient.NewSession()
+	if err != nil {
+		t.Fatalf("new admin gateway session: %v", err)
+	}
+	defer adminSession.Close()
+	adminStdout, err := adminSession.StdoutPipe()
+	if err != nil {
+		t.Fatalf("admin stdout pipe: %v", err)
+	}
+	if err := adminSession.RequestPty("xterm-256color", 24, 80, ssh.TerminalModes{ssh.ECHO: 1}); err != nil {
+		t.Fatalf("request admin pty: %v", err)
+	}
+	if err := adminSession.Shell(); err != nil {
+		t.Fatalf("start admin gateway shell: %v", err)
+	}
+	adminOutput := readUntilContains(t, adminStdout, "target-shell", 5*time.Second)
+	if !strings.Contains(adminOutput, "Connecting to "+assetRec.Name) || !strings.Contains(adminOutput, "target-shell") {
+		t.Fatalf("chinese admin did not reach ungranted target: %q", adminOutput)
+	}
+
+	auditorClient, err := ssh.Dial("tcp", gateway.Address(), &ssh.ClientConfig{
+		User:            "chinese-auditor#" + assetRec.Name,
+		Auth:            []ssh.AuthMethod{ssh.Password("password123")},
+		HostKeyCallback: ssh.InsecureIgnoreHostKey(),
+		Timeout:         5 * time.Second,
+	})
+	if err != nil {
+		t.Fatalf("dial gateway as chinese auditor: %v", err)
+	}
+	defer auditorClient.Close()
+	auditorSession, err := auditorClient.NewSession()
+	if err != nil {
+		t.Fatalf("new auditor gateway session: %v", err)
+	}
+	defer auditorSession.Close()
+	auditorStdout, err := auditorSession.StdoutPipe()
+	if err != nil {
+		t.Fatalf("auditor stdout pipe: %v", err)
+	}
+	if err := auditorSession.RequestPty("xterm-256color", 24, 80, ssh.TerminalModes{ssh.ECHO: 1}); err != nil {
+		t.Fatalf("request auditor pty: %v", err)
+	}
+	if err := auditorSession.Shell(); err != nil {
+		t.Fatalf("start auditor gateway shell: %v", err)
+	}
+	auditorOutput := readUntilContains(t, auditorStdout, "No authorized SSH assets.", 5*time.Second)
+	if strings.Contains(auditorOutput, "target-shell") || strings.Contains(auditorOutput, assetRec.Name) {
+		t.Fatalf("chinese auditor was treated as an admin: %q", auditorOutput)
+	}
+}
+
 func TestNativeSSHGatewayDirectTCPIPForwarding(t *testing.T) {
 	echoAddr, closeEcho := startTCPEchoServer(t)
 	defer closeEcho()

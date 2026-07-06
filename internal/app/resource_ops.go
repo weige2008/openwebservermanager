@@ -625,6 +625,10 @@ func (s *Server) handleStorageFiles(w http.ResponseWriter, r *http.Request, stor
 		writeError(w, http.StatusNotFound, "storage not found")
 		return
 	}
+	if !platformItemEnabled(storage) {
+		writeError(w, http.StatusNotFound, "storage not found")
+		return
+	}
 	root := filepath.Join(s.cfg.DataDir, "drives", storageID)
 	if err := os.MkdirAll(root, 0o770); err != nil {
 		writeError(w, http.StatusInternalServerError, err.Error())

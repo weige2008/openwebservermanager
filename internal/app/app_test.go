@@ -6003,6 +6003,42 @@ func TestStorageQuotaEnforcedAndUsageUpdated(t *testing.T) {
 	}
 }
 
+func TestStorageFileOperationsRejectDisabledStorage(t *testing.T) {
+	handler, adminCookie := newTestHandler(t)
+
+	storageRec := assertStatus(t, handler, http.MethodPost, "/api/admin/storages", map[string]any{
+		"name":   "disabled-drive",
+		"type":   "local",
+		"status": "enabled",
+	}, adminCookie, http.StatusCreated)
+	var storage model.PlatformItem
+	decodeResponse(t, storageRec, &storage)
+
+	assertStatus(t, handler, http.MethodPost, "/api/admin/storages/"+storage.ID+"/files-write", map[string]any{
+		"path":    "docs/keep.txt",
+		"content": "keep",
+	}, adminCookie, http.StatusCreated)
+	assertStatus(t, handler, http.MethodPatch, "/api/admin/storages/"+storage.ID, map[string]any{
+		"status": "disabled",
+	}, adminCookie, http.StatusOK)
+
+	assertStatus(t, handler, http.MethodGet, "/api/admin/storages/"+storage.ID+"/files", nil, adminCookie, http.StatusNotFound)
+	assertStatus(t, handler, http.MethodGet, "/api/admin/storages/"+storage.ID+"/files-download?path=docs/keep.txt", nil, adminCookie, http.StatusNotFound)
+	assertStatus(t, handler, http.MethodPost, "/api/admin/storages/"+storage.ID+"/files-write", map[string]any{
+		"path":    "docs/blocked.txt",
+		"content": "blocked",
+	}, adminCookie, http.StatusNotFound)
+	assertStatus(t, handler, http.MethodDelete, "/api/admin/storages/"+storage.ID+"/files?path=docs/keep.txt", nil, adminCookie, http.StatusNotFound)
+
+	assertStatus(t, handler, http.MethodPatch, "/api/admin/storages/"+storage.ID, map[string]any{
+		"status": "enabled",
+	}, adminCookie, http.StatusOK)
+	downloadRec := assertStatus(t, handler, http.MethodGet, "/api/admin/storages/"+storage.ID+"/files-download?path=docs/keep.txt", nil, adminCookie, http.StatusOK)
+	if strings.TrimSpace(downloadRec.Body.String()) != "keep" {
+		t.Fatalf("storage content after re-enable = %q, want keep", downloadRec.Body.String())
+	}
+}
+
 func TestStorageAuthorizationStrategySubjectAndPathScope(t *testing.T) {
 	handler, adminCookie := newTestHandler(t)
 

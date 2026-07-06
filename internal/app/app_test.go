@@ -4118,6 +4118,7 @@ func TestOIDCUserInfoRejectsDisabledClientAndUser(t *testing.T) {
 
 func TestExternalOIDCLoginCreatesUserAndSession(t *testing.T) {
 	handler, adminCookie := newTestHandler(t)
+	srv := handler.(*Server)
 	var authorizeState string
 	var authorizeNonce string
 	var tokenEndpointCalls int
@@ -4166,7 +4167,7 @@ func TestExternalOIDCLoginCreatesUserAndSession(t *testing.T) {
 	}))
 	defer provider.Close()
 
-	assertStatus(t, handler, http.MethodPost, "/api/admin/system-settings", map[string]any{
+	settingRec := assertStatus(t, handler, http.MethodPost, "/api/admin/system-settings", map[string]any{
 		"name":   "External OIDC",
 		"type":   "identity",
 		"status": "enabled",
@@ -4193,6 +4194,8 @@ func TestExternalOIDCLoginCreatesUserAndSession(t *testing.T) {
 			},
 		},
 	}, adminCookie, http.StatusCreated)
+	var setting model.PlatformItem
+	decodeResponse(t, settingRec, &setting)
 	systemSettingsRec := assertStatus(t, handler, http.MethodGet, "/api/admin/system-settings", nil, adminCookie, http.StatusOK)
 	for _, leaked := range []string{"openweb-secret", "disabled-secret", "oidc_client_secret_encrypted", "client_secret_encrypted"} {
 		if strings.Contains(systemSettingsRec.Body.String(), leaked) {
@@ -4257,6 +4260,43 @@ func TestExternalOIDCLoginCreatesUserAndSession(t *testing.T) {
 	loginLogsRec := assertStatus(t, handler, http.MethodGet, "/api/admin/audit/login-logs", nil, adminCookie, http.StatusOK)
 	if !strings.Contains(loginLogsRec.Body.String(), `"type":"oidc"`) || !strings.Contains(loginLogsRec.Body.String(), "fake-sso") {
 		t.Fatalf("oidc login log missing: %s", loginLogsRec.Body.String())
+	}
+
+	assertStatus(t, handler, http.MethodPatch, "/api/admin/system-settings/"+setting.ID, map[string]any{
+		"metadata": map[string]any{
+			"oidc_login_enabled":          true,
+			"oidc_provider_id":            "fake-sso",
+			"oidc_provider_name":          "Fake SSO",
+			"oidc_authorization_endpoint": provider.URL + "/authorize",
+			"oidc_token_endpoint":         provider.URL + "/token",
+			"oidc_userinfo_endpoint":      provider.URL + "/userinfo",
+			"oidc_client_id":              "openweb-client",
+			"oidc_client_secret_clear":    true,
+			"oidc_scopes":                 []string{"openid", "profile", "email"},
+			"oidc_role":                   "user",
+		},
+	}, adminCookie, http.StatusOK)
+	rawSetting, ok, err := srv.cfg.Store.GetPlatformItem("system_settings", setting.ID)
+	if err != nil || !ok {
+		t.Fatalf("get raw oidc setting after clear ok=%v err=%v", ok, err)
+	}
+	for _, key := range []string{"oidc_client_secret_encrypted", "oidc_client_secret_set", "oidc_client_secret_updated_at", "oidc_client_secret_clear"} {
+		if _, exists := rawSetting.Metadata[key]; exists {
+			t.Fatalf("cleared oidc setting still has %s in raw metadata: %#v", key, rawSetting.Metadata)
+		}
+	}
+	clearedProviders, err := srv.externalOIDCProvidersFromMetadata(rawSetting.Metadata)
+	if err != nil {
+		t.Fatalf("parse cleared oidc providers: %v", err)
+	}
+	if len(clearedProviders) != 1 || clearedProviders[0].ClientSecret != "" {
+		t.Fatalf("cleared oidc provider should keep config without old secret: %#v", clearedProviders)
+	}
+	clearedSettingsRec := assertStatus(t, handler, http.MethodGet, "/api/admin/system-settings", nil, adminCookie, http.StatusOK)
+	for _, leaked := range []string{"openweb-secret", "oidc_client_secret_encrypted", "oidc_client_secret_clear"} {
+		if strings.Contains(clearedSettingsRec.Body.String(), leaked) {
+			t.Fatalf("cleared oidc settings leaked sensitive value %q: %s", leaked, clearedSettingsRec.Body.String())
+		}
 	}
 }
 
@@ -4828,6 +4868,48 @@ func TestLDAPIntegrationTestLogin(t *testing.T) {
 	if fakeLDAP.calls != 2 {
 		t.Fatalf("ldap authenticator calls after failed probe = %d, want 2", fakeLDAP.calls)
 	}
+	assertStatus(t, handler, http.MethodPatch, "/api/admin/system-settings/"+setting.ID, map[string]any{
+		"metadata": map[string]any{
+			"ldap_enabled":                true,
+			"ldap_provider_id":            "corp-ldap",
+			"ldap_provider_name":          "Corp LDAP",
+			"ldap_url":                    "ldap://directory.example.test:389",
+			"ldap_bind_dn":                "cn=reader,dc=example,dc=test",
+			"ldap_bind_password_clear":    true,
+			"ldap_base_dn":                "ou=people,dc=example,dc=test",
+			"ldap_user_filter":            "(uid={username})",
+			"ldap_username_attribute":     "uid",
+			"ldap_display_name_attribute": "cn",
+			"ldap_email_attribute":        "mail",
+			"ldap_role":                   "user",
+			"ldap_auto_create":            true,
+		},
+	}, adminCookie, http.StatusOK)
+	rawSetting, ok, err := srv.cfg.Store.GetPlatformItem("system_settings", setting.ID)
+	if err != nil || !ok {
+		t.Fatalf("get raw ldap setting after clear ok=%v err=%v", ok, err)
+	}
+	for _, key := range []string{"ldap_bind_password_encrypted", "ldap_bind_password_set", "ldap_bind_password_updated_at", "ldap_bind_password_clear"} {
+		if _, exists := rawSetting.Metadata[key]; exists {
+			t.Fatalf("cleared ldap setting still has %s in raw metadata: %#v", key, rawSetting.Metadata)
+		}
+	}
+	clearedRec := assertStatus(t, handler, http.MethodPost, "/api/admin/system-settings/ldap/test", map[string]any{
+		"setting_id": setting.ID,
+		"username":   "ldap-probe",
+		"password":   "directory-password",
+	}, adminCookie, http.StatusBadGateway)
+	if fakeLDAP.calls != 3 {
+		t.Fatalf("ldap authenticator calls after cleared password probe = %d, want 3", fakeLDAP.calls)
+	}
+	if fakeLDAP.lastProvider.BindPassword != "" {
+		t.Fatalf("cleared ldap provider kept old bind password: %#v", fakeLDAP.lastProvider)
+	}
+	for _, leaked := range []string{"directory-secret", "ldap_bind_password_encrypted", "ldap_bind_password_clear"} {
+		if strings.Contains(clearedRec.Body.String(), leaked) {
+			t.Fatalf("cleared ldap test leaked sensitive value %q: %s", leaked, clearedRec.Body.String())
+		}
+	}
 	logsRec := assertStatus(t, handler, http.MethodGet, "/api/admin/audit/operation-logs", nil, adminCookie, http.StatusOK)
 	if !strings.Contains(logsRec.Body.String(), "system_settings.ldap_test") || !strings.Contains(logsRec.Body.String(), "system_settings.ldap_test.failed") {
 		t.Fatalf("ldap test operation logs missing success or failure entries: %s", logsRec.Body.String())
@@ -4840,7 +4922,7 @@ func TestLDAPIntegrationTestLogin(t *testing.T) {
 		"username":   "ldap-probe",
 		"password":   "directory-password",
 	}, adminCookie, http.StatusNotFound)
-	if fakeLDAP.calls != 2 {
+	if fakeLDAP.calls != 3 {
 		t.Fatalf("disabled ldap setting should not call authenticator, calls=%d", fakeLDAP.calls)
 	}
 }
@@ -4969,6 +5051,38 @@ func TestWeComIntegrationTokenTest(t *testing.T) {
 	usersRec := assertStatus(t, handler, http.MethodGet, "/api/admin/users", nil, adminCookie, http.StatusOK)
 	if strings.Contains(usersRec.Body.String(), `"type":"wecom"`) {
 		t.Fatalf("wecom token test unexpectedly created a user: %s", usersRec.Body.String())
+	}
+	assertStatus(t, handler, http.MethodPatch, "/api/admin/system-settings/"+setting.ID, map[string]any{
+		"metadata": map[string]any{
+			"wecom_enabled":            true,
+			"wecom_provider_id":        "corp-wecom",
+			"wecom_provider_name":      "Corp WeCom",
+			"wecom_corp_id":            "ww-openweb",
+			"wecom_agent_id":           "100001",
+			"wecom_agent_secret_clear": true,
+			"wecom_token_endpoint":     provider.URL + "/gettoken",
+			"wecom_userinfo_endpoint":  provider.URL + "/getuserinfo",
+		},
+	}, adminCookie, http.StatusOK)
+	rawSetting, ok, err := handler.(*Server).cfg.Store.GetPlatformItem("system_settings", setting.ID)
+	if err != nil || !ok {
+		t.Fatalf("get raw wecom setting after clear ok=%v err=%v", ok, err)
+	}
+	for _, key := range []string{"wecom_agent_secret_encrypted", "wecom_agent_secret_set", "wecom_agent_secret_updated_at", "wecom_agent_secret_clear"} {
+		if _, exists := rawSetting.Metadata[key]; exists {
+			t.Fatalf("cleared wecom setting still has %s in raw metadata: %#v", key, rawSetting.Metadata)
+		}
+	}
+	clearedRec := assertStatus(t, handler, http.MethodPost, "/api/admin/system-settings/wecom/test", map[string]any{
+		"setting_id": setting.ID,
+	}, adminCookie, http.StatusBadRequest)
+	if tokenCalls != 1 {
+		t.Fatalf("cleared wecom setting should not call token endpoint, calls=%d", tokenCalls)
+	}
+	for _, leaked := range []string{"wecom-secret", "wecom_agent_secret_encrypted", "wecom_agent_secret_clear"} {
+		if strings.Contains(clearedRec.Body.String(), leaked) {
+			t.Fatalf("cleared wecom test leaked sensitive value %q: %s", leaked, clearedRec.Body.String())
+		}
 	}
 	assertStatus(t, handler, http.MethodPatch, "/api/admin/system-settings/"+setting.ID, map[string]any{
 		"status": "disabled",

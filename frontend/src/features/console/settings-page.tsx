@@ -94,6 +94,7 @@ interface OIDCSettingsState {
   clientID: string
   clientSecret: string
   clientSecretSet: boolean
+  clientSecretClear: boolean
   scopes: string
   role: string
   autoCreate: boolean
@@ -107,6 +108,7 @@ interface LDAPSettingsState {
   bindDN: string
   bindPassword: string
   bindPasswordSet: boolean
+  bindPasswordClear: boolean
   baseDN: string
   userFilter: string
   usernameAttribute: string
@@ -124,6 +126,7 @@ interface WeComSettingsState {
   agentID: string
   agentSecret: string
   agentSecretSet: boolean
+  agentSecretClear: boolean
   role: string
   autoCreate: boolean
   setting?: PlatformItem
@@ -600,24 +603,31 @@ export function SettingsPage() {
         oidc_auto_create: oidcSettings.autoCreate,
       }
       if (oidcSettings.clientSecret.trim()) metadata.oidc_client_secret = oidcSettings.clientSecret.trim()
+      else if (oidcSettings.clientSecretClear) metadata.oidc_client_secret_clear = true
       const payload = {
         name: target?.name || 'External OIDC identity',
         type: 'identity',
         status: 'enabled',
         metadata,
       }
+      let saved: PlatformItem
       if (target?.id) {
-        await apiRequest<PlatformItem>(`/api/admin/system-settings/${target.id}`, {
+        saved = await apiRequest<PlatformItem>(`/api/admin/system-settings/${target.id}`, {
           method: 'PATCH',
           body: JSON.stringify(payload),
         })
       } else {
-        await apiRequest<PlatformItem>('/api/admin/system-settings', {
+        saved = await apiRequest<PlatformItem>('/api/admin/system-settings', {
           method: 'POST',
           body: JSON.stringify(payload),
         })
       }
-      patchOIDC({ clientSecret: '' })
+      patchOIDC({
+        clientSecret: '',
+        clientSecretSet: Boolean(saved.metadata?.oidc_client_secret_set),
+        clientSecretClear: false,
+        setting: saved,
+      })
       await app.refresh(true)
       await loadLoginSecurity()
       app.showToast(t('saved'))
@@ -663,24 +673,31 @@ export function SettingsPage() {
         ldap_auto_create: ldapSettings.autoCreate,
       }
       if (ldapSettings.bindPassword.trim()) metadata.ldap_bind_password = ldapSettings.bindPassword.trim()
+      else if (ldapSettings.bindPasswordClear) metadata.ldap_bind_password_clear = true
       const payload = {
         name: target?.name || 'LDAP identity',
         type: 'identity',
         status: 'enabled',
         metadata,
       }
+      let saved: PlatformItem
       if (target?.id) {
-        await apiRequest<PlatformItem>(`/api/admin/system-settings/${target.id}`, {
+        saved = await apiRequest<PlatformItem>(`/api/admin/system-settings/${target.id}`, {
           method: 'PATCH',
           body: JSON.stringify(payload),
         })
       } else {
-        await apiRequest<PlatformItem>('/api/admin/system-settings', {
+        saved = await apiRequest<PlatformItem>('/api/admin/system-settings', {
           method: 'POST',
           body: JSON.stringify(payload),
         })
       }
-      patchLDAP({ bindPassword: '' })
+      patchLDAP({
+        bindPassword: '',
+        bindPasswordSet: Boolean(saved.metadata?.ldap_bind_password_set),
+        bindPasswordClear: false,
+        setting: saved,
+      })
       await app.refresh(true)
       await loadLoginSecurity()
       app.showToast(t('saved'))
@@ -726,24 +743,31 @@ export function SettingsPage() {
         wecom_auto_create: wecomSettings.autoCreate,
       }
       if (wecomSettings.agentSecret.trim()) metadata.wecom_agent_secret = wecomSettings.agentSecret.trim()
+      else if (wecomSettings.agentSecretClear) metadata.wecom_agent_secret_clear = true
       const payload = {
         name: target?.name || 'Enterprise WeChat identity',
         type: 'identity',
         status: 'enabled',
         metadata,
       }
+      let saved: PlatformItem
       if (target?.id) {
-        await apiRequest<PlatformItem>(`/api/admin/system-settings/${target.id}`, {
+        saved = await apiRequest<PlatformItem>(`/api/admin/system-settings/${target.id}`, {
           method: 'PATCH',
           body: JSON.stringify(payload),
         })
       } else {
-        await apiRequest<PlatformItem>('/api/admin/system-settings', {
+        saved = await apiRequest<PlatformItem>('/api/admin/system-settings', {
           method: 'POST',
           body: JSON.stringify(payload),
         })
       }
-      patchWeCom({ agentSecret: '' })
+      patchWeCom({
+        agentSecret: '',
+        agentSecretSet: Boolean(saved.metadata?.wecom_agent_secret_set),
+        agentSecretClear: false,
+        setting: saved,
+      })
       await app.refresh(true)
       await loadLoginSecurity()
       app.showToast(t('saved'))
@@ -942,7 +966,7 @@ export function SettingsPage() {
               <Input value={oidcSettings.clientID} onChange={(event) => patchOIDC({ clientID: event.currentTarget.value })} placeholder='openweb-client' />
             </Field>
             <Field label={t('settingsPage.oidcClientSecret', { defaultValue: 'Client secret' })}>
-              <Input type='password' value={oidcSettings.clientSecret} onChange={(event) => patchOIDC({ clientSecret: event.currentTarget.value })} placeholder={oidcSettings.clientSecretSet ? 'Leave blank to keep current secret' : ''} autoComplete='new-password' />
+              <Input type='password' value={oidcSettings.clientSecret} onChange={(event) => patchOIDC({ clientSecret: event.currentTarget.value, clientSecretClear: false })} placeholder={oidcSettings.clientSecretSet ? 'Leave blank to keep current secret' : ''} autoComplete='new-password' />
             </Field>
             <Field label={t('settingsPage.oidcScopes', { defaultValue: 'Scopes' })}>
               <Input value={oidcSettings.scopes} onChange={(event) => patchOIDC({ scopes: event.currentTarget.value })} placeholder='openid profile email' />
@@ -973,6 +997,17 @@ export function SettingsPage() {
             />
             <span>{t('settingsPage.oidcAutoCreate', { defaultValue: 'Create OIDC users on first successful login' })}</span>
           </label>
+          {oidcSettings.clientSecretSet && (
+            <label className='flex items-center gap-2 rounded-lg border border-border bg-background/70 px-3 py-2 text-sm'>
+              <input
+                type='checkbox'
+                className='size-4 accent-primary'
+                checked={oidcSettings.clientSecretClear}
+                onChange={(event) => patchOIDC({ clientSecretClear: event.currentTarget.checked, clientSecret: event.currentTarget.checked ? '' : oidcSettings.clientSecret })}
+              />
+              <span>{t('settingsPage.clearOIDCClientSecret', { defaultValue: 'Clear saved OIDC client secret on save' })}</span>
+            </label>
+          )}
           <div className='grid gap-3 rounded-lg border border-border bg-background/70 p-3'>
             <div>
               <div className='text-sm font-medium'>{t('settingsPage.oidcTestTitle', { defaultValue: 'Test OIDC authorization endpoint' })}</div>
@@ -1419,7 +1454,7 @@ export function SettingsPage() {
               <Input value={ldapSettings.bindDN} onChange={(event) => patchLDAP({ bindDN: event.currentTarget.value })} placeholder='cn=reader,dc=example,dc=com' />
             </Field>
             <Field label={t('password')}>
-              <Input type='password' value={ldapSettings.bindPassword} onChange={(event) => patchLDAP({ bindPassword: event.currentTarget.value })} placeholder={ldapSettings.bindPasswordSet ? 'Leave blank to keep current password' : ''} autoComplete='new-password' />
+              <Input type='password' value={ldapSettings.bindPassword} onChange={(event) => patchLDAP({ bindPassword: event.currentTarget.value, bindPasswordClear: false })} placeholder={ldapSettings.bindPasswordSet ? 'Leave blank to keep current password' : ''} autoComplete='new-password' />
             </Field>
             <Field label={t('settingsPage.ldapBaseDN', { defaultValue: 'Base DN' })}>
               <Input value={ldapSettings.baseDN} onChange={(event) => patchLDAP({ baseDN: event.currentTarget.value })} placeholder='ou=people,dc=example,dc=com' />
@@ -1453,6 +1488,17 @@ export function SettingsPage() {
             />
             <span>{t('settingsPage.ldapAutoCreate', { defaultValue: 'Create LDAP users on first successful login' })}</span>
           </label>
+          {ldapSettings.bindPasswordSet && (
+            <label className='flex items-center gap-2 rounded-lg border border-border bg-background/70 px-3 py-2 text-sm'>
+              <input
+                type='checkbox'
+                className='size-4 accent-primary'
+                checked={ldapSettings.bindPasswordClear}
+                onChange={(event) => patchLDAP({ bindPasswordClear: event.currentTarget.checked, bindPassword: event.currentTarget.checked ? '' : ldapSettings.bindPassword })}
+              />
+              <span>{t('settingsPage.clearLDAPBindPassword', { defaultValue: 'Clear saved LDAP bind password on save' })}</span>
+            </label>
+          )}
           <div className='grid gap-3 rounded-lg border border-border bg-background/70 p-3'>
             <div>
               <div className='text-sm font-medium'>{t('settingsPage.ldapTestTitle', { defaultValue: 'Test LDAP login' })}</div>
@@ -1525,7 +1571,7 @@ export function SettingsPage() {
               <Input value={wecomSettings.agentID} onChange={(event) => patchWeCom({ agentID: event.currentTarget.value })} placeholder='1000002' />
             </Field>
             <Field label={t('settingsPage.wecomAgentSecret', { defaultValue: 'Agent secret' })}>
-              <Input type='password' value={wecomSettings.agentSecret} onChange={(event) => patchWeCom({ agentSecret: event.currentTarget.value })} placeholder={wecomSettings.agentSecretSet ? 'Leave blank to keep current secret' : ''} autoComplete='new-password' />
+              <Input type='password' value={wecomSettings.agentSecret} onChange={(event) => patchWeCom({ agentSecret: event.currentTarget.value, agentSecretClear: false })} placeholder={wecomSettings.agentSecretSet ? 'Leave blank to keep current secret' : ''} autoComplete='new-password' />
             </Field>
             <Field label={t('settingsPage.defaultRole', { defaultValue: 'Default role' })}>
               <Select value={wecomSettings.role} onChange={(event) => patchWeCom({ role: event.currentTarget.value })}>
@@ -1544,6 +1590,17 @@ export function SettingsPage() {
             />
             <span>{t('settingsPage.wecomAutoCreate', { defaultValue: 'Create Enterprise WeChat users on first successful login' })}</span>
           </label>
+          {wecomSettings.agentSecretSet && (
+            <label className='flex items-center gap-2 rounded-lg border border-border bg-background/70 px-3 py-2 text-sm'>
+              <input
+                type='checkbox'
+                className='size-4 accent-primary'
+                checked={wecomSettings.agentSecretClear}
+                onChange={(event) => patchWeCom({ agentSecretClear: event.currentTarget.checked, agentSecret: event.currentTarget.checked ? '' : wecomSettings.agentSecret })}
+              />
+              <span>{t('settingsPage.clearWeComAgentSecret', { defaultValue: 'Clear saved Enterprise WeChat agent secret on save' })}</span>
+            </label>
+          )}
           <div className='grid gap-3 rounded-lg border border-border bg-background/70 p-3'>
             <div>
               <div className='text-sm font-medium'>{t('settingsPage.wecomTestTitle', { defaultValue: 'Test Enterprise WeChat token' })}</div>
@@ -1852,6 +1909,7 @@ function defaultOIDCSettings(): OIDCSettingsState {
     clientID: '',
     clientSecret: '',
     clientSecretSet: false,
+    clientSecretClear: false,
     scopes: 'openid profile email',
     role: 'user',
     autoCreate: true,
@@ -1866,6 +1924,7 @@ function defaultLDAPSettings(): LDAPSettingsState {
     bindDN: '',
     bindPassword: '',
     bindPasswordSet: false,
+    bindPasswordClear: false,
     baseDN: '',
     userFilter: '(uid={username})',
     usernameAttribute: 'uid',
@@ -1884,6 +1943,7 @@ function defaultWeComSettings(): WeComSettingsState {
     agentID: '',
     agentSecret: '',
     agentSecretSet: false,
+    agentSecretClear: false,
     role: 'user',
     autoCreate: true,
   }
@@ -1906,6 +1966,7 @@ function oidcSettingsFromSettings(items: PlatformItem[]): OIDCSettingsState {
     clientID: metadataText(metadata.oidc_client_id) || metadataText(metadata.client_id) || '',
     clientSecret: '',
     clientSecretSet: metadataBoolValue(metadata.oidc_client_secret_set) === true,
+    clientSecretClear: false,
     scopes: metadataListText(metadata.oidc_scopes) || metadataText(metadata.scope) || metadataText(metadata.scopes) || 'openid profile email',
     role: metadataText(metadata.oidc_role) || metadataText(metadata.role) || 'user',
     autoCreate: metadata.oidc_auto_create === undefined ? true : metadataBoolValue(metadata.oidc_auto_create) === true,
@@ -1928,6 +1989,7 @@ function ldapSettingsFromSettings(items: PlatformItem[]): LDAPSettingsState {
     bindDN: metadataText(metadata.ldap_bind_dn) || metadataText(metadata.bind_dn) || '',
     bindPassword: '',
     bindPasswordSet: metadataBoolValue(metadata.ldap_bind_password_set) === true,
+    bindPasswordClear: false,
     baseDN: metadataText(metadata.ldap_base_dn) || metadataText(metadata.base_dn) || '',
     userFilter: metadataText(metadata.ldap_user_filter) || metadataText(metadata.user_filter) || '(uid={username})',
     usernameAttribute: metadataText(metadata.ldap_username_attribute) || metadataText(metadata.username_attribute) || 'uid',
@@ -1954,6 +2016,7 @@ function wecomSettingsFromSettings(items: PlatformItem[]): WeComSettingsState {
     agentID: metadataText(metadata.wecom_agent_id) || metadataText(metadata.enterprise_wechat_agent_id) || metadataText(metadata.agent_id) || '',
     agentSecret: '',
     agentSecretSet: metadataBoolValue(metadata.wecom_agent_secret_set) === true,
+    agentSecretClear: false,
     role: metadataText(metadata.wecom_role) || metadataText(metadata.role) || 'user',
     autoCreate: metadata.wecom_auto_create === undefined ? true : metadataBoolValue(metadata.wecom_auto_create) === true,
     setting,

@@ -7819,17 +7819,24 @@ func TestDesktopSessionDriveFiles(t *testing.T) {
 		t.Fatalf("write drive delete file: %v", err)
 	}
 
+	assertMultipartStatus(t, handler, "/api/connections/"+session.ID+"/drive/upload", map[string]string{"path": "../secret"}, "escape.txt", []byte("escape"), adminCookie, http.StatusForbidden)
+	assertMultipartStatus(t, handler, "/api/connections/"+session.ID+"/drive/upload", map[string]string{"path": "reports"}, "uploaded.bin", []byte{4, 5, 6}, adminCookie, http.StatusCreated)
+
 	rootList := assertStatus(t, handler, http.MethodGet, "/api/connections/"+session.ID+"/drive", nil, adminCookie, http.StatusOK)
 	if !strings.Contains(rootList.Body.String(), `"name":"reports"`) {
 		t.Fatalf("drive root did not list reports directory: %s", rootList.Body.String())
 	}
 	reportsList := assertStatus(t, handler, http.MethodGet, "/api/connections/"+session.ID+"/drive?path=reports", nil, adminCookie, http.StatusOK)
-	if !strings.Contains(reportsList.Body.String(), `"name":"download.txt"`) || !strings.Contains(reportsList.Body.String(), `"name":"remove.txt"`) {
+	if !strings.Contains(reportsList.Body.String(), `"name":"download.txt"`) || !strings.Contains(reportsList.Body.String(), `"name":"remove.txt"`) || !strings.Contains(reportsList.Body.String(), `"name":"uploaded.bin"`) {
 		t.Fatalf("drive reports did not list files: %s", reportsList.Body.String())
 	}
 	downloadRec := assertStatus(t, handler, http.MethodGet, "/api/connections/"+session.ID+"/drive/download?path=reports/download.txt", nil, adminCookie, http.StatusOK)
 	if strings.TrimSpace(downloadRec.Body.String()) != "desktop file" {
 		t.Fatalf("drive download body = %q", downloadRec.Body.String())
+	}
+	uploadDownloadRec := assertStatus(t, handler, http.MethodGet, "/api/connections/"+session.ID+"/drive/download?path=reports/uploaded.bin", nil, adminCookie, http.StatusOK)
+	if !bytes.Equal(uploadDownloadRec.Body.Bytes(), []byte{4, 5, 6}) {
+		t.Fatalf("drive uploaded download body = %v", uploadDownloadRec.Body.Bytes())
 	}
 	assertStatus(t, handler, http.MethodGet, "/api/connections/"+session.ID+"/drive/download?path=../secret.txt", nil, adminCookie, http.StatusForbidden)
 	assertStatus(t, handler, http.MethodDelete, "/api/connections/"+session.ID+"/drive?path=reports/remove.txt", nil, adminCookie, http.StatusOK)
@@ -7855,9 +7862,10 @@ func TestDesktopSessionDriveFiles(t *testing.T) {
 		t.Fatalf("disable file transfer: %v", err)
 	}
 	assertStatus(t, handler, http.MethodGet, "/api/connections/"+session.ID+"/drive", nil, adminCookie, http.StatusForbidden)
+	assertMultipartStatus(t, handler, "/api/connections/"+session.ID+"/drive/upload", map[string]string{"path": "reports"}, "blocked.txt", []byte("blocked"), adminCookie, http.StatusForbidden)
 
 	fileLogs := assertStatus(t, handler, http.MethodGet, "/api/admin/audit/file-logs", nil, adminCookie, http.StatusOK)
-	for _, want := range []string{session.ID, "download", "delete"} {
+	for _, want := range []string{session.ID, "upload", "download", "delete"} {
 		if !strings.Contains(fileLogs.Body.String(), want) {
 			t.Fatalf("drive file log missing %q: %s", want, fileLogs.Body.String())
 		}

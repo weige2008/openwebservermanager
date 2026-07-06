@@ -605,6 +605,8 @@ const en = {
     downloadFile: 'Download',
     deleteFile: 'Delete',
     fileDeleted: 'File deleted.',
+    fileUploaded: 'File uploaded.',
+    uploadSessionFile: 'Upload here',
     fileListFailed: 'Unable to load session files.',
     pathLabel: 'Path',
     modifiedLabel: 'Modified',

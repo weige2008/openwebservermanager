@@ -75,6 +75,8 @@ export function WorkspaceView() {
       downloadFile: t('workspace.downloadFile', { defaultValue: 'Download' }),
       deleteFile: t('workspace.deleteFile', { defaultValue: 'Delete' }),
       fileDeleted: t('workspace.fileDeleted', { defaultValue: 'File deleted.' }),
+      fileUploaded: t('workspace.fileUploaded', { defaultValue: 'File uploaded.' }),
+      uploadSessionFile: t('workspace.uploadSessionFile', { defaultValue: 'Upload here' }),
       fileListFailed: t('workspace.fileListFailed', { defaultValue: 'Unable to load session files.' }),
       pathLabel: t('workspace.pathLabel', { defaultValue: 'Path' }),
       modifiedLabel: t('workspace.modifiedLabel', { defaultValue: 'Modified' }),
@@ -336,6 +338,8 @@ function RDPWorkspace({
     downloadFile: string
     deleteFile: string
     fileDeleted: string
+    fileUploaded: string
+    uploadSessionFile: string
     fileListFailed: string
     pathLabel: string
     modifiedLabel: string
@@ -352,6 +356,7 @@ function RDPWorkspace({
   const [remoteClipboardUpdatedAt, setRemoteClipboardUpdatedAt] = useState('')
   const [driveDialogOpen, setDriveDialogOpen] = useState(false)
   const [drivePath, setDrivePath] = useState('')
+  const [uploadingDriveFile, setUploadingDriveFile] = useState(false)
   const driveQuery = useQuery({
     queryKey: ['desktop-drive', session.id, drivePath],
     queryFn: () => apiRequest<DesktopDriveResponse>(`/api/connections/${session.id}/drive?path=${encodeURIComponent(drivePath)}`),
@@ -414,6 +419,24 @@ function RDPWorkspace({
     } catch (error) {
       app.handleApiError(error)
     }
+  }
+
+  const uploadDriveFile = () => {
+    const input = document.createElement('input')
+    input.type = 'file'
+    input.onchange = () => {
+      const file = input.files?.[0]
+      if (!file) return
+      setUploadingDriveFile(true)
+      void uploadDesktopDriveFile(session.id, drivePath, file)
+        .then(async () => {
+          showToast(messages.fileUploaded)
+          await driveQuery.refetch()
+        })
+        .catch(app.handleApiError)
+        .finally(() => setUploadingDriveFile(false))
+    }
+    input.click()
   }
 
   useEffect(() => {
@@ -686,6 +709,10 @@ function RDPWorkspace({
               <span className='break-all'>{driveQuery.data?.path && driveQuery.data.path !== '.' ? driveQuery.data.path : '/'}</span>
             </div>
             <div className='flex gap-2'>
+              <Button size='sm' variant='outline' onClick={uploadDriveFile} disabled={uploadingDriveFile}>
+                <Upload className='size-3.5' />
+                {messages.uploadSessionFile}
+              </Button>
               <Button size='sm' variant='outline' onClick={goParentDriveFolder} disabled={!drivePath}>
                 <ArrowUp className='size-3.5' />
                 {messages.parentFolder}
@@ -765,6 +792,22 @@ async function downloadDesktopDriveFile(sessionID: string, entry: DesktopDriveEn
   anchor.click()
   anchor.remove()
   URL.revokeObjectURL(url)
+}
+
+async function uploadDesktopDriveFile(sessionID: string, path: string, file: File) {
+  const form = new FormData()
+  form.set('path', path)
+  form.set('file', file, file.name)
+  const response = await fetch(`/api/connections/${sessionID}/drive/upload`, {
+    method: 'POST',
+    credentials: 'same-origin',
+    body: form,
+  })
+  const payload = (await response.json().catch(() => ({}))) as { error?: string }
+  if (!response.ok) {
+    throw new ApiError(payload.error || response.statusText, response.status, false, payload)
+  }
+  return payload
 }
 
 function formatBytes(value: number) {

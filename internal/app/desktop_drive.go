@@ -1,6 +1,7 @@
 package app
 
 import (
+	"io"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -40,6 +41,8 @@ func (s *Server) handleDesktopDrive(w http.ResponseWriter, r *http.Request) {
 		s.handleDesktopDriveDelete(w, r, session, root)
 	case action == "download" && r.Method == http.MethodGet:
 		s.handleDesktopDriveDownload(w, r, session, root)
+	case action == "upload" && r.Method == http.MethodPost:
+		s.handleDesktopDriveUpload(w, r, session, root)
 	default:
 		writeError(w, http.StatusMethodNotAllowed, "method not allowed")
 	}
@@ -128,6 +131,68 @@ func (s *Server) handleDesktopDriveDownload(w http.ResponseWriter, r *http.Reque
 	w.Header().Set("Content-Type", "application/octet-stream")
 	w.Header().Set("Content-Disposition", `attachment; filename="`+sanitizeAttachmentName(filepath.Base(rel))+`"`)
 	http.ServeFile(w, r, target)
+}
+
+func (s *Server) handleDesktopDriveUpload(w http.ResponseWriter, r *http.Request, session model.ConnectionSession, root string) {
+	r.Body = http.MaxBytesReader(w, r.Body, 512<<20)
+	if err := r.ParseMultipartForm(32 << 20); err != nil {
+		writeError(w, http.StatusBadRequest, "invalid multipart upload: "+err.Error())
+		return
+	}
+	file, header, err := r.FormFile("file")
+	if err != nil {
+		writeError(w, http.StatusBadRequest, "file is required")
+		return
+	}
+	defer file.Close()
+
+	fileName := strings.TrimSpace(r.FormValue("filename"))
+	if fileName == "" && header != nil {
+		fileName = header.Filename
+	}
+	fileName = filepath.Base(filepath.Clean(filepath.FromSlash(fileName)))
+	if fileName == "." || fileName == ".." || fileName == string(filepath.Separator) || fileName == "" {
+		writeError(w, http.StatusBadRequest, "filename is required")
+		return
+	}
+
+	targetPath := filepath.ToSlash(filepath.Join(r.FormValue("path"), fileName))
+	target, rel, ok := s.storagePath(w, r, root, targetPath)
+	if !ok {
+		return
+	}
+	if info, err := os.Stat(target); err == nil && info.IsDir() {
+		writeError(w, http.StatusBadRequest, "target is a directory")
+		return
+	}
+	if err := os.MkdirAll(filepath.Dir(target), 0o770); err != nil {
+		writeError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	output, err := os.OpenFile(target, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0o660)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	written, copyErr := io.Copy(output, file)
+	closeErr := output.Close()
+	if copyErr != nil {
+		_ = os.Remove(target)
+		writeError(w, http.StatusInternalServerError, copyErr.Error())
+		return
+	}
+	if closeErr != nil {
+		_ = os.Remove(target)
+		writeError(w, http.StatusInternalServerError, closeErr.Error())
+		return
+	}
+	s.recordDesktopDriveFileLog(r, session, "upload", "success", rel, map[string]any{
+		"path":     filepath.ToSlash(rel),
+		"filename": fileName,
+		"size":     written,
+	})
+	_ = s.audit(r, "connection.drive.upload", session.ID, session.Protocol, "uploaded session drive file")
+	writeJSON(w, http.StatusCreated, map[string]any{"path": filepath.ToSlash(rel), "size": written, "name": fileName})
 }
 
 func (s *Server) handleDesktopDriveDelete(w http.ResponseWriter, r *http.Request, session model.ConnectionSession, root string) {

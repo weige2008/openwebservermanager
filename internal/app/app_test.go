@@ -2043,6 +2043,10 @@ func TestWebAssetProxyRequiresAuthorizationAndLogs(t *testing.T) {
 		}
 	}))
 	defer upstream.Close()
+	upstreamURL, err := url.Parse(upstream.URL)
+	if err != nil {
+		t.Fatalf("parse upstream url: %v", err)
+	}
 
 	handler, adminCookie := newTestHandler(t)
 	userRec := assertStatus(t, handler, http.MethodPost, "/api/admin/users", map[string]any{
@@ -2109,6 +2113,52 @@ func TestWebAssetProxyRequiresAuthorizationAndLogs(t *testing.T) {
 	logsBody := logsRec.Body.String()
 	if !strings.Contains(logsBody, webAsset.ID) || !strings.Contains(logsBody, "200") || !strings.Contains(logsBody, "500") || !strings.Contains(logsBody, "/proxy/hello") || !strings.Contains(logsBody, "docs.example.test") {
 		t.Fatal("access logs did not include proxied request details")
+	}
+	var logsPayload struct {
+		Items []model.PlatformItem `json:"items"`
+	}
+	decodeResponse(t, logsRec, &logsPayload)
+	var helloLog *model.PlatformItem
+	for index := range logsPayload.Items {
+		if strings.Contains(firstMetadataString(logsPayload.Items[index].Metadata, "uri"), "/proxy/hello") {
+			helloLog = &logsPayload.Items[index]
+			break
+		}
+	}
+	if helloLog == nil {
+		t.Fatalf("access logs did not include hello request item: %s", logsBody)
+	}
+	if helloLog.OwnerID != user.ID || helloLog.TargetID != webAsset.ID || helloLog.Type != http.MethodGet || helloLog.Status != "200" {
+		t.Fatalf("access log basic fields = %#v", helloLog)
+	}
+	for key, want := range map[string]string{
+		"asset_id":      webAsset.ID,
+		"user_id":       user.ID,
+		"client_ip":     "192.0.2.1",
+		"domain":        upstreamURL.Hostname(),
+		"upstream_host": upstreamURL.Host,
+		"method":        http.MethodGet,
+		"user_agent":    "openwebservermanager-test",
+		"referer":       "https://docs.example.test/start",
+	} {
+		if got := firstMetadataString(helloLog.Metadata, key); got != want {
+			t.Fatalf("access log metadata %s = %q, want %q in %#v", key, got, want, helloLog.Metadata)
+		}
+	}
+	for key, want := range map[string]int{
+		"status_code":   http.StatusOK,
+		"response_size": len("proxied ok"),
+	} {
+		got, ok := metadataInt(helloLog.Metadata[key])
+		if !ok || got != want {
+			t.Fatalf("access log metadata %s = %v/%v, want %d in %#v", key, got, ok, want, helloLog.Metadata)
+		}
+	}
+	if _, ok := metadataInt(helloLog.Metadata["duration_ms"]); !ok {
+		t.Fatalf("access log missing duration_ms: %#v", helloLog.Metadata)
+	}
+	if requestHost := firstMetadataString(helloLog.Metadata, "request_host"); requestHost == "" {
+		t.Fatalf("access log missing request_host: %#v", helloLog.Metadata)
 	}
 	statsRec := assertStatus(t, handler, http.MethodGet, "/api/admin/audit/access-stats", nil, adminCookie, http.StatusOK)
 	statsBody := statsRec.Body.String()

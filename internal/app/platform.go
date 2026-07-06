@@ -447,8 +447,13 @@ func (s *Server) handleWebAssetProxy(w http.ResponseWriter, r *http.Request, ass
 	proxy.ServeHTTP(recorder, r)
 	duration := time.Since(started)
 	metadata := map[string]any{
+		"asset_id":      asset.ID,
 		"asset_name":    asset.Name,
+		"user_id":       userID,
 		"client_ip":     s.clientIP(r),
+		"domain":        webAssetAccessDomain(asset, target),
+		"upstream_host": target.Host,
+		"request_host":  r.Host,
 		"method":        r.Method,
 		"uri":           r.URL.RequestURI(),
 		"status_code":   recorder.status,
@@ -510,6 +515,26 @@ func (w *statusCaptureWriter) Hijack() (net.Conn, *bufio.ReadWriter, error) {
 
 func (w *statusCaptureWriter) Unwrap() http.ResponseWriter {
 	return w.ResponseWriter
+}
+
+func webAssetAccessDomain(asset model.PlatformItem, target *url.URL) string {
+	raw := firstNonEmpty(
+		firstMetadataString(asset.Metadata, "domain", "hostname", "server_name", "web_domain"),
+		asset.Host,
+	)
+	if parsed, err := url.Parse(raw); err == nil && parsed.Hostname() != "" {
+		return parsed.Hostname()
+	}
+	if host, _, err := net.SplitHostPort(raw); err == nil {
+		return host
+	}
+	if raw = strings.TrimSpace(raw); raw != "" {
+		return raw
+	}
+	if target != nil {
+		return target.Hostname()
+	}
+	return ""
 }
 
 func webAssetTargetURL(asset model.PlatformItem) (*url.URL, error) {

@@ -4366,6 +4366,14 @@ func TestResourceOperationEndpoints(t *testing.T) {
 			t.Fatalf("dns provider list leaked %s", leaked)
 		}
 	}
+	missingDNSProviderACMERec := assertStatus(t, handler, http.MethodPost, "/api/admin/certificates/acme", map[string]any{
+		"name":            "missing-provider-acme",
+		"domain":          "missing-provider.example.test",
+		"dns_provider_id": "missing-dns-provider",
+	}, cookie, http.StatusNotFound)
+	if !strings.Contains(missingDNSProviderACMERec.Body.String(), "dns provider not found") || strings.Contains(missingDNSProviderACMERec.Body.String(), "dns-secret-token") {
+		t.Fatalf("missing dns provider ACME response missing safe error: %s", missingDNSProviderACMERec.Body.String())
+	}
 
 	acmeRec := assertStatus(t, handler, http.MethodPost, "/api/admin/certificates/acme", map[string]any{
 		"name":            "acme-cert",
@@ -4387,6 +4395,9 @@ func TestResourceOperationEndpoints(t *testing.T) {
 	}
 	if acmeCert.Metadata["certificate"] == "" || acmeCert.Metadata["expires_at"] == nil || acmeCert.Metadata["acme_http_url"] == "" {
 		t.Fatalf("acme response missing certificate metadata: %#v", acmeCert.Metadata)
+	}
+	if firstMetadataString(acmeCert.Metadata, "dns_provider_name") != "cloudflare-test" || firstMetadataString(acmeCert.Metadata, "dns_provider_zone") != "example.test" {
+		t.Fatalf("acme response missing dns provider metadata: %#v", acmeCert.Metadata)
 	}
 	rawACMECert, ok, err := server.cfg.Store.GetPlatformItem("certificates", acmeCert.ID)
 	if err != nil || !ok {

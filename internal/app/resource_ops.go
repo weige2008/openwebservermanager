@@ -1804,8 +1804,21 @@ func (s *Server) handleCertificateACME(w http.ResponseWriter, r *http.Request) {
 	if strings.TrimSpace(req.Email) != "" {
 		metadata["account_email"] = strings.TrimSpace(req.Email)
 	}
-	if strings.TrimSpace(req.DNSProviderID) != "" {
-		metadata["dns_provider_id"] = strings.TrimSpace(req.DNSProviderID)
+	if dnsProviderID := strings.TrimSpace(req.DNSProviderID); dnsProviderID != "" {
+		provider, ok, err := s.certificateDNSProviderByID(dnsProviderID)
+		if err != nil {
+			writeError(w, http.StatusInternalServerError, err.Error())
+			return
+		}
+		if !ok {
+			writeError(w, http.StatusNotFound, "dns provider not found")
+			return
+		}
+		metadata["dns_provider_id"] = provider.ID
+		metadata["dns_provider_name"] = provider.Name
+		if zone := firstMetadataString(provider.Metadata, "zone"); zone != "" {
+			metadata["dns_provider_zone"] = zone
+		}
 	}
 	if req.MTLSEnabled {
 		metadata["mtls_enabled"] = true
@@ -1832,6 +1845,17 @@ func (s *Server) handleCertificateACME(w http.ResponseWriter, r *http.Request) {
 		sanitizeCertificateItem(&item)
 	}
 	writeJSON(w, http.StatusCreated, item)
+}
+
+func (s *Server) certificateDNSProviderByID(id string) (model.PlatformItem, bool, error) {
+	item, ok, err := s.cfg.Store.GetPlatformItem("system_settings", id)
+	if err != nil || !ok {
+		return model.PlatformItem{}, false, err
+	}
+	if !strings.EqualFold(item.Type, "dns-provider") || !platformItemEnabled(item) {
+		return model.PlatformItem{}, false, nil
+	}
+	return item, true, nil
 }
 
 func makeACMEHTTPChallenge() (string, string, error) {

@@ -4446,6 +4446,19 @@ func TestAgentGatewayRegistrationHeartbeatAndTimeout(t *testing.T) {
 		t.Fatalf("rotated token heartbeat did not recover gateway: %s", rotatedRecoveredRec.Body.String())
 	}
 
+	assertStatus(t, handler, http.MethodPatch, "/api/admin/agent-gateways/"+gateway.ID, map[string]any{
+		"status": "disabled",
+	}, adminCookie, http.StatusOK)
+	assertStatus(t, handler, http.MethodPost, "/api/agent/gateways/heartbeat", map[string]any{
+		"registration_token": rotatedRegistrationToken,
+		"latency_ms":         5,
+	}, nil, http.StatusForbidden)
+	assertStatus(t, handler, http.MethodPost, "/api/admin/agent-gateways/"+gateway.ID+"/token", nil, adminCookie, http.StatusForbidden)
+	disabledRec := assertStatus(t, handler, http.MethodGet, "/api/admin/agent-gateways/"+gateway.ID, nil, adminCookie, http.StatusOK)
+	if !strings.Contains(disabledRec.Body.String(), `"status":"disabled"`) || strings.Contains(disabledRec.Body.String(), `"latency_ms":5`) {
+		t.Fatalf("disabled gateway accepted heartbeat or changed status: %s", disabledRec.Body.String())
+	}
+
 	logsRec := assertStatus(t, handler, http.MethodGet, "/api/admin/audit/operation-logs", nil, adminCookie, http.StatusOK)
 	if !strings.Contains(logsRec.Body.String(), "agent.gateway.register") || !strings.Contains(logsRec.Body.String(), "agent_gateway.token") {
 		t.Fatal("agent gateway token/register operations were not audited")

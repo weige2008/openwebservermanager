@@ -85,7 +85,7 @@ func (s *Server) handleOIDCAPI(w http.ResponseWriter, r *http.Request) {
 		s.handleOIDCAuthorize(w, r)
 	case r.Method == http.MethodPost && r.URL.Path == "/api/oidc/token":
 		s.handleOIDCToken(w, r)
-	case r.Method == http.MethodGet && r.URL.Path == "/api/oidc/userinfo":
+	case (r.Method == http.MethodGet || r.Method == http.MethodPost) && r.URL.Path == "/api/oidc/userinfo":
 		s.handleOIDCUserInfo(w, r)
 	default:
 		writeError(w, http.StatusNotFound, "oidc endpoint not found")
@@ -253,7 +253,7 @@ func (s *Server) handleOIDCToken(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleOIDCUserInfo(w http.ResponseWriter, r *http.Request) {
-	token := strings.TrimSpace(strings.TrimPrefix(r.Header.Get("Authorization"), "Bearer "))
+	token := oidcBearerTokenFromRequest(r)
 	if token == "" {
 		writeError(w, http.StatusUnauthorized, "bearer token required")
 		return
@@ -269,6 +269,23 @@ func (s *Server) handleOIDCUserInfo(w http.ResponseWriter, r *http.Request) {
 		"preferred_username": accessToken.Username,
 		"role":               accessToken.Role,
 	})
+}
+
+func oidcBearerTokenFromRequest(r *http.Request) string {
+	authHeader := strings.TrimSpace(r.Header.Get("Authorization"))
+	if authHeader != "" {
+		parts := strings.Fields(authHeader)
+		if len(parts) == 2 && strings.EqualFold(parts[0], "Bearer") {
+			return strings.TrimSpace(parts[1])
+		}
+	}
+	if r.Method != http.MethodPost {
+		return ""
+	}
+	if err := r.ParseForm(); err != nil {
+		return ""
+	}
+	return strings.TrimSpace(r.PostForm.Get("access_token"))
 }
 
 func (s *Server) redirectOIDCError(w http.ResponseWriter, r *http.Request, redirectURI, code, description string) {

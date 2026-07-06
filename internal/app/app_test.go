@@ -2431,9 +2431,20 @@ func TestOIDCProviderAuthorizationCodeFlow(t *testing.T) {
 	if !strings.Contains(userInfoRec.Body.String(), `"preferred_username":"admin"`) || !strings.Contains(userInfoRec.Body.String(), `"sub"`) {
 		t.Fatal("userinfo did not include signed-in user claims")
 	}
+	postUserInfoRec := assertStatusWithHeaders(t, handler, http.MethodPost, "/api/oidc/userinfo", nil, nil, map[string]string{
+		"Authorization": "bearer " + accessToken,
+	}, http.StatusOK)
+	if !strings.Contains(postUserInfoRec.Body.String(), `"preferred_username":"admin"`) || !strings.Contains(postUserInfoRec.Body.String(), `"role":"admin"`) {
+		t.Fatal("post userinfo did not include signed-in user claims")
+	}
+	formUserInfoRec := assertFormStatus(t, handler, "/api/oidc/userinfo", url.Values{"access_token": {accessToken}}, nil, nil, http.StatusOK)
+	if !strings.Contains(formUserInfoRec.Body.String(), `"preferred_username":"admin"`) || !strings.Contains(formUserInfoRec.Body.String(), `"sub"`) {
+		t.Fatal("form userinfo did not include signed-in user claims")
+	}
 	assertStatusWithHeaders(t, handler, http.MethodGet, "/api/oidc/userinfo", nil, nil, map[string]string{
 		"Authorization": "Bearer invalid",
 	}, http.StatusUnauthorized)
+	assertFormStatus(t, handler, "/api/oidc/userinfo", url.Values{"access_token": {"invalid"}}, nil, nil, http.StatusUnauthorized)
 }
 
 func TestExternalOIDCLoginCreatesUserAndSession(t *testing.T) {

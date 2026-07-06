@@ -168,7 +168,7 @@ func (s *Server) handleDesktopDriveUpload(w http.ResponseWriter, r *http.Request
 	if fileName == "" && header != nil {
 		fileName = header.Filename
 	}
-	fileName = filepath.Base(filepath.Clean(filepath.FromSlash(fileName)))
+	fileName = safeUploadedFilename(fileName)
 	if fileName == "." || fileName == ".." || fileName == string(filepath.Separator) || fileName == "" {
 		writeError(w, http.StatusBadRequest, "filename is required")
 		return

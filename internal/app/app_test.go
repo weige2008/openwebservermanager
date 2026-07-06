@@ -8111,7 +8111,10 @@ func TestDesktopSessionDriveFiles(t *testing.T) {
 	}
 
 	assertMultipartStatus(t, handler, "/api/connections/"+session.ID+"/drive/upload", map[string]string{"path": "../secret"}, "escape.txt", []byte("escape"), adminCookie, http.StatusForbidden)
-	assertMultipartStatus(t, handler, "/api/connections/"+session.ID+"/drive/upload", map[string]string{"path": "reports"}, "uploaded.bin", []byte{4, 5, 6}, adminCookie, http.StatusCreated)
+	uploadRec := assertMultipartStatus(t, handler, "/api/connections/"+session.ID+"/drive/upload", map[string]string{"path": "reports"}, `C:\Users\ops\Downloads\uploaded.bin`, []byte{4, 5, 6}, adminCookie, http.StatusCreated)
+	if !strings.Contains(uploadRec.Body.String(), `"name":"uploaded.bin"`) || strings.Contains(uploadRec.Body.String(), `C:\Users\ops`) {
+		t.Fatalf("drive upload leaked unsafe filename: %s", uploadRec.Body.String())
+	}
 
 	rootList := assertStatus(t, handler, http.MethodGet, "/api/connections/"+session.ID+"/drive", nil, adminCookie, http.StatusOK)
 	if !strings.Contains(rootList.Body.String(), `"name":"reports"`) {
@@ -8124,6 +8127,9 @@ func TestDesktopSessionDriveFiles(t *testing.T) {
 	downloadRec := assertStatus(t, handler, http.MethodGet, "/api/connections/"+session.ID+"/drive/download?path=reports/download.txt", nil, adminCookie, http.StatusOK)
 	if strings.TrimSpace(downloadRec.Body.String()) != "desktop file" {
 		t.Fatalf("drive download body = %q", downloadRec.Body.String())
+	}
+	if contentDisposition := downloadRec.Header().Get("Content-Disposition"); !strings.Contains(contentDisposition, `filename="download.txt"`) {
+		t.Fatalf("drive download missing safe attachment filename: %s", contentDisposition)
 	}
 	uploadDownloadRec := assertStatus(t, handler, http.MethodGet, "/api/connections/"+session.ID+"/drive/download?path=reports/uploaded.bin", nil, adminCookie, http.StatusOK)
 	if !bytes.Equal(uploadDownloadRec.Body.Bytes(), []byte{4, 5, 6}) {
@@ -8160,6 +8166,9 @@ func TestDesktopSessionDriveFiles(t *testing.T) {
 		if !strings.Contains(fileLogs.Body.String(), want) {
 			t.Fatalf("drive file log missing %q: %s", want, fileLogs.Body.String())
 		}
+	}
+	if !strings.Contains(fileLogs.Body.String(), `"filename":"uploaded.bin"`) || strings.Contains(fileLogs.Body.String(), `C:\Users\ops`) || strings.Contains(fileLogs.Body.String(), `Downloads\`) {
+		t.Fatalf("drive file log leaked unsafe filename: %s", fileLogs.Body.String())
 	}
 	operationLogs := assertStatus(t, handler, http.MethodGet, "/api/admin/audit/operation-logs", nil, adminCookie, http.StatusOK)
 	for _, want := range []string{"connection.drive.list.denied", "connection.drive.upload.denied"} {

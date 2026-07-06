@@ -507,6 +507,121 @@ func TestNativeSSHGatewayDepartmentAndAssetGroupAuthorization(t *testing.T) {
 	}
 }
 
+func TestNativeSSHGatewayAuthorizationMetadataAliases(t *testing.T) {
+	targetAddr, closeTarget := startFakeSSHServer(t, "remote", "target-secret")
+	defer closeTarget()
+
+	st := newGatewayTestStore(t)
+	userRec, err := st.CreatePlatformItem("users", model.PlatformItemRequest{
+		Name:     "gateway-alias-user",
+		Type:     "local",
+		Status:   "enabled",
+		Password: "password123",
+		Metadata: map[string]any{"role": "user"},
+	})
+	if err != nil {
+		t.Fatalf("create user: %v", err)
+	}
+	groupRec, err := st.CreatePlatformItem("asset_groups", model.PlatformItemRequest{
+		Name:   "Alias Linux",
+		Type:   "ssh",
+		Status: "enabled",
+	})
+	if err != nil {
+		t.Fatalf("create group: %v", err)
+	}
+	host, portText, err := net.SplitHostPort(targetAddr)
+	if err != nil {
+		t.Fatalf("split target addr: %v", err)
+	}
+	port := mustAtoi(t, portText)
+	assetRec, err := st.CreatePlatformItem("assets", model.PlatformItemRequest{
+		Name:     "alias-metadata-ssh",
+		Status:   "enabled",
+		Protocol: model.ProtocolSSH,
+		Host:     host,
+		Port:     port,
+		Metadata: map[string]any{"assetGroupId": groupRec.ID},
+	})
+	if err != nil {
+		t.Fatalf("create asset: %v", err)
+	}
+	if _, err := st.CreatePlatformItem("credentials", model.PlatformItemRequest{
+		Name:     "alias metadata password",
+		Type:     string(model.CredentialSSHPassword),
+		Status:   "encrypted",
+		Username: "remote",
+		Password: "target-secret",
+		TargetID: assetRec.ID,
+	}); err != nil {
+		t.Fatalf("create credential: %v", err)
+	}
+	if _, err := st.CreatePlatformItem("authorized_assets", model.PlatformItemRequest{
+		Name:   "alias metadata grant",
+		Type:   "metadata_aliases",
+		Status: "enabled",
+		Metadata: map[string]any{
+			"subjectId":    userRec.ID,
+			"assetGroupId": groupRec.ID,
+		},
+	}); err != nil {
+		t.Fatalf("create metadata alias authorization: %v", err)
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	gatewayDataDir := mustTempDir(t)
+	defer removeTempDir(gatewayDataDir)
+	gateway, err := StartGateway(ctx, GatewayConfig{
+		Enabled:        true,
+		Address:        "127.0.0.1:0",
+		DataDir:        gatewayDataDir,
+		KnownHostsPath: filepath.Join(gatewayDataDir, "known_hosts"),
+		Store:          st,
+	})
+	if err != nil {
+		t.Fatalf("start gateway: %v", err)
+	}
+	defer gateway.Close()
+
+	client, err := ssh.Dial("tcp", gateway.Address(), &ssh.ClientConfig{
+		User:            userRec.Name,
+		Auth:            []ssh.AuthMethod{ssh.Password("password123")},
+		HostKeyCallback: ssh.InsecureIgnoreHostKey(),
+		Timeout:         5 * time.Second,
+	})
+	if err != nil {
+		t.Fatalf("dial gateway: %v", err)
+	}
+	defer client.Close()
+	session, err := client.NewSession()
+	if err != nil {
+		t.Fatalf("new gateway session: %v", err)
+	}
+	defer session.Close()
+	stdout, err := session.StdoutPipe()
+	if err != nil {
+		t.Fatalf("stdout pipe: %v", err)
+	}
+	stdin, err := session.StdinPipe()
+	if err != nil {
+		t.Fatalf("stdin pipe: %v", err)
+	}
+	if err := session.RequestPty("xterm-256color", 24, 80, ssh.TerminalModes{ssh.ECHO: 1}); err != nil {
+		t.Fatalf("request pty: %v", err)
+	}
+	if err := session.Shell(); err != nil {
+		t.Fatalf("start gateway shell: %v", err)
+	}
+	if _, err := io.WriteString(stdin, "1\r"); err != nil {
+		t.Fatalf("select asset: %v", err)
+	}
+	output := readUntilContains(t, stdout, "target-shell", 5*time.Second)
+	if !strings.Contains(output, assetRec.Name) || !strings.Contains(output, "target-shell") {
+		t.Fatalf("metadata alias authorization did not reach target: %q", output)
+	}
+}
+
 func TestNativeSSHGatewayChineseAdminDirectAssetLoginWithoutGrant(t *testing.T) {
 	targetAddr, closeTarget := startFakeSSHServer(t, "remote", "target-secret")
 	defer closeTarget()

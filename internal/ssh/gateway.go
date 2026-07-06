@@ -821,13 +821,13 @@ func gatewayAuthorizationSubjectMatches(authorization model.PlatformItem, userKe
 func gatewayAuthorizationTargetMatches(platform map[string][]model.PlatformItem, authorization, asset model.PlatformItem) bool {
 	targetKeys := map[string]bool{}
 	addGatewayAuthKeys(targetKeys, authorization.TargetID, authorization.ParentID, authorization.Group)
-	addGatewayMetadataKeys(targetKeys, authorization.Metadata, "target_id", "target_ids", "asset_id", "asset_ids", "asset_group_id", "asset_group_ids", "group_id", "group_ids", "group", "groups")
+	addGatewayMetadataKeys(targetKeys, authorization.Metadata, "target_id", "target_ids", "targetId", "asset_id", "asset_ids", "assetId", "resource_id", "resource_ids", "resourceId", "asset_group_id", "asset_group_ids", "assetGroupId", "target_group_id", "target_group_ids", "targetGroupId", "group_id", "group_ids", "groupId", "group", "groups")
 	if targetKeys["*"] {
 		return true
 	}
 	assetKeys := map[string]bool{}
 	addGatewayAuthKeys(assetKeys, asset.ID, asset.Name, asset.TargetID, asset.ParentID, asset.Group)
-	addGatewayMetadataKeys(assetKeys, asset.Metadata, "asset_id", "asset_ids", "asset_group_id", "asset_group_ids", "group_id", "group_ids", "parent_id", "parent_ids")
+	addGatewayMetadataKeys(assetKeys, asset.Metadata, "asset_id", "asset_ids", "assetId", "asset_group_id", "asset_group_ids", "assetGroupId", "group_id", "group_ids", "groupId", "parent_id", "parent_ids", "parentId")
 	expandGatewayRelatedKeys(platform["asset_groups"], assetKeys)
 	return gatewayKeysOverlap(assetKeys, targetKeys)
 }
@@ -840,7 +840,7 @@ func expandGatewayRelatedKeys(items []model.PlatformItem, keys map[string]bool) 
 				continue
 			}
 			changed = addGatewayAuthKeys(keys, item.ID, item.Name, item.ParentID, item.Group) || changed
-			changed = addGatewayMetadataKeys(keys, item.Metadata, "parent_id", "parent_ids", "group_id", "group_ids") || changed
+			changed = addGatewayMetadataKeys(keys, item.Metadata, "parent_id", "parent_ids", "parentId", "group_id", "group_ids", "groupId") || changed
 		}
 		if !changed {
 			return

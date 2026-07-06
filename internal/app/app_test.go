@@ -5284,7 +5284,7 @@ func TestLLMIntegrationTestPrompt(t *testing.T) {
 	}
 
 	failingServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		http.Error(w, "provider down", http.StatusBadGateway)
+		http.Error(w, "provider down with "+r.Header.Get("Authorization"), http.StatusBadGateway)
 	}))
 	defer failingServer.Close()
 	failingSettingRec := assertStatus(t, handler, http.MethodPost, "/api/admin/system-settings", map[string]any{
@@ -5294,6 +5294,7 @@ func TestLLMIntegrationTestPrompt(t *testing.T) {
 		"metadata": map[string]any{
 			"llm_base_url": failingServer.URL + "/v1",
 			"llm_model":    "test-model",
+			"llm_api_key":  "fail-secret",
 		},
 	}, cookie, http.StatusCreated)
 	var failingSetting model.PlatformItem
@@ -5303,6 +5304,14 @@ func TestLLMIntegrationTestPrompt(t *testing.T) {
 	}, cookie, http.StatusBadGateway)
 	if !strings.Contains(failedRec.Body.String(), "send LLM test prompt") {
 		t.Fatal("failed LLM test did not return a clear provider error")
+	}
+	if strings.Contains(failedRec.Body.String(), "fail-secret") || !strings.Contains(failedRec.Body.String(), "[redacted]") {
+		t.Fatalf("failed LLM test response did not redact provider error: %s", failedRec.Body.String())
+	}
+	failedLogsRec := assertStatus(t, handler, http.MethodGet, "/api/admin/audit/operation-logs", nil, cookie, http.StatusOK)
+	failedLogsBody := failedLogsRec.Body.String()
+	if strings.Contains(failedLogsBody, "fail-secret") || !strings.Contains(failedLogsBody, "system_settings.llm_test.failed") || !strings.Contains(failedLogsBody, "[redacted]") {
+		t.Fatalf("failed LLM test audit log did not redact provider error: %s", failedLogsBody)
 	}
 	assertStatus(t, handler, http.MethodPost, "/api/admin/system-settings/llm/test", map[string]any{
 		"setting_id": "missing",

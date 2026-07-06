@@ -170,10 +170,12 @@ func (s *Server) handleLLMTest(w http.ResponseWriter, r *http.Request) {
 	started := time.Now()
 	content, err := sendLLMTestPrompt(cfg, prompt)
 	if err != nil {
-		_ = s.audit(r, "system_settings.llm_test.failed", item.ID, "", "LLM test failed: "+err.Error())
-		writeError(w, http.StatusBadGateway, "send LLM test prompt: "+err.Error())
+		errText := sanitizeLLMTestText(cfg, err.Error())
+		_ = s.audit(r, "system_settings.llm_test.failed", item.ID, "", "LLM test failed: "+errText)
+		writeError(w, http.StatusBadGateway, "send LLM test prompt: "+errText)
 		return
 	}
+	content = sanitizeLLMTestText(cfg, content)
 	_ = s.audit(r, "system_settings.llm_test", item.ID, "", "sent LLM test prompt")
 	writeJSON(w, http.StatusOK, map[string]any{
 		"ok":          true,
@@ -784,6 +786,19 @@ func sendLLMTestPrompt(cfg llmDeliveryConfig, prompt string) (string, error) {
 		}
 	}
 	return "", errors.New("LLM provider response did not include a completion")
+}
+
+func sanitizeLLMTestText(cfg llmDeliveryConfig, text string) string {
+	secret := strings.TrimSpace(cfg.APIKey)
+	if secret == "" || text == "" {
+		return text
+	}
+	replacements := []string{
+		"Bearer " + secret, "Bearer [redacted]",
+		secret, "[redacted]",
+		url.QueryEscape(secret), "[redacted]",
+	}
+	return strings.NewReplacer(replacements...).Replace(text)
 }
 
 func llmChatCompletionsURL(base string) (string, error) {

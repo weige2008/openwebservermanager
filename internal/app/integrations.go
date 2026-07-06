@@ -344,7 +344,14 @@ func (s *Server) handleWeComTest(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) smtpIntegrationSetting(id string) (model.PlatformItem, bool, error) {
 	if strings.TrimSpace(id) != "" {
-		return s.cfg.Store.GetPlatformItem("system_settings", strings.TrimSpace(id))
+		item, ok, err := s.cfg.Store.GetPlatformItem("system_settings", strings.TrimSpace(id))
+		if err != nil || !ok {
+			return model.PlatformItem{}, ok, err
+		}
+		if !strings.EqualFold(strings.TrimSpace(item.Type), "integration") || !platformItemEnabled(item) {
+			return model.PlatformItem{}, false, nil
+		}
+		return item, true, nil
 	}
 	items, err := s.cfg.Store.ListPlatformItems("system_settings")
 	if err != nil {
@@ -358,11 +365,6 @@ func (s *Server) smtpIntegrationSetting(id string) (model.PlatformItem, bool, er
 			return item, true, nil
 		}
 	}
-	for _, item := range items {
-		if strings.EqualFold(strings.TrimSpace(item.Type), "integration") {
-			return item, true, nil
-		}
-	}
 	return model.PlatformItem{}, false, nil
 }
 
@@ -371,6 +373,9 @@ func (s *Server) ldapTestSetting(id string) (model.PlatformItem, []externalLDAPP
 		item, ok, err := s.cfg.Store.GetPlatformItem("system_settings", strings.TrimSpace(id))
 		if err != nil || !ok {
 			return model.PlatformItem{}, nil, ok, err
+		}
+		if !strings.EqualFold(strings.TrimSpace(item.Type), "identity") || !platformItemEnabled(item) {
+			return model.PlatformItem{}, nil, false, nil
 		}
 		providers, err := s.externalLDAPProvidersFromMetadata(item.Metadata)
 		if err != nil {
@@ -387,18 +392,6 @@ func (s *Server) ldapTestSetting(id string) (model.PlatformItem, []externalLDAPP
 	})
 	for _, item := range items {
 		if !strings.EqualFold(strings.TrimSpace(item.Type), "identity") || !platformItemEnabled(item) {
-			continue
-		}
-		providers, err := s.externalLDAPProvidersFromMetadata(item.Metadata)
-		if err != nil {
-			return model.PlatformItem{}, nil, false, err
-		}
-		if len(providers) > 0 {
-			return item, providers, true, nil
-		}
-	}
-	for _, item := range items {
-		if !strings.EqualFold(strings.TrimSpace(item.Type), "identity") {
 			continue
 		}
 		providers, err := s.externalLDAPProvidersFromMetadata(item.Metadata)
@@ -418,6 +411,9 @@ func (s *Server) oidcTestSetting(id string) (model.PlatformItem, []externalOIDCP
 		if err != nil || !ok {
 			return model.PlatformItem{}, nil, ok, err
 		}
+		if !strings.EqualFold(strings.TrimSpace(item.Type), "identity") || !platformItemEnabled(item) {
+			return model.PlatformItem{}, nil, false, nil
+		}
 		providers, err := s.externalOIDCProvidersFromMetadata(item.Metadata)
 		if err != nil {
 			return model.PlatformItem{}, nil, false, err
@@ -433,18 +429,6 @@ func (s *Server) oidcTestSetting(id string) (model.PlatformItem, []externalOIDCP
 	})
 	for _, item := range items {
 		if !strings.EqualFold(strings.TrimSpace(item.Type), "identity") || !platformItemEnabled(item) {
-			continue
-		}
-		providers, err := s.externalOIDCProvidersFromMetadata(item.Metadata)
-		if err != nil {
-			return model.PlatformItem{}, nil, false, err
-		}
-		if len(providers) > 0 {
-			return item, providers, true, nil
-		}
-	}
-	for _, item := range items {
-		if !strings.EqualFold(strings.TrimSpace(item.Type), "identity") {
 			continue
 		}
 		providers, err := s.externalOIDCProvidersFromMetadata(item.Metadata)
@@ -464,6 +448,9 @@ func (s *Server) weComTestSetting(id string) (model.PlatformItem, []externalWeCo
 		if err != nil || !ok {
 			return model.PlatformItem{}, nil, ok, err
 		}
+		if !strings.EqualFold(strings.TrimSpace(item.Type), "identity") || !platformItemEnabled(item) {
+			return model.PlatformItem{}, nil, false, nil
+		}
 		providers, err := s.externalWeComProvidersFromMetadata(item.Metadata)
 		if err != nil {
 			return model.PlatformItem{}, nil, false, err
@@ -479,18 +466,6 @@ func (s *Server) weComTestSetting(id string) (model.PlatformItem, []externalWeCo
 	})
 	for _, item := range items {
 		if !strings.EqualFold(strings.TrimSpace(item.Type), "identity") || !platformItemEnabled(item) {
-			continue
-		}
-		providers, err := s.externalWeComProvidersFromMetadata(item.Metadata)
-		if err != nil {
-			return model.PlatformItem{}, nil, false, err
-		}
-		if len(providers) > 0 {
-			return item, providers, true, nil
-		}
-	}
-	for _, item := range items {
-		if !strings.EqualFold(strings.TrimSpace(item.Type), "identity") {
 			continue
 		}
 		providers, err := s.externalWeComProvidersFromMetadata(item.Metadata)

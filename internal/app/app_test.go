@@ -3433,9 +3433,11 @@ func TestOIDCIntegrationAuthorizationEndpointTest(t *testing.T) {
 	var gotScope string
 	var gotState string
 	var gotNonce string
+	var authorizeCalls int
 	provider := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {
 		case "/authorize":
+			authorizeCalls++
 			query := r.URL.Query()
 			gotClientID = query.Get("client_id")
 			gotRedirectURI = query.Get("redirect_uri")
@@ -3501,6 +3503,15 @@ func TestOIDCIntegrationAuthorizationEndpointTest(t *testing.T) {
 	usersRec := assertStatus(t, handler, http.MethodGet, "/api/admin/users", nil, adminCookie, http.StatusOK)
 	if strings.Contains(usersRec.Body.String(), `"type":"oidc"`) {
 		t.Fatalf("oidc authorization test unexpectedly created a user: %s", usersRec.Body.String())
+	}
+	assertStatus(t, handler, http.MethodPatch, "/api/admin/system-settings/"+setting.ID, map[string]any{
+		"status": "disabled",
+	}, adminCookie, http.StatusOK)
+	assertStatus(t, handler, http.MethodPost, "/api/admin/system-settings/oidc/test", map[string]any{
+		"setting_id": setting.ID,
+	}, adminCookie, http.StatusNotFound)
+	if authorizeCalls != 1 {
+		t.Fatalf("disabled oidc setting should not call authorization endpoint, calls=%d", authorizeCalls)
 	}
 
 	badSettingRec := assertStatus(t, handler, http.MethodPost, "/api/admin/system-settings", map[string]any{
@@ -3801,17 +3812,30 @@ func TestLDAPIntegrationTestLogin(t *testing.T) {
 	if !strings.Contains(logsRec.Body.String(), "system_settings.ldap_test") || !strings.Contains(logsRec.Body.String(), "system_settings.ldap_test.failed") {
 		t.Fatalf("ldap test operation logs missing success or failure entries: %s", logsRec.Body.String())
 	}
+	assertStatus(t, handler, http.MethodPatch, "/api/admin/system-settings/"+setting.ID, map[string]any{
+		"status": "disabled",
+	}, adminCookie, http.StatusOK)
+	assertStatus(t, handler, http.MethodPost, "/api/admin/system-settings/ldap/test", map[string]any{
+		"setting_id": setting.ID,
+		"username":   "ldap-probe",
+		"password":   "directory-password",
+	}, adminCookie, http.StatusNotFound)
+	if fakeLDAP.calls != 2 {
+		t.Fatalf("disabled ldap setting should not call authenticator, calls=%d", fakeLDAP.calls)
+	}
 }
 
 func TestWeComIntegrationTokenTest(t *testing.T) {
 	handler, adminCookie := newTestHandler(t)
 	var gotCorpID string
 	var gotSecret string
+	var tokenCalls int
 	provider := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path != "/gettoken" {
 			http.NotFound(w, r)
 			return
 		}
+		tokenCalls++
 		gotCorpID = r.URL.Query().Get("corpid")
 		gotSecret = r.URL.Query().Get("corpsecret")
 		if gotCorpID != "ww-openweb" || gotSecret != "wecom-secret" {
@@ -3866,6 +3890,15 @@ func TestWeComIntegrationTokenTest(t *testing.T) {
 	usersRec := assertStatus(t, handler, http.MethodGet, "/api/admin/users", nil, adminCookie, http.StatusOK)
 	if strings.Contains(usersRec.Body.String(), `"type":"wecom"`) {
 		t.Fatalf("wecom token test unexpectedly created a user: %s", usersRec.Body.String())
+	}
+	assertStatus(t, handler, http.MethodPatch, "/api/admin/system-settings/"+setting.ID, map[string]any{
+		"status": "disabled",
+	}, adminCookie, http.StatusOK)
+	assertStatus(t, handler, http.MethodPost, "/api/admin/system-settings/wecom/test", map[string]any{
+		"setting_id": setting.ID,
+	}, adminCookie, http.StatusNotFound)
+	if tokenCalls != 1 {
+		t.Fatalf("disabled wecom setting should not call token endpoint, calls=%d", tokenCalls)
 	}
 
 	badSettingRec := assertStatus(t, handler, http.MethodPost, "/api/admin/system-settings", map[string]any{
@@ -4872,6 +4905,13 @@ func TestSMTPIntegrationTestEmail(t *testing.T) {
 	assertStatus(t, handler, http.MethodPost, "/api/admin/system-settings/smtp/test", map[string]any{
 		"setting_id": "missing",
 	}, cookie, http.StatusNotFound)
+	assertStatus(t, handler, http.MethodPatch, "/api/admin/system-settings/"+setting.ID, map[string]any{
+		"status": "disabled",
+	}, cookie, http.StatusOK)
+	assertStatus(t, handler, http.MethodPost, "/api/admin/system-settings/smtp/test", map[string]any{
+		"setting_id": setting.ID,
+		"to":         "receiver@example.test",
+	}, cookie, http.StatusNotFound)
 }
 
 func TestLLMIntegrationTestPrompt(t *testing.T) {
@@ -4879,7 +4919,9 @@ func TestLLMIntegrationTestPrompt(t *testing.T) {
 	var gotAuth string
 	var gotPath string
 	var gotModel string
+	var llmCalls int
 	llmServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		llmCalls++
 		gotAuth = r.Header.Get("Authorization")
 		gotPath = r.URL.Path
 		var payload map[string]any
@@ -4932,6 +4974,16 @@ func TestLLMIntegrationTestPrompt(t *testing.T) {
 	logsRec := assertStatus(t, handler, http.MethodGet, "/api/admin/audit/operation-logs", nil, cookie, http.StatusOK)
 	if !strings.Contains(logsRec.Body.String(), "system_settings.llm_test") {
 		t.Fatal("LLM test did not write operation log")
+	}
+	assertStatus(t, handler, http.MethodPatch, "/api/admin/system-settings/"+setting.ID, map[string]any{
+		"status": "disabled",
+	}, cookie, http.StatusOK)
+	assertStatus(t, handler, http.MethodPost, "/api/admin/system-settings/llm/test", map[string]any{
+		"setting_id": setting.ID,
+		"prompt":     "ping",
+	}, cookie, http.StatusNotFound)
+	if llmCalls != 1 {
+		t.Fatalf("disabled llm setting should not call provider endpoint, calls=%d", llmCalls)
 	}
 
 	failingServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

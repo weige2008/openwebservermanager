@@ -2670,6 +2670,10 @@ func TestDatabaseAssetQueryRequiresAuthorizationAndLogs(t *testing.T) {
 	if !strings.Contains(selfApproveRec.Body.String(), "self-approved") {
 		t.Fatalf("self approval denial did not explain reason: %s", selfApproveRec.Body.String())
 	}
+	selfApproveLogsRec := assertStatus(t, handler, http.MethodGet, "/api/admin/audit/operation-logs", nil, adminCookie, http.StatusOK)
+	if !strings.Contains(selfApproveLogsRec.Body.String(), "sql_work_order.approve.denied") || !strings.Contains(selfApproveLogsRec.Body.String(), workOrder.ID) {
+		t.Fatalf("self approval denial was not audited: %s", selfApproveLogsRec.Body.String())
+	}
 	approveRec := assertStatus(t, handler, http.MethodPost, "/api/admin/sql-work-orders/"+workOrder.ID+"/approve", map[string]any{"note": "approved for test"}, adminCookie, http.StatusOK)
 	var approvedOrder model.PlatformItem
 	decodeResponse(t, approveRec, &approvedOrder)

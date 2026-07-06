@@ -3097,6 +3097,7 @@ func (s *Server) handleSQLWorkOrderDecision(w http.ResponseWriter, r *http.Reque
 	}
 	userID, isAdmin := s.accessUser(r)
 	if nextStatus == "approved" && !isAdmin && userID != "" && sqlWorkOrderRequesterMatches(order, userID) {
+		_ = s.audit(r, "sql_work_order.approve.denied", id, model.ProtocolDatabase, "sql work order cannot be self-approved")
 		writeError(w, http.StatusForbidden, "sql work order cannot be self-approved")
 		return
 	}

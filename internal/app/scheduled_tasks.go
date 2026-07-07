@@ -9,6 +9,7 @@ import (
 	"io"
 	"net"
 	"net/http"
+	"net/url"
 	"os"
 	"path/filepath"
 	"strings"
@@ -508,6 +509,9 @@ func (s *Server) checkAssetReachability(collection string, item model.PlatformIt
 		if err != nil {
 			return "offline", err.Error()
 		}
+		if connection.Driver == "sqlite" {
+			return checkSQLiteDatabaseAssetReachability(connection.DSN)
+		}
 		db, err := sql.Open(connection.Driver, connection.DSN)
 		if err != nil {
 			return "offline", err.Error()
@@ -533,6 +537,39 @@ func (s *Server) checkAssetReachability(collection string, item model.PlatformIt
 		_ = conn.Close()
 		return "active", fmt.Sprintf("%s:%d reachable", host, port)
 	}
+}
+
+func checkSQLiteDatabaseAssetReachability(path string) (string, string) {
+	info, err := os.Stat(path)
+	if errors.Is(err, os.ErrNotExist) {
+		return "offline", "sqlite database file not found"
+	}
+	if err != nil {
+		return "offline", err.Error()
+	}
+	if info.IsDir() {
+		return "offline", "sqlite database path is a directory"
+	}
+	if !info.Mode().IsRegular() {
+		return "offline", "sqlite database path is not a regular file"
+	}
+	db, err := sql.Open("sqlite", sqliteReadOnlyDSN(path))
+	if err != nil {
+		return "offline", err.Error()
+	}
+	defer db.Close()
+	if err := db.Ping(); err != nil {
+		return "offline", err.Error()
+	}
+	return "active", "sqlite reachable"
+}
+
+func sqliteReadOnlyDSN(path string) string {
+	endpoint := url.URL{Scheme: "file", Path: filepath.ToSlash(path)}
+	query := endpoint.Query()
+	query.Set("mode", "ro")
+	endpoint.RawQuery = query.Encode()
+	return endpoint.String()
 }
 
 func checkWebAssetReachability(target string, timeout time.Duration) (string, string) {

@@ -8869,6 +8869,40 @@ func TestScheduledTaskRunners(t *testing.T) {
 	if err := srv.cfg.Store.DeletePlatformItem("assets", legacyServer.ID); err != nil {
 		t.Fatalf("remove writable platform asset mirror: %v", err)
 	}
+	missingSQLitePath := filepath.Join(srv.cfg.DataDir, "database-assets", "status-missing.db")
+	databaseStatusRec := assertStatus(t, handler, http.MethodPost, "/api/admin/database-assets", map[string]any{
+		"name":     "status missing sqlite",
+		"type":     "sqlite",
+		"status":   "enabled",
+		"protocol": "database",
+		"metadata": map[string]any{"sqlite_path": "status-missing.db"},
+	}, cookie, http.StatusCreated)
+	var databaseStatusAsset model.PlatformItem
+	decodeResponse(t, databaseStatusRec, &databaseStatusAsset)
+	existingSQLitePath := filepath.Join(srv.cfg.DataDir, "database-assets", "status-existing.db")
+	if err := os.MkdirAll(filepath.Dir(existingSQLitePath), 0o770); err != nil {
+		t.Fatalf("create database asset directory: %v", err)
+	}
+	existingSQLiteDB, err := sql.Open("sqlite", existingSQLitePath)
+	if err != nil {
+		t.Fatalf("open existing sqlite status fixture: %v", err)
+	}
+	if _, err := existingSQLiteDB.Exec("CREATE TABLE status_check(id INTEGER PRIMARY KEY)"); err != nil {
+		_ = existingSQLiteDB.Close()
+		t.Fatalf("prepare existing sqlite status fixture: %v", err)
+	}
+	if err := existingSQLiteDB.Close(); err != nil {
+		t.Fatalf("close existing sqlite status fixture: %v", err)
+	}
+	existingDatabaseStatusRec := assertStatus(t, handler, http.MethodPost, "/api/admin/database-assets", map[string]any{
+		"name":     "status existing sqlite",
+		"type":     "sqlite",
+		"status":   "enabled",
+		"protocol": "database",
+		"metadata": map[string]any{"sqlite_path": "status-existing.db"},
+	}, cookie, http.StatusCreated)
+	var existingDatabaseStatusAsset model.PlatformItem
+	decodeResponse(t, existingDatabaseStatusRec, &existingDatabaseStatusAsset)
 	statusTaskRec := assertStatus(t, handler, http.MethodPost, "/api/admin/scheduled-tasks", map[string]any{
 		"name":     "Asset status",
 		"type":     "asset-status",
@@ -8883,6 +8917,15 @@ func TestScheduledTaskRunners(t *testing.T) {
 	}
 	if !strings.Contains(statusRunRec.Body.String(), legacyServer.ID) || !strings.Contains(statusRunRec.Body.String(), `"source":"legacy_server"`) || !strings.Contains(statusRunRec.Body.String(), `"persisted":false`) {
 		t.Fatalf("asset status task did not include read-only legacy asset result: %s", statusRunRec.Body.String())
+	}
+	if !strings.Contains(statusRunRec.Body.String(), databaseStatusAsset.ID) || !strings.Contains(statusRunRec.Body.String(), "sqlite database file not found") {
+		t.Fatalf("asset status task did not report missing sqlite asset without creation: %s", statusRunRec.Body.String())
+	}
+	if _, err := os.Stat(missingSQLitePath); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("asset status task created missing sqlite database file: %v", err)
+	}
+	if !strings.Contains(statusRunRec.Body.String(), existingDatabaseStatusAsset.ID) || !strings.Contains(statusRunRec.Body.String(), "sqlite reachable") {
+		t.Fatalf("asset status task did not report existing sqlite asset as reachable: %s", statusRunRec.Body.String())
 	}
 	webListRec := assertStatus(t, handler, http.MethodGet, "/api/admin/websites", nil, cookie, http.StatusOK)
 	if !strings.Contains(webListRec.Body.String(), webAsset.ID) || !strings.Contains(webListRec.Body.String(), "last_check_status") {

@@ -1271,12 +1271,20 @@ func (s *Server) handleStorageWrite(w http.ResponseWriter, r *http.Request, root
 	if !s.ensureStorageParentDirectory(w, root, target) {
 		return
 	}
+	rollback, err := prepareStorageFileRollback(target)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	defer rollback.cleanup()
 	if err := os.WriteFile(target, content, 0o660); err != nil {
+		_ = rollback.restore()
 		writeError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
 	usage, err := s.updateStorageUsage(storage.ID, root)
 	if err != nil {
+		err = rollback.restoreError(err)
 		writeError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
@@ -1285,6 +1293,8 @@ func (s *Server) handleStorageWrite(w http.ResponseWriter, r *http.Request, root
 		"size":       len(content),
 		"permission": permission,
 	}); err != nil {
+		err = rollback.restoreError(err)
+		_, _ = s.updateStorageUsage(storage.ID, root)
 		writeError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
@@ -1352,6 +1362,12 @@ func (s *Server) handleStorageUpload(w http.ResponseWriter, r *http.Request, roo
 	if !s.ensureStorageParentDirectory(w, root, target) {
 		return
 	}
+	rollback, err := prepareStorageFileRollback(target)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	defer rollback.cleanup()
 	output, err := os.OpenFile(target, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0o660)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, err.Error())
@@ -1360,17 +1376,18 @@ func (s *Server) handleStorageUpload(w http.ResponseWriter, r *http.Request, roo
 	written, copyErr := io.Copy(output, file)
 	closeErr := output.Close()
 	if copyErr != nil {
-		_ = os.Remove(target)
+		_ = rollback.restore()
 		writeError(w, http.StatusInternalServerError, copyErr.Error())
 		return
 	}
 	if closeErr != nil {
-		_ = os.Remove(target)
+		_ = rollback.restore()
 		writeError(w, http.StatusInternalServerError, closeErr.Error())
 		return
 	}
 	usage, err := s.updateStorageUsage(storage.ID, root)
 	if err != nil {
+		err = rollback.restoreError(err)
 		writeError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
@@ -1380,6 +1397,8 @@ func (s *Server) handleStorageUpload(w http.ResponseWriter, r *http.Request, roo
 		"size":       written,
 		"permission": permission,
 	}); err != nil {
+		err = rollback.restoreError(err)
+		_, _ = s.updateStorageUsage(storage.ID, root)
 		writeError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
@@ -1974,6 +1993,109 @@ func regularStorageFileInfo(path string) (os.FileInfo, error) {
 		return nil, errStorageSpecialFile
 	}
 	return info, nil
+}
+
+type storageFileRollback struct {
+	path       string
+	existed    bool
+	backupPath string
+	mode       os.FileMode
+}
+
+func prepareStorageFileRollback(path string) (*storageFileRollback, error) {
+	rollback := &storageFileRollback{path: path}
+	info, exists, err := storagePathInfo(path)
+	if err != nil {
+		return nil, err
+	}
+	if !exists {
+		return rollback, nil
+	}
+	if info.IsDir() || !info.Mode().IsRegular() {
+		return nil, errStorageSpecialFile
+	}
+	backup, err := os.CreateTemp("", "openwebservermanager-rollback-*")
+	if err != nil {
+		return nil, err
+	}
+	backupPath := backup.Name()
+	source, err := os.Open(path)
+	if err != nil {
+		_ = backup.Close()
+		_ = os.Remove(backupPath)
+		return nil, err
+	}
+	_, copyErr := io.Copy(backup, source)
+	sourceErr := source.Close()
+	closeErr := backup.Close()
+	if copyErr != nil {
+		_ = os.Remove(backupPath)
+		return nil, copyErr
+	}
+	if sourceErr != nil {
+		_ = os.Remove(backupPath)
+		return nil, sourceErr
+	}
+	if closeErr != nil {
+		_ = os.Remove(backupPath)
+		return nil, closeErr
+	}
+	rollback.existed = true
+	rollback.backupPath = backupPath
+	rollback.mode = info.Mode().Perm()
+	return rollback, nil
+}
+
+func (r *storageFileRollback) restore() error {
+	if r == nil || r.path == "" {
+		return nil
+	}
+	if !r.existed {
+		if err := os.Remove(r.path); err != nil && !errors.Is(err, os.ErrNotExist) {
+			return err
+		}
+		return nil
+	}
+	if r.backupPath == "" {
+		return errors.New("file rollback backup is missing")
+	}
+	if err := os.Remove(r.path); err != nil && !errors.Is(err, os.ErrNotExist) {
+		return err
+	}
+	backup, err := os.Open(r.backupPath)
+	if err != nil {
+		return err
+	}
+	defer backup.Close()
+	output, err := os.OpenFile(r.path, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, r.mode)
+	if err != nil {
+		return err
+	}
+	_, copyErr := io.Copy(output, backup)
+	closeErr := output.Close()
+	if copyErr != nil {
+		return copyErr
+	}
+	if closeErr != nil {
+		return closeErr
+	}
+	_ = os.Remove(r.backupPath)
+	r.backupPath = ""
+	return nil
+}
+
+func (r *storageFileRollback) restoreError(err error) error {
+	if restoreErr := r.restore(); restoreErr != nil {
+		return fmt.Errorf("%w; additionally failed to restore file: %v", err, restoreErr)
+	}
+	return err
+}
+
+func (r *storageFileRollback) cleanup() {
+	if r != nil && r.backupPath != "" {
+		_ = os.Remove(r.backupPath)
+		r.backupPath = ""
+	}
 }
 
 func (s *Server) ensureStorageParentDirectory(w http.ResponseWriter, root, target string) bool {

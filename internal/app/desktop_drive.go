@@ -219,6 +219,12 @@ func (s *Server) handleDesktopDriveUpload(w http.ResponseWriter, r *http.Request
 	if !s.ensureStorageParentDirectory(w, root, target) {
 		return
 	}
+	rollback, err := prepareStorageFileRollback(target)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	defer rollback.cleanup()
 	output, err := os.OpenFile(target, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0o660)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, err.Error())
@@ -227,12 +233,12 @@ func (s *Server) handleDesktopDriveUpload(w http.ResponseWriter, r *http.Request
 	written, copyErr := io.Copy(output, file)
 	closeErr := output.Close()
 	if copyErr != nil {
-		_ = os.Remove(target)
+		_ = rollback.restore()
 		writeError(w, http.StatusInternalServerError, copyErr.Error())
 		return
 	}
 	if closeErr != nil {
-		_ = os.Remove(target)
+		_ = rollback.restore()
 		writeError(w, http.StatusInternalServerError, closeErr.Error())
 		return
 	}
@@ -241,6 +247,7 @@ func (s *Server) handleDesktopDriveUpload(w http.ResponseWriter, r *http.Request
 		"filename": fileName,
 		"size":     written,
 	}); err != nil {
+		err = rollback.restoreError(err)
 		writeError(w, http.StatusInternalServerError, err.Error())
 		return
 	}

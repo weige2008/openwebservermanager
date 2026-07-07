@@ -9827,9 +9827,33 @@ func TestStorageFileLogPersistenceFailureReturnsServerError(t *testing.T) {
 	if !strings.Contains(writeRec.Body.String(), "persist file log failed") {
 		t.Fatalf("storage file log persistence failure was not reported: %s", writeRec.Body.String())
 	}
+	if _, err := os.Stat(filepath.Join(srv.cfg.DataDir, "drives", storage.ID, "audit.txt")); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("storage write left a new file before file log persisted: %v", err)
+	}
 	operationLogsRec := assertStatus(t, handler, http.MethodGet, "/api/admin/audit/operation-logs", nil, adminCookie, http.StatusOK)
 	if !strings.Contains(operationLogsRec.Body.String(), "file.log.persist_failed") {
 		t.Fatalf("storage file log persistence failure was not audited: %s", operationLogsRec.Body.String())
+	}
+
+	assertStatus(t, handler, http.MethodPost, "/api/admin/storages/"+storage.ID+"/files-write", map[string]any{"path": "overwrite.txt", "content": "old"}, adminCookie, http.StatusCreated)
+	removeOverwriteBlocker := blockPlatformItemCreate(t, srv.cfg.Store, "file_logs")
+	overwriteRec := assertStatus(t, handler, http.MethodPost, "/api/admin/storages/"+storage.ID+"/files-write", map[string]any{"path": "overwrite.txt", "content": "new"}, adminCookie, http.StatusInternalServerError)
+	removeOverwriteBlocker()
+	if !strings.Contains(overwriteRec.Body.String(), "persist file log failed") {
+		t.Fatalf("storage overwrite file log persistence failure was not reported: %s", overwriteRec.Body.String())
+	}
+	if data, err := os.ReadFile(filepath.Join(srv.cfg.DataDir, "drives", storage.ID, "overwrite.txt")); err != nil || string(data) != "old" {
+		t.Fatalf("storage overwrite did not restore old content after file log failure: data=%q err=%v", string(data), err)
+	}
+
+	removeUploadBlocker := blockPlatformItemCreate(t, srv.cfg.Store, "file_logs")
+	uploadRec := assertMultipartStatus(t, handler, "/api/admin/storages/"+storage.ID+"/files-upload", nil, "upload-new.txt", []byte("upload"), adminCookie, http.StatusInternalServerError)
+	removeUploadBlocker()
+	if !strings.Contains(uploadRec.Body.String(), "persist file log failed") {
+		t.Fatalf("storage upload file log persistence failure was not reported: %s", uploadRec.Body.String())
+	}
+	if _, err := os.Stat(filepath.Join(srv.cfg.DataDir, "drives", storage.ID, "upload-new.txt")); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("storage upload left a new file before file log persisted: %v", err)
 	}
 
 	assertStatus(t, handler, http.MethodPost, "/api/admin/storages/"+storage.ID+"/files-write", map[string]any{"path": "delete-me.txt", "content": "keep me"}, adminCookie, http.StatusCreated)
@@ -10842,6 +10866,9 @@ func TestDesktopDriveFileLogPersistenceFailureReturnsServerError(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(driveRoot, "delete.txt"), []byte("desktop delete"), 0o660); err != nil {
 		t.Fatalf("write drive delete file: %v", err)
 	}
+	if err := os.WriteFile(filepath.Join(driveRoot, "overwrite.txt"), []byte("desktop old"), 0o660); err != nil {
+		t.Fatalf("write drive overwrite file: %v", err)
+	}
 
 	removeBlocker := blockPlatformItemCreate(t, srv.cfg.Store, "file_logs")
 	downloadRec := assertStatus(t, handler, http.MethodGet, "/api/connections/"+session.ID+"/drive/download?path=reports/download.txt", nil, adminCookie, http.StatusInternalServerError)
@@ -10855,6 +10882,26 @@ func TestDesktopDriveFileLogPersistenceFailureReturnsServerError(t *testing.T) {
 	operationLogsRec := assertStatus(t, handler, http.MethodGet, "/api/admin/audit/operation-logs", nil, adminCookie, http.StatusOK)
 	if !strings.Contains(operationLogsRec.Body.String(), "file.log.persist_failed") {
 		t.Fatalf("desktop drive file log persistence failure was not audited: %s", operationLogsRec.Body.String())
+	}
+
+	removeUploadBlocker := blockPlatformItemCreate(t, srv.cfg.Store, "file_logs")
+	uploadRec := assertMultipartStatus(t, handler, "/api/connections/"+session.ID+"/drive/upload", map[string]string{"path": "reports"}, "upload-new.txt", []byte("desktop upload"), adminCookie, http.StatusInternalServerError)
+	removeUploadBlocker()
+	if !strings.Contains(uploadRec.Body.String(), "persist file log failed") {
+		t.Fatalf("desktop drive upload file log persistence failure was not reported: %s", uploadRec.Body.String())
+	}
+	if _, err := os.Stat(filepath.Join(driveRoot, "upload-new.txt")); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("desktop drive upload left a new file before file log persisted: %v", err)
+	}
+
+	removeOverwriteBlocker := blockPlatformItemCreate(t, srv.cfg.Store, "file_logs")
+	overwriteRec := assertMultipartStatus(t, handler, "/api/connections/"+session.ID+"/drive/upload", map[string]string{"path": "reports"}, "overwrite.txt", []byte("desktop new"), adminCookie, http.StatusInternalServerError)
+	removeOverwriteBlocker()
+	if !strings.Contains(overwriteRec.Body.String(), "persist file log failed") {
+		t.Fatalf("desktop drive overwrite file log persistence failure was not reported: %s", overwriteRec.Body.String())
+	}
+	if data, err := os.ReadFile(filepath.Join(driveRoot, "overwrite.txt")); err != nil || string(data) != "desktop old" {
+		t.Fatalf("desktop drive overwrite did not restore old content after file log failure: data=%q err=%v", string(data), err)
 	}
 
 	removeDeleteBlocker := blockPlatformItemCreate(t, srv.cfg.Store, "file_logs")

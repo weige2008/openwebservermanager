@@ -1617,6 +1617,44 @@ func TestSSHExecAccessRunsCommandAndLogs(t *testing.T) {
 	if !strings.Contains(assetDeniedLogsRec.Body.String(), "command_approval.asset_access.denied") || !strings.Contains(assetDeniedLogsRec.Body.String(), approvalID) || !strings.Contains(assetDeniedLogsRec.Body.String(), asset.ID) {
 		t.Fatalf("command approval asset denial was not audited: %s", assetDeniedLogsRec.Body.String())
 	}
+	removeApproveLogBlocker := blockOperationLogName(t, srv.cfg.Store, "command_approval.approved")
+	blockedApproveRec := assertStatus(t, handler, http.MethodPost, "/api/admin/command-approvals/"+approvalID+"/approve", map[string]any{"note": "blocked operation log"}, adminCookie, http.StatusInternalServerError)
+	removeApproveLogBlocker()
+	if !strings.Contains(blockedApproveRec.Body.String(), "persist operation log failed") {
+		t.Fatalf("command approval log persistence failure did not explain error: %s", blockedApproveRec.Body.String())
+	}
+	blockedApproveStatusRec := assertStatus(t, handler, http.MethodGet, "/api/admin/command-approvals/"+approvalID, nil, adminCookie, http.StatusOK)
+	if !strings.Contains(blockedApproveStatusRec.Body.String(), `"status":"pending"`) || strings.Contains(blockedApproveStatusRec.Body.String(), "blocked operation log") {
+		t.Fatalf("command approval was not restored after approve log failure: %s", blockedApproveStatusRec.Body.String())
+	}
+	if !coreAuditLogsContainAction(srv.cfg.Store, "operation.log.persist_failed") {
+		t.Fatal("command approval approve operation log failure was not audited")
+	}
+	rejectRequiredRec := assertStatus(t, handler, http.MethodPost, "/api/access/ssh/"+asset.ID+"/exec", map[string]any{
+		"command":         "systemctl restart cron",
+		"credential_id":   credential.ID,
+		"timeout_seconds": 5,
+	}, userCookie, http.StatusForbidden)
+	var rejectRequiredResult map[string]any
+	decodeResponse(t, rejectRequiredRec, &rejectRequiredResult)
+	rejectApprovalID, _ := rejectRequiredResult["approval_id"].(string)
+	if rejectApprovalID == "" {
+		t.Fatalf("approval-required reject command did not return approval id: %#v", rejectRequiredResult)
+	}
+	removeRejectLogBlocker := blockOperationLogName(t, srv.cfg.Store, "command_approval.rejected")
+	blockedRejectRec := assertStatus(t, handler, http.MethodPost, "/api/admin/command-approvals/"+rejectApprovalID+"/reject", map[string]any{"note": "blocked reject log"}, adminCookie, http.StatusInternalServerError)
+	removeRejectLogBlocker()
+	if !strings.Contains(blockedRejectRec.Body.String(), "persist operation log failed") {
+		t.Fatalf("command reject log persistence failure did not explain error: %s", blockedRejectRec.Body.String())
+	}
+	blockedRejectStatusRec := assertStatus(t, handler, http.MethodGet, "/api/admin/command-approvals/"+rejectApprovalID, nil, adminCookie, http.StatusOK)
+	if !strings.Contains(blockedRejectStatusRec.Body.String(), `"status":"pending"`) || strings.Contains(blockedRejectStatusRec.Body.String(), "blocked reject log") {
+		t.Fatalf("command approval was not restored after reject log failure: %s", blockedRejectStatusRec.Body.String())
+	}
+	rejectDecisionRec := assertStatus(t, handler, http.MethodPost, "/api/admin/command-approvals/"+rejectApprovalID+"/reject", map[string]any{"note": "not this window"}, adminCookie, http.StatusOK)
+	if !strings.Contains(rejectDecisionRec.Body.String(), `"status":"rejected"`) || !strings.Contains(rejectDecisionRec.Body.String(), "not this window") {
+		t.Fatalf("command approval reject response did not include rejected state: %s", rejectDecisionRec.Body.String())
+	}
 	approvedRec := assertStatus(t, handler, http.MethodPost, "/api/admin/command-approvals/"+approvalID+"/approve", map[string]any{"note": "maintenance window approved"}, adminCookie, http.StatusOK)
 	if !strings.Contains(approvedRec.Body.String(), `"status":"approved"`) || !strings.Contains(approvedRec.Body.String(), "maintenance window approved") {
 		t.Fatalf("command approval response did not include approved state: %s", approvedRec.Body.String())
@@ -3549,6 +3587,19 @@ func TestDatabaseAssetQueryRequiresAuthorizationAndLogs(t *testing.T) {
 	if !strings.Contains(assetDeniedLogsRec.Body.String(), "sql_work_order.database_access.denied") || !strings.Contains(assetDeniedLogsRec.Body.String(), workOrder.ID) || !strings.Contains(assetDeniedLogsRec.Body.String(), databaseAsset.ID) {
 		t.Fatalf("sql work order asset denial was not audited: %s", assetDeniedLogsRec.Body.String())
 	}
+	removeSQLApproveLogBlocker := blockOperationLogName(t, srv.cfg.Store, "sql_work_order.approved")
+	blockedSQLApproveRec := assertStatus(t, handler, http.MethodPost, "/api/admin/sql-work-orders/"+workOrder.ID+"/approve", map[string]any{"note": "blocked operation log"}, adminCookie, http.StatusInternalServerError)
+	removeSQLApproveLogBlocker()
+	if !strings.Contains(blockedSQLApproveRec.Body.String(), "persist operation log failed") {
+		t.Fatalf("sql work order approve log persistence failure did not explain error: %s", blockedSQLApproveRec.Body.String())
+	}
+	blockedSQLApproveStatusRec := assertStatus(t, handler, http.MethodGet, "/api/admin/sql-work-orders/"+workOrder.ID, nil, adminCookie, http.StatusOK)
+	if !strings.Contains(blockedSQLApproveStatusRec.Body.String(), `"status":"pending"`) || strings.Contains(blockedSQLApproveStatusRec.Body.String(), "blocked operation log") {
+		t.Fatalf("sql work order was not restored after approve log failure: %s", blockedSQLApproveStatusRec.Body.String())
+	}
+	if !coreAuditLogsContainAction(srv.cfg.Store, "operation.log.persist_failed") {
+		t.Fatal("sql work order approve operation log failure was not audited")
+	}
 	approveRec := assertStatus(t, handler, http.MethodPost, "/api/admin/sql-work-orders/"+workOrder.ID+"/approve", map[string]any{"note": "approved for test"}, adminCookie, http.StatusOK)
 	var approvedOrder model.PlatformItem
 	decodeResponse(t, approveRec, &approvedOrder)
@@ -3575,6 +3626,16 @@ func TestDatabaseAssetQueryRequiresAuthorizationAndLogs(t *testing.T) {
 	}, userCookie, http.StatusCreated)
 	var rejectedOrder model.PlatformItem
 	decodeResponse(t, rejectedRec, &rejectedOrder)
+	removeSQLRejectLogBlocker := blockOperationLogName(t, srv.cfg.Store, "sql_work_order.rejected")
+	blockedSQLRejectRec := assertStatus(t, handler, http.MethodPost, "/api/admin/sql-work-orders/"+rejectedOrder.ID+"/reject", map[string]any{"note": "blocked reject log"}, adminCookie, http.StatusInternalServerError)
+	removeSQLRejectLogBlocker()
+	if !strings.Contains(blockedSQLRejectRec.Body.String(), "persist operation log failed") {
+		t.Fatalf("sql work order reject log persistence failure did not explain error: %s", blockedSQLRejectRec.Body.String())
+	}
+	blockedSQLRejectStatusRec := assertStatus(t, handler, http.MethodGet, "/api/admin/sql-work-orders/"+rejectedOrder.ID, nil, adminCookie, http.StatusOK)
+	if !strings.Contains(blockedSQLRejectStatusRec.Body.String(), `"status":"pending"`) || strings.Contains(blockedSQLRejectStatusRec.Body.String(), "blocked reject log") {
+		t.Fatalf("sql work order was not restored after reject log failure: %s", blockedSQLRejectStatusRec.Body.String())
+	}
 	rejectRec := assertStatus(t, handler, http.MethodPost, "/api/admin/sql-work-orders/"+rejectedOrder.ID+"/reject", map[string]any{"note": "not allowed"}, adminCookie, http.StatusOK)
 	var rejectedDecision model.PlatformItem
 	decodeResponse(t, rejectRec, &rejectedDecision)

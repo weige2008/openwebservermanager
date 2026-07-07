@@ -2,6 +2,7 @@ package app
 
 import (
 	"errors"
+	"fmt"
 	"log/slog"
 	"net/http"
 	"path/filepath"
@@ -73,8 +74,33 @@ func (s *Server) handleCommandApprovalDecision(w http.ResponseWriter, r *http.Re
 		writeError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
+	if err := s.createCommandApprovalDecisionOperationLog(r, nextStatus, item, "set command approval "+nextStatus); err != nil {
+		if _, restoreErr := s.cfg.Store.SavePlatformItem("command_approvals", approval); restoreErr != nil {
+			err = fmt.Errorf("%w; additionally failed to restore command approval: %v", err, restoreErr)
+		}
+		writeError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
 	_ = s.audit(r, "command_approval."+nextStatus, id, model.ProtocolSSH, "set command approval "+nextStatus)
 	writeJSON(w, http.StatusOK, item)
+}
+
+func (s *Server) createCommandApprovalDecisionOperationLog(r *http.Request, status string, item model.PlatformItem, description string) error {
+	return s.createOperationLog(r, model.PlatformItemRequest{
+		Name:        "command_approval." + status,
+		Type:        "command_approvals",
+		Status:      "success",
+		Protocol:    model.ProtocolSSH,
+		TargetID:    item.ID,
+		OwnerID:     s.currentUserID(r),
+		Description: description,
+		Metadata: map[string]any{
+			"collection": "command_approvals",
+			"item_id":    item.ID,
+			"decision":   status,
+			"client_ip":  s.clientIP(r),
+		},
+	})
 }
 
 func (s *Server) handleCommandApprovalExecute(w http.ResponseWriter, r *http.Request, id string) {

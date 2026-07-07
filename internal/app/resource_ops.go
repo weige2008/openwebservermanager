@@ -4077,8 +4077,33 @@ func (s *Server) handleSQLWorkOrderDecision(w http.ResponseWriter, r *http.Reque
 		writeError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
+	if err := s.createSQLWorkOrderDecisionOperationLog(r, nextStatus, item, "set sql work order "+nextStatus); err != nil {
+		if _, restoreErr := s.cfg.Store.SavePlatformItem("sql_work_orders", order); restoreErr != nil {
+			err = fmt.Errorf("%w; additionally failed to restore sql work order: %v", err, restoreErr)
+		}
+		writeError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
 	_ = s.audit(r, "sql_work_order."+nextStatus, id, model.ProtocolDatabase, "set sql work order "+nextStatus)
 	writeJSON(w, http.StatusOK, item)
+}
+
+func (s *Server) createSQLWorkOrderDecisionOperationLog(r *http.Request, status string, item model.PlatformItem, description string) error {
+	return s.createOperationLog(r, model.PlatformItemRequest{
+		Name:        "sql_work_order." + status,
+		Type:        "sql_work_orders",
+		Status:      "success",
+		Protocol:    model.ProtocolDatabase,
+		TargetID:    item.ID,
+		OwnerID:     s.currentUserID(r),
+		Description: description,
+		Metadata: map[string]any{
+			"collection": "sql_work_orders",
+			"item_id":    item.ID,
+			"decision":   status,
+			"client_ip":  s.clientIP(r),
+		},
+	})
 }
 
 func sqlWorkOrderRequesterID(order model.PlatformItem) string {

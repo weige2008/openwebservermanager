@@ -3348,15 +3348,34 @@ func (s *Server) handleSQLWorkOrderExecute(w http.ResponseWriter, r *http.Reques
 	if statusCode != http.StatusOK {
 		nextMetadata := sqlWorkOrderExecutionMetadata(order, asset, logItem, approvedSQL, userID)
 		nextMetadata["execution_error"] = logItem.Description
-		_, _ = s.cfg.Store.UpdatePlatformItem("sql_work_orders", id, model.PlatformItemRequest{Status: "failed", Protocol: model.ProtocolDatabase, Metadata: nextMetadata})
+		if _, ok := s.updateSQLWorkOrderExecutionState(w, r, id, "failed", nextMetadata); !ok {
+			return
+		}
 		_ = s.audit(r, "sql_work_order.execute.failed", id, model.ProtocolDatabase, logItem.Description)
 		writeJSON(w, statusCode, logItem)
 		return
 	}
 	nextMetadata := sqlWorkOrderExecutionMetadata(order, asset, logItem, approvedSQL, userID)
-	_, _ = s.cfg.Store.UpdatePlatformItem("sql_work_orders", id, model.PlatformItemRequest{Status: "executed", Protocol: model.ProtocolDatabase, Metadata: nextMetadata})
+	if _, ok := s.updateSQLWorkOrderExecutionState(w, r, id, "executed", nextMetadata); !ok {
+		return
+	}
 	_ = s.audit(r, "sql_work_order.execute", id, model.ProtocolDatabase, "executed sql work order")
 	writeJSON(w, http.StatusOK, logItem)
+}
+
+func (s *Server) updateSQLWorkOrderExecutionState(w http.ResponseWriter, r *http.Request, id, status string, metadata map[string]any) (model.PlatformItem, bool) {
+	item, err := s.cfg.Store.UpdatePlatformItem("sql_work_orders", id, model.PlatformItemRequest{
+		Status:   status,
+		Protocol: model.ProtocolDatabase,
+		Metadata: metadata,
+	})
+	if err != nil {
+		detail := "persist sql work order " + status + " state failed: " + err.Error()
+		_ = s.audit(r, "sql_work_order.execute.persist_failed", id, model.ProtocolDatabase, detail)
+		writeError(w, http.StatusInternalServerError, detail)
+		return model.PlatformItem{}, false
+	}
+	return item, true
 }
 
 func sqlWorkOrderExecutionMetadata(order, asset, logItem model.PlatformItem, approvedSQL, userID string) map[string]any {

@@ -2984,7 +2984,8 @@ func TestWebAssetProxyUsesMTLSCertificate(t *testing.T) {
 }
 
 func TestDatabaseAssetQueryRequiresAuthorizationAndLogs(t *testing.T) {
-	handler, adminCookie := newTestHandler(t)
+	srv, adminCookie := newTestServer(t, nil)
+	handler := http.Handler(srv)
 
 	assertStatus(t, handler, http.MethodPost, "/api/admin/roles", map[string]any{
 		"name":   "sql-self-approver",
@@ -3146,6 +3147,44 @@ func TestDatabaseAssetQueryRequiresAuthorizationAndLogs(t *testing.T) {
 	}
 	assertStatus(t, handler, http.MethodPost, "/api/admin/sql-work-orders/"+failingOrder.ID+"/approve", map[string]any{"note": "retry by re-approval"}, adminCookie, http.StatusConflict)
 	assertStatus(t, handler, http.MethodPost, "/api/admin/sql-work-orders/"+failingOrder.ID+"/reject", map[string]any{"note": "reject failed order"}, adminCookie, http.StatusConflict)
+
+	blockedPersistRec := assertStatus(t, handler, http.MethodPost, "/api/access/database/"+databaseAsset.ID+"/work-orders", map[string]any{
+		"sql":    "CREATE TABLE blocked_status_update(name TEXT)",
+		"reason": "exercise status persistence failure",
+	}, userCookie, http.StatusCreated)
+	var blockedPersistOrder model.PlatformItem
+	decodeResponse(t, blockedPersistRec, &blockedPersistOrder)
+	assertStatus(t, handler, http.MethodPost, "/api/admin/sql-work-orders/"+blockedPersistOrder.ID+"/approve", map[string]any{"note": "approved persistence failure path"}, adminCookie, http.StatusOK)
+	removeExecutedBlocker := blockSQLWorkOrderStatusUpdate(t, srv.cfg.Store, blockedPersistOrder.ID, "executed")
+	blockedPersistExecuteRec := assertStatus(t, handler, http.MethodPost, "/api/admin/sql-work-orders/"+blockedPersistOrder.ID+"/execute", map[string]any{}, adminCookie, http.StatusInternalServerError)
+	removeExecutedBlocker()
+	if !strings.Contains(blockedPersistExecuteRec.Body.String(), "persist sql work order executed state failed") {
+		t.Fatalf("status persistence failure did not explain executed state error: %s", blockedPersistExecuteRec.Body.String())
+	}
+	blockedPersistStatusRec := assertStatus(t, handler, http.MethodGet, "/api/admin/sql-work-orders/"+blockedPersistOrder.ID, nil, adminCookie, http.StatusOK)
+	var stillApprovedOrder model.PlatformItem
+	decodeResponse(t, blockedPersistStatusRec, &stillApprovedOrder)
+	if stillApprovedOrder.Status != "approved" {
+		t.Fatalf("blocked status update unexpectedly changed work order status to %q", stillApprovedOrder.Status)
+	}
+
+	blockedFailureRec := assertStatus(t, handler, http.MethodPost, "/api/access/database/"+databaseAsset.ID+"/work-orders", map[string]any{
+		"sql":    "SELECT * FROM missing_persist_failure_table",
+		"reason": "exercise failed status persistence failure",
+	}, userCookie, http.StatusCreated)
+	var blockedFailureOrder model.PlatformItem
+	decodeResponse(t, blockedFailureRec, &blockedFailureOrder)
+	assertStatus(t, handler, http.MethodPost, "/api/admin/sql-work-orders/"+blockedFailureOrder.ID+"/approve", map[string]any{"note": "approved failed persistence path"}, adminCookie, http.StatusOK)
+	removeFailedBlocker := blockSQLWorkOrderStatusUpdate(t, srv.cfg.Store, blockedFailureOrder.ID, "failed")
+	blockedFailureExecuteRec := assertStatus(t, handler, http.MethodPost, "/api/admin/sql-work-orders/"+blockedFailureOrder.ID+"/execute", map[string]any{}, adminCookie, http.StatusInternalServerError)
+	removeFailedBlocker()
+	if !strings.Contains(blockedFailureExecuteRec.Body.String(), "persist sql work order failed state failed") {
+		t.Fatalf("status persistence failure did not explain failed state error: %s", blockedFailureExecuteRec.Body.String())
+	}
+	persistFailureLogsRec := assertStatus(t, handler, http.MethodGet, "/api/admin/audit/operation-logs", nil, adminCookie, http.StatusOK)
+	if !strings.Contains(persistFailureLogsRec.Body.String(), "sql_work_order.execute.persist_failed") {
+		t.Fatalf("sql work order status persistence failure was not audited: %s", persistFailureLogsRec.Body.String())
+	}
 
 	logsRec := assertStatus(t, handler, http.MethodGet, "/api/admin/audit/sql-logs", nil, adminCookie, http.StatusOK)
 	logsBody := logsRec.Body.String()
@@ -10602,6 +10641,39 @@ func newUnconfiguredTestServer(t *testing.T, configure func(*Config)) *Server {
 		configure(&cfg)
 	}
 	return NewServer(cfg)
+}
+
+func blockSQLWorkOrderStatusUpdate(t *testing.T, st *store.Store, orderID, status string) func() {
+	t.Helper()
+	db, err := sql.Open("sqlite", st.DatabasePath())
+	if err != nil {
+		t.Fatalf("open store database for status blocker: %v", err)
+	}
+	triggerName := "block_sql_work_order_status_update"
+	if _, err := db.Exec(`DROP TRIGGER IF EXISTS ` + triggerName); err != nil {
+		_ = db.Close()
+		t.Fatalf("drop stale status blocker trigger: %v", err)
+	}
+	statusFragment := `"status":"` + status + `"`
+	triggerSQL := `CREATE TRIGGER ` + triggerName + ` BEFORE INSERT ON platform_records
+WHEN NEW.collection = 'sql_work_orders'
+  AND NEW.id = ` + sqliteTestStringLiteral(orderID) + `
+  AND instr(NEW.payload, ` + sqliteTestStringLiteral(statusFragment) + `) > 0
+BEGIN
+  SELECT RAISE(ABORT, 'forced sql work order status update failure');
+END`
+	if _, err := db.Exec(triggerSQL); err != nil {
+		_ = db.Close()
+		t.Fatalf("create status blocker trigger: %v", err)
+	}
+	return func() {
+		_, _ = db.Exec(`DROP TRIGGER IF EXISTS ` + triggerName)
+		_ = db.Close()
+	}
+}
+
+func sqliteTestStringLiteral(value string) string {
+	return "'" + strings.ReplaceAll(value, "'", "''") + "'"
 }
 
 type fakeSSHGatewayRuntime struct {

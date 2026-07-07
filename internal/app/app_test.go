@@ -1386,6 +1386,41 @@ func TestUserImportCreatesSkipsAndUpdatesLoginUsers(t *testing.T) {
 	if !strings.Contains(csvLoginRec.Body.String(), `"role":"auditor"`) {
 		t.Fatalf("csv imported user did not login with role: %s", csvLoginRec.Body.String())
 	}
+	removeCreateImportBlocker := blockOperationLogName(t, handler.(*Server).cfg.Store, "users.import")
+	createImportFailureRec := assertStatus(t, handler, http.MethodPost, "/api/admin/users/import", map[string]any{
+		"items": []map[string]any{{
+			"name":     "rollback-import-user",
+			"type":     "local",
+			"status":   "enabled",
+			"password": "password123",
+			"metadata": map[string]any{"role": "user"},
+		}},
+	}, adminCookie, http.StatusInternalServerError)
+	removeCreateImportBlocker()
+	if !strings.Contains(createImportFailureRec.Body.String(), "persist operation log failed") {
+		t.Fatalf("user import create operation log failure was not reported: %s", createImportFailureRec.Body.String())
+	}
+	assertStatus(t, handler, http.MethodPost, "/api/auth/login", map[string]any{"username": "rollback-import-user", "password": "password123"}, nil, http.StatusUnauthorized)
+	removeUpdateImportBlocker := blockOperationLogName(t, handler.(*Server).cfg.Store, "users.import")
+	updateImportFailureRec := assertStatus(t, handler, http.MethodPost, "/api/admin/users/import", map[string]any{
+		"update_existing": true,
+		"items": []map[string]any{{
+			"name":     "import-user",
+			"type":     "local",
+			"status":   "enabled",
+			"password": "blockedpassword123",
+			"metadata": map[string]any{"role": "auditor"},
+		}},
+	}, adminCookie, http.StatusInternalServerError)
+	removeUpdateImportBlocker()
+	if !strings.Contains(updateImportFailureRec.Body.String(), "persist operation log failed") {
+		t.Fatalf("user import update operation log failure was not reported: %s", updateImportFailureRec.Body.String())
+	}
+	assertStatus(t, handler, http.MethodPost, "/api/auth/login", map[string]any{"username": "import-user", "password": "blockedpassword123"}, nil, http.StatusUnauthorized)
+	rolledBackLoginRec := assertStatus(t, handler, http.MethodPost, "/api/auth/login", map[string]any{"username": "import-user", "password": "newpassword123"}, nil, http.StatusOK)
+	if !strings.Contains(rolledBackLoginRec.Body.String(), `"role":"admin"`) {
+		t.Fatalf("user import update was not rolled back after operation log failure: %s", rolledBackLoginRec.Body.String())
+	}
 	exportJSONRec := assertStatus(t, handler, http.MethodGet, "/api/admin/users/export", nil, adminCookie, http.StatusOK)
 	exportJSONBody := exportJSONRec.Body.String()
 	for _, leaked := range []string{"password_hash", "raw-mfa-secret", "raw-recovery-code"} {
@@ -2658,6 +2693,20 @@ func TestBulkAuthorizationGrantsAccessAcrossResourceTypes(t *testing.T) {
 	}
 	if hasGrant(accessPayload.Authorized, expiredAsset.ID) || hasGrant(accessPayload.AuthorizedAssets, expiredAsset.ID) {
 		t.Fatalf("access portal returned expired authorization record: %#v", accessPayload)
+	}
+	removeBulkAuthBlocker := blockOperationLogName(t, handler.(*Server).cfg.Store, "authorized_assets.bulk_create")
+	blockedRenewRec := assertStatus(t, handler, http.MethodPost, "/api/admin/authorizations/assets/bulk", map[string]any{
+		"subject_ids": []string{user.ID},
+		"target_ids":  []string{expiredAsset.ID},
+		"expires_at":  time.Now().Add(time.Hour).UTC().Format(time.RFC3339),
+	}, adminCookie, http.StatusInternalServerError)
+	removeBulkAuthBlocker()
+	if !strings.Contains(blockedRenewRec.Body.String(), "persist operation log failed") {
+		t.Fatalf("bulk authorization operation log failure was not reported: %s", blockedRenewRec.Body.String())
+	}
+	blockedRenewAccessRec := assertStatus(t, handler, http.MethodGet, "/api/access/assets", nil, userCookie, http.StatusOK)
+	if strings.Contains(blockedRenewAccessRec.Body.String(), expiredAsset.ID) {
+		t.Fatalf("bulk authorization update survived operation log failure: %s", blockedRenewAccessRec.Body.String())
 	}
 	renewRec := assertStatus(t, handler, http.MethodPost, "/api/admin/authorizations/assets/bulk", map[string]any{
 		"subject_ids": []string{user.ID},
@@ -8095,6 +8144,46 @@ func TestResourceOperationEndpoints(t *testing.T) {
 	}, cookie, http.StatusCreated)
 	if !strings.Contains(importAssetRec.Body.String(), `"created":1`) || !strings.Contains(importAssetRec.Body.String(), `"total":1`) {
 		t.Fatalf("asset import summary missing: %s", importAssetRec.Body.String())
+	}
+	removeAssetImportCreateBlocker := blockOperationLogName(t, server.cfg.Store, "assets.import")
+	assetImportCreateFailureRec := assertStatus(t, handler, http.MethodPost, "/api/admin/assets/import", map[string]any{
+		"items": []map[string]any{{
+			"name":     "rollback-imported-asset",
+			"type":     "linux",
+			"status":   "active",
+			"protocol": "ssh",
+			"host":     "192.0.2.30",
+			"port":     22,
+		}},
+	}, cookie, http.StatusInternalServerError)
+	removeAssetImportCreateBlocker()
+	if !strings.Contains(assetImportCreateFailureRec.Body.String(), "persist operation log failed") {
+		t.Fatalf("asset import create operation log failure was not reported: %s", assetImportCreateFailureRec.Body.String())
+	}
+	assetListAfterCreateFailure := assertStatus(t, handler, http.MethodGet, "/api/admin/assets", nil, cookie, http.StatusOK)
+	if strings.Contains(assetListAfterCreateFailure.Body.String(), "rollback-imported-asset") {
+		t.Fatalf("asset import create survived operation log failure: %s", assetListAfterCreateFailure.Body.String())
+	}
+	removeAssetImportUpdateBlocker := blockOperationLogName(t, server.cfg.Store, "assets.import")
+	assetImportUpdateFailureRec := assertStatus(t, handler, http.MethodPost, "/api/admin/assets/import", map[string]any{
+		"update_existing": true,
+		"items": []map[string]any{{
+			"name":        "linux-export",
+			"type":        "linux",
+			"status":      "disabled",
+			"protocol":    "ssh",
+			"host":        "192.0.2.31",
+			"port":        2222,
+			"description": "blocked import update",
+		}},
+	}, cookie, http.StatusInternalServerError)
+	removeAssetImportUpdateBlocker()
+	if !strings.Contains(assetImportUpdateFailureRec.Body.String(), "persist operation log failed") {
+		t.Fatalf("asset import update operation log failure was not reported: %s", assetImportUpdateFailureRec.Body.String())
+	}
+	assetDetailAfterUpdateFailure := assertStatus(t, handler, http.MethodGet, "/api/admin/assets/"+asset.ID, nil, cookie, http.StatusOK)
+	if strings.Contains(assetDetailAfterUpdateFailure.Body.String(), "192.0.2.31") || strings.Contains(assetDetailAfterUpdateFailure.Body.String(), "blocked import update") || !strings.Contains(assetDetailAfterUpdateFailure.Body.String(), `"status":"active"`) {
+		t.Fatalf("asset import update was not rolled back after operation log failure: %s", assetDetailAfterUpdateFailure.Body.String())
 	}
 	skipAssetRec := assertStatus(t, handler, http.MethodPost, "/api/admin/assets/import", map[string]any{
 		"items": []map[string]any{{

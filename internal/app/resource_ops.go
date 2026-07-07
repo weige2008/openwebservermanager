@@ -845,6 +845,7 @@ func (s *Server) handleAssetImport(w http.ResponseWriter, r *http.Request) {
 	seen := map[string]bool{}
 	created := []model.PlatformItem{}
 	updated := []model.PlatformItem{}
+	rollback := platformBulkMutationRollback{Collection: "assets"}
 	skipped := []map[string]string{}
 	for index, itemReq := range req.Items {
 		itemReq.Name = strings.TrimSpace(itemReq.Name)
@@ -863,11 +864,21 @@ func (s *Server) handleAssetImport(w http.ResponseWriter, r *http.Request) {
 				skipped = append(skipped, map[string]string{"name": itemReq.Name, "reason": "asset already exists"})
 				continue
 			}
+			previous, ok, err := s.cfg.Store.GetPlatformItem("assets", existing.ID)
+			if err != nil {
+				writeError(w, http.StatusInternalServerError, err.Error())
+				return
+			}
+			if !ok {
+				writeError(w, http.StatusNotFound, "asset not found")
+				return
+			}
 			item, err := s.cfg.Store.UpdatePlatformItem("assets", existing.ID, itemReq)
 			if err != nil {
 				writeError(w, http.StatusInternalServerError, err.Error())
 				return
 			}
+			rollback.Updated = append(rollback.Updated, previous)
 			updated = append(updated, item)
 			continue
 		}
@@ -876,7 +887,15 @@ func (s *Server) handleAssetImport(w http.ResponseWriter, r *http.Request) {
 			writeError(w, http.StatusInternalServerError, err.Error())
 			return
 		}
+		rollback.CreatedIDs = append(rollback.CreatedIDs, item.ID)
 		created = append(created, item)
+	}
+	if err := s.createBulkMutationOperationLog(r, "assets.import", "import", "assets", "", "imported assets", len(created), len(updated), len(skipped), len(req.Items)); err != nil {
+		if rollbackErr := s.rollbackPlatformBulkMutation(rollback); rollbackErr != nil {
+			err = fmt.Errorf("%w; additionally failed to roll back imported assets: %v", err, rollbackErr)
+		}
+		writeError(w, http.StatusInternalServerError, err.Error())
+		return
 	}
 	_ = s.audit(r, "assets.import", "assets", "", "imported assets")
 	items := append([]model.PlatformItem{}, created...)
@@ -924,6 +943,7 @@ func (s *Server) handleUserImport(w http.ResponseWriter, r *http.Request) {
 	seen := map[string]bool{}
 	created := []model.PlatformItem{}
 	updated := []model.PlatformItem{}
+	rollback := platformBulkMutationRollback{Collection: "users"}
 	skipped := []map[string]string{}
 	for index, itemReq := range req.Items {
 		itemReq.Name = strings.TrimSpace(itemReq.Name)
@@ -954,11 +974,21 @@ func (s *Server) handleUserImport(w http.ResponseWriter, r *http.Request) {
 				skipped = append(skipped, map[string]string{"name": itemReq.Name, "reason": "user already exists"})
 				continue
 			}
+			previous, ok, err := s.cfg.Store.GetPlatformItem("users", existing.ID)
+			if err != nil {
+				writeError(w, http.StatusInternalServerError, err.Error())
+				return
+			}
+			if !ok {
+				writeError(w, http.StatusNotFound, "user not found")
+				return
+			}
 			item, err := s.cfg.Store.UpdatePlatformItem("users", existing.ID, itemReq)
 			if err != nil {
 				writeError(w, http.StatusInternalServerError, err.Error())
 				return
 			}
+			rollback.Updated = append(rollback.Updated, previous)
 			updated = append(updated, item)
 			continue
 		}
@@ -967,7 +997,15 @@ func (s *Server) handleUserImport(w http.ResponseWriter, r *http.Request) {
 			writeError(w, http.StatusBadRequest, fmt.Sprintf("import user %q: %v", itemReq.Name, err))
 			return
 		}
+		rollback.CreatedIDs = append(rollback.CreatedIDs, item.ID)
 		created = append(created, item)
+	}
+	if err := s.createBulkMutationOperationLog(r, "users.import", "import", "users", "", "imported users", len(created), len(updated), len(skipped), len(req.Items)); err != nil {
+		if rollbackErr := s.rollbackPlatformBulkMutation(rollback); rollbackErr != nil {
+			err = fmt.Errorf("%w; additionally failed to roll back imported users: %v", err, rollbackErr)
+		}
+		writeError(w, http.StatusInternalServerError, err.Error())
+		return
 	}
 	_ = s.audit(r, "users.import", "users", "", "imported users")
 	writeJSON(w, http.StatusCreated, map[string]any{
@@ -1041,6 +1079,7 @@ func (s *Server) handleAuthorizationBulk(w http.ResponseWriter, r *http.Request,
 	}
 	created := []model.PlatformItem{}
 	updated := []model.PlatformItem{}
+	rollback := platformBulkMutationRollback{Collection: collection}
 	skipped := []map[string]string{}
 	for _, subjectID := range subjects {
 		for _, targetID := range targets {
@@ -1070,11 +1109,21 @@ func (s *Server) handleAuthorizationBulk(w http.ResponseWriter, r *http.Request,
 			}
 			if len(existingForPair) > 0 {
 				metadata["updated_by"] = currentUserID
+				previous, ok, err := s.cfg.Store.GetPlatformItem(collection, existingForPair[0].ID)
+				if err != nil {
+					writeError(w, http.StatusInternalServerError, err.Error())
+					return
+				}
+				if !ok {
+					writeError(w, http.StatusNotFound, "authorization record not found")
+					return
+				}
 				item, err := s.cfg.Store.UpdatePlatformItem(collection, existingForPair[0].ID, itemReq)
 				if err != nil {
 					writeError(w, http.StatusInternalServerError, err.Error())
 					return
 				}
+				rollback.Updated = append(rollback.Updated, previous)
 				existingPairs[pairKey] = append(existingPairs[pairKey], item)
 				updated = append(updated, item)
 				continue
@@ -1084,9 +1133,17 @@ func (s *Server) handleAuthorizationBulk(w http.ResponseWriter, r *http.Request,
 				writeError(w, http.StatusInternalServerError, err.Error())
 				return
 			}
+			rollback.CreatedIDs = append(rollback.CreatedIDs, item.ID)
 			existingPairs[pairKey] = append(existingPairs[pairKey], item)
 			created = append(created, item)
 		}
+	}
+	if err := s.createBulkMutationOperationLog(r, collection+".bulk_create", "bulk_create", collection, protocol, "bulk created authorizations", len(created), len(updated), len(skipped), len(subjects)*len(targets)); err != nil {
+		if rollbackErr := s.rollbackPlatformBulkMutation(rollback); rollbackErr != nil {
+			err = fmt.Errorf("%w; additionally failed to roll back bulk authorizations: %v", err, rollbackErr)
+		}
+		writeError(w, http.StatusInternalServerError, err.Error())
+		return
 	}
 	_ = s.audit(r, collection+".bulk_create", collection, protocol, "bulk created authorizations")
 	writeJSON(w, http.StatusCreated, map[string]any{
@@ -1098,6 +1155,48 @@ func (s *Server) handleAuthorizationBulk(w http.ResponseWriter, r *http.Request,
 			"updated": len(updated),
 			"skipped": len(skipped),
 			"total":   len(subjects) * len(targets),
+		},
+	})
+}
+
+type platformBulkMutationRollback struct {
+	Collection string
+	CreatedIDs []string
+	Updated    []model.PlatformItem
+}
+
+func (s *Server) rollbackPlatformBulkMutation(snapshot platformBulkMutationRollback) error {
+	var errs []error
+	for i := len(snapshot.CreatedIDs) - 1; i >= 0; i-- {
+		id := snapshot.CreatedIDs[i]
+		if err := s.cfg.Store.DeletePlatformItem(snapshot.Collection, id); err != nil && !errors.Is(err, os.ErrNotExist) {
+			errs = append(errs, fmt.Errorf("delete created %s: %w", id, err))
+		}
+	}
+	for i := len(snapshot.Updated) - 1; i >= 0; i-- {
+		item := snapshot.Updated[i]
+		if _, err := s.cfg.Store.SavePlatformItem(snapshot.Collection, item); err != nil {
+			errs = append(errs, fmt.Errorf("restore updated %s: %w", item.ID, err))
+		}
+	}
+	return errors.Join(errs...)
+}
+
+func (s *Server) createBulkMutationOperationLog(r *http.Request, name, logType, targetID string, protocol model.Protocol, description string, created, updated, skipped, total int) error {
+	return s.createOperationLog(r, model.PlatformItemRequest{
+		Name:        name,
+		Type:        logType,
+		Status:      "success",
+		Protocol:    protocol,
+		OwnerID:     s.currentUserID(r),
+		TargetID:    targetID,
+		Description: description,
+		Metadata: map[string]any{
+			"client_ip": s.clientIP(r),
+			"created":   created,
+			"updated":   updated,
+			"skipped":   skipped,
+			"total":     total,
 		},
 	})
 }

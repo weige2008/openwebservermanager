@@ -9584,6 +9584,10 @@ func TestBackupListDownloadAndRestore(t *testing.T) {
 	if !zipHasEntry(downloadZip, "manifest.json") {
 		t.Fatal("backup download did not include manifest.json")
 	}
+	downloadLogsRec := assertStatus(t, handler, http.MethodGet, "/api/admin/audit/operation-logs", nil, cookie, http.StatusOK)
+	if !strings.Contains(downloadLogsRec.Body.String(), "backup.download") || !strings.Contains(downloadLogsRec.Body.String(), backupName) {
+		t.Fatalf("backup download did not write operation log: %s", downloadLogsRec.Body.String())
+	}
 
 	transientAssetRec := assertStatus(t, handler, http.MethodPost, "/api/admin/assets", map[string]any{
 		"name":     "restore-removed",
@@ -10072,6 +10076,16 @@ func TestBackupOperationLogPersistenceFailures(t *testing.T) {
 	}
 	if len(afterCreateFailure) != len(beforeCreateFailure) {
 		t.Fatalf("backup create left an unaudited archive: before=%v after=%v", beforeCreateFailure, afterCreateFailure)
+	}
+
+	removeDownloadLogBlocker := blockPlatformItemCreate(t, srv.cfg.Store, "operation_logs")
+	downloadFailureRec := assertStatus(t, handler, http.MethodGet, "/api/admin/backups/"+backupName+"/download", nil, cookie, http.StatusInternalServerError)
+	removeDownloadLogBlocker()
+	if !strings.Contains(downloadFailureRec.Body.String(), "persist operation log failed") {
+		t.Fatalf("backup download operation log failure was not reported: %s", downloadFailureRec.Body.String())
+	}
+	if downloadFailureRec.Header().Get("Content-Type") == "application/zip" || bytes.Equal(downloadFailureRec.Body.Bytes(), backupRaw) {
+		t.Fatalf("backup download returned archive after operation log failure")
 	}
 
 	removeDeleteLogBlocker := blockPlatformItemCreate(t, srv.cfg.Store, "operation_logs")

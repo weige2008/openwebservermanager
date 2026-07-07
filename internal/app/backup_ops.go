@@ -88,11 +88,23 @@ func (s *Server) handleBackupDownload(w http.ResponseWriter, r *http.Request, na
 		writeError(w, http.StatusBadRequest, err.Error())
 		return
 	}
-	if _, err := backupRegularFileInfo(path); errors.Is(err, os.ErrNotExist) {
+	info, err := backupRegularFileInfo(path)
+	if errors.Is(err, os.ErrNotExist) {
 		writeError(w, http.StatusNotFound, "backup not found")
 		return
 	} else if err != nil {
 		writeError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	if err := s.createOperationLog(r, model.PlatformItemRequest{
+		Name:        "backup.download",
+		Type:        "backup",
+		Status:      "success",
+		OwnerID:     s.currentUserID(r),
+		Description: "downloaded backup archive",
+		Metadata:    map[string]any{"backup": name, "size": info.Size(), "client_ip": s.clientIP(r)},
+	}); err != nil {
+		writeError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
 	_ = s.audit(r, "backup.download", name, "", "downloaded backup")

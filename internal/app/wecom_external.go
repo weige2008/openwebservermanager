@@ -160,6 +160,11 @@ func (s *Server) handleExternalWeComCallback(w http.ResponseWriter, r *http.Requ
 		writeError(w, http.StatusBadGateway, safeErr.Error())
 		return
 	}
+	previousUser, hadPreviousUser, err := s.externalUserSnapshot("wecom", provider.ID, claims.Subject)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
 	user, err := s.upsertExternalWeComUser(provider, claims)
 	if err != nil {
 		status := http.StatusBadGateway
@@ -173,6 +178,18 @@ func (s *Server) handleExternalWeComCallback(w http.ResponseWriter, r *http.Requ
 		writeError(w, status, err.Error())
 		return
 	}
+	if err := s.createLoginLog(r, model.PlatformItemRequest{
+		Name:        user.Username,
+		Type:        "wecom",
+		Status:      "success",
+		OwnerID:     user.UserID,
+		Description: "signed in with enterprise wechat",
+		Metadata:    map[string]any{"client_ip": s.clientIP(r), "provider_id": provider.ID, "subject": claims.Subject},
+	}); err != nil {
+		s.restoreExternalUserAfterLoginLogFailure(user.UserID, previousUser, hadPreviousUser)
+		writeError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
 	token, session, err := s.auth.create(user)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, err.Error())
@@ -180,17 +197,6 @@ func (s *Server) handleExternalWeComCallback(w http.ResponseWriter, r *http.Requ
 	}
 	_ = s.cfg.Store.RecordUserLogin(session.UserID, s.clientIP(r), r.UserAgent())
 	_ = s.audit(r, "auth.wecom.login", session.UserID, "", "signed in with enterprise wechat provider "+provider.ID)
-	if err := s.createLoginLog(r, model.PlatformItemRequest{
-		Name:        session.Username,
-		Type:        "wecom",
-		Status:      "success",
-		OwnerID:     session.UserID,
-		Description: "signed in with enterprise wechat",
-		Metadata:    map[string]any{"client_ip": s.clientIP(r), "provider_id": provider.ID, "subject": claims.Subject},
-	}); err != nil {
-		writeError(w, http.StatusInternalServerError, err.Error())
-		return
-	}
 	http.SetCookie(w, s.authCookie(r, token, int(authSessionTTL.Seconds())))
 	http.Redirect(w, r, state.Next, http.StatusFound)
 }

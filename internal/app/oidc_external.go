@@ -154,6 +154,12 @@ func (s *Server) handleExternalOIDCCallback(w http.ResponseWriter, r *http.Reque
 		writeError(w, http.StatusBadRequest, err.Error())
 		return
 	}
+	subject := firstMetadataString(claims, "sub", "id", "user_id")
+	previousUser, hadPreviousUser, err := s.externalUserSnapshot("oidc", provider.ID, subject)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
 	user, err := s.upsertExternalOIDCUser(provider, claims)
 	if err != nil {
 		status := http.StatusBadGateway
@@ -170,6 +176,18 @@ func (s *Server) handleExternalOIDCCallback(w http.ResponseWriter, r *http.Reque
 		writeError(w, status, err.Error())
 		return
 	}
+	if err := s.createLoginLog(r, model.PlatformItemRequest{
+		Name:        user.Username,
+		Type:        "oidc",
+		Status:      "success",
+		OwnerID:     user.UserID,
+		Description: "signed in with external oidc",
+		Metadata:    map[string]any{"client_ip": s.clientIP(r), "provider_id": provider.ID, "subject": subject},
+	}); err != nil {
+		s.restoreExternalUserAfterLoginLogFailure(user.UserID, previousUser, hadPreviousUser)
+		writeError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
 	token, session, err := s.auth.create(user)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, err.Error())
@@ -177,17 +195,6 @@ func (s *Server) handleExternalOIDCCallback(w http.ResponseWriter, r *http.Reque
 	}
 	_ = s.cfg.Store.RecordUserLogin(session.UserID, s.clientIP(r), r.UserAgent())
 	_ = s.audit(r, "auth.oidc.login", session.UserID, "", "signed in with external oidc provider "+provider.ID)
-	if err := s.createLoginLog(r, model.PlatformItemRequest{
-		Name:        session.Username,
-		Type:        "oidc",
-		Status:      "success",
-		OwnerID:     session.UserID,
-		Description: "signed in with external oidc",
-		Metadata:    map[string]any{"client_ip": s.clientIP(r), "provider_id": provider.ID, "subject": firstMetadataString(claims, "sub")},
-	}); err != nil {
-		writeError(w, http.StatusInternalServerError, err.Error())
-		return
-	}
 	http.SetCookie(w, s.authCookie(r, token, int(authSessionTTL.Seconds())))
 	http.Redirect(w, r, state.Next, http.StatusFound)
 }
@@ -218,6 +225,34 @@ func (s *Server) recordExternalOIDCLoginFailure(r *http.Request, provider extern
 	}
 	_ = s.audit(r, "auth.oidc.login_failed", provider.ID, "oidc", detail)
 	return nil
+}
+
+func (s *Server) externalUserSnapshot(providerType, providerID, subject string) (model.PlatformItem, bool, error) {
+	if strings.TrimSpace(subject) == "" {
+		return model.PlatformItem{}, false, nil
+	}
+	users, err := s.cfg.Store.ListPlatformItems("users")
+	if err != nil {
+		return model.PlatformItem{}, false, err
+	}
+	for _, item := range users {
+		if firstMetadataString(item.Metadata, "external_provider") != providerType ||
+			firstMetadataString(item.Metadata, "external_provider_id") != providerID ||
+			firstMetadataString(item.Metadata, "external_subject") != subject {
+			continue
+		}
+		item.Metadata = cloneMetadata(item.Metadata)
+		return item, true, nil
+	}
+	return model.PlatformItem{}, false, nil
+}
+
+func (s *Server) restoreExternalUserAfterLoginLogFailure(userID string, previous model.PlatformItem, hadPrevious bool) {
+	if hadPrevious {
+		_, _ = s.cfg.Store.SavePlatformItem("users", previous)
+		return
+	}
+	_ = s.cfg.Store.DeletePlatformItem("users", userID)
 }
 
 func sanitizedExternalProviderError(err error, secrets ...string) error {

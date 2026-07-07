@@ -4441,6 +4441,25 @@ func TestOIDCProviderAuthorizationCodeFlow(t *testing.T) {
 		t.Fatalf("public oidc client retained secret-set metadata: %#v", rawPublicClient.Metadata)
 	}
 
+	publicNoPKCEAuthorizePath := "/api/oidc/authorize?" + url.Values{
+		"response_type": {"code"},
+		"client_id":     {"openweb-test"},
+		"redirect_uri":  {redirectURI},
+		"scope":         {"openid profile"},
+		"state":         {"state-public-no-pkce"},
+	}.Encode()
+	publicNoPKCERec := assertStatus(t, handler, http.MethodGet, publicNoPKCEAuthorizePath, nil, adminCookie, http.StatusFound)
+	publicNoPKCELocation, err := url.Parse(publicNoPKCERec.Header().Get("Location"))
+	if err != nil {
+		t.Fatalf("parse public no-pkce authorize redirect: %v", err)
+	}
+	if publicNoPKCELocation.Query().Get("error") != "invalid_request" || publicNoPKCELocation.Query().Get("state") != "state-public-no-pkce" || publicNoPKCELocation.Query().Get("code") != "" {
+		t.Fatalf("public client without PKCE redirect = %q", publicNoPKCELocation.String())
+	}
+	if !strings.Contains(publicNoPKCELocation.Query().Get("error_description"), "PKCE") {
+		t.Fatalf("public client without PKCE error did not explain requirement: %q", publicNoPKCELocation.String())
+	}
+
 	publicCodeVerifier := "public-verifier-1234567890"
 	publicChallengeRaw := sha256.Sum256([]byte(publicCodeVerifier))
 	publicCodeChallenge := base64.RawURLEncoding.EncodeToString(publicChallengeRaw[:])

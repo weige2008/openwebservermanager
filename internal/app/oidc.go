@@ -154,6 +154,10 @@ func (s *Server) handleOIDCAuthorize(w http.ResponseWriter, r *http.Request) {
 		s.redirectOIDCError(w, r, redirectURI, "invalid_request", "unsupported code_challenge_method")
 		return
 	}
+	if oidcClientRequiresPKCE(client) && strings.TrimSpace(query.Get("code_challenge")) == "" {
+		s.redirectOIDCError(w, r, redirectURI, "invalid_request", "public clients must use PKCE")
+		return
+	}
 	_, session, ok := s.authSession(r)
 	if !ok {
 		if query.Get("prompt") == "none" {
@@ -430,11 +434,19 @@ func oidcValidateScope(item model.PlatformItem, requested string) (string, error
 func oidcClientSecretValid(item model.PlatformItem, secret string) bool {
 	hash, _ := item.Metadata["client_secret_hash"].(string)
 	if hash == "" {
-		method := strings.ToLower(firstMetadataString(item.Metadata, "token_endpoint_auth_method", "auth_method", "authMethod"))
-		clientType := strings.ToLower(strings.TrimSpace(item.Type))
-		return strings.TrimSpace(secret) == "" && (clientType == "public" || method == "none")
+		return strings.TrimSpace(secret) == "" && oidcClientAllowsPublicTokenAuth(item)
 	}
 	return bcrypt.CompareHashAndPassword([]byte(hash), []byte(secret)) == nil
+}
+
+func oidcClientRequiresPKCE(item model.PlatformItem) bool {
+	return oidcClientAllowsPublicTokenAuth(item)
+}
+
+func oidcClientAllowsPublicTokenAuth(item model.PlatformItem) bool {
+	method := strings.ToLower(firstMetadataString(item.Metadata, "token_endpoint_auth_method", "auth_method", "authMethod"))
+	clientType := strings.ToLower(strings.TrimSpace(item.Type))
+	return clientType == "public" || method == "none"
 }
 
 func (m *oidcManager) createAuthorizationCode(code oidcAuthorizationCode) (string, error) {

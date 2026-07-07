@@ -323,11 +323,19 @@ func (s *Server) handleAssetExport(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	exportedAt := time.Now().UTC()
-	_ = s.audit(r, "assets.export", "assets", "", "exported assets")
 	format := strings.ToLower(strings.TrimSpace(r.URL.Query().Get("format")))
 	if format == "" {
 		format = "json"
 	}
+	if format != "json" && format != "csv" {
+		writeError(w, http.StatusBadRequest, "unsupported export format")
+		return
+	}
+	if err := s.createExportOperationLog(r, "assets.export", "assets", "assets", format, len(items), "exported assets"); err != nil {
+		writeError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	_ = s.audit(r, "assets.export", "assets", "", "exported assets")
 	switch format {
 	case "json":
 		w.Header().Set("Content-Disposition", `attachment; filename="`+auditExportFilename("assets", exportedAt, "json")+`"`)
@@ -378,11 +386,19 @@ func (s *Server) handleUserExport(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	exportedAt := time.Now().UTC()
-	_ = s.audit(r, "users.export", "users", "", "exported users")
 	format := strings.ToLower(strings.TrimSpace(r.URL.Query().Get("format")))
 	if format == "" {
 		format = "json"
 	}
+	if format != "json" && format != "csv" {
+		writeError(w, http.StatusBadRequest, "unsupported export format")
+		return
+	}
+	if err := s.createExportOperationLog(r, "users.export", "users", "users", format, len(items), "exported users"); err != nil {
+		writeError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	_ = s.audit(r, "users.export", "users", "", "exported users")
 	switch format {
 	case "json":
 		w.Header().Set("Content-Disposition", `attachment; filename="`+auditExportFilename("users", exportedAt, "json")+`"`)
@@ -436,6 +452,14 @@ func (s *Server) handlePlatformCollectionExport(w http.ResponseWriter, r *http.R
 	format := strings.ToLower(strings.TrimSpace(r.URL.Query().Get("format")))
 	if format == "" {
 		format = "json"
+	}
+	if format != "json" && format != "csv" {
+		writeError(w, http.StatusBadRequest, "unsupported export format")
+		return
+	}
+	if err := s.createExportOperationLog(r, collection+".export", collection, route, format, len(items), "exported "+collection); err != nil {
+		writeError(w, http.StatusInternalServerError, err.Error())
+		return
 	}
 	_ = s.audit(r, collection+".export", collection, "", "exported "+collection)
 	switch format {
@@ -507,6 +531,14 @@ func (s *Server) handleAuditExport(w http.ResponseWriter, r *http.Request, route
 	if format == "" {
 		format = "json"
 	}
+	if format != "json" && format != "csv" {
+		writeError(w, http.StatusBadRequest, "unsupported export format")
+		return
+	}
+	if err := s.createExportOperationLog(r, "audit."+collection+".export", collection, route, format, len(items), "exported audit logs"); err != nil {
+		writeError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
 	_ = s.audit(r, "audit."+collection+".export", collection, "", "exported audit logs")
 	switch format {
 	case "json":
@@ -549,6 +581,23 @@ func (s *Server) handleAuditExport(w http.ResponseWriter, r *http.Request, route
 	default:
 		writeError(w, http.StatusBadRequest, "unsupported export format")
 	}
+}
+
+func (s *Server) createExportOperationLog(r *http.Request, name, targetID, route, format string, count int, description string) error {
+	return s.createOperationLog(r, model.PlatformItemRequest{
+		Name:        name,
+		Type:        "export",
+		Status:      "success",
+		OwnerID:     s.currentUserID(r),
+		TargetID:    targetID,
+		Description: description,
+		Metadata: map[string]any{
+			"client_ip": s.clientIP(r),
+			"route":     route,
+			"format":    format,
+			"count":     count,
+		},
+	})
 }
 
 func auditExportFilename(route string, exportedAt time.Time, ext string) string {

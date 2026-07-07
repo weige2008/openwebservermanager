@@ -339,6 +339,18 @@ func TestAuditLogExportJSONAndCSV(t *testing.T) {
 	if !strings.Contains(operationLogsRec.Body.String(), "audit.login_logs.export") {
 		t.Fatalf("audit export did not write operation log: %s", operationLogsRec.Body.String())
 	}
+	removeExportBlocker := blockOperationLogName(t, handler.(*Server).cfg.Store, "audit.login_logs.export")
+	blockedExportRec := assertStatus(t, handler, http.MethodGet, "/api/admin/audit/login-logs/export", nil, adminCookie, http.StatusInternalServerError)
+	removeExportBlocker()
+	if !strings.Contains(blockedExportRec.Body.String(), "persist operation log failed") {
+		t.Fatalf("audit export operation log failure was not reported: %s", blockedExportRec.Body.String())
+	}
+	if blockedExportRec.Header().Get("Content-Disposition") != "" || strings.Contains(blockedExportRec.Body.String(), logItem.ID) {
+		t.Fatalf("audit export returned data after operation log failure: %s", blockedExportRec.Body.String())
+	}
+	if !coreAuditLogsContainAction(handler.(*Server).cfg.Store, "operation.log.persist_failed") {
+		t.Fatal("audit export operation log failure was not written to core audit logs")
+	}
 }
 
 func platformItemsContainID(items []model.PlatformItem, id string) bool {
@@ -1408,6 +1420,18 @@ func TestUserImportCreatesSkipsAndUpdatesLoginUsers(t *testing.T) {
 	}
 	if !foundCSVUser {
 		t.Fatalf("user csv export missing csv-user row: %#v", userRows)
+	}
+	removeUserExportBlocker := blockOperationLogName(t, handler.(*Server).cfg.Store, "users.export")
+	blockedUserExportRec := assertStatus(t, handler, http.MethodGet, "/api/admin/users/export", nil, adminCookie, http.StatusInternalServerError)
+	removeUserExportBlocker()
+	if !strings.Contains(blockedUserExportRec.Body.String(), "persist operation log failed") {
+		t.Fatalf("user export operation log failure was not reported: %s", blockedUserExportRec.Body.String())
+	}
+	if blockedUserExportRec.Header().Get("Content-Disposition") != "" || strings.Contains(blockedUserExportRec.Body.String(), "csv-user") {
+		t.Fatalf("user export returned data after operation log failure: %s", blockedUserExportRec.Body.String())
+	}
+	if !coreAuditLogsContainAction(handler.(*Server).cfg.Store, "operation.log.persist_failed") {
+		t.Fatal("user export operation log failure was not written to core audit logs")
 	}
 
 	usersRec := assertStatus(t, handler, http.MethodGet, "/api/admin/users", nil, adminCookie, http.StatusOK)
@@ -7963,6 +7987,18 @@ func TestResourceOperationEndpoints(t *testing.T) {
 	if !foundExportRow {
 		t.Fatalf("asset csv export missing created asset row: %#v", rows)
 	}
+	removeAssetExportBlocker := blockOperationLogName(t, server.cfg.Store, "assets.export")
+	blockedAssetExportRec := assertStatus(t, handler, http.MethodGet, "/api/admin/assets/export", nil, cookie, http.StatusInternalServerError)
+	removeAssetExportBlocker()
+	if !strings.Contains(blockedAssetExportRec.Body.String(), "persist operation log failed") {
+		t.Fatalf("asset export operation log failure was not reported: %s", blockedAssetExportRec.Body.String())
+	}
+	if blockedAssetExportRec.Header().Get("Content-Disposition") != "" || strings.Contains(blockedAssetExportRec.Body.String(), asset.ID) {
+		t.Fatalf("asset export returned data after operation log failure: %s", blockedAssetExportRec.Body.String())
+	}
+	if !coreAuditLogsContainAction(server.cfg.Store, "operation.log.persist_failed") {
+		t.Fatal("asset export operation log failure was not written to core audit logs")
+	}
 
 	credentialRec := assertStatus(t, handler, http.MethodPost, "/api/admin/credentials", map[string]any{
 		"name":        "credential-export",
@@ -8005,6 +8041,15 @@ func TestResourceOperationEndpoints(t *testing.T) {
 		if strings.Contains(credentialCSVRec.Body.String(), leaked) {
 			t.Fatalf("credential csv export leaked %q: %s", leaked, credentialCSVRec.Body.String())
 		}
+	}
+	removeCredentialExportBlocker := blockOperationLogName(t, server.cfg.Store, "credentials.export")
+	blockedCredentialExportRec := assertStatus(t, handler, http.MethodGet, "/api/admin/credentials/export", nil, cookie, http.StatusInternalServerError)
+	removeCredentialExportBlocker()
+	if !strings.Contains(blockedCredentialExportRec.Body.String(), "persist operation log failed") {
+		t.Fatalf("credential export operation log failure was not reported: %s", blockedCredentialExportRec.Body.String())
+	}
+	if blockedCredentialExportRec.Header().Get("Content-Disposition") != "" || strings.Contains(blockedCredentialExportRec.Body.String(), credential.ID) {
+		t.Fatalf("credential export returned data after operation log failure: %s", blockedCredentialExportRec.Body.String())
 	}
 	assertStatus(t, handler, http.MethodPost, "/api/admin/credentials/export", nil, cookie, http.StatusMethodNotAllowed)
 	assertStatus(t, handler, http.MethodGet, "/api/admin/credentials/export?format=xml", nil, cookie, http.StatusBadRequest)

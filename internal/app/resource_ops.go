@@ -3623,32 +3623,61 @@ func (s *Server) canAccessPlatformSession(r *http.Request, item model.PlatformIt
 }
 
 func (s *Server) validateRecordingPath(w http.ResponseWriter, recordingPath string, protocol model.Protocol) (auditRecording, bool) {
+	path, err := s.recordingDirectory(recordingPath)
+	if err != nil {
+		s.writeRecordingDirectoryError(w, err)
+		return auditRecording{}, false
+	}
+	return auditRecording{path: path, protocol: protocol}, true
+}
+
+func (s *Server) recordingDirectory(recordingPath string) (string, error) {
+	recordingPath = strings.TrimSpace(recordingPath)
 	if recordingPath == "" {
-		writeError(w, http.StatusNotFound, "recording not found")
-		return auditRecording{}, false
+		return "", os.ErrNotExist
 	}
-	if err := ensureChildPath(filepath.Join(s.cfg.DataDir, "recordings"), recordingPath); err != nil {
+	root := filepath.Join(s.cfg.DataDir, "recordings")
+	if err := ensureChildPath(root, recordingPath); err != nil {
+		return "", err
+	}
+	if err := ensureExistingRealStorageDirectory(root, recordingPath); err != nil {
+		return "", err
+	}
+	return recordingPath, nil
+}
+
+func (s *Server) writeRecordingDirectoryError(w http.ResponseWriter, err error) {
+	if errors.Is(err, os.ErrNotExist) {
+		writeError(w, http.StatusNotFound, "recording not found")
+		return
+	}
+	if errors.Is(err, errStorageSpecialFile) {
+		writeError(w, http.StatusBadRequest, "recording path is not a real directory")
+		return
+	}
+	if strings.Contains(err.Error(), "escapes") {
 		writeError(w, http.StatusForbidden, err.Error())
-		return auditRecording{}, false
+		return
 	}
-	if info, err := os.Stat(recordingPath); err != nil || !info.IsDir() {
-		writeError(w, http.StatusNotFound, "recording not found")
-		return auditRecording{}, false
-	}
-	return auditRecording{path: recordingPath, protocol: protocol}, true
+	writeError(w, http.StatusInternalServerError, err.Error())
 }
 
 func (s *Server) recordingSizeFromMetadata(metadata map[string]any) (int64, bool) {
 	recordingPath := firstMetadataString(metadata, "recording_path")
-	if recordingPath == "" {
-		return 0, false
+	size, ok, err := s.recordingDirectorySize(recordingPath)
+	return size, ok && err == nil
+}
+
+func (s *Server) recordingDirectorySize(recordingPath string) (int64, bool, error) {
+	path, err := s.recordingDirectory(recordingPath)
+	if errors.Is(err, os.ErrNotExist) || errors.Is(err, errStorageSpecialFile) {
+		return 0, false, nil
 	}
-	if err := ensureChildPath(filepath.Join(s.cfg.DataDir, "recordings"), recordingPath); err != nil {
-		return 0, false
+	if err != nil {
+		return 0, false, err
 	}
-	usage := directoryUsage(recordingPath)
-	size, ok := usage["bytes"].(int64)
-	return size, ok
+	size, ok := directoryUsage(path)["bytes"].(int64)
+	return size, ok, nil
 }
 
 func (s *Server) serveRecordingZip(w http.ResponseWriter, _ *http.Request, id, recordingPath string) {

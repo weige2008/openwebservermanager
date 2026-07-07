@@ -552,16 +552,12 @@ func (s *Server) handleRecordingDownload(w http.ResponseWriter, r *http.Request)
 		writeError(w, http.StatusForbidden, "session access denied")
 		return
 	}
-	if err := ensureChildPath(filepath.Join(s.cfg.DataDir, "recordings"), session.RecordingPath); err != nil {
-		writeError(w, http.StatusForbidden, err.Error())
-		return
-	}
-	if _, err := os.Stat(session.RecordingPath); err != nil {
-		writeError(w, http.StatusNotFound, "recording not found")
+	recording, ok := s.validateRecordingPath(w, session.RecordingPath, session.Protocol)
+	if !ok {
 		return
 	}
 	_ = s.audit(r, "recording.download", session.ID, session.Protocol, "downloaded recording")
-	s.serveRecordingZip(w, r, session.ID, session.RecordingPath)
+	s.serveRecordingZip(w, r, session.ID, recording.path)
 }
 func (s *Server) handleClose(w http.ResponseWriter, r *http.Request) {
 	id := pathSegment(r.URL.Path, 2)
@@ -642,12 +638,14 @@ func (s *Server) refreshSessionRecordingSize(id string) error {
 	if !ok || strings.TrimSpace(session.RecordingPath) == "" {
 		return nil
 	}
-	if err := ensureChildPath(filepath.Join(s.cfg.DataDir, "recordings"), session.RecordingPath); err != nil {
+	size, sizeOK, err := s.recordingDirectorySize(session.RecordingPath)
+	if err != nil {
 		return err
 	}
-	usage := directoryUsage(session.RecordingPath)
-	size, _ := usage["bytes"].(int64)
-	_, err := s.cfg.Store.UpdateSession(id, func(item *model.ConnectionSession) {
+	if !sizeOK {
+		return nil
+	}
+	_, err = s.cfg.Store.UpdateSession(id, func(item *model.ConnectionSession) {
 		item.RecordingSize = size
 	})
 	return err

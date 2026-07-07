@@ -366,24 +366,18 @@ func (s *Server) deleteSessionRecordingPath(recordingPath string) (bool, int64, 
 	if recordingPath == "" {
 		return false, 0, nil
 	}
-	if err := ensureChildPath(filepath.Join(s.cfg.DataDir, "recordings"), recordingPath); err != nil {
-		return false, 0, err
-	}
-	info, err := os.Stat(recordingPath)
-	if errors.Is(err, os.ErrNotExist) {
+	path, err := s.recordingDirectory(recordingPath)
+	if errors.Is(err, os.ErrNotExist) || errors.Is(err, errStorageSpecialFile) {
 		return false, 0, nil
 	}
 	if err != nil {
 		return false, 0, err
 	}
-	if !info.IsDir() {
-		return false, 0, errors.New("recording path is not a directory")
-	}
 	size := int64(0)
-	if value, ok := directoryUsage(recordingPath)["bytes"].(int64); ok {
+	if value, ok := directoryUsage(path)["bytes"].(int64); ok {
 		size = value
 	}
-	if err := os.RemoveAll(recordingPath); err != nil {
+	if err := os.RemoveAll(path); err != nil {
 		return false, 0, err
 	}
 	return true, size, nil

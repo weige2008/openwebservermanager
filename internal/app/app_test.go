@@ -9383,6 +9383,76 @@ func TestAuditSessionOperations(t *testing.T) {
 	}
 }
 
+func TestRecordingAuditRejectsSymlinkRecordingRoot(t *testing.T) {
+	srv, adminCookie := newTestServer(t, nil)
+	handler := http.Handler(srv)
+
+	recordingsRoot := filepath.Join(srv.cfg.DataDir, "recordings")
+	if err := os.MkdirAll(recordingsRoot, 0o770); err != nil {
+		t.Fatalf("create recordings root: %v", err)
+	}
+	externalDir := filepath.Join(t.TempDir(), "external-recording-root")
+	if err := os.MkdirAll(externalDir, 0o770); err != nil {
+		t.Fatalf("create external recording dir: %v", err)
+	}
+	externalFile := filepath.Join(externalDir, "recording.guac")
+	externalContent := "external recording root frames"
+	if err := os.WriteFile(externalFile, []byte(externalContent), 0o660); err != nil {
+		t.Fatalf("write external recording file: %v", err)
+	}
+	linkPath := filepath.Join(recordingsRoot, "linked-root")
+	if err := os.Symlink(externalDir, linkPath); err != nil {
+		t.Skipf("symlink unavailable: %v", err)
+	}
+
+	session, err := srv.cfg.Store.CreateSession(model.ConnectionSession{
+		Protocol:      model.ProtocolRDP,
+		UserID:        "admin",
+		RecordingPath: linkPath,
+	})
+	if err != nil {
+		t.Fatalf("create session with linked recording root: %v", err)
+	}
+	legacyDownload := assertStatus(t, handler, http.MethodGet, "/api/connections/"+session.ID+"/recording.zip", nil, adminCookie, http.StatusBadRequest)
+	if strings.Contains(legacyDownload.Body.String(), externalContent) {
+		t.Fatalf("legacy recording download leaked external content: %s", legacyDownload.Body.String())
+	}
+
+	offlineID := "offline-linked-recording-root"
+	if _, err := srv.cfg.Store.SavePlatformItem("offline_sessions", model.PlatformItem{
+		ID:          offlineID,
+		Name:        "linked recording root",
+		Type:        "rdp",
+		Status:      string(model.SessionClosed),
+		Protocol:    model.ProtocolRDP,
+		OwnerID:     "admin",
+		Description: "linked recording root fixture",
+		Metadata: map[string]any{
+			"recording_path": linkPath,
+		},
+	}); err != nil {
+		t.Fatalf("save offline linked recording root: %v", err)
+	}
+	auditDownload := assertStatus(t, handler, http.MethodGet, "/api/admin/audit/offline-sessions/"+offlineID+"/recording", nil, adminCookie, http.StatusBadRequest)
+	if strings.Contains(auditDownload.Body.String(), externalContent) {
+		t.Fatalf("audit recording download leaked external content: %s", auditDownload.Body.String())
+	}
+	assertStatus(t, handler, http.MethodDelete, "/api/admin/audit/offline-sessions/"+offlineID+"/recording", nil, adminCookie, http.StatusBadRequest)
+	if data, err := os.ReadFile(externalFile); err != nil || string(data) != externalContent {
+		t.Fatalf("external recording file changed after rejected delete: content=%q err=%v", string(data), err)
+	}
+	if _, err := os.Lstat(linkPath); err != nil {
+		t.Fatalf("rejected recording delete removed local symlink: %v", err)
+	}
+	deleted, bytes, err := srv.deleteSessionRecordingPath(linkPath)
+	if err != nil || deleted || bytes != 0 {
+		t.Fatalf("cleanup linked recording root = deleted %v bytes %d err %v, want no-op", deleted, bytes, err)
+	}
+	if data, err := os.ReadFile(externalFile); err != nil || string(data) != externalContent {
+		t.Fatalf("external recording file changed after cleanup: content=%q err=%v", string(data), err)
+	}
+}
+
 func TestDesktopSessionDriveFiles(t *testing.T) {
 	srv, adminCookie := newTestServer(t, nil)
 	handler := http.Handler(srv)

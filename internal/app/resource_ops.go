@@ -3401,6 +3401,12 @@ func (s *Server) serveRecordingZip(w http.ResponseWriter, _ *http.Request, id, r
 		if err != nil || entry.IsDir() {
 			return nil
 		}
+		if entry.Type()&os.ModeType != 0 {
+			return nil
+		}
+		if err := ensureChildPath(recordingPath, filePath); err != nil {
+			return nil
+		}
 		rel, err := filepath.Rel(recordingPath, filePath)
 		if err != nil {
 			return nil

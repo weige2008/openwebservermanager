@@ -1,7 +1,6 @@
 package app
 
 import (
-	"archive/zip"
 	"context"
 	"encoding/json"
 	"errors"
@@ -562,30 +561,7 @@ func (s *Server) handleRecordingDownload(w http.ResponseWriter, r *http.Request)
 		return
 	}
 	_ = s.audit(r, "recording.download", session.ID, session.Protocol, "downloaded recording")
-	w.Header().Set("Content-Type", "application/zip")
-	w.Header().Set("Content-Disposition", "attachment; filename=\""+session.ID+".zip\"")
-	archive := zip.NewWriter(w)
-	defer archive.Close()
-	_ = filepath.WalkDir(session.RecordingPath, func(filePath string, entry os.DirEntry, err error) error {
-		if err != nil || entry.IsDir() {
-			return nil
-		}
-		rel, err := filepath.Rel(session.RecordingPath, filePath)
-		if err != nil {
-			return nil
-		}
-		writer, err := archive.Create(filepath.ToSlash(rel))
-		if err != nil {
-			return nil
-		}
-		file, err := os.Open(filePath)
-		if err != nil {
-			return nil
-		}
-		defer file.Close()
-		_, _ = io.Copy(writer, file)
-		return nil
-	})
+	s.serveRecordingZip(w, r, session.ID, session.RecordingPath)
 }
 func (s *Server) handleClose(w http.ResponseWriter, r *http.Request) {
 	id := pathSegment(r.URL.Path, 2)

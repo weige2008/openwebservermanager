@@ -9039,6 +9039,17 @@ func TestAuditSessionOperations(t *testing.T) {
 	if !strings.Contains(offlineSessionsRec.Body.String(), `"recording_size":6`) {
 		t.Fatalf("offline session index did not include recording size: %s", offlineSessionsRec.Body.String())
 	}
+	externalRecordingContent := "external recording frames"
+	externalRecordingPath := filepath.Join(t.TempDir(), "outside-recording.guac")
+	if err := os.WriteFile(externalRecordingPath, []byte(externalRecordingContent), 0o660); err != nil {
+		t.Fatalf("write external recording fixture: %v", err)
+	}
+	recordingSymlinkName := "linked-outside.guac"
+	recordingSymlinkCreated := true
+	if err := os.Symlink(externalRecordingPath, filepath.Join(rdpSession.RecordingPath, recordingSymlinkName)); err != nil {
+		recordingSymlinkCreated = false
+		t.Logf("skip recording symlink assertion: %v", err)
+	}
 
 	rdpAuditSessionRec := assertStatus(t, handler, http.MethodPost, "/api/connections/rdp", map[string]any{
 		"server_id":         windows.ID,
@@ -9068,6 +9079,9 @@ func TestAuditSessionOperations(t *testing.T) {
 	auditorCookie := auditorLogin.Result().Cookies()[0]
 	auditorDownload := assertStatus(t, handler, http.MethodGet, "/api/admin/audit/offline-sessions/"+rdpSession.ID+"/recording", nil, auditorCookie, http.StatusOK)
 	assertZipContains(t, auditorDownload.Body.Bytes(), "recording.guac", "frames")
+	if recordingSymlinkCreated {
+		assertZipOmitsEntryAndContent(t, auditorDownload.Body.Bytes(), recordingSymlinkName, externalRecordingContent)
+	}
 	assertStatus(t, handler, http.MethodPost, "/api/admin/audit/online-sessions/"+rdpSession.ID+"/disconnect", nil, auditorCookie, http.StatusForbidden)
 	assertStatus(t, handler, http.MethodPost, "/api/admin/roles", map[string]any{
 		"name":   "recording-limited",
@@ -9094,6 +9108,14 @@ func TestAuditSessionOperations(t *testing.T) {
 
 	adminDownload := assertStatus(t, handler, http.MethodGet, "/api/admin/audit/offline-sessions/"+rdpSession.ID+"/recording", nil, adminCookie, http.StatusOK)
 	assertZipContains(t, adminDownload.Body.Bytes(), "recording.guac", "frames")
+	if recordingSymlinkCreated {
+		assertZipOmitsEntryAndContent(t, adminDownload.Body.Bytes(), recordingSymlinkName, externalRecordingContent)
+	}
+	legacyDownload := assertStatus(t, handler, http.MethodGet, "/api/connections/"+rdpSession.ID+"/recording.zip", nil, adminCookie, http.StatusOK)
+	assertZipContains(t, legacyDownload.Body.Bytes(), "recording.guac", "frames")
+	if recordingSymlinkCreated {
+		assertZipOmitsEntryAndContent(t, legacyDownload.Body.Bytes(), recordingSymlinkName, externalRecordingContent)
+	}
 	assertStatus(t, handler, http.MethodDelete, "/api/admin/audit/offline-sessions/"+rdpSession.ID+"/recording", nil, adminCookie, http.StatusOK)
 	assertStatus(t, handler, http.MethodGet, "/api/admin/audit/offline-sessions/"+rdpSession.ID+"/recording", nil, adminCookie, http.StatusNotFound)
 	logsRec := assertStatus(t, handler, http.MethodGet, "/api/admin/audit/operation-logs", nil, adminCookie, http.StatusOK)
@@ -10071,6 +10093,34 @@ func assertZipContains(t *testing.T, raw []byte, filename, content string) {
 		return
 	}
 	t.Fatalf("zip entry %q not found", filename)
+}
+
+func assertZipOmitsEntryAndContent(t *testing.T, raw []byte, filename, content string) {
+	t.Helper()
+	reader, err := zip.NewReader(bytes.NewReader(raw), int64(len(raw)))
+	if err != nil {
+		t.Fatalf("open zip: %v", err)
+	}
+	for _, file := range reader.File {
+		if file.Name == filename {
+			t.Fatalf("zip entry %q should have been omitted", filename)
+		}
+		rc, err := file.Open()
+		if err != nil {
+			t.Fatalf("open zip entry: %v", err)
+		}
+		data, err := io.ReadAll(rc)
+		closeErr := rc.Close()
+		if err != nil {
+			t.Fatalf("read zip entry: %v", err)
+		}
+		if closeErr != nil {
+			t.Fatalf("close zip entry: %v", closeErr)
+		}
+		if content != "" && strings.Contains(string(data), content) {
+			t.Fatalf("zip entry %q leaked omitted content", file.Name)
+		}
+	}
 }
 
 func zipEntryText(t *testing.T, reader *zip.Reader, filename string) string {

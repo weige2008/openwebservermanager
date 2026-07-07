@@ -1432,18 +1432,18 @@ func (s *Server) handleStorageDelete(w http.ResponseWriter, r *http.Request, roo
 	if !s.requireStorageTreePermission(w, r, storage.ID, "delete", target, rel) {
 		return
 	}
+	if err := s.recordStorageFileLog(r, storage.ID, "delete", "success", rel, "deleted file", map[string]any{
+		"path": filepath.ToSlash(rel),
+	}); err != nil {
+		writeError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
 	if err := os.RemoveAll(target); err != nil {
 		writeError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
 	usage, err := s.updateStorageUsage(storage.ID, root)
 	if err != nil {
-		writeError(w, http.StatusInternalServerError, err.Error())
-		return
-	}
-	if err := s.recordStorageFileLog(r, storage.ID, "delete", "success", rel, "deleted file", map[string]any{
-		"path": filepath.ToSlash(rel),
-	}); err != nil {
 		writeError(w, http.StatusInternalServerError, err.Error())
 		return
 	}

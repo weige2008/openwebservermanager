@@ -9831,6 +9831,17 @@ func TestStorageFileLogPersistenceFailureReturnsServerError(t *testing.T) {
 	if !strings.Contains(operationLogsRec.Body.String(), "file.log.persist_failed") {
 		t.Fatalf("storage file log persistence failure was not audited: %s", operationLogsRec.Body.String())
 	}
+
+	assertStatus(t, handler, http.MethodPost, "/api/admin/storages/"+storage.ID+"/files-write", map[string]any{"path": "delete-me.txt", "content": "keep me"}, adminCookie, http.StatusCreated)
+	removeDeleteBlocker := blockPlatformItemCreate(t, srv.cfg.Store, "file_logs")
+	deleteRec := assertStatus(t, handler, http.MethodDelete, "/api/admin/storages/"+storage.ID+"/files?path=delete-me.txt", nil, adminCookie, http.StatusInternalServerError)
+	removeDeleteBlocker()
+	if !strings.Contains(deleteRec.Body.String(), "persist file log failed") {
+		t.Fatalf("storage delete file log persistence failure was not reported: %s", deleteRec.Body.String())
+	}
+	if data, err := os.ReadFile(filepath.Join(srv.cfg.DataDir, "drives", storage.ID, "delete-me.txt")); err != nil || string(data) != "keep me" {
+		t.Fatalf("storage delete removed file before file log persisted: data=%q err=%v", string(data), err)
+	}
 }
 
 func TestStorageQuotaEnforcedAndUsageUpdated(t *testing.T) {
@@ -10828,6 +10839,9 @@ func TestDesktopDriveFileLogPersistenceFailureReturnsServerError(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(driveRoot, "download.txt"), []byte("desktop file"), 0o660); err != nil {
 		t.Fatalf("write drive download file: %v", err)
 	}
+	if err := os.WriteFile(filepath.Join(driveRoot, "delete.txt"), []byte("desktop delete"), 0o660); err != nil {
+		t.Fatalf("write drive delete file: %v", err)
+	}
 
 	removeBlocker := blockPlatformItemCreate(t, srv.cfg.Store, "file_logs")
 	downloadRec := assertStatus(t, handler, http.MethodGet, "/api/connections/"+session.ID+"/drive/download?path=reports/download.txt", nil, adminCookie, http.StatusInternalServerError)
@@ -10841,6 +10855,16 @@ func TestDesktopDriveFileLogPersistenceFailureReturnsServerError(t *testing.T) {
 	operationLogsRec := assertStatus(t, handler, http.MethodGet, "/api/admin/audit/operation-logs", nil, adminCookie, http.StatusOK)
 	if !strings.Contains(operationLogsRec.Body.String(), "file.log.persist_failed") {
 		t.Fatalf("desktop drive file log persistence failure was not audited: %s", operationLogsRec.Body.String())
+	}
+
+	removeDeleteBlocker := blockPlatformItemCreate(t, srv.cfg.Store, "file_logs")
+	deleteRec := assertStatus(t, handler, http.MethodDelete, "/api/connections/"+session.ID+"/drive?path=reports/delete.txt", nil, adminCookie, http.StatusInternalServerError)
+	removeDeleteBlocker()
+	if !strings.Contains(deleteRec.Body.String(), "persist file log failed") {
+		t.Fatalf("desktop drive delete file log persistence failure was not reported: %s", deleteRec.Body.String())
+	}
+	if data, err := os.ReadFile(filepath.Join(driveRoot, "delete.txt")); err != nil || string(data) != "desktop delete" {
+		t.Fatalf("desktop drive delete removed file before file log persisted: data=%q err=%v", string(data), err)
 	}
 }
 

@@ -264,13 +264,13 @@ func (s *Server) handleDesktopDriveDelete(w http.ResponseWriter, r *http.Request
 		writeError(w, http.StatusNotFound, "file not found")
 		return
 	}
-	if err := os.RemoveAll(target); err != nil {
-		writeError(w, http.StatusInternalServerError, err.Error())
-		return
-	}
 	if err := s.recordDesktopDriveFileLog(r, session, "delete", "success", rel, map[string]any{
 		"path": filepath.ToSlash(rel),
 	}); err != nil {
+		writeError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	if err := os.RemoveAll(target); err != nil {
 		writeError(w, http.StatusInternalServerError, err.Error())
 		return
 	}

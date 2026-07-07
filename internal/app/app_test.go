@@ -5885,7 +5885,17 @@ func TestAgentGatewayRegistrationHeartbeatAndTimeout(t *testing.T) {
 		"network_rx_bytes":   1000,
 		"network_tx_bytes":   2000,
 		"active_sessions":    3,
-		"metrics":            map[string]any{"queue_depth": 2},
+		"metrics": map[string]any{
+			"queue_depth": 2,
+			"password":    "agent-metric-password",
+			"nested": map[string]any{
+				"private_key": "agent-metric-private-key",
+				"label":       "agent-metric-safe-label",
+			},
+			"tokens": []any{
+				map[string]any{"token": "agent-metric-token", "value": "safe-token-counter"},
+			},
+		},
 	}, nil, map[string]string{
 		"Authorization": "Bearer " + registrationToken,
 	}, http.StatusOK)
@@ -5894,12 +5904,36 @@ func TestAgentGatewayRegistrationHeartbeatAndTimeout(t *testing.T) {
 			t.Fatalf("heartbeat response did not include %q", want)
 		}
 	}
+	for _, leaked := range []string{"agent-metric-password", "agent-metric-private-key", "agent-metric-token"} {
+		if strings.Contains(heartbeatRec.Body.String(), leaked) {
+			t.Fatalf("heartbeat response leaked metric secret %q: %s", leaked, heartbeatRec.Body.String())
+		}
+	}
+	rawHeartbeatGateway, ok, err := srv.cfg.Store.GetPlatformItem("agent_gateways", gateway.ID)
+	if err != nil || !ok {
+		t.Fatalf("load heartbeat gateway: ok=%v err=%v", ok, err)
+	}
+	rawHeartbeatJSON, err := json.Marshal(rawHeartbeatGateway)
+	if err != nil {
+		t.Fatalf("marshal raw heartbeat gateway: %v", err)
+	}
+	rawHeartbeatText := string(rawHeartbeatJSON)
+	for _, leaked := range []string{"agent-metric-password", "agent-metric-private-key", "agent-metric-token"} {
+		if strings.Contains(rawHeartbeatText, leaked) {
+			t.Fatalf("raw agent gateway persisted metric secret %q: %s", leaked, rawHeartbeatText)
+		}
+	}
+	for _, kept := range []string{"queue_depth", "agent-metric-safe-label", "safe-token-counter"} {
+		if !strings.Contains(rawHeartbeatText, kept) {
+			t.Fatalf("raw agent gateway lost non-sensitive metric %q: %s", kept, rawHeartbeatText)
+		}
+	}
 
 	listRec := assertStatus(t, handler, http.MethodGet, "/api/admin/agent-gateways", nil, adminCookie, http.StatusOK)
 	if !strings.Contains(listRec.Body.String(), `"status":"online"`) || !strings.Contains(listRec.Body.String(), `"latency_ms":18`) {
 		t.Fatal("agent gateway list did not include online heartbeat metrics")
 	}
-	if strings.Contains(listRec.Body.String(), "agent_token_hash") || strings.Contains(listRec.Body.String(), registrationToken) {
+	if strings.Contains(listRec.Body.String(), "agent_token_hash") || strings.Contains(listRec.Body.String(), registrationToken) || strings.Contains(listRec.Body.String(), "agent-metric-password") || strings.Contains(listRec.Body.String(), "agent-metric-private-key") || strings.Contains(listRec.Body.String(), "agent-metric-token") {
 		t.Fatal("agent gateway list leaked token material")
 	}
 	statusRec := assertStatus(t, handler, http.MethodGet, "/api/admin/agent-gateways/status", nil, adminCookie, http.StatusOK)

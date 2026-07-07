@@ -1538,6 +1538,7 @@ func applyAgentGatewayPlatformSecret(item *model.PlatformItem, creating bool) er
 	if creating {
 		delete(item.Metadata, "agent_token_hash")
 	}
+	sanitizeMetadataValue(item.Metadata["metrics"])
 	return nil
 }
 

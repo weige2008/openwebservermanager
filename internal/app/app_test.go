@@ -350,6 +350,61 @@ func TestAdminLicenseEndpoint(t *testing.T) {
 	}
 }
 
+func TestAdminLicenseOperationLogFailureRollsBackSetting(t *testing.T) {
+	srv, adminCookie := newTestServer(t, nil)
+	handler := http.Handler(srv)
+
+	removeCreateBlocker := blockPlatformItemCreate(t, srv.cfg.Store, "operation_logs")
+	createFailureRec := assertStatus(t, handler, http.MethodPut, "/api/admin/license", map[string]any{
+		"licensee": "no-audit-license",
+		"serial":   "NO-AUDIT",
+	}, adminCookie, http.StatusInternalServerError)
+	removeCreateBlocker()
+	if !strings.Contains(createFailureRec.Body.String(), "persist operation log failed") {
+		t.Fatalf("license create operation log failure was not reported: %s", createFailureRec.Body.String())
+	}
+	emptyInfoRec := assertStatus(t, handler, http.MethodGet, "/api/admin/license", nil, adminCookie, http.StatusOK)
+	var emptyInfo localLicenseInfo
+	decodeResponse(t, emptyInfoRec, &emptyInfo)
+	if emptyInfo.SettingID != "" || emptyInfo.Licensee == "no-audit-license" {
+		t.Fatalf("license create was not rolled back after operation log failure: %+v", emptyInfo)
+	}
+
+	initialRec := assertStatus(t, handler, http.MethodPut, "/api/admin/license", map[string]any{
+		"licensee": "Audited License",
+		"serial":   "AUDITED-001",
+		"features": []string{"ssh", "rdp"},
+	}, adminCookie, http.StatusOK)
+	var initialInfo localLicenseInfo
+	decodeResponse(t, initialRec, &initialInfo)
+	if initialInfo.SettingID == "" {
+		t.Fatal("initial audited license did not create a setting")
+	}
+
+	removeUpdateBlocker := blockPlatformItemCreate(t, srv.cfg.Store, "operation_logs")
+	updateFailureRec := assertStatus(t, handler, http.MethodPatch, "/api/admin/license", map[string]any{
+		"licensee": "Changed License",
+		"serial":   "CHANGED-001",
+		"features": []string{"database"},
+	}, adminCookie, http.StatusInternalServerError)
+	removeUpdateBlocker()
+	if !strings.Contains(updateFailureRec.Body.String(), "persist operation log failed") {
+		t.Fatalf("license update operation log failure was not reported: %s", updateFailureRec.Body.String())
+	}
+	restoredRec := assertStatus(t, handler, http.MethodGet, "/api/admin/license", nil, adminCookie, http.StatusOK)
+	var restoredInfo localLicenseInfo
+	decodeResponse(t, restoredRec, &restoredInfo)
+	if restoredInfo.SettingID != initialInfo.SettingID || restoredInfo.Licensee != "Audited License" || restoredInfo.Serial != "AUDITED-001" {
+		t.Fatalf("license update was not rolled back after operation log failure: %+v", restoredInfo)
+	}
+	if strings.Join(restoredInfo.Features, ",") != "ssh,rdp" {
+		t.Fatalf("license features were not restored after operation log failure: %+v", restoredInfo.Features)
+	}
+	if !coreAuditLogsContainAction(srv.cfg.Store, "operation.log.persist_failed") {
+		t.Fatal("license operation log persistence failure was not written to core audit logs")
+	}
+}
+
 func TestAdminLicenseRequiresAdminPermission(t *testing.T) {
 	handler, adminCookie := newTestHandler(t)
 

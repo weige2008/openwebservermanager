@@ -3,6 +3,7 @@ package app
 import (
 	"crypto/sha256"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"net/http"
 	"os"
@@ -65,8 +66,29 @@ func (s *Server) handleAdminLicense(w http.ResponseWriter, r *http.Request) {
 		if !decodeJSON(w, r, &req) {
 			return
 		}
+		snapshot, err := s.localLicenseSnapshot()
+		if err != nil {
+			writeError(w, http.StatusInternalServerError, err.Error())
+			return
+		}
 		item, err := s.saveLocalLicense(req)
 		if err != nil {
+			err = s.restoreLocalLicenseSnapshotError(err, snapshot)
+			writeError(w, http.StatusInternalServerError, err.Error())
+			return
+		}
+		if err := s.createOperationLog(r, model.PlatformItemRequest{
+			Name:        "license.update",
+			Type:        "license",
+			Status:      "success",
+			TargetID:    item.ID,
+			OwnerID:     s.currentUserID(r),
+			Description: "updated local license information",
+			Metadata: map[string]any{
+				"client_ip": s.clientIP(r),
+			},
+		}); err != nil {
+			err = s.restoreLocalLicenseSnapshotError(err, snapshot)
 			writeError(w, http.StatusInternalServerError, err.Error())
 			return
 		}
@@ -112,6 +134,57 @@ func (s *Server) saveLocalLicense(req localLicenseRequest) (model.PlatformItem, 
 		return s.cfg.Store.UpdatePlatformItem("system_settings", current.ID, payload)
 	}
 	return s.cfg.Store.CreatePlatformItem("system_settings", payload)
+}
+
+type localLicenseSnapshot struct {
+	exists bool
+	item   model.PlatformItem
+}
+
+func (s *Server) localLicenseSnapshot() (localLicenseSnapshot, error) {
+	items, err := s.cfg.Store.ListPlatformItems("system_settings")
+	if err != nil {
+		return localLicenseSnapshot{}, err
+	}
+	item, ok := findLocalLicenseSetting(items)
+	if !ok {
+		return localLicenseSnapshot{}, nil
+	}
+	raw, ok, err := s.cfg.Store.GetPlatformItem("system_settings", item.ID)
+	if err != nil {
+		return localLicenseSnapshot{}, err
+	}
+	if !ok {
+		return localLicenseSnapshot{}, nil
+	}
+	raw.Metadata = cloneMetadata(raw.Metadata)
+	return localLicenseSnapshot{exists: true, item: raw}, nil
+}
+
+func (s *Server) restoreLocalLicenseSnapshot(snapshot localLicenseSnapshot) error {
+	if snapshot.exists {
+		_, err := s.cfg.Store.SavePlatformItem("system_settings", snapshot.item)
+		return err
+	}
+	items, err := s.cfg.Store.ListPlatformItems("system_settings")
+	if err != nil {
+		return err
+	}
+	item, ok := findLocalLicenseSetting(items)
+	if !ok {
+		return nil
+	}
+	if err := s.cfg.Store.DeletePlatformItem("system_settings", item.ID); err != nil && !errors.Is(err, os.ErrNotExist) {
+		return err
+	}
+	return nil
+}
+
+func (s *Server) restoreLocalLicenseSnapshotError(err error, snapshot localLicenseSnapshot) error {
+	if restoreErr := s.restoreLocalLicenseSnapshot(snapshot); restoreErr != nil {
+		return fmt.Errorf("%w; additionally failed to restore local license: %v", err, restoreErr)
+	}
+	return err
 }
 
 func (s *Server) localLicenseInfo() (localLicenseInfo, error) {

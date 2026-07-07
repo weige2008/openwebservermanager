@@ -1171,6 +1171,7 @@ func TestSSHExecAccessRunsCommandAndLogs(t *testing.T) {
 		t.Fatalf("parse target port: %v", err)
 	}
 	handler, adminCookie := newTestHandler(t)
+	srv := handler.(*Server)
 
 	assertStatus(t, handler, http.MethodPost, "/api/admin/roles", map[string]any{
 		"name":   "command-approval-reviewer",
@@ -1317,6 +1318,31 @@ func TestSSHExecAccessRunsCommandAndLogs(t *testing.T) {
 	}
 
 	assertStatus(t, handler, http.MethodPatch, "/api/admin/command-filters/"+approvalFilter.ID, map[string]any{"status": "enabled"}, adminCookie, http.StatusOK)
+	blockedPersistRequiredRec := assertStatus(t, handler, http.MethodPost, "/api/access/ssh/"+asset.ID+"/exec", map[string]any{
+		"command":         "systemctl restart api",
+		"credential_id":   credential.ID,
+		"timeout_seconds": 5,
+	}, userCookie, http.StatusForbidden)
+	var blockedPersistRequiredResult map[string]any
+	decodeResponse(t, blockedPersistRequiredRec, &blockedPersistRequiredResult)
+	blockedPersistApprovalID, _ := blockedPersistRequiredResult["approval_id"].(string)
+	if blockedPersistApprovalID == "" {
+		t.Fatalf("approval-required command did not return approval id: %#v", blockedPersistRequiredResult)
+	}
+	assertStatus(t, handler, http.MethodPost, "/api/admin/command-approvals/"+blockedPersistApprovalID+"/approve", map[string]any{"note": "approved persistence failure path"}, adminCookie, http.StatusOK)
+	assertStatus(t, handler, http.MethodPatch, "/api/admin/command-filters/"+approvalFilter.ID, map[string]any{"status": "disabled"}, adminCookie, http.StatusOK)
+	removeExecutedBlocker := blockPlatformItemStatusUpdate(t, srv.cfg.Store, "command_approvals", blockedPersistApprovalID, "executed")
+	blockedPersistExecuteRec := assertStatus(t, handler, http.MethodPost, "/api/admin/command-approvals/"+blockedPersistApprovalID+"/execute", map[string]any{"timeout_seconds": 5}, adminCookie, http.StatusInternalServerError)
+	removeExecutedBlocker()
+	if !strings.Contains(blockedPersistExecuteRec.Body.String(), "persist command approval executed state failed") {
+		t.Fatalf("command approval persistence failure did not explain executed state error: %s", blockedPersistExecuteRec.Body.String())
+	}
+	blockedPersistApprovalRec := assertStatus(t, handler, http.MethodGet, "/api/admin/command-approvals/"+blockedPersistApprovalID, nil, adminCookie, http.StatusOK)
+	if !strings.Contains(blockedPersistApprovalRec.Body.String(), `"status":"approved"`) {
+		t.Fatalf("blocked command approval status update unexpectedly changed state: %s", blockedPersistApprovalRec.Body.String())
+	}
+
+	assertStatus(t, handler, http.MethodPatch, "/api/admin/command-filters/"+approvalFilter.ID, map[string]any{"status": "enabled"}, adminCookie, http.StatusOK)
 	blockedApprovalRequiredRec := assertStatus(t, handler, http.MethodPost, "/api/access/ssh/"+asset.ID+"/exec", map[string]any{
 		"command":         "systemctl restart postgresql",
 		"credential_id":   credential.ID,
@@ -1347,6 +1373,38 @@ func TestSSHExecAccessRunsCommandAndLogs(t *testing.T) {
 	blockedApprovalRec := assertStatus(t, handler, http.MethodGet, "/api/admin/command-approvals/"+blockedApprovalID, nil, adminCookie, http.StatusOK)
 	if !strings.Contains(blockedApprovalRec.Body.String(), `"status":"denied"`) || !strings.Contains(blockedApprovalRec.Body.String(), `"execution_status":"denied"`) || !strings.Contains(blockedApprovalRec.Body.String(), `"approved_execution":true`) {
 		t.Fatalf("denied approved command did not persist execution metadata: %s", blockedApprovalRec.Body.String())
+	}
+
+	deniedPersistRequiredRec := assertStatus(t, handler, http.MethodPost, "/api/access/ssh/"+asset.ID+"/exec", map[string]any{
+		"command":         "systemctl restart mysql",
+		"credential_id":   credential.ID,
+		"timeout_seconds": 5,
+	}, userCookie, http.StatusForbidden)
+	var deniedPersistRequiredResult map[string]any
+	decodeResponse(t, deniedPersistRequiredRec, &deniedPersistRequiredResult)
+	deniedPersistApprovalID, _ := deniedPersistRequiredResult["approval_id"].(string)
+	if deniedPersistApprovalID == "" {
+		t.Fatalf("approval-required denied command did not return approval id: %#v", deniedPersistRequiredResult)
+	}
+	assertStatus(t, handler, http.MethodPost, "/api/admin/command-approvals/"+deniedPersistApprovalID+"/approve", map[string]any{"note": "approved denied persistence failure path"}, adminCookie, http.StatusOK)
+	assertStatus(t, handler, http.MethodPost, "/api/admin/command-filters", map[string]any{
+		"name":      "deny restarted mysql",
+		"type":      "deny",
+		"status":    "enabled",
+		"protocol":  "ssh",
+		"owner_id":  user.ID,
+		"target_id": asset.ID,
+		"metadata":  map[string]any{"pattern": "systemctl restart mysql", "risk": "emergency"},
+	}, adminCookie, http.StatusCreated)
+	removeDeniedBlocker := blockPlatformItemStatusUpdate(t, srv.cfg.Store, "command_approvals", deniedPersistApprovalID, "denied")
+	deniedPersistExecuteRec := assertStatus(t, handler, http.MethodPost, "/api/admin/command-approvals/"+deniedPersistApprovalID+"/execute", map[string]any{"timeout_seconds": 5}, adminCookie, http.StatusInternalServerError)
+	removeDeniedBlocker()
+	if !strings.Contains(deniedPersistExecuteRec.Body.String(), "persist command approval denied state failed") {
+		t.Fatalf("command approval persistence failure did not explain denied state error: %s", deniedPersistExecuteRec.Body.String())
+	}
+	persistFailureOperationRec := assertStatus(t, handler, http.MethodGet, "/api/admin/audit/operation-logs", nil, adminCookie, http.StatusOK)
+	if !strings.Contains(persistFailureOperationRec.Body.String(), "command_approval.execute.persist_failed") {
+		t.Fatalf("command approval persistence failure was not audited: %s", persistFailureOperationRec.Body.String())
 	}
 
 	logsRec := assertStatus(t, handler, http.MethodGet, "/api/admin/audit/exec-command-logs", nil, adminCookie, http.StatusOK)
@@ -10664,22 +10722,27 @@ func newUnconfiguredTestServer(t *testing.T, configure func(*Config)) *Server {
 
 func blockSQLWorkOrderStatusUpdate(t *testing.T, st *store.Store, orderID, status string) func() {
 	t.Helper()
+	return blockPlatformItemStatusUpdate(t, st, "sql_work_orders", orderID, status)
+}
+
+func blockPlatformItemStatusUpdate(t *testing.T, st *store.Store, collection, itemID, status string) func() {
+	t.Helper()
 	db, err := sql.Open("sqlite", st.DatabasePath())
 	if err != nil {
 		t.Fatalf("open store database for status blocker: %v", err)
 	}
-	triggerName := "block_sql_work_order_status_update"
+	triggerName := "block_platform_item_status_update"
 	if _, err := db.Exec(`DROP TRIGGER IF EXISTS ` + triggerName); err != nil {
 		_ = db.Close()
 		t.Fatalf("drop stale status blocker trigger: %v", err)
 	}
 	statusFragment := `"status":"` + status + `"`
 	triggerSQL := `CREATE TRIGGER ` + triggerName + ` BEFORE INSERT ON platform_records
-WHEN NEW.collection = 'sql_work_orders'
-  AND NEW.id = ` + sqliteTestStringLiteral(orderID) + `
+WHEN NEW.collection = ` + sqliteTestStringLiteral(collection) + `
+  AND NEW.id = ` + sqliteTestStringLiteral(itemID) + `
   AND instr(NEW.payload, ` + sqliteTestStringLiteral(statusFragment) + `) > 0
 BEGIN
-  SELECT RAISE(ABORT, 'forced sql work order status update failure');
+  SELECT RAISE(ABORT, 'forced platform item status update failure');
 END`
 	if _, err := db.Exec(triggerSQL); err != nil {
 		_ = db.Close()

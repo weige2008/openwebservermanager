@@ -178,13 +178,26 @@ func (s *Server) handleCommandApprovalExecute(w http.ResponseWriter, r *http.Req
 	if runErr != nil {
 		nextMetadata["execution_error"] = result.Error
 	}
-	_, _ = s.cfg.Store.UpdatePlatformItem("command_approvals", id, model.PlatformItemRequest{
-		Status:   nextStatus,
-		Protocol: model.ProtocolSSH,
-		Metadata: nextMetadata,
-	})
+	if _, ok := s.updateCommandApprovalExecutionState(w, r, id, nextStatus, nextMetadata); !ok {
+		return
+	}
 	_ = s.audit(r, auditAction, id, model.ProtocolSSH, auditMessage)
 	writeJSON(w, statusCode, result)
+}
+
+func (s *Server) updateCommandApprovalExecutionState(w http.ResponseWriter, r *http.Request, id, status string, metadata map[string]any) (model.PlatformItem, bool) {
+	item, err := s.cfg.Store.UpdatePlatformItem("command_approvals", id, model.PlatformItemRequest{
+		Status:   status,
+		Protocol: model.ProtocolSSH,
+		Metadata: metadata,
+	})
+	if err != nil {
+		detail := "persist command approval " + status + " state failed: " + err.Error()
+		_ = s.audit(r, "command_approval.execute.persist_failed", id, model.ProtocolSSH, detail)
+		writeError(w, http.StatusInternalServerError, detail)
+		return model.PlatformItem{}, false
+	}
+	return item, true
 }
 
 func commandApprovalExecutionMetadata(approval model.PlatformItem, session model.ConnectionSession, result sshrunner.ExecResult, userID string) map[string]any {

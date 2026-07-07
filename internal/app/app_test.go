@@ -6232,6 +6232,68 @@ func TestExternalLDAPLoginCreatesUserAndSession(t *testing.T) {
 	}
 }
 
+func TestExternalLDAPLoginLogFailureRollsBackAutoCreatedUser(t *testing.T) {
+	handler, adminCookie := newTestHandler(t)
+	srv := handler.(*Server)
+	fakeLDAP := &fakeLDAPAuthenticator{
+		users: map[string]fakeLDAPUser{
+			"ldap-rollback": {
+				password: "directory-password",
+				claims: externalLDAPClaims{
+					Subject:     "uid=ldap-rollback,ou=people,dc=example,dc=test",
+					DN:          "uid=ldap-rollback,ou=people,dc=example,dc=test",
+					Username:    "ldap-rollback",
+					DisplayName: "LDAP Rollback",
+					Email:       "ldap-rollback@example.test",
+				},
+			},
+		},
+	}
+	srv.ldap = fakeLDAP
+
+	assertStatus(t, handler, http.MethodPost, "/api/admin/system-settings", map[string]any{
+		"name":   "LDAP rollback identity",
+		"type":   "identity",
+		"status": "enabled",
+		"metadata": map[string]any{
+			"disable_password_login":      true,
+			"ldap_enabled":                true,
+			"ldap_provider_id":            "corp-ldap",
+			"ldap_provider_name":          "Corp LDAP",
+			"ldap_url":                    "ldap://directory.example.test:389",
+			"ldap_bind_dn":                "cn=reader,dc=example,dc=test",
+			"ldap_bind_password":          "directory-secret",
+			"ldap_base_dn":                "ou=people,dc=example,dc=test",
+			"ldap_user_filter":            "(uid={username})",
+			"ldap_username_attribute":     "uid",
+			"ldap_display_name_attribute": "cn",
+			"ldap_email_attribute":        "mail",
+			"ldap_role":                   "user",
+			"ldap_auto_create":            true,
+		},
+	}, adminCookie, http.StatusCreated)
+
+	removeBlocker := blockPlatformItemCreate(t, srv.cfg.Store, "login_logs")
+	loginRec := assertStatus(t, handler, http.MethodPost, "/api/auth/login", map[string]any{
+		"username": "ldap-rollback",
+		"password": "directory-password",
+	}, nil, http.StatusInternalServerError)
+	removeBlocker()
+	if !strings.Contains(loginRec.Body.String(), "persist login log failed") {
+		t.Fatalf("ldap login log failure was not reported: %s", loginRec.Body.String())
+	}
+	if cookies := loginRec.Result().Cookies(); len(cookies) != 0 {
+		t.Fatalf("ldap login issued cookies after failed login log write: %#v", cookies)
+	}
+	usersRec := assertStatus(t, handler, http.MethodGet, "/api/admin/users", nil, adminCookie, http.StatusOK)
+	if strings.Contains(usersRec.Body.String(), "ldap-rollback") || strings.Contains(usersRec.Body.String(), "uid=ldap-rollback") {
+		t.Fatalf("ldap auto-created user survived failed login log write: %s", usersRec.Body.String())
+	}
+	if !coreAuditLogsContainAction(srv.cfg.Store, "auth.login.log.persist_failed") {
+		t.Fatal("ldap login log persistence failure was not written to core audit logs")
+	}
+}
+
 func TestExternalLDAPLoginFailureRedactsSecrets(t *testing.T) {
 	handler, adminCookie := newTestHandler(t)
 	srv := handler.(*Server)

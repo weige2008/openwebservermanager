@@ -674,6 +674,8 @@ func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
 	var admin store.AdminPublic
 	loginType := "password"
 	ok := false
+	var ldapPreviousUser model.PlatformItem
+	ldapHadPreviousUser := false
 	var err error
 	if !passwordLoginDisabled {
 		admin, ok, err = s.cfg.Store.VerifyAdmin(username, req.Password)
@@ -691,7 +693,7 @@ func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
 	}
 	if !ok {
 		var providerID string
-		admin, providerID, ok, err = s.authenticateExternalLDAP(r.Context(), username, req.Password)
+		admin, providerID, ok, ldapPreviousUser, ldapHadPreviousUser, err = s.authenticateExternalLDAP(r.Context(), username, req.Password)
 		if err != nil {
 			status := http.StatusBadGateway
 			if errors.Is(err, errExternalLDAPUserDisabled) || errors.Is(err, errExternalLDAPUserNotAllowed) {
@@ -746,6 +748,9 @@ func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
 		Description: "signed in",
 		Metadata:    map[string]any{"client_ip": clientIP, "account": username},
 	}); err != nil {
+		if loginType == "ldap" {
+			s.restoreExternalUserAfterLoginLogFailure(admin.UserID, ldapPreviousUser, ldapHadPreviousUser)
+		}
 		writeError(w, http.StatusInternalServerError, err.Error())
 		return
 	}

@@ -59,14 +59,14 @@ func (s *Server) ldapLoginConfigured() bool {
 	return err == nil && len(providers) > 0
 }
 
-func (s *Server) authenticateExternalLDAP(ctx context.Context, username, password string) (store.AdminPublic, string, bool, error) {
+func (s *Server) authenticateExternalLDAP(ctx context.Context, username, password string) (store.AdminPublic, string, bool, model.PlatformItem, bool, error) {
 	username = strings.TrimSpace(username)
 	if username == "" || password == "" {
-		return store.AdminPublic{}, "", false, nil
+		return store.AdminPublic{}, "", false, model.PlatformItem{}, false, nil
 	}
 	providers, err := s.externalLDAPProviders()
 	if err != nil {
-		return store.AdminPublic{}, "", false, err
+		return store.AdminPublic{}, "", false, model.PlatformItem{}, false, err
 	}
 	var firstErr error
 	var firstProviderID string
@@ -82,13 +82,18 @@ func (s *Server) authenticateExternalLDAP(ctx context.Context, username, passwor
 		if !ok {
 			continue
 		}
+		subject := strings.TrimSpace(firstNonEmpty(claims.Subject, claims.DN, username))
+		previousUser, hadPreviousUser, err := s.externalUserSnapshot("ldap", provider.ID, subject)
+		if err != nil {
+			return store.AdminPublic{}, provider.ID, false, model.PlatformItem{}, false, err
+		}
 		user, err := s.upsertExternalLDAPUser(provider, claims, username)
-		return user, provider.ID, true, err
+		return user, provider.ID, true, previousUser, hadPreviousUser, err
 	}
 	if firstErr != nil {
-		return store.AdminPublic{}, firstProviderID, false, firstErr
+		return store.AdminPublic{}, firstProviderID, false, model.PlatformItem{}, false, firstErr
 	}
-	return store.AdminPublic{}, "", false, nil
+	return store.AdminPublic{}, "", false, model.PlatformItem{}, false, nil
 }
 
 func sanitizedLDAPProviderError(provider externalLDAPProvider, password string, err error) error {

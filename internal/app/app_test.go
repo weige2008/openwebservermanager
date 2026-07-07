@@ -4291,6 +4291,7 @@ func TestLoginLogPersistenceFailureReturnsServerError(t *testing.T) {
 		t.Fatalf("failed login log persistence failure was not audited: %s", operationLogsRec.Body.String())
 	}
 
+	beforeSuccessFailure := rawPlatformUserByName(t, srv, "admin")
 	removeSuccessBlocker := blockPlatformItemCreate(t, srv.cfg.Store, "login_logs")
 	successLoginRec := assertStatus(t, handler, http.MethodPost, "/api/auth/login", map[string]any{"username": "admin", "password": "password123"}, nil, http.StatusInternalServerError)
 	removeSuccessBlocker()
@@ -4299,6 +4300,15 @@ func TestLoginLogPersistenceFailureReturnsServerError(t *testing.T) {
 	}
 	if cookies := successLoginRec.Result().Cookies(); len(cookies) != 0 {
 		t.Fatalf("successful login issued cookies even though login log persistence failed: %#v", cookies)
+	}
+	afterSuccessFailure := rawPlatformUserByName(t, srv, "admin")
+	for _, key := range []string{"last_login_at", "last_login_ip", "last_seen_at", "last_user_agent"} {
+		if firstMetadataString(afterSuccessFailure.Metadata, key) != firstMetadataString(beforeSuccessFailure.Metadata, key) {
+			t.Fatalf("successful login updated %s after login log failure: before=%#v after=%#v", key, beforeSuccessFailure.Metadata, afterSuccessFailure.Metadata)
+		}
+	}
+	if metadataIntDefault(afterSuccessFailure.Metadata["login_count"], 0) != metadataIntDefault(beforeSuccessFailure.Metadata["login_count"], 0) {
+		t.Fatalf("successful login updated login_count after login log failure: before=%#v after=%#v", beforeSuccessFailure.Metadata, afterSuccessFailure.Metadata)
 	}
 }
 

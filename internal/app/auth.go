@@ -734,6 +734,17 @@ func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	if err := s.createLoginLog(r, model.PlatformItemRequest{
+		Name:        username,
+		Type:        loginType,
+		Status:      "success",
+		OwnerID:     admin.UserID,
+		Description: "signed in",
+		Metadata:    map[string]any{"client_ip": clientIP, "account": username},
+	}); err != nil {
+		writeError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
 	s.auth.resetLoginFailures(failureKey)
 	token, session, err := s.auth.create(admin)
 	if err != nil {
@@ -743,17 +754,6 @@ func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
 
 	_ = s.cfg.Store.RecordUserLogin(session.UserID, clientIP, r.UserAgent())
 	_ = s.audit(r, "auth.login", session.UserID, "", "signed in with "+loginType)
-	if err := s.createLoginLog(r, model.PlatformItemRequest{
-		Name:        username,
-		Type:        loginType,
-		Status:      "success",
-		OwnerID:     session.UserID,
-		Description: "signed in",
-		Metadata:    map[string]any{"client_ip": clientIP, "account": username},
-	}); err != nil {
-		writeError(w, http.StatusInternalServerError, err.Error())
-		return
-	}
 	http.SetCookie(w, s.authCookie(r, token, int(authSessionTTL.Seconds())))
 	writeJSON(w, http.StatusOK, map[string]any{"user": s.authUserPayload(session)})
 }

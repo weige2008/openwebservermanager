@@ -100,6 +100,10 @@ func (s *Server) handleSMTPTest(w http.ResponseWriter, r *http.Request) {
 	}
 	cfg, err := smtpDeliveryConfigFromSetting(item, password, req.To)
 	if err != nil {
+		if logErr := s.createIntegrationTestOperationLog(r, "system_settings.smtp_test.failed", "failed", item.ID, err.Error(), map[string]any{"integration": "smtp"}); logErr != nil {
+			writeError(w, http.StatusInternalServerError, logErr.Error())
+			return
+		}
 		_ = s.audit(r, "system_settings.smtp_test.failed", item.ID, "", err.Error())
 		writeError(w, http.StatusBadRequest, err.Error())
 		return
@@ -115,8 +119,28 @@ func (s *Server) handleSMTPTest(w http.ResponseWriter, r *http.Request) {
 	started := time.Now()
 	if err := sendSMTPTestMail(cfg, subject, body); err != nil {
 		errText := sanitizeSMTPTestText(cfg, err.Error())
+		if logErr := s.createIntegrationTestOperationLog(r, "system_settings.smtp_test.failed", "failed", item.ID, "SMTP test failed: "+errText, map[string]any{
+			"integration":     "smtp",
+			"host":            cfg.Host,
+			"port":            cfg.Port,
+			"recipient_count": len(cfg.To),
+		}); logErr != nil {
+			writeError(w, http.StatusInternalServerError, logErr.Error())
+			return
+		}
 		_ = s.audit(r, "system_settings.smtp_test.failed", item.ID, "", "SMTP test failed: "+errText)
 		writeError(w, http.StatusBadGateway, "send SMTP test email: "+errText)
+		return
+	}
+	durationMS := time.Since(started).Milliseconds()
+	if logErr := s.createIntegrationTestOperationLog(r, "system_settings.smtp_test", "success", item.ID, "sent SMTP test email", map[string]any{
+		"integration":     "smtp",
+		"host":            cfg.Host,
+		"port":            cfg.Port,
+		"recipient_count": len(cfg.To),
+		"duration_ms":     durationMS,
+	}); logErr != nil {
+		writeError(w, http.StatusInternalServerError, logErr.Error())
 		return
 	}
 	_ = s.audit(r, "system_settings.smtp_test", item.ID, "", "sent SMTP test email")
@@ -127,7 +151,7 @@ func (s *Server) handleSMTPTest(w http.ResponseWriter, r *http.Request) {
 		"host":        cfg.Host,
 		"port":        cfg.Port,
 		"to":          cfg.To,
-		"duration_ms": time.Since(started).Milliseconds(),
+		"duration_ms": durationMS,
 		"sent_at":     time.Now().UTC(),
 	})
 }
@@ -161,6 +185,10 @@ func (s *Server) handleLLMTest(w http.ResponseWriter, r *http.Request) {
 	}
 	cfg, err := llmDeliveryConfigFromSetting(item, apiKey)
 	if err != nil {
+		if logErr := s.createIntegrationTestOperationLog(r, "system_settings.llm_test.failed", "failed", item.ID, err.Error(), map[string]any{"integration": "llm"}); logErr != nil {
+			writeError(w, http.StatusInternalServerError, logErr.Error())
+			return
+		}
 		_ = s.audit(r, "system_settings.llm_test.failed", item.ID, "", err.Error())
 		writeError(w, http.StatusBadRequest, err.Error())
 		return
@@ -173,11 +201,29 @@ func (s *Server) handleLLMTest(w http.ResponseWriter, r *http.Request) {
 	content, err := sendLLMTestPrompt(cfg, prompt)
 	if err != nil {
 		errText := sanitizeLLMTestText(cfg, err.Error())
+		if logErr := s.createIntegrationTestOperationLog(r, "system_settings.llm_test.failed", "failed", item.ID, "LLM test failed: "+errText, map[string]any{
+			"integration": "llm",
+			"provider":    cfg.Provider,
+			"model":       cfg.Model,
+		}); logErr != nil {
+			writeError(w, http.StatusInternalServerError, logErr.Error())
+			return
+		}
 		_ = s.audit(r, "system_settings.llm_test.failed", item.ID, "", "LLM test failed: "+errText)
 		writeError(w, http.StatusBadGateway, "send LLM test prompt: "+errText)
 		return
 	}
 	content = sanitizeLLMTestText(cfg, content)
+	durationMS := time.Since(started).Milliseconds()
+	if logErr := s.createIntegrationTestOperationLog(r, "system_settings.llm_test", "success", item.ID, "sent LLM test prompt", map[string]any{
+		"integration": "llm",
+		"provider":    cfg.Provider,
+		"model":       cfg.Model,
+		"duration_ms": durationMS,
+	}); logErr != nil {
+		writeError(w, http.StatusInternalServerError, logErr.Error())
+		return
+	}
 	_ = s.audit(r, "system_settings.llm_test", item.ID, "", "sent LLM test prompt")
 	writeJSON(w, http.StatusOK, map[string]any{
 		"ok":          true,
@@ -187,7 +233,7 @@ func (s *Server) handleLLMTest(w http.ResponseWriter, r *http.Request) {
 		"base_url":    cfg.BaseURL,
 		"model":       cfg.Model,
 		"response":    content,
-		"duration_ms": time.Since(started).Milliseconds(),
+		"duration_ms": durationMS,
 		"tested_at":   time.Now().UTC(),
 	})
 }

@@ -8790,6 +8790,36 @@ func TestSMTPIntegrationTestEmail(t *testing.T) {
 	if !strings.Contains(logsRec.Body.String(), "system_settings.smtp_test") {
 		t.Fatal("SMTP test did not write operation log")
 	}
+	removeLogBlocker := blockPlatformItemCreate(t, handler.(*Server).cfg.Store, "operation_logs")
+	logFailureRec := assertStatus(t, handler, http.MethodPost, "/api/admin/system-settings/smtp/test", map[string]any{
+		"setting_id": setting.ID,
+		"to":         "receiver@example.test",
+		"subject":    "SMTP probe audit failure",
+		"body":       "delivery works before audit failure",
+	}, cookie, http.StatusInternalServerError)
+	removeLogBlocker()
+	if !strings.Contains(logFailureRec.Body.String(), "persist operation log failed") {
+		t.Fatalf("SMTP test log failure did not surface operation log error: %s", logFailureRec.Body.String())
+	}
+	select {
+	case message := <-smtpServer.messages:
+		if !strings.Contains(message, "Subject: SMTP probe audit failure") || !strings.Contains(message, "delivery works before audit failure") {
+			t.Fatalf("SMTP message before audit failure missing expected content:\n%s", message)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("SMTP server did not receive test email before audit failure")
+	}
+	select {
+	case authCommand := <-smtpServer.auths:
+		if !strings.HasPrefix(authCommand, "AUTH ") {
+			t.Fatalf("SMTP server recorded unexpected auth command before audit failure: %q", authCommand)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("SMTP server did not receive AUTH command before audit failure")
+	}
+	if !coreAuditLogsContainAction(handler.(*Server).cfg.Store, "operation.log.persist_failed") {
+		t.Fatalf("SMTP test log failure did not create core audit failure")
+	}
 	clearRec := assertStatus(t, handler, http.MethodPatch, "/api/admin/system-settings/"+setting.ID, map[string]any{
 		"name":     "Notification integrations",
 		"type":     "integration",
@@ -8979,6 +9009,21 @@ func TestLLMIntegrationTestPrompt(t *testing.T) {
 	if !strings.Contains(logsRec.Body.String(), "system_settings.llm_test") {
 		t.Fatal("LLM test did not write operation log")
 	}
+	removeLogBlocker := blockPlatformItemCreate(t, handler.(*Server).cfg.Store, "operation_logs")
+	logFailureRec := assertStatus(t, handler, http.MethodPost, "/api/admin/system-settings/llm/test", map[string]any{
+		"setting_id": setting.ID,
+		"prompt":     "ping",
+	}, cookie, http.StatusInternalServerError)
+	removeLogBlocker()
+	if !strings.Contains(logFailureRec.Body.String(), "persist operation log failed") {
+		t.Fatalf("LLM test log failure did not surface operation log error: %s", logFailureRec.Body.String())
+	}
+	if llmCalls != 2 {
+		t.Fatalf("LLM provider should be called before audit failure, calls=%d", llmCalls)
+	}
+	if !coreAuditLogsContainAction(handler.(*Server).cfg.Store, "operation.log.persist_failed") {
+		t.Fatalf("LLM test log failure did not create core audit failure")
+	}
 	clearRec := assertStatus(t, handler, http.MethodPatch, "/api/admin/system-settings/"+setting.ID, map[string]any{
 		"name":   "LLM integrations",
 		"type":   "integration",
@@ -9025,7 +9070,7 @@ func TestLLMIntegrationTestPrompt(t *testing.T) {
 		"setting_id": setting.ID,
 		"prompt":     "ping",
 	}, cookie, http.StatusNotFound)
-	if llmCalls != 2 {
+	if llmCalls != 3 {
 		t.Fatalf("disabled llm setting should not call provider endpoint, calls=%d", llmCalls)
 	}
 

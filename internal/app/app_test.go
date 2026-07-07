@@ -7981,6 +7981,36 @@ func TestBackupDeleteAndRetention(t *testing.T) {
 	if err := os.MkdirAll(backupDir, 0o770); err != nil {
 		t.Fatalf("create backup dir: %v", err)
 	}
+	externalBackupContent := "external backup secret"
+	externalBackupPath := filepath.Join(t.TempDir(), "external.zip")
+	if err := os.WriteFile(externalBackupPath, []byte(externalBackupContent), 0o660); err != nil {
+		t.Fatalf("write external backup target: %v", err)
+	}
+	linkedBackupName := "linked-outside.zip"
+	linkedBackupPath := filepath.Join(backupDir, linkedBackupName)
+	linkedBackupCreated := true
+	if err := os.Symlink(externalBackupPath, linkedBackupPath); err != nil {
+		linkedBackupCreated = false
+		t.Logf("skip backup symlink assertion: %v", err)
+	}
+	if linkedBackupCreated {
+		symlinkListRec := assertStatus(t, handler, http.MethodGet, "/api/admin/backups", nil, cookie, http.StatusOK)
+		if strings.Contains(symlinkListRec.Body.String(), linkedBackupName) {
+			t.Fatalf("backup list exposed symlink archive: %s", symlinkListRec.Body.String())
+		}
+		symlinkDownload := assertStatus(t, handler, http.MethodGet, "/api/admin/backups/"+linkedBackupName+"/download", nil, cookie, http.StatusBadRequest)
+		if strings.Contains(symlinkDownload.Body.String(), externalBackupContent) {
+			t.Fatalf("backup symlink download leaked external content: %s", symlinkDownload.Body.String())
+		}
+		symlinkDelete := assertStatus(t, handler, http.MethodDelete, "/api/admin/backups/"+linkedBackupName, nil, cookie, http.StatusBadRequest)
+		if strings.Contains(symlinkDelete.Body.String(), externalBackupContent) {
+			t.Fatalf("backup symlink delete leaked external content: %s", symlinkDelete.Body.String())
+		}
+		data, err := os.ReadFile(externalBackupPath)
+		if err != nil || string(data) != externalBackupContent {
+			t.Fatalf("external backup symlink target changed: content=%q err=%v", string(data), err)
+		}
+	}
 	oldName := "backup-20000101-000000-000000000.zip"
 	oldPath := filepath.Join(backupDir, oldName)
 	if err := os.WriteFile(oldPath, []byte("old backup"), 0o660); err != nil {
@@ -8016,9 +8046,21 @@ func TestBackupDeleteAndRetention(t *testing.T) {
 	if _, err := os.Stat(oldPath); !errors.Is(err, os.ErrNotExist) {
 		t.Fatalf("expired backup was not deleted: %v", err)
 	}
+	if linkedBackupCreated {
+		if info, err := os.Lstat(linkedBackupPath); err != nil || info.Mode()&os.ModeSymlink == 0 {
+			t.Fatalf("backup retention removed or changed symlink archive: info=%v err=%v", info, err)
+		}
+		data, err := os.ReadFile(externalBackupPath)
+		if err != nil || string(data) != externalBackupContent {
+			t.Fatalf("backup retention changed external symlink target: content=%q err=%v", string(data), err)
+		}
+	}
 	listRec := assertStatus(t, handler, http.MethodGet, "/api/admin/backups", nil, cookie, http.StatusOK)
 	if strings.Contains(listRec.Body.String(), oldName) {
 		t.Fatal("expired backup still appears in backup list")
+	}
+	if linkedBackupCreated && strings.Contains(listRec.Body.String(), linkedBackupName) {
+		t.Fatal("symlink backup still appears in backup list")
 	}
 }
 

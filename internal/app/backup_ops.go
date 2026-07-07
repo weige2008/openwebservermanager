@@ -18,6 +18,8 @@ import (
 
 const maxBackupUploadBytes = 512 << 20
 
+var errBackupSpecialFile = errors.New("backup path is not a regular file")
+
 type backupInfo struct {
 	Name     string         `json:"name"`
 	Size     int64          `json:"size"`
@@ -71,8 +73,11 @@ func (s *Server) handleBackupDownload(w http.ResponseWriter, r *http.Request, na
 		writeError(w, http.StatusBadRequest, err.Error())
 		return
 	}
-	if _, err := os.Stat(path); err != nil {
+	if _, err := backupRegularFileInfo(path); errors.Is(err, os.ErrNotExist) {
 		writeError(w, http.StatusNotFound, "backup not found")
+		return
+	} else if err != nil {
+		writeError(w, http.StatusBadRequest, err.Error())
 		return
 	}
 	_ = s.audit(r, "backup.download", name, "", "downloaded backup")
@@ -91,9 +96,12 @@ func (s *Server) handleBackupDelete(w http.ResponseWriter, r *http.Request, name
 		writeError(w, http.StatusBadRequest, err.Error())
 		return
 	}
-	info, err := os.Stat(path)
-	if err != nil || info.IsDir() {
+	info, err := backupRegularFileInfo(path)
+	if errors.Is(err, os.ErrNotExist) {
 		writeError(w, http.StatusNotFound, "backup not found")
+		return
+	} else if err != nil {
+		writeError(w, http.StatusBadRequest, err.Error())
 		return
 	}
 	if err := os.Remove(path); err != nil {
@@ -269,11 +277,11 @@ func (s *Server) listBackups() ([]backupInfo, error) {
 	}
 	items := []backupInfo{}
 	for _, entry := range entries {
-		if entry.IsDir() || !strings.HasSuffix(strings.ToLower(entry.Name()), ".zip") {
+		if !strings.HasSuffix(strings.ToLower(entry.Name()), ".zip") {
 			continue
 		}
 		path := filepath.Join(dir, entry.Name())
-		info, err := entry.Info()
+		info, err := backupRegularFileInfo(path)
 		if err != nil {
 			continue
 		}
@@ -301,6 +309,20 @@ func (s *Server) backupFilePath(name string) (string, error) {
 	return path, nil
 }
 
+func backupRegularFileInfo(path string) (os.FileInfo, error) {
+	info, err := os.Lstat(path)
+	if errors.Is(err, os.ErrNotExist) {
+		return nil, os.ErrNotExist
+	}
+	if err != nil {
+		return nil, err
+	}
+	if info.IsDir() || !info.Mode().IsRegular() {
+		return nil, errBackupSpecialFile
+	}
+	return info, nil
+}
+
 func (s *Server) cleanupExpiredBackups(now time.Time) (backupRetentionResult, error) {
 	days := s.backupRetentionDays()
 	result := backupRetentionResult{RetentionDays: days}
@@ -317,14 +339,14 @@ func (s *Server) cleanupExpiredBackups(now time.Time) (backupRetentionResult, er
 	}
 	cutoff := now.AddDate(0, 0, -days)
 	for _, entry := range entries {
-		if entry.IsDir() || !strings.HasSuffix(strings.ToLower(entry.Name()), ".zip") {
-			continue
-		}
-		info, err := entry.Info()
-		if err != nil || info.ModTime().After(cutoff) {
+		if !strings.HasSuffix(strings.ToLower(entry.Name()), ".zip") {
 			continue
 		}
 		path := filepath.Join(dir, entry.Name())
+		info, err := backupRegularFileInfo(path)
+		if err != nil || info.ModTime().After(cutoff) {
+			continue
+		}
 		if err := ensureChildPath(dir, path); err != nil {
 			return result, err
 		}

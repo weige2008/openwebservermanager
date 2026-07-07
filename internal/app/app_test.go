@@ -1953,6 +1953,21 @@ func TestConnectionCreateOperationLogFailuresRollbackSessions(t *testing.T) {
 	if !coreAuditLogsContainAction(srv.cfg.Store, "operation.log.persist_failed") {
 		t.Fatal("legacy ssh create operation log failure was not audited")
 	}
+	goodSSHRec := assertStatus(t, handler, http.MethodPost, "/api/connections/ssh", map[string]any{
+		"server_id":     linux.ID,
+		"credential_id": sshCred.ID,
+	}, adminCookie, http.StatusCreated)
+	var goodSSH model.ConnectionSession
+	decodeResponse(t, goodSSHRec, &goodSSH)
+	removeSSHOpenLogBlocker := blockOperationLogName(t, srv.cfg.Store, "connection.ssh.open")
+	sshOpenRec := assertStatus(t, handler, http.MethodGet, "/api/connections/ssh/"+goodSSH.ID+"/ws?term=xterm&cols=100&rows=30", nil, adminCookie, http.StatusInternalServerError)
+	removeSSHOpenLogBlocker()
+	if !strings.Contains(sshOpenRec.Body.String(), "persist operation log failed") {
+		t.Fatalf("ssh websocket open operation log failure was not reported: %s", sshOpenRec.Body.String())
+	}
+	if _, ok := srv.cfg.Store.GetSession(goodSSH.ID); !ok {
+		t.Fatal("ssh websocket open operation log failure removed the session")
+	}
 
 	userRec := assertStatus(t, handler, http.MethodPost, "/api/admin/users", map[string]any{
 		"name":     "connection-create-rollback-user",
@@ -2008,6 +2023,18 @@ func TestConnectionCreateOperationLogFailuresRollbackSessions(t *testing.T) {
 	}
 	if got := recordingDirCountForTest(t, srv); got != recordingDirBefore {
 		t.Fatalf("vnc create left recording directories after operation log failure: got %d want %d", got, recordingDirBefore)
+	}
+	goodVNCRec := assertStatus(t, handler, http.MethodPost, "/api/access/vnc/"+vncAsset.ID, nil, userCookie, http.StatusAccepted)
+	var goodVNC model.ConnectionSession
+	decodeResponse(t, goodVNCRec, &goodVNC)
+	removeVNCOpenLogBlocker := blockOperationLogName(t, srv.cfg.Store, "connection.vnc.open")
+	vncOpenRec := assertStatus(t, handler, http.MethodGet, "/api/connections/vnc/"+goodVNC.ID+"/tunnel?width=1024&height=768&dpi=96", nil, userCookie, http.StatusInternalServerError)
+	removeVNCOpenLogBlocker()
+	if !strings.Contains(vncOpenRec.Body.String(), "persist operation log failed") {
+		t.Fatalf("vnc tunnel open operation log failure was not reported: %s", vncOpenRec.Body.String())
+	}
+	if _, ok := srv.cfg.Store.GetSession(goodVNC.ID); !ok {
+		t.Fatal("vnc tunnel open operation log failure removed the session")
 	}
 
 	webAssetRec := assertStatus(t, handler, http.MethodPost, "/api/admin/websites", map[string]any{

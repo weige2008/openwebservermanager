@@ -448,14 +448,22 @@ func (s *Server) handleSSHWebSocket(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
+	term := r.URL.Query().Get("term")
+	cols, _ := strconv.Atoi(r.URL.Query().Get("cols"))
+	rows, _ := strconv.Atoi(r.URL.Query().Get("rows"))
+	if err := s.createConnectionSessionOpenOperationLog(r, session, "opened ssh websocket", map[string]any{
+		"term": term,
+		"cols": cols,
+		"rows": rows,
+	}); err != nil {
+		writeError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
 	conn, err := ws.Upgrade(w, r)
 	if err != nil {
 		writeError(w, http.StatusBadRequest, err.Error())
 		return
 	}
-	term := r.URL.Query().Get("term")
-	cols, _ := strconv.Atoi(r.URL.Query().Get("cols"))
-	rows, _ := strconv.Atoi(r.URL.Query().Get("rows"))
 	_ = s.audit(r, "connection.ssh.open", session.ID, model.ProtocolSSH, "opened ssh websocket")
 	sshrunner.Runner{Store: s.cfg.Store, Logger: slog.Default(), KnownHostsPath: filepath.Join(s.cfg.DataDir, "known_hosts")}.Run(conn, session, server, credential, secret, term, cols, rows)
 }
@@ -841,6 +849,26 @@ func (s *Server) createConnectionSessionCreateOperationLog(r *http.Request, sess
 			"height":        session.Height,
 			"dpi":           session.DPI,
 		},
+	})
+}
+
+func (s *Server) createConnectionSessionOpenOperationLog(r *http.Request, session model.ConnectionSession, description string, metadata map[string]any) error {
+	if metadata == nil {
+		metadata = map[string]any{}
+	}
+	metadata["session_id"] = session.ID
+	metadata["server_id"] = session.ServerID
+	metadata["credential_id"] = session.CredentialID
+	metadata["client_ip"] = s.clientIP(r)
+	return s.createOperationLog(r, model.PlatformItemRequest{
+		Name:        "connection." + string(session.Protocol) + ".open",
+		Type:        "connection_session",
+		Status:      "success",
+		Protocol:    session.Protocol,
+		TargetID:    session.ID,
+		OwnerID:     s.currentUserID(r),
+		Description: description,
+		Metadata:    metadata,
 	})
 }
 

@@ -64,11 +64,6 @@ func (s *Server) handleDesktopTunnel(w http.ResponseWriter, r *http.Request, pro
 	if !ok {
 		return
 	}
-	conn, err := ws.Upgrade(w, r)
-	if err != nil {
-		writeError(w, http.StatusBadRequest, err.Error())
-		return
-	}
 	if width, _ := strconv.Atoi(r.URL.Query().Get("width")); width > 0 {
 		cfg.Width = width
 	}
@@ -77,6 +72,19 @@ func (s *Server) handleDesktopTunnel(w http.ResponseWriter, r *http.Request, pro
 	}
 	if dpi, _ := strconv.Atoi(r.URL.Query().Get("dpi")); dpi > 0 {
 		cfg.DPI = dpi
+	}
+	if err := s.createConnectionSessionOpenOperationLog(r, cfg.Session, "opened "+string(protocol)+" tunnel", map[string]any{
+		"width":  cfg.Width,
+		"height": cfg.Height,
+		"dpi":    cfg.DPI,
+	}); err != nil {
+		writeError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	conn, err := ws.Upgrade(w, r)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, err.Error())
+		return
 	}
 	_ = s.audit(r, "connection."+string(protocol)+".open", cfg.Session.ID, protocol, "opened "+string(protocol)+" tunnel")
 	guac.Tunnel{Manager: s.cfg.Guacd, Store: s.cfg.Store, Logger: slog.Default(), DataDir: s.cfg.DataDir}.RunDesktop(r.Context(), conn, cfg)

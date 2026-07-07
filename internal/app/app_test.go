@@ -10093,6 +10093,32 @@ func TestBackupOperationLogPersistenceFailures(t *testing.T) {
 	if strings.Contains(dryRunFailureRec.Body.String(), `"valid":true`) {
 		t.Fatalf("backup restore dry-run returned success after operation log failure: %s", dryRunFailureRec.Body.String())
 	}
+
+	transientAssetRec := assertStatus(t, handler, http.MethodPost, "/api/admin/assets", map[string]any{
+		"name":     "restore-rollback-kept",
+		"type":     "linux",
+		"status":   "active",
+		"protocol": "ssh",
+		"host":     "127.0.0.50",
+		"port":     22,
+	}, cookie, http.StatusCreated)
+	var transientAsset model.PlatformItem
+	decodeResponse(t, transientAssetRec, &transientAsset)
+	removeRestoreLogBlocker := blockOperationLogName(t, srv.cfg.Store, "backup.restore")
+	restoreFailureRec := assertMultipartStatus(t, handler, "/api/admin/backups/restore", nil, backupName, backupRaw, cookie, http.StatusInternalServerError)
+	removeRestoreLogBlocker()
+	if !strings.Contains(restoreFailureRec.Body.String(), "persist operation log failed") {
+		t.Fatalf("backup restore operation log failure was not reported: %s", restoreFailureRec.Body.String())
+	}
+	if strings.Contains(restoreFailureRec.Body.String(), `"restored":true`) {
+		t.Fatalf("backup restore returned success after operation log failure: %s", restoreFailureRec.Body.String())
+	}
+	loginRec := assertStatus(t, handler, http.MethodPost, "/api/auth/login", map[string]any{"username": "admin", "password": "password123"}, nil, http.StatusOK)
+	rollbackCookie := loginRec.Result().Cookies()[0]
+	assetsAfterRollbackRec := assertStatus(t, handler, http.MethodGet, "/api/admin/assets", nil, rollbackCookie, http.StatusOK)
+	if !strings.Contains(assetsAfterRollbackRec.Body.String(), transientAsset.ID) {
+		t.Fatalf("backup restore was not rolled back after operation log failure: %s", assetsAfterRollbackRec.Body.String())
+	}
 	if !coreAuditLogsContainAction(srv.cfg.Store, "operation.log.persist_failed") {
 		t.Fatal("operation log persistence failure was not written to core audit logs")
 	}
@@ -12325,6 +12351,34 @@ END`
 	if _, err := db.Exec(triggerSQL); err != nil {
 		_ = db.Close()
 		t.Fatalf("create platform item blocker trigger: %v", err)
+	}
+	return func() {
+		_, _ = db.Exec(`DROP TRIGGER IF EXISTS ` + triggerName)
+		_ = db.Close()
+	}
+}
+
+func blockOperationLogName(t *testing.T, st *store.Store, name string) func() {
+	t.Helper()
+	db, err := sql.Open("sqlite", st.DatabasePath())
+	if err != nil {
+		t.Fatalf("open store database for operation log name blocker: %v", err)
+	}
+	triggerName := "block_operation_log_name"
+	if _, err := db.Exec(`DROP TRIGGER IF EXISTS ` + triggerName); err != nil {
+		_ = db.Close()
+		t.Fatalf("drop stale operation log name blocker trigger: %v", err)
+	}
+	nameFragment := `"name":"` + name + `"`
+	triggerSQL := `CREATE TRIGGER ` + triggerName + ` BEFORE INSERT ON platform_records
+WHEN NEW.collection = 'operation_logs'
+  AND instr(NEW.payload, ` + sqliteTestStringLiteral(nameFragment) + `) > 0
+BEGIN
+  SELECT RAISE(ABORT, 'forced operation log name create failure');
+END`
+	if _, err := db.Exec(triggerSQL); err != nil {
+		_ = db.Close()
+		t.Fatalf("create operation log name blocker trigger: %v", err)
 	}
 	return func() {
 		_, _ = db.Exec(`DROP TRIGGER IF EXISTS ` + triggerName)

@@ -238,6 +238,12 @@ func (s *Server) handleBackupRestore(w http.ResponseWriter, r *http.Request) {
 			"summary":            summary,
 		},
 	}); err != nil {
+		if rollbackErr := s.restoreBackupSnapshot(preRestore); rollbackErr != nil {
+			s.auth.clearSessions()
+			writeError(w, http.StatusInternalServerError, err.Error()+"; restore rollback failed: "+rollbackErr.Error())
+			return
+		}
+		_ = s.audit(r, "operation.log.persist_failed", "backups", "", "backup restore rolled back after operation log failure: "+err.Error())
 		s.auth.clearSessions()
 		writeError(w, http.StatusInternalServerError, err.Error())
 		return
@@ -284,6 +290,29 @@ func backupRestoreUploadMetadata(filename string, headerSize, written int64) map
 
 func backupRestoreUploadName(filename string) string {
 	return safeUploadedFilename(filename)
+}
+
+func (s *Server) restoreBackupSnapshot(metadata map[string]any) error {
+	backupPath, _ := metadata["backup_path"].(string)
+	backupPath = strings.TrimSpace(backupPath)
+	if backupPath == "" {
+		return errors.New("pre-restore backup path is missing")
+	}
+	backupPath = filepath.FromSlash(backupPath)
+	if _, err := backupRegularFileInfo(backupPath); err != nil {
+		return err
+	}
+	tempDir, err := os.MkdirTemp(s.cfg.DataDir, "restore-rollback-*")
+	if err != nil {
+		return err
+	}
+	defer os.RemoveAll(tempDir)
+	archive, err := readRestoreArchive(backupPath, tempDir)
+	if err != nil {
+		return err
+	}
+	_, err = s.cfg.Store.RestoreSnapshot(archive.LegacyRaw, archive.SQLiteDB)
+	return err
 }
 
 func safeUploadedFilename(filename string) string {

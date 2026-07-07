@@ -4755,6 +4755,48 @@ func TestExternalOIDCCallbackAutoCreateDisabledIsAudited(t *testing.T) {
 	}
 }
 
+func TestExternalOIDCCallbackProviderErrorConsumesStateAndAudits(t *testing.T) {
+	handler, adminCookie := newTestHandler(t)
+	srv := handler.(*Server)
+
+	assertStatus(t, handler, http.MethodPost, "/api/admin/system-settings", map[string]any{
+		"name":   "External OIDC provider error",
+		"type":   "identity",
+		"status": "enabled",
+		"metadata": map[string]any{
+			"oidc_login_enabled":          true,
+			"oidc_provider_id":            "error-sso",
+			"oidc_provider_name":          "Error SSO",
+			"oidc_authorization_endpoint": "https://sso.example.test/authorize",
+			"oidc_token_endpoint":         "https://sso.example.test/token",
+			"oidc_userinfo_endpoint":      "https://sso.example.test/userinfo",
+			"oidc_client_id":              "openweb-client",
+			"oidc_client_secret":          "openweb-secret",
+			"oidc_scopes":                 []string{"openid", "profile"},
+		},
+	}, adminCookie, http.StatusCreated)
+	state, _, err := srv.auth.createExternalOIDCState("error-sso", "/app/access")
+	if err != nil {
+		t.Fatalf("create external oidc state: %v", err)
+	}
+	failedRec := assertStatus(t, handler, http.MethodGet, "/api/auth/oidc/callback?state="+url.QueryEscape(state)+"&error=access_denied", nil, nil, http.StatusBadRequest)
+	if !strings.Contains(failedRec.Body.String(), "oidc provider returned error: access_denied") {
+		t.Fatalf("oidc provider error response missing reason: %s", failedRec.Body.String())
+	}
+	reuseRec := assertStatus(t, handler, http.MethodGet, "/api/auth/oidc/callback?state="+url.QueryEscape(state)+"&code=reused-code", nil, nil, http.StatusBadRequest)
+	if !strings.Contains(reuseRec.Body.String(), "oidc state is invalid or expired") {
+		t.Fatalf("oidc provider error did not consume state: %s", reuseRec.Body.String())
+	}
+	loginLogsRec := assertStatus(t, handler, http.MethodGet, "/api/admin/audit/login-logs", nil, adminCookie, http.StatusOK)
+	if !strings.Contains(loginLogsRec.Body.String(), `"type":"oidc"`) || !strings.Contains(loginLogsRec.Body.String(), `"status":"failed"`) || !strings.Contains(loginLogsRec.Body.String(), "error-sso") || !strings.Contains(loginLogsRec.Body.String(), "access_denied") {
+		t.Fatalf("oidc provider error login log missing details: %s", loginLogsRec.Body.String())
+	}
+	operationLogsRec := assertStatus(t, handler, http.MethodGet, "/api/admin/audit/operation-logs", nil, adminCookie, http.StatusOK)
+	if !strings.Contains(operationLogsRec.Body.String(), "auth.oidc.login_failed") || !strings.Contains(operationLogsRec.Body.String(), "access_denied") {
+		t.Fatalf("oidc provider error operation audit missing: %s", operationLogsRec.Body.String())
+	}
+}
+
 func TestExternalOIDCCallbackTokenFailureIsAuditedAndRedacted(t *testing.T) {
 	handler, adminCookie := newTestHandler(t)
 	srv := handler.(*Server)
@@ -5996,6 +6038,49 @@ func TestExternalWeComCallbackAutoCreateDisabledIsAudited(t *testing.T) {
 	operationLogsRec := assertStatus(t, handler, http.MethodGet, "/api/admin/audit/operation-logs", nil, adminCookie, http.StatusOK)
 	if !strings.Contains(operationLogsRec.Body.String(), "auth.wecom.login_failed") {
 		t.Fatalf("wecom failed login audit missing: %s", operationLogsRec.Body.String())
+	}
+}
+
+func TestExternalWeComCallbackProviderErrorConsumesStateAndAudits(t *testing.T) {
+	handler, adminCookie := newTestHandler(t)
+	srv := handler.(*Server)
+
+	assertStatus(t, handler, http.MethodPost, "/api/admin/system-settings", map[string]any{
+		"name":   "Enterprise WeChat provider error",
+		"type":   "identity",
+		"status": "enabled",
+		"metadata": map[string]any{
+			"wecom_enabled":            true,
+			"wecom_provider_id":        "error-wecom",
+			"wecom_provider_name":      "Error WeCom",
+			"wecom_corp_id":            "ww-openweb",
+			"wecom_agent_id":           "100001",
+			"wecom_agent_secret":       "wecom-secret",
+			"wecom_authorize_endpoint": "https://wecom.example.test/authorize",
+			"wecom_token_endpoint":     "https://wecom.example.test/gettoken",
+			"wecom_userinfo_endpoint":  "https://wecom.example.test/getuserinfo",
+			"wecom_role":               "user",
+		},
+	}, adminCookie, http.StatusCreated)
+	state, err := srv.auth.createExternalWeComState("error-wecom", "/app/access")
+	if err != nil {
+		t.Fatalf("create external wecom state: %v", err)
+	}
+	failedRec := assertStatus(t, handler, http.MethodGet, "/api/auth/wecom/callback?state="+url.QueryEscape(state)+"&error=access_denied", nil, nil, http.StatusBadRequest)
+	if !strings.Contains(failedRec.Body.String(), "wecom provider returned error: access_denied") {
+		t.Fatalf("wecom provider error response missing reason: %s", failedRec.Body.String())
+	}
+	reuseRec := assertStatus(t, handler, http.MethodGet, "/api/auth/wecom/callback?state="+url.QueryEscape(state)+"&code=reused-code", nil, nil, http.StatusBadRequest)
+	if !strings.Contains(reuseRec.Body.String(), "wecom state is invalid or expired") {
+		t.Fatalf("wecom provider error did not consume state: %s", reuseRec.Body.String())
+	}
+	loginLogsRec := assertStatus(t, handler, http.MethodGet, "/api/admin/audit/login-logs", nil, adminCookie, http.StatusOK)
+	if !strings.Contains(loginLogsRec.Body.String(), `"type":"wecom"`) || !strings.Contains(loginLogsRec.Body.String(), `"status":"failed"`) || !strings.Contains(loginLogsRec.Body.String(), "error-wecom") || !strings.Contains(loginLogsRec.Body.String(), "access_denied") {
+		t.Fatalf("wecom provider error login log missing details: %s", loginLogsRec.Body.String())
+	}
+	operationLogsRec := assertStatus(t, handler, http.MethodGet, "/api/admin/audit/operation-logs", nil, adminCookie, http.StatusOK)
+	if !strings.Contains(operationLogsRec.Body.String(), "auth.wecom.login_failed") || !strings.Contains(operationLogsRec.Body.String(), "access_denied") {
+		t.Fatalf("wecom provider error operation audit missing: %s", operationLogsRec.Body.String())
 	}
 }
 

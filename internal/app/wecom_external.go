@@ -117,10 +117,6 @@ func (s *Server) handleExternalWeComStart(w http.ResponseWriter, r *http.Request
 }
 
 func (s *Server) handleExternalWeComCallback(w http.ResponseWriter, r *http.Request) {
-	if errText := strings.TrimSpace(r.URL.Query().Get("error")); errText != "" {
-		writeError(w, http.StatusBadRequest, "wecom provider returned error: "+errText)
-		return
-	}
 	state, ok := s.auth.consumeExternalWeComState(r.URL.Query().Get("state"))
 	if !ok {
 		writeError(w, http.StatusBadRequest, "wecom state is invalid or expired")
@@ -133,6 +129,12 @@ func (s *Server) handleExternalWeComCallback(w http.ResponseWriter, r *http.Requ
 	}
 	if !ok {
 		writeError(w, http.StatusNotFound, "wecom provider not found")
+		return
+	}
+	if errText := strings.TrimSpace(r.URL.Query().Get("error")); errText != "" {
+		err := errors.New("wecom provider returned error: " + errText)
+		s.recordExternalWeComLoginFailure(r, provider, externalWeComClaims{}, err)
+		writeError(w, http.StatusBadRequest, err.Error())
 		return
 	}
 	code := strings.TrimSpace(r.URL.Query().Get("code"))

@@ -102,10 +102,6 @@ func (s *Server) handleExternalOIDCStart(w http.ResponseWriter, r *http.Request)
 }
 
 func (s *Server) handleExternalOIDCCallback(w http.ResponseWriter, r *http.Request) {
-	if errText := strings.TrimSpace(r.URL.Query().Get("error")); errText != "" {
-		writeError(w, http.StatusBadRequest, "oidc provider returned error: "+errText)
-		return
-	}
 	state, ok := s.auth.consumeExternalOIDCState(r.URL.Query().Get("state"))
 	if !ok {
 		writeError(w, http.StatusBadRequest, "oidc state is invalid or expired")
@@ -118,6 +114,12 @@ func (s *Server) handleExternalOIDCCallback(w http.ResponseWriter, r *http.Reque
 	}
 	if !ok {
 		writeError(w, http.StatusNotFound, "oidc provider not found")
+		return
+	}
+	if errText := strings.TrimSpace(r.URL.Query().Get("error")); errText != "" {
+		err := errors.New("oidc provider returned error: " + errText)
+		s.recordExternalOIDCLoginFailure(r, provider, nil, err)
+		writeError(w, http.StatusBadRequest, err.Error())
 		return
 	}
 	code := strings.TrimSpace(r.URL.Query().Get("code"))

@@ -343,6 +343,13 @@ func (s *Server) handleDeleteLoginLock(w http.ResponseWriter, r *http.Request, i
 		writeError(w, http.StatusNotFound, "record not found")
 		return
 	}
+	if err := s.createLoginLockUnlockOperationLog(r, lock); err != nil {
+		if _, restoreErr := s.cfg.Store.SavePlatformItem("login_locks", lock); restoreErr != nil {
+			err = fmt.Errorf("%w; additionally failed to restore login lock: %v", err, restoreErr)
+		}
+		writeError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
 	for _, account := range loginLockAccounts(lock) {
 		for _, clientIP := range loginLockClientIPs(lock) {
 			s.auth.resetLoginFailuresFor(account, clientIP)
@@ -350,6 +357,23 @@ func (s *Server) handleDeleteLoginLock(w http.ResponseWriter, r *http.Request, i
 	}
 	_ = s.audit(r, "login_locks.unlock", id, "", "unlocked login lock")
 	writeJSON(w, http.StatusOK, map[string]bool{"ok": true})
+}
+
+func (s *Server) createLoginLockUnlockOperationLog(r *http.Request, lock model.PlatformItem) error {
+	return s.createOperationLog(r, model.PlatformItemRequest{
+		Name:        "login_locks.unlock",
+		Type:        "login_locks",
+		Status:      "success",
+		TargetID:    lock.ID,
+		OwnerID:     s.currentUserID(r),
+		Description: "unlocked login lock",
+		Metadata: map[string]any{
+			"collection": "login_locks",
+			"item_id":    lock.ID,
+			"account":    firstNonEmpty(firstMetadataString(lock.Metadata, "account", "username"), lock.Username, lock.Name),
+			"client_ip":  firstNonEmpty(firstMetadataString(lock.Metadata, "client_ip"), lock.Host),
+		},
+	})
 }
 
 func (s *Server) handleAccessAssets(w http.ResponseWriter, r *http.Request) {

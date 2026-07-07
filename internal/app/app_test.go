@@ -4340,6 +4340,20 @@ func TestLoginSecurityPoliciesAndLocks(t *testing.T) {
 	if lockID == "" {
 		t.Fatal("lock-user lock id was not returned")
 	}
+	removeUnlockLogBlocker := blockOperationLogName(t, handler.(*Server).cfg.Store, "login_locks.unlock")
+	blockedUnlockRec := assertStatus(t, handler, http.MethodDelete, "/api/admin/login-locked/"+lockID, nil, adminCookie, http.StatusInternalServerError)
+	removeUnlockLogBlocker()
+	if !strings.Contains(blockedUnlockRec.Body.String(), "persist operation log failed") {
+		t.Fatalf("login lock unlock operation log failure was not reported: %s", blockedUnlockRec.Body.String())
+	}
+	if !coreAuditLogsContainAction(handler.(*Server).cfg.Store, "operation.log.persist_failed") {
+		t.Fatal("login lock unlock operation log failure was not audited")
+	}
+	blockedLocksRec := assertStatus(t, handler, http.MethodGet, "/api/admin/login-locked", nil, adminCookie, http.StatusOK)
+	if !strings.Contains(blockedLocksRec.Body.String(), lockID) || !strings.Contains(blockedLocksRec.Body.String(), "lock-user") {
+		t.Fatalf("login lock was not restored after unlock log failure: %s", blockedLocksRec.Body.String())
+	}
+	assertStatus(t, handler, http.MethodPost, "/api/auth/login", map[string]any{"username": "lock-user", "password": "password123"}, nil, http.StatusTooManyRequests)
 	assertStatus(t, handler, http.MethodDelete, "/api/admin/login-locked/"+lockID, nil, adminCookie, http.StatusOK)
 	assertStatus(t, handler, http.MethodPost, "/api/auth/login", map[string]any{"username": "lock-user", "password": "password123"}, nil, http.StatusOK)
 

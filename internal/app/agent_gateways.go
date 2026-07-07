@@ -79,6 +79,9 @@ func (s *Server) handleAgentGatewayToken(w http.ResponseWriter, r *http.Request,
 		writeError(w, http.StatusForbidden, "agent gateway is disabled")
 		return
 	}
+	previous := item
+	previous.Tags = append([]string(nil), item.Tags...)
+	previous.Metadata = cloneMetadata(item.Metadata)
 	secret, err := randomToken()
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, err.Error())
@@ -116,6 +119,28 @@ func (s *Server) handleAgentGatewayToken(w http.ResponseWriter, r *http.Request,
 	item.Metadata["token_expires_at"] = expiresAt.Format(time.RFC3339Nano)
 	saved, err := s.cfg.Store.SavePlatformItem("agent_gateways", item)
 	if err != nil {
+		writeError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	if err := s.createOperationLog(r, model.PlatformItemRequest{
+		Name:        "agent_gateway.token",
+		Type:        "agent",
+		Status:      "success",
+		TargetID:    saved.ID,
+		OwnerID:     s.currentUserID(r),
+		Description: "issued agent gateway registration token",
+		Metadata: map[string]any{
+			"gateway_id":       saved.ID,
+			"gateway_name":     saved.Name,
+			"gateway_status":   saved.Status,
+			"client_ip":        s.clientIP(r),
+			"expires_at":       expiresAt.Format(time.RFC3339Nano),
+			"token_generation": metadataIntDefault(saved.Metadata["token_generation"], 0),
+		},
+	}); err != nil {
+		if _, restoreErr := s.cfg.Store.SavePlatformItem("agent_gateways", previous); restoreErr != nil {
+			slog.Default().Error("restore agent gateway after token operation log failure", "gateway_id", saved.ID, "error", restoreErr)
+		}
 		writeError(w, http.StatusInternalServerError, err.Error())
 		return
 	}

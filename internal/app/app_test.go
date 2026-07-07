@@ -7920,6 +7920,26 @@ func TestAgentGatewayOperationLogPersistenceFailures(t *testing.T) {
 	var gateway model.PlatformItem
 	decodeResponse(t, gatewayRec, &gateway)
 
+	removeTokenBlocker := blockOperationLogName(t, srv.cfg.Store, "agent_gateway.token")
+	tokenFailureRec := assertStatus(t, handler, http.MethodPost, "/api/admin/agent-gateways/"+gateway.ID+"/token", nil, adminCookie, http.StatusInternalServerError)
+	removeTokenBlocker()
+	if !strings.Contains(tokenFailureRec.Body.String(), "persist operation log failed") {
+		t.Fatalf("agent token operation log failure was not reported: %s", tokenFailureRec.Body.String())
+	}
+	if strings.Contains(tokenFailureRec.Body.String(), "registration_token") || strings.Contains(tokenFailureRec.Body.String(), `"token":`) {
+		t.Fatalf("agent token operation log failure leaked token material: %s", tokenFailureRec.Body.String())
+	}
+	storedGateway, ok, err := srv.cfg.Store.GetPlatformItem("agent_gateways", gateway.ID)
+	if err != nil || !ok {
+		t.Fatalf("load gateway after failed token issue: ok=%v err=%v", ok, err)
+	}
+	if firstMetadataString(storedGateway.Metadata, "agent_token_hash") != "" || firstMetadataString(storedGateway.Metadata, "token_expires_at") != "" || metadataIntDefault(storedGateway.Metadata["token_generation"], 0) != 0 {
+		t.Fatalf("agent token issue changed gateway token state before audit log persisted: %#v", storedGateway)
+	}
+	if !coreAuditLogsContainAction(srv.cfg.Store, "operation.log.persist_failed") {
+		t.Fatal("agent token operation log persistence failure was not written to core audit logs")
+	}
+
 	tokenRec := assertStatus(t, handler, http.MethodPost, "/api/admin/agent-gateways/"+gateway.ID+"/token", nil, adminCookie, http.StatusOK)
 	var tokenPayload map[string]any
 	decodeResponse(t, tokenRec, &tokenPayload)
@@ -7938,7 +7958,7 @@ func TestAgentGatewayOperationLogPersistenceFailures(t *testing.T) {
 	if !strings.Contains(registerFailureRec.Body.String(), "persist operation log failed") {
 		t.Fatalf("agent register operation log failure was not reported: %s", registerFailureRec.Body.String())
 	}
-	storedGateway, ok, err := srv.cfg.Store.GetPlatformItem("agent_gateways", gateway.ID)
+	storedGateway, ok, err = srv.cfg.Store.GetPlatformItem("agent_gateways", gateway.ID)
 	if err != nil || !ok {
 		t.Fatalf("load gateway after failed register: ok=%v err=%v", ok, err)
 	}

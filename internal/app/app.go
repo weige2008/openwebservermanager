@@ -586,6 +586,13 @@ func (s *Server) handleClose(w http.ResponseWriter, r *http.Request) {
 			writeError(w, http.StatusForbidden, "session access denied")
 			return
 		}
+		if err := s.createSessionLifecycleOperationLog(r, "connection.close", "requested", id, item.Protocol, "close platform session requested", map[string]any{
+			"session_collection": "online_sessions",
+			"close_reason":       "closed by user",
+		}); err != nil {
+			writeError(w, http.StatusInternalServerError, err.Error())
+			return
+		}
 		closed, err := s.closePlatformOnlineSession(id, "closed by user")
 		if err != nil {
 			writeError(w, http.StatusInternalServerError, err.Error())
@@ -597,6 +604,13 @@ func (s *Server) handleClose(w http.ResponseWriter, r *http.Request) {
 	}
 	if !s.canAccessSession(r, existing) {
 		writeError(w, http.StatusForbidden, "session access denied")
+		return
+	}
+	if err := s.createSessionLifecycleOperationLog(r, "connection.close", "requested", id, existing.Protocol, "close session requested", map[string]any{
+		"session_collection": "connection_sessions",
+		"close_reason":       "closed by user",
+	}); err != nil {
+		writeError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
 	if err := s.refreshSessionRecordingSize(id); err != nil {
@@ -772,6 +786,24 @@ func (s *Server) createOperationLog(r *http.Request, req model.PlatformItemReque
 		return errors.New(detail)
 	}
 	return nil
+}
+
+func (s *Server) createSessionLifecycleOperationLog(r *http.Request, name, status, id string, protocol model.Protocol, description string, metadata map[string]any) error {
+	if metadata == nil {
+		metadata = map[string]any{}
+	}
+	metadata["session_id"] = id
+	metadata["client_ip"] = s.clientIP(r)
+	return s.createOperationLog(r, model.PlatformItemRequest{
+		Name:        name,
+		Type:        "connection_session",
+		Status:      status,
+		Protocol:    protocol,
+		TargetID:    id,
+		OwnerID:     s.currentUserID(r),
+		Description: description,
+		Metadata:    metadata,
+	})
 }
 
 func validateCredentialForServer(credentialType model.CredentialType, server model.Server) error {

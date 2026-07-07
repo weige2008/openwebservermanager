@@ -4157,6 +4157,13 @@ func (s *Server) handleAuditSessionDisconnect(w http.ResponseWriter, r *http.Req
 			writeError(w, http.StatusForbidden, "session access denied")
 			return
 		}
+		if err := s.createSessionLifecycleOperationLog(r, "audit.session.disconnect", "requested", id, session.Protocol, "disconnect online session requested", map[string]any{
+			"session_collection": "connection_sessions",
+			"close_reason":       "closed by auditor",
+		}); err != nil {
+			writeError(w, http.StatusInternalServerError, err.Error())
+			return
+		}
 		if err := s.refreshSessionRecordingSize(id); err != nil {
 			writeError(w, http.StatusInternalServerError, err.Error())
 			return
@@ -4177,6 +4184,13 @@ func (s *Server) handleAuditSessionDisconnect(w http.ResponseWriter, r *http.Req
 	}
 	if !ok {
 		writeError(w, http.StatusNotFound, "session not found")
+		return
+	}
+	if err := s.createSessionLifecycleOperationLog(r, "audit.session.disconnect", "requested", id, item.Protocol, "disconnect platform online session requested", map[string]any{
+		"session_collection": "online_sessions",
+		"close_reason":       "closed by auditor",
+	}); err != nil {
+		writeError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
 	offline, err := s.closePlatformOnlineSession(id, "closed by auditor")

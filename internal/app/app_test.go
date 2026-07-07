@@ -11585,6 +11585,20 @@ func TestPlatformOnlineSessionCloseEndpoint(t *testing.T) {
 		t.Fatalf("save platform online recording metadata: %v", err)
 	}
 
+	removePlatformCloseLogBlocker := blockOperationLogName(t, srv.cfg.Store, "connection.close")
+	blockedPlatformCloseRec := assertStatus(t, handler, http.MethodPost, "/api/connections/"+online.ID+"/close", nil, userCookie, http.StatusInternalServerError)
+	removePlatformCloseLogBlocker()
+	if !strings.Contains(blockedPlatformCloseRec.Body.String(), "persist operation log failed") {
+		t.Fatalf("platform close operation log failure was not reported: %s", blockedPlatformCloseRec.Body.String())
+	}
+	blockedOnlineRec := assertStatus(t, handler, http.MethodGet, "/api/admin/audit/online-sessions", nil, adminCookie, http.StatusOK)
+	if !strings.Contains(blockedOnlineRec.Body.String(), online.ID) {
+		t.Fatalf("platform close removed online session after operation log failure: %s", blockedOnlineRec.Body.String())
+	}
+	if !coreAuditLogsContainAction(srv.cfg.Store, "operation.log.persist_failed") {
+		t.Fatal("platform close operation log failure was not audited")
+	}
+
 	closeRec := assertStatus(t, handler, http.MethodPost, "/api/connections/"+online.ID+"/close", nil, userCookie, http.StatusOK)
 	var closed model.PlatformItem
 	decodeResponse(t, closeRec, &closed)
@@ -11652,6 +11666,19 @@ func TestAuditSessionOperations(t *testing.T) {
 	}, adminCookie, http.StatusCreated)
 	var sshSession model.ConnectionSession
 	decodeResponse(t, sshSessionRec, &sshSession)
+	removeDisconnectLogBlocker := blockOperationLogName(t, handler.(*Server).cfg.Store, "audit.session.disconnect")
+	blockedDisconnectRec := assertStatus(t, handler, http.MethodPost, "/api/admin/audit/online-sessions/"+sshSession.ID+"/disconnect", nil, adminCookie, http.StatusInternalServerError)
+	removeDisconnectLogBlocker()
+	if !strings.Contains(blockedDisconnectRec.Body.String(), "persist operation log failed") {
+		t.Fatalf("audit disconnect operation log failure was not reported: %s", blockedDisconnectRec.Body.String())
+	}
+	blockedDisconnectOnlineRec := assertStatus(t, handler, http.MethodGet, "/api/admin/audit/online-sessions", nil, adminCookie, http.StatusOK)
+	if !strings.Contains(blockedDisconnectOnlineRec.Body.String(), sshSession.ID) {
+		t.Fatalf("audit disconnect removed session after operation log failure: %s", blockedDisconnectOnlineRec.Body.String())
+	}
+	if !coreAuditLogsContainAction(handler.(*Server).cfg.Store, "operation.log.persist_failed") {
+		t.Fatal("audit disconnect operation log failure was not audited")
+	}
 	closeRec := assertStatus(t, handler, http.MethodPost, "/api/admin/audit/online-sessions/"+sshSession.ID+"/disconnect", nil, adminCookie, http.StatusOK)
 	if !strings.Contains(closeRec.Body.String(), string(model.SessionClosed)) {
 		t.Fatal("audit disconnect did not close session")
@@ -11690,6 +11717,16 @@ func TestAuditSessionOperations(t *testing.T) {
 	}
 	if err := os.WriteFile(filepath.Join(rdpSession.RecordingPath, "recording.guac"), []byte("frames"), 0o660); err != nil {
 		t.Fatalf("write fake recording: %v", err)
+	}
+	removeConnectionCloseLogBlocker := blockOperationLogName(t, handler.(*Server).cfg.Store, "connection.close")
+	blockedConnectionCloseRec := assertStatus(t, handler, http.MethodPost, "/api/connections/"+rdpSession.ID+"/close", nil, adminCookie, http.StatusInternalServerError)
+	removeConnectionCloseLogBlocker()
+	if !strings.Contains(blockedConnectionCloseRec.Body.String(), "persist operation log failed") {
+		t.Fatalf("connection close operation log failure was not reported: %s", blockedConnectionCloseRec.Body.String())
+	}
+	blockedConnectionOnlineRec := assertStatus(t, handler, http.MethodGet, "/api/admin/audit/online-sessions", nil, adminCookie, http.StatusOK)
+	if !strings.Contains(blockedConnectionOnlineRec.Body.String(), rdpSession.ID) {
+		t.Fatalf("connection close removed session after operation log failure: %s", blockedConnectionOnlineRec.Body.String())
 	}
 	closeRDPRec := assertStatus(t, handler, http.MethodPost, "/api/connections/"+rdpSession.ID+"/close", nil, adminCookie, http.StatusOK)
 	var closedRDP model.ConnectionSession

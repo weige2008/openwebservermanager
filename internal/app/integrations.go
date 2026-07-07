@@ -224,13 +224,25 @@ func (s *Server) handleLDAPTest(w http.ResponseWriter, r *http.Request) {
 	claims, authenticated, err := s.ldap.Authenticate(r.Context(), provider, username, req.Password)
 	if err != nil {
 		errText := sanitizeLDAPText(provider, req.Password, err.Error())
+		if logErr := s.createIntegrationTestOperationLog(r, "system_settings.ldap_test.failed", "failed", item.ID, "LDAP test failed: "+errText, map[string]any{"provider_id": provider.ID}); logErr != nil {
+			writeError(w, http.StatusInternalServerError, logErr.Error())
+			return
+		}
 		_ = s.audit(r, "system_settings.ldap_test.failed", item.ID, "", "LDAP test failed: "+errText)
 		writeError(w, http.StatusBadGateway, "test LDAP login: "+errText)
 		return
 	}
 	if !authenticated {
+		if logErr := s.createIntegrationTestOperationLog(r, "system_settings.ldap_test.failed", "failed", item.ID, "LDAP test credentials rejected", map[string]any{"provider_id": provider.ID}); logErr != nil {
+			writeError(w, http.StatusInternalServerError, logErr.Error())
+			return
+		}
 		_ = s.audit(r, "system_settings.ldap_test.failed", item.ID, "", "LDAP test credentials rejected")
 		writeError(w, http.StatusUnauthorized, "LDAP test credentials were rejected")
+		return
+	}
+	if logErr := s.createIntegrationTestOperationLog(r, "system_settings.ldap_test", "success", item.ID, "LDAP test login succeeded", map[string]any{"provider_id": provider.ID}); logErr != nil {
+		writeError(w, http.StatusInternalServerError, logErr.Error())
 		return
 	}
 	_ = s.audit(r, "system_settings.ldap_test", item.ID, "", "LDAP test login succeeded")
@@ -279,8 +291,16 @@ func (s *Server) handleOIDCTest(w http.ResponseWriter, r *http.Request) {
 	statusCode, authorizeURL, err := testExternalOIDCAuthorizationEndpoint(provider, redirectURI)
 	if err != nil {
 		errText := sanitizedOIDCTestError(provider, err)
+		if logErr := s.createIntegrationTestOperationLog(r, "system_settings.oidc_test.failed", "failed", item.ID, "External OIDC test failed: "+errText, map[string]any{"provider_id": provider.ID}); logErr != nil {
+			writeError(w, http.StatusInternalServerError, logErr.Error())
+			return
+		}
 		_ = s.audit(r, "system_settings.oidc_test.failed", item.ID, "", "External OIDC test failed: "+errText)
 		writeError(w, http.StatusBadGateway, "test external OIDC authorization endpoint: "+errText)
+		return
+	}
+	if logErr := s.createIntegrationTestOperationLog(r, "system_settings.oidc_test", "success", item.ID, "External OIDC authorization endpoint test succeeded", map[string]any{"provider_id": provider.ID, "status_code": statusCode}); logErr != nil {
+		writeError(w, http.StatusInternalServerError, logErr.Error())
 		return
 	}
 	_ = s.audit(r, "system_settings.oidc_test", item.ID, "", "External OIDC authorization endpoint test succeeded")
@@ -328,8 +348,16 @@ func (s *Server) handleWeComTest(w http.ResponseWriter, r *http.Request) {
 	expiresIn, err := testExternalWeComAccessToken(provider)
 	if err != nil {
 		errText := sanitizedWeComTestError(provider, err)
+		if logErr := s.createIntegrationTestOperationLog(r, "system_settings.wecom_test.failed", "failed", item.ID, "Enterprise WeChat test failed: "+errText, map[string]any{"provider_id": provider.ID}); logErr != nil {
+			writeError(w, http.StatusInternalServerError, logErr.Error())
+			return
+		}
 		_ = s.audit(r, "system_settings.wecom_test.failed", item.ID, "", "Enterprise WeChat test failed: "+errText)
 		writeError(w, http.StatusBadGateway, "test Enterprise WeChat token: "+errText)
+		return
+	}
+	if logErr := s.createIntegrationTestOperationLog(r, "system_settings.wecom_test", "success", item.ID, "Enterprise WeChat token test succeeded", map[string]any{"provider_id": provider.ID, "expires_in_seconds": expiresIn}); logErr != nil {
+		writeError(w, http.StatusInternalServerError, logErr.Error())
 		return
 	}
 	_ = s.audit(r, "system_settings.wecom_test", item.ID, "", "Enterprise WeChat token test succeeded")
@@ -344,6 +372,25 @@ func (s *Server) handleWeComTest(w http.ResponseWriter, r *http.Request) {
 		"expires_in_seconds": expiresIn,
 		"duration_ms":        time.Since(started).Milliseconds(),
 		"tested_at":          time.Now().UTC(),
+	})
+}
+
+func (s *Server) createIntegrationTestOperationLog(r *http.Request, name, status, settingID, description string, metadata map[string]any) error {
+	if metadata == nil {
+		metadata = map[string]any{}
+	} else {
+		metadata = cloneMetadata(metadata)
+	}
+	metadata["client_ip"] = s.clientIP(r)
+	metadata["setting_id"] = settingID
+	return s.createOperationLog(r, model.PlatformItemRequest{
+		Name:        name,
+		Type:        "integration_test",
+		Status:      status,
+		OwnerID:     s.currentUserID(r),
+		TargetID:    settingID,
+		Description: description,
+		Metadata:    metadata,
 	})
 }
 

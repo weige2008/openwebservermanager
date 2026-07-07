@@ -6096,13 +6096,27 @@ func TestOIDCIntegrationAuthorizationEndpointTest(t *testing.T) {
 	if strings.Contains(usersRec.Body.String(), `"type":"oidc"`) {
 		t.Fatalf("oidc authorization test unexpectedly created a user: %s", usersRec.Body.String())
 	}
+	removeLogBlocker := blockPlatformItemCreate(t, handler.(*Server).cfg.Store, "operation_logs")
+	logFailureRec := assertStatus(t, handler, http.MethodPost, "/api/admin/system-settings/oidc/test", map[string]any{
+		"setting_id": setting.ID,
+	}, adminCookie, http.StatusInternalServerError)
+	removeLogBlocker()
+	if !strings.Contains(logFailureRec.Body.String(), "persist operation log failed") {
+		t.Fatalf("oidc test log failure did not surface operation log error: %s", logFailureRec.Body.String())
+	}
+	if authorizeCalls != 2 {
+		t.Fatalf("oidc test should probe before failing on operation log, calls=%d", authorizeCalls)
+	}
+	if !coreAuditLogsContainAction(handler.(*Server).cfg.Store, "operation.log.persist_failed") {
+		t.Fatalf("oidc test log failure did not create core audit failure")
+	}
 	assertStatus(t, handler, http.MethodPatch, "/api/admin/system-settings/"+setting.ID, map[string]any{
 		"status": "disabled",
 	}, adminCookie, http.StatusOK)
 	assertStatus(t, handler, http.MethodPost, "/api/admin/system-settings/oidc/test", map[string]any{
 		"setting_id": setting.ID,
 	}, adminCookie, http.StatusNotFound)
-	if authorizeCalls != 1 {
+	if authorizeCalls != 2 {
 		t.Fatalf("disabled oidc setting should not call authorization endpoint, calls=%d", authorizeCalls)
 	}
 
@@ -6513,14 +6527,30 @@ func TestLDAPIntegrationTestLogin(t *testing.T) {
 	if strings.Contains(usersRec.Body.String(), "ldap-probe") {
 		t.Fatalf("ldap test unexpectedly created a user: %s", usersRec.Body.String())
 	}
+	removeLogBlocker := blockPlatformItemCreate(t, srv.cfg.Store, "operation_logs")
+	logFailureRec := assertStatus(t, handler, http.MethodPost, "/api/admin/system-settings/ldap/test", map[string]any{
+		"setting_id": setting.ID,
+		"username":   "ldap-probe",
+		"password":   "directory-password",
+	}, adminCookie, http.StatusInternalServerError)
+	removeLogBlocker()
+	if !strings.Contains(logFailureRec.Body.String(), "persist operation log failed") {
+		t.Fatalf("ldap test log failure did not surface operation log error: %s", logFailureRec.Body.String())
+	}
+	if fakeLDAP.calls != 2 {
+		t.Fatalf("ldap test should authenticate before failing on operation log, calls=%d", fakeLDAP.calls)
+	}
+	if !coreAuditLogsContainAction(srv.cfg.Store, "operation.log.persist_failed") {
+		t.Fatalf("ldap test log failure did not create core audit failure")
+	}
 
 	assertStatus(t, handler, http.MethodPost, "/api/admin/system-settings/ldap/test", map[string]any{
 		"setting_id": setting.ID,
 		"username":   "ldap-probe",
 		"password":   "wrong-password",
 	}, adminCookie, http.StatusUnauthorized)
-	if fakeLDAP.calls != 2 {
-		t.Fatalf("ldap authenticator calls after failed probe = %d, want 2", fakeLDAP.calls)
+	if fakeLDAP.calls != 3 {
+		t.Fatalf("ldap authenticator calls after failed probe = %d, want 3", fakeLDAP.calls)
 	}
 	assertStatus(t, handler, http.MethodPatch, "/api/admin/system-settings/"+setting.ID, map[string]any{
 		"metadata": map[string]any{
@@ -6553,8 +6583,8 @@ func TestLDAPIntegrationTestLogin(t *testing.T) {
 		"username":   "ldap-probe",
 		"password":   "directory-password",
 	}, adminCookie, http.StatusBadGateway)
-	if fakeLDAP.calls != 3 {
-		t.Fatalf("ldap authenticator calls after cleared password probe = %d, want 3", fakeLDAP.calls)
+	if fakeLDAP.calls != 4 {
+		t.Fatalf("ldap authenticator calls after cleared password probe = %d, want 4", fakeLDAP.calls)
 	}
 	if fakeLDAP.lastProvider.BindPassword != "" {
 		t.Fatalf("cleared ldap provider kept old bind password: %#v", fakeLDAP.lastProvider)
@@ -6576,7 +6606,7 @@ func TestLDAPIntegrationTestLogin(t *testing.T) {
 		"username":   "ldap-probe",
 		"password":   "directory-password",
 	}, adminCookie, http.StatusNotFound)
-	if fakeLDAP.calls != 3 {
+	if fakeLDAP.calls != 4 {
 		t.Fatalf("disabled ldap setting should not call authenticator, calls=%d", fakeLDAP.calls)
 	}
 }
@@ -6706,6 +6736,20 @@ func TestWeComIntegrationTokenTest(t *testing.T) {
 	if strings.Contains(usersRec.Body.String(), `"type":"wecom"`) {
 		t.Fatalf("wecom token test unexpectedly created a user: %s", usersRec.Body.String())
 	}
+	removeLogBlocker := blockPlatformItemCreate(t, handler.(*Server).cfg.Store, "operation_logs")
+	logFailureRec := assertStatus(t, handler, http.MethodPost, "/api/admin/system-settings/wecom/test", map[string]any{
+		"setting_id": setting.ID,
+	}, adminCookie, http.StatusInternalServerError)
+	removeLogBlocker()
+	if !strings.Contains(logFailureRec.Body.String(), "persist operation log failed") {
+		t.Fatalf("wecom test log failure did not surface operation log error: %s", logFailureRec.Body.String())
+	}
+	if tokenCalls != 2 {
+		t.Fatalf("wecom test should call token endpoint before failing on operation log, calls=%d", tokenCalls)
+	}
+	if !coreAuditLogsContainAction(handler.(*Server).cfg.Store, "operation.log.persist_failed") {
+		t.Fatalf("wecom test log failure did not create core audit failure")
+	}
 	assertStatus(t, handler, http.MethodPatch, "/api/admin/system-settings/"+setting.ID, map[string]any{
 		"metadata": map[string]any{
 			"wecom_enabled":            true,
@@ -6730,7 +6774,7 @@ func TestWeComIntegrationTokenTest(t *testing.T) {
 	clearedRec := assertStatus(t, handler, http.MethodPost, "/api/admin/system-settings/wecom/test", map[string]any{
 		"setting_id": setting.ID,
 	}, adminCookie, http.StatusBadRequest)
-	if tokenCalls != 1 {
+	if tokenCalls != 2 {
 		t.Fatalf("cleared wecom setting should not call token endpoint, calls=%d", tokenCalls)
 	}
 	for _, leaked := range []string{"wecom-secret", "wecom_agent_secret_encrypted", "wecom_agent_secret_clear"} {
@@ -6744,7 +6788,7 @@ func TestWeComIntegrationTokenTest(t *testing.T) {
 	assertStatus(t, handler, http.MethodPost, "/api/admin/system-settings/wecom/test", map[string]any{
 		"setting_id": setting.ID,
 	}, adminCookie, http.StatusNotFound)
-	if tokenCalls != 1 {
+	if tokenCalls != 2 {
 		t.Fatalf("disabled wecom setting should not call token endpoint, calls=%d", tokenCalls)
 	}
 

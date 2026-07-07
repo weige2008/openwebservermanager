@@ -56,6 +56,21 @@ func (s *Server) handleBackups(w http.ResponseWriter, r *http.Request) {
 			writeError(w, http.StatusInternalServerError, err.Error())
 			return
 		}
+		backupPath, _ := metadata["backup_path"].(string)
+		if err := s.createOperationLog(r, model.PlatformItemRequest{
+			Name:        "backup.create",
+			Type:        "backup",
+			Status:      "success",
+			OwnerID:     s.currentUserID(r),
+			Description: "created backup snapshot",
+			Metadata:    map[string]any{"client_ip": s.clientIP(r), "backup": filepath.Base(backupPath), "backup_path": backupPath},
+		}); err != nil {
+			if backupPath != "" {
+				_ = os.Remove(filepath.FromSlash(backupPath))
+			}
+			writeError(w, http.StatusInternalServerError, err.Error())
+			return
+		}
 		_ = s.audit(r, "backup.create", "backups", "", "created backup snapshot")
 		writeJSON(w, http.StatusCreated, metadata)
 	default:
@@ -104,18 +119,21 @@ func (s *Server) handleBackupDelete(w http.ResponseWriter, r *http.Request, name
 		writeError(w, http.StatusBadRequest, err.Error())
 		return
 	}
-	if err := os.Remove(path); err != nil {
-		writeError(w, http.StatusInternalServerError, err.Error())
-		return
-	}
-	_, _ = s.cfg.Store.CreatePlatformItem("operation_logs", model.PlatformItemRequest{
+	if err := s.createOperationLog(r, model.PlatformItemRequest{
 		Name:        "backup.delete",
 		Type:        "backup",
 		Status:      "success",
 		OwnerID:     s.currentUserID(r),
 		Description: "deleted backup archive",
 		Metadata:    map[string]any{"backup": name, "size": info.Size(), "client_ip": s.clientIP(r)},
-	})
+	}); err != nil {
+		writeError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	if err := os.Remove(path); err != nil {
+		writeError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
 	_ = s.audit(r, "backup.delete", name, "", "deleted backup")
 	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "deleted": name})
 }
@@ -172,7 +190,7 @@ func (s *Server) handleBackupRestore(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if isTruthy(r.URL.Query().Get("dry_run")) || isTruthy(r.FormValue("dry_run")) {
-		_, _ = s.cfg.Store.CreatePlatformItem("operation_logs", model.PlatformItemRequest{
+		if err := s.createOperationLog(r, model.PlatformItemRequest{
 			Name:        "backup.restore.validate",
 			Type:        "backup",
 			Status:      "success",
@@ -185,7 +203,10 @@ func (s *Server) handleBackupRestore(w http.ResponseWriter, r *http.Request) {
 				"manifest":          archive.Manifest,
 				"files":             archive.Files,
 			},
-		})
+		}); err != nil {
+			writeError(w, http.StatusInternalServerError, err.Error())
+			return
+		}
 		writeJSON(w, http.StatusOK, map[string]any{"valid": true, "manifest": archive.Manifest, "files": archive.Files, "size": written})
 		return
 	}
@@ -201,7 +222,7 @@ func (s *Server) handleBackupRestore(w http.ResponseWriter, r *http.Request) {
 		s.writeBackupRestoreFailure(w, r, http.StatusBadRequest, err.Error(), metadata)
 		return
 	}
-	_, _ = s.cfg.Store.CreatePlatformItem("operation_logs", model.PlatformItemRequest{
+	if err := s.createOperationLog(r, model.PlatformItemRequest{
 		Name:        "backup.restore",
 		Type:        "backup",
 		Status:      "success",
@@ -216,7 +237,11 @@ func (s *Server) handleBackupRestore(w http.ResponseWriter, r *http.Request) {
 			"pre_restore_backup": preRestore,
 			"summary":            summary,
 		},
-	})
+	}); err != nil {
+		s.auth.clearSessions()
+		writeError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
 	s.auth.clearSessions()
 	writeJSON(w, http.StatusOK, map[string]any{
 		"restored":           true,
@@ -235,14 +260,17 @@ func (s *Server) writeBackupRestoreFailure(w http.ResponseWriter, r *http.Reques
 	metadata["client_ip"] = s.clientIP(r)
 	metadata["http_status"] = status
 	metadata["error"] = detail
-	_, _ = s.cfg.Store.CreatePlatformItem("operation_logs", model.PlatformItemRequest{
+	if err := s.createOperationLog(r, model.PlatformItemRequest{
 		Name:        "backup.restore.failed",
 		Type:        "backup",
 		Status:      "failed",
 		OwnerID:     s.currentUserID(r),
 		Description: detail,
 		Metadata:    metadata,
-	})
+	}); err != nil {
+		writeError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
 	writeError(w, status, detail)
 }
 

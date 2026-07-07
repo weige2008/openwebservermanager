@@ -235,6 +235,16 @@ func platformItemsContainID(items []model.PlatformItem, id string) bool {
 	return false
 }
 
+func coreAuditLogsContainAction(st *store.Store, action string) bool {
+	_, _, _, logs := st.Bootstrap()
+	for _, log := range logs {
+		if log.Action == action {
+			return true
+		}
+	}
+	return false
+}
+
 func TestAdminLicenseEndpoint(t *testing.T) {
 	handler, adminCookie := newTestHandler(t)
 
@@ -4690,6 +4700,66 @@ func TestOIDCProviderAuthorizationCodeFlow(t *testing.T) {
 	}
 }
 
+func TestOIDCTokenOperationLogPersistenceFailure(t *testing.T) {
+	srv, adminCookie := newTestServer(t, nil)
+	handler := http.Handler(srv)
+
+	assertStatus(t, handler, http.MethodPost, "/api/admin/oidc-clients", map[string]any{
+		"name":   "blocked-token-client",
+		"type":   "public",
+		"status": "enabled",
+		"metadata": map[string]any{
+			"client_id":                  "blocked-token-client",
+			"redirect_uris":              []string{"https://client.example/blocked-callback"},
+			"scopes":                     []string{"openid", "profile"},
+			"token_endpoint_auth_method": "none",
+		},
+	}, adminCookie, http.StatusCreated)
+
+	codeVerifier := "blocked-verifier-1234567890"
+	challengeRaw := sha256.Sum256([]byte(codeVerifier))
+	codeChallenge := base64.RawURLEncoding.EncodeToString(challengeRaw[:])
+	redirectURI := "https://client.example/blocked-callback"
+	authorizePath := "/api/oidc/authorize?" + url.Values{
+		"response_type":         {"code"},
+		"client_id":             {"blocked-token-client"},
+		"redirect_uri":          {redirectURI},
+		"scope":                 {"openid profile"},
+		"state":                 {"blocked-token-state"},
+		"code_challenge":        {codeChallenge},
+		"code_challenge_method": {"S256"},
+	}.Encode()
+	authorizeRec := assertStatus(t, handler, http.MethodGet, authorizePath, nil, adminCookie, http.StatusFound)
+	location, err := url.Parse(authorizeRec.Header().Get("Location"))
+	if err != nil {
+		t.Fatalf("parse blocked token authorize redirect: %v", err)
+	}
+	code := location.Query().Get("code")
+	if code == "" {
+		t.Fatal("blocked token authorize redirect did not include code")
+	}
+
+	removeBlocker := blockPlatformItemCreate(t, srv.cfg.Store, "operation_logs")
+	tokenRec := assertFormStatus(t, handler, "/api/oidc/token", url.Values{
+		"grant_type":    {"authorization_code"},
+		"client_id":     {"blocked-token-client"},
+		"code":          {code},
+		"redirect_uri":  {redirectURI},
+		"code_verifier": {codeVerifier},
+	}, nil, nil, http.StatusInternalServerError)
+	removeBlocker()
+	body := tokenRec.Body.String()
+	if !strings.Contains(body, "persist operation log failed") {
+		t.Fatalf("oidc token operation log failure was not reported: %s", body)
+	}
+	if strings.Contains(body, "access_token") || strings.Contains(body, "id_token") {
+		t.Fatalf("oidc token response included tokens after operation log failure: %s", body)
+	}
+	if !coreAuditLogsContainAction(srv.cfg.Store, "operation.log.persist_failed") {
+		t.Fatal("oidc token operation log persistence failure was not written to core audit logs")
+	}
+}
+
 func TestOIDCUserInfoRejectsDisabledClientAndUser(t *testing.T) {
 	handler, adminCookie := newTestHandler(t)
 
@@ -6797,6 +6867,80 @@ func TestAgentGatewayRegistrationHeartbeatAndTimeout(t *testing.T) {
 		if !strings.Contains(logsBody, want) {
 			t.Fatalf("agent gateway operation %q was not audited: %s", want, logsBody)
 		}
+	}
+}
+
+func TestAgentGatewayOperationLogPersistenceFailures(t *testing.T) {
+	srv, adminCookie := newTestServer(t, nil)
+	handler := http.Handler(srv)
+
+	gatewayRec := assertStatus(t, handler, http.MethodPost, "/api/admin/agent-gateways", map[string]any{
+		"name":     "blocked-agent-gateway",
+		"type":     "agent",
+		"status":   "offline",
+		"metadata": map[string]any{"heartbeat_timeout_seconds": 30},
+	}, adminCookie, http.StatusCreated)
+	var gateway model.PlatformItem
+	decodeResponse(t, gatewayRec, &gateway)
+
+	tokenRec := assertStatus(t, handler, http.MethodPost, "/api/admin/agent-gateways/"+gateway.ID+"/token", nil, adminCookie, http.StatusOK)
+	var tokenPayload map[string]any
+	decodeResponse(t, tokenRec, &tokenPayload)
+	registrationToken, _ := tokenPayload["registration_token"].(string)
+	if registrationToken == "" {
+		t.Fatal("agent token response did not include registration token")
+	}
+
+	removeRegisterBlocker := blockPlatformItemCreate(t, srv.cfg.Store, "operation_logs")
+	registerFailureRec := assertStatus(t, handler, http.MethodPost, "/api/agent/gateways/register", map[string]any{
+		"registration_token": registrationToken,
+		"hostname":           "blocked-edge-01",
+		"version":            "9.9.9",
+	}, nil, http.StatusInternalServerError)
+	removeRegisterBlocker()
+	if !strings.Contains(registerFailureRec.Body.String(), "persist operation log failed") {
+		t.Fatalf("agent register operation log failure was not reported: %s", registerFailureRec.Body.String())
+	}
+	storedGateway, ok, err := srv.cfg.Store.GetPlatformItem("agent_gateways", gateway.ID)
+	if err != nil || !ok {
+		t.Fatalf("load gateway after failed register: ok=%v err=%v", ok, err)
+	}
+	if storedGateway.Status != "offline" || firstMetadataString(storedGateway.Metadata, "registered_at") != "" || firstMetadataString(storedGateway.Metadata, "hostname") == "blocked-edge-01" {
+		t.Fatalf("agent register changed gateway state before audit log persisted: %#v", storedGateway)
+	}
+
+	assertStatus(t, handler, http.MethodPost, "/api/agent/gateways/register", map[string]any{
+		"registration_token": registrationToken,
+		"hostname":           "blocked-edge-01",
+		"version":            "1.0.0",
+	}, nil, http.StatusOK)
+	assertStatus(t, handler, http.MethodPatch, "/api/admin/agent-gateways/"+gateway.ID, map[string]any{
+		"status": "offline",
+		"metadata": map[string]any{
+			"last_heartbeat_at":         time.Now().UTC().Format(time.RFC3339Nano),
+			"heartbeat_timeout_seconds": 30,
+			"latency_ms":                100,
+		},
+	}, adminCookie, http.StatusOK)
+
+	removeHeartbeatBlocker := blockPlatformItemCreate(t, srv.cfg.Store, "operation_logs")
+	heartbeatFailureRec := assertStatus(t, handler, http.MethodPost, "/api/agent/gateways/heartbeat", map[string]any{
+		"registration_token": registrationToken,
+		"latency_ms":         12,
+	}, nil, http.StatusInternalServerError)
+	removeHeartbeatBlocker()
+	if !strings.Contains(heartbeatFailureRec.Body.String(), "persist operation log failed") {
+		t.Fatalf("agent heartbeat operation log failure was not reported: %s", heartbeatFailureRec.Body.String())
+	}
+	storedGateway, ok, err = srv.cfg.Store.GetPlatformItem("agent_gateways", gateway.ID)
+	if err != nil || !ok {
+		t.Fatalf("load gateway after failed heartbeat: ok=%v err=%v", ok, err)
+	}
+	if storedGateway.Status != "offline" || metadataIntDefault(storedGateway.Metadata["latency_ms"], 0) != 100 {
+		t.Fatalf("agent heartbeat recovered gateway before audit log persisted: %#v", storedGateway)
+	}
+	if !coreAuditLogsContainAction(srv.cfg.Store, "operation.log.persist_failed") {
+		t.Fatal("agent operation log persistence failure was not written to core audit logs")
 	}
 }
 
@@ -8942,6 +9086,66 @@ func TestBackupDeleteAndRetention(t *testing.T) {
 	}
 	if linkedBackupCreated && strings.Contains(listRec.Body.String(), linkedBackupName) {
 		t.Fatal("symlink backup still appears in backup list")
+	}
+}
+
+func TestBackupOperationLogPersistenceFailures(t *testing.T) {
+	srv, cookie := newTestServer(t, nil)
+	handler := http.Handler(srv)
+
+	createBackupRec := assertStatus(t, handler, http.MethodPost, "/api/admin/backups", nil, cookie, http.StatusCreated)
+	var backupMetadata map[string]any
+	decodeResponse(t, createBackupRec, &backupMetadata)
+	backupPath, _ := backupMetadata["backup_path"].(string)
+	backupName := filepath.Base(filepath.FromSlash(backupPath))
+	if backupName == "." || backupName == "" {
+		t.Fatalf("backup path missing from metadata: %v", backupMetadata)
+	}
+	backupRaw, err := os.ReadFile(filepath.FromSlash(backupPath))
+	if err != nil {
+		t.Fatalf("read backup archive: %v", err)
+	}
+	backupDir := filepath.Join(srv.cfg.DataDir, "backups")
+	beforeCreateFailure, err := filepath.Glob(filepath.Join(backupDir, "*.zip"))
+	if err != nil {
+		t.Fatalf("glob backups before failure: %v", err)
+	}
+
+	removeCreateLogBlocker := blockPlatformItemCreate(t, srv.cfg.Store, "operation_logs")
+	createFailureRec := assertStatus(t, handler, http.MethodPost, "/api/admin/backups", nil, cookie, http.StatusInternalServerError)
+	removeCreateLogBlocker()
+	if !strings.Contains(createFailureRec.Body.String(), "persist operation log failed") {
+		t.Fatalf("backup create operation log failure was not reported: %s", createFailureRec.Body.String())
+	}
+	afterCreateFailure, err := filepath.Glob(filepath.Join(backupDir, "*.zip"))
+	if err != nil {
+		t.Fatalf("glob backups after failure: %v", err)
+	}
+	if len(afterCreateFailure) != len(beforeCreateFailure) {
+		t.Fatalf("backup create left an unaudited archive: before=%v after=%v", beforeCreateFailure, afterCreateFailure)
+	}
+
+	removeDeleteLogBlocker := blockPlatformItemCreate(t, srv.cfg.Store, "operation_logs")
+	deleteFailureRec := assertStatus(t, handler, http.MethodDelete, "/api/admin/backups/"+backupName, nil, cookie, http.StatusInternalServerError)
+	removeDeleteLogBlocker()
+	if !strings.Contains(deleteFailureRec.Body.String(), "persist operation log failed") {
+		t.Fatalf("backup delete operation log failure was not reported: %s", deleteFailureRec.Body.String())
+	}
+	if _, err := os.Stat(filepath.FromSlash(backupPath)); err != nil {
+		t.Fatalf("backup delete removed archive before audit log persisted: %v", err)
+	}
+
+	removeDryRunLogBlocker := blockPlatformItemCreate(t, srv.cfg.Store, "operation_logs")
+	dryRunFailureRec := assertMultipartStatus(t, handler, "/api/admin/backups/restore?dry_run=1", nil, backupName, backupRaw, cookie, http.StatusInternalServerError)
+	removeDryRunLogBlocker()
+	if !strings.Contains(dryRunFailureRec.Body.String(), "persist operation log failed") {
+		t.Fatalf("backup restore dry-run operation log failure was not reported: %s", dryRunFailureRec.Body.String())
+	}
+	if strings.Contains(dryRunFailureRec.Body.String(), `"valid":true`) {
+		t.Fatalf("backup restore dry-run returned success after operation log failure: %s", dryRunFailureRec.Body.String())
+	}
+	if !coreAuditLogsContainAction(srv.cfg.Store, "operation.log.persist_failed") {
+		t.Fatal("operation log persistence failure was not written to core audit logs")
 	}
 }
 

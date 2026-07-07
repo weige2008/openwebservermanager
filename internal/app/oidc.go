@@ -221,6 +221,18 @@ func (s *Server) handleOIDCToken(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	issuer := requestBaseURL(r, s.cfg.TrustProxyHeaders)
+	if err := s.createOperationLog(r, model.PlatformItemRequest{
+		Name:        "oidc.token",
+		Type:        "oidc",
+		Status:      "success",
+		OwnerID:     code.UserID,
+		TargetID:    code.ClientID,
+		Description: "issued oidc tokens",
+		Metadata:    map[string]any{"client_ip": s.clientIP(r), "client_id": code.ClientID, "scope": code.Scope},
+	}); err != nil {
+		writeError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
 	accessToken, err := s.oidc.createAccessToken(oidcAccessToken{
 		ClientID:  code.ClientID,
 		Scope:     code.Scope,
@@ -238,15 +250,6 @@ func (s *Server) handleOIDCToken(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
-	_, _ = s.cfg.Store.CreatePlatformItem("operation_logs", model.PlatformItemRequest{
-		Name:        "oidc.token",
-		Type:        "oidc",
-		Status:      "success",
-		OwnerID:     code.UserID,
-		TargetID:    code.ClientID,
-		Description: "issued oidc tokens",
-		Metadata:    map[string]any{"client_ip": s.clientIP(r), "client_id": code.ClientID, "scope": code.Scope},
-	})
 	writeJSON(w, http.StatusOK, map[string]any{
 		"access_token": accessToken,
 		"token_type":   "Bearer",

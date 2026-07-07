@@ -1,6 +1,7 @@
 package app
 
 import (
+	"log/slog"
 	"net/http"
 	"strings"
 	"time"
@@ -137,6 +138,9 @@ func (s *Server) handleAgentGatewayRegister(w http.ResponseWriter, r *http.Reque
 	if !ok {
 		return
 	}
+	previous := item
+	previous.Tags = append([]string(nil), item.Tags...)
+	previous.Metadata = cloneMetadata(item.Metadata)
 	now := time.Now().UTC()
 	if req.Name != "" {
 		item.Name = strings.TrimSpace(req.Name)
@@ -181,14 +185,20 @@ func (s *Server) handleAgentGatewayRegister(w http.ResponseWriter, r *http.Reque
 		writeError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
-	_, _ = s.cfg.Store.CreatePlatformItem("operation_logs", model.PlatformItemRequest{
+	if err := s.createOperationLog(r, model.PlatformItemRequest{
 		Name:        "agent.gateway.register",
 		Type:        "agent",
 		Status:      "success",
 		TargetID:    saved.ID,
 		Description: "agent gateway registered",
 		Metadata:    map[string]any{"client_ip": s.clientIP(r), "gateway_id": saved.ID, "hostname": req.Hostname, "version": req.Version},
-	})
+	}); err != nil {
+		if _, restoreErr := s.cfg.Store.SavePlatformItem("agent_gateways", previous); restoreErr != nil {
+			slog.Default().Error("restore agent gateway after operation log failure", "gateway_id", saved.ID, "error", restoreErr)
+		}
+		writeError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
 	writeJSON(w, http.StatusOK, map[string]any{
 		"gateway":                    saved,
 		"heartbeat_interval_seconds": 30,
@@ -205,6 +215,9 @@ func (s *Server) handleAgentGatewayHeartbeat(w http.ResponseWriter, r *http.Requ
 	if !ok {
 		return
 	}
+	previous := item
+	previous.Tags = append([]string(nil), item.Tags...)
+	previous.Metadata = cloneMetadata(item.Metadata)
 	now := time.Now().UTC()
 	wasOnline := strings.EqualFold(item.Status, "online")
 	item.Status = "online"
@@ -236,10 +249,16 @@ func (s *Server) handleAgentGatewayHeartbeat(w http.ResponseWriter, r *http.Requ
 		return
 	}
 	if !wasOnline {
-		s.recordAgentGatewayStatusEvent("agent.gateway.recovered", "success", saved, map[string]any{
+		if err := s.recordAgentGatewayStatusEvent("agent.gateway.recovered", "success", saved, map[string]any{
 			"reason":    "valid heartbeat",
 			"client_ip": s.clientIP(r),
-		})
+		}); err != nil {
+			if _, restoreErr := s.cfg.Store.SavePlatformItem("agent_gateways", previous); restoreErr != nil {
+				slog.Default().Error("restore agent gateway after recovered event failure", "gateway_id", saved.ID, "error", restoreErr)
+			}
+			writeError(w, http.StatusInternalServerError, err.Error())
+			return
+		}
 	}
 	writeJSON(w, http.StatusOK, map[string]any{
 		"gateway":                    saved,
@@ -335,6 +354,9 @@ func (s *Server) refreshAgentGatewayStatuses() {
 		if err != nil || !ok {
 			continue
 		}
+		previous := raw
+		previous.Tags = append([]string(nil), raw.Tags...)
+		previous.Metadata = cloneMetadata(raw.Metadata)
 		last, ok := metadataTime(raw.Metadata["last_heartbeat_at"])
 		if !ok || last.IsZero() || now.Sub(last) <= agentHeartbeatTimeout(raw) {
 			continue
@@ -349,15 +371,20 @@ func (s *Server) refreshAgentGatewayStatuses() {
 		if err != nil {
 			continue
 		}
-		s.recordAgentGatewayStatusEvent("agent.gateway.timeout", "warning", saved, map[string]any{
+		if err := s.recordAgentGatewayStatusEvent("agent.gateway.timeout", "warning", saved, map[string]any{
 			"reason":                    "heartbeat timeout",
 			"last_heartbeat_at":         last.Format(time.RFC3339Nano),
 			"heartbeat_timeout_seconds": int(agentHeartbeatTimeout(raw).Seconds()),
-		})
+		}); err != nil {
+			if _, restoreErr := s.cfg.Store.SavePlatformItem("agent_gateways", previous); restoreErr != nil {
+				slog.Default().Error("restore agent gateway after timeout event failure", "gateway_id", saved.ID, "error", restoreErr)
+			}
+			slog.Default().Error("record agent gateway timeout event", "gateway_id", saved.ID, "error", err)
+		}
 	}
 }
 
-func (s *Server) recordAgentGatewayStatusEvent(name, status string, item model.PlatformItem, metadata map[string]any) {
+func (s *Server) recordAgentGatewayStatusEvent(name, status string, item model.PlatformItem, metadata map[string]any) error {
 	if metadata == nil {
 		metadata = map[string]any{}
 	}
@@ -367,7 +394,7 @@ func (s *Server) recordAgentGatewayStatusEvent(name, status string, item model.P
 	if value := firstMetadataString(item.Metadata, "last_client_ip"); value != "" {
 		metadata["last_client_ip"] = value
 	}
-	_, _ = s.cfg.Store.CreatePlatformItem("operation_logs", model.PlatformItemRequest{
+	return s.createOperationLog(nil, model.PlatformItemRequest{
 		Name:        name,
 		Type:        "agent",
 		Status:      status,

@@ -753,6 +753,17 @@ func (s *Server) audit(r *http.Request, action, targetID string, protocol model.
 	})
 }
 
+func (s *Server) createOperationLog(r *http.Request, req model.PlatformItemRequest) error {
+	if _, err := s.cfg.Store.CreatePlatformItem("operation_logs", req); err != nil {
+		detail := "persist operation log failed: " + err.Error()
+		if r != nil {
+			_ = s.audit(r, "operation.log.persist_failed", req.TargetID, req.Protocol, detail)
+		}
+		return errors.New(detail)
+	}
+	return nil
+}
+
 func validateCredentialForServer(credentialType model.CredentialType, server model.Server) error {
 	if server.OS == model.ServerOSWindows {
 		if credentialType == model.CredentialRDPPassword {

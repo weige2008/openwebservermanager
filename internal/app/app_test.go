@@ -9820,6 +9820,20 @@ func TestStorageFileLogPersistenceFailureReturnsServerError(t *testing.T) {
 	}, adminCookie, http.StatusCreated)
 	var storage model.PlatformItem
 	decodeResponse(t, storageRec, &storage)
+	storageRoot := filepath.Join(srv.cfg.DataDir, "drives", storage.ID)
+	assertStorageMissing := func(rel string) {
+		t.Helper()
+		if _, err := os.Stat(filepath.Join(storageRoot, filepath.FromSlash(rel))); !errors.Is(err, os.ErrNotExist) {
+			t.Fatalf("storage path %s exists after failed audited operation: %v", rel, err)
+		}
+	}
+	assertStorageContent := func(rel, want string) {
+		t.Helper()
+		data, err := os.ReadFile(filepath.Join(storageRoot, filepath.FromSlash(rel)))
+		if err != nil || string(data) != want {
+			t.Fatalf("storage file %s = %q/%v, want %q", rel, string(data), err, want)
+		}
+	}
 
 	removeBlocker := blockPlatformItemCreate(t, srv.cfg.Store, "file_logs")
 	writeRec := assertStatus(t, handler, http.MethodPost, "/api/admin/storages/"+storage.ID+"/files-write", map[string]any{"path": "audit.txt", "content": "audit"}, adminCookie, http.StatusInternalServerError)
@@ -9827,9 +9841,7 @@ func TestStorageFileLogPersistenceFailureReturnsServerError(t *testing.T) {
 	if !strings.Contains(writeRec.Body.String(), "persist file log failed") {
 		t.Fatalf("storage file log persistence failure was not reported: %s", writeRec.Body.String())
 	}
-	if _, err := os.Stat(filepath.Join(srv.cfg.DataDir, "drives", storage.ID, "audit.txt")); !errors.Is(err, os.ErrNotExist) {
-		t.Fatalf("storage write left a new file before file log persisted: %v", err)
-	}
+	assertStorageMissing("audit.txt")
 	operationLogsRec := assertStatus(t, handler, http.MethodGet, "/api/admin/audit/operation-logs", nil, adminCookie, http.StatusOK)
 	if !strings.Contains(operationLogsRec.Body.String(), "file.log.persist_failed") {
 		t.Fatalf("storage file log persistence failure was not audited: %s", operationLogsRec.Body.String())
@@ -9842,9 +9854,7 @@ func TestStorageFileLogPersistenceFailureReturnsServerError(t *testing.T) {
 	if !strings.Contains(overwriteRec.Body.String(), "persist file log failed") {
 		t.Fatalf("storage overwrite file log persistence failure was not reported: %s", overwriteRec.Body.String())
 	}
-	if data, err := os.ReadFile(filepath.Join(srv.cfg.DataDir, "drives", storage.ID, "overwrite.txt")); err != nil || string(data) != "old" {
-		t.Fatalf("storage overwrite did not restore old content after file log failure: data=%q err=%v", string(data), err)
-	}
+	assertStorageContent("overwrite.txt", "old")
 
 	removeUploadBlocker := blockPlatformItemCreate(t, srv.cfg.Store, "file_logs")
 	uploadRec := assertMultipartStatus(t, handler, "/api/admin/storages/"+storage.ID+"/files-upload", nil, "upload-new.txt", []byte("upload"), adminCookie, http.StatusInternalServerError)
@@ -9852,9 +9862,77 @@ func TestStorageFileLogPersistenceFailureReturnsServerError(t *testing.T) {
 	if !strings.Contains(uploadRec.Body.String(), "persist file log failed") {
 		t.Fatalf("storage upload file log persistence failure was not reported: %s", uploadRec.Body.String())
 	}
-	if _, err := os.Stat(filepath.Join(srv.cfg.DataDir, "drives", storage.ID, "upload-new.txt")); !errors.Is(err, os.ErrNotExist) {
-		t.Fatalf("storage upload left a new file before file log persisted: %v", err)
+	assertStorageMissing("upload-new.txt")
+
+	removeMkdirBlocker := blockPlatformItemCreate(t, srv.cfg.Store, "file_logs")
+	mkdirRec := assertStatus(t, handler, http.MethodPost, "/api/admin/storages/"+storage.ID+"/files-mkdir", map[string]any{"path": "audit-dir/nested"}, adminCookie, http.StatusInternalServerError)
+	removeMkdirBlocker()
+	if !strings.Contains(mkdirRec.Body.String(), "persist file log failed") {
+		t.Fatalf("storage mkdir file log persistence failure was not reported: %s", mkdirRec.Body.String())
 	}
+	assertStorageMissing("audit-dir")
+
+	assertStatus(t, handler, http.MethodPost, "/api/admin/storages/"+storage.ID+"/files-write", map[string]any{"path": "rename-source.txt", "content": "rename source"}, adminCookie, http.StatusCreated)
+	removeRenameBlocker := blockPlatformItemCreate(t, srv.cfg.Store, "file_logs")
+	renameRec := assertStatus(t, handler, http.MethodPost, "/api/admin/storages/"+storage.ID+"/files-rename", map[string]any{"path": "rename-source.txt", "destination": "renamed.txt"}, adminCookie, http.StatusInternalServerError)
+	removeRenameBlocker()
+	if !strings.Contains(renameRec.Body.String(), "persist file log failed") {
+		t.Fatalf("storage rename file log persistence failure was not reported: %s", renameRec.Body.String())
+	}
+	assertStorageContent("rename-source.txt", "rename source")
+	assertStorageMissing("renamed.txt")
+
+	assertStatus(t, handler, http.MethodPost, "/api/admin/storages/"+storage.ID+"/files-write", map[string]any{"path": "rename-overwrite-source.txt", "content": "rename new"}, adminCookie, http.StatusCreated)
+	assertStatus(t, handler, http.MethodPost, "/api/admin/storages/"+storage.ID+"/files-write", map[string]any{"path": "rename-overwrite-target.txt", "content": "rename old"}, adminCookie, http.StatusCreated)
+	removeRenameOverwriteBlocker := blockPlatformItemCreate(t, srv.cfg.Store, "file_logs")
+	renameOverwriteRec := assertStatus(t, handler, http.MethodPost, "/api/admin/storages/"+storage.ID+"/files-rename", map[string]any{"path": "rename-overwrite-source.txt", "destination": "rename-overwrite-target.txt", "overwrite": true}, adminCookie, http.StatusInternalServerError)
+	removeRenameOverwriteBlocker()
+	if !strings.Contains(renameOverwriteRec.Body.String(), "persist file log failed") {
+		t.Fatalf("storage rename overwrite file log persistence failure was not reported: %s", renameOverwriteRec.Body.String())
+	}
+	assertStorageContent("rename-overwrite-source.txt", "rename new")
+	assertStorageContent("rename-overwrite-target.txt", "rename old")
+
+	assertStatus(t, handler, http.MethodPost, "/api/admin/storages/"+storage.ID+"/files-write", map[string]any{"path": "rename-dir/source.txt", "content": "rename dir"}, adminCookie, http.StatusCreated)
+	removeRenameDirBlocker := blockPlatformItemCreate(t, srv.cfg.Store, "file_logs")
+	renameDirRec := assertStatus(t, handler, http.MethodPost, "/api/admin/storages/"+storage.ID+"/files-rename", map[string]any{"path": "rename-dir", "destination": "renamed-dir"}, adminCookie, http.StatusInternalServerError)
+	removeRenameDirBlocker()
+	if !strings.Contains(renameDirRec.Body.String(), "persist file log failed") {
+		t.Fatalf("storage rename directory file log persistence failure was not reported: %s", renameDirRec.Body.String())
+	}
+	assertStorageContent("rename-dir/source.txt", "rename dir")
+	assertStorageMissing("renamed-dir")
+
+	assertStatus(t, handler, http.MethodPost, "/api/admin/storages/"+storage.ID+"/files-write", map[string]any{"path": "copy-source.txt", "content": "copy source"}, adminCookie, http.StatusCreated)
+	removeCopyBlocker := blockPlatformItemCreate(t, srv.cfg.Store, "file_logs")
+	copyRec := assertStatus(t, handler, http.MethodPost, "/api/admin/storages/"+storage.ID+"/files-copy", map[string]any{"path": "copy-source.txt", "destination": "copy-new.txt"}, adminCookie, http.StatusInternalServerError)
+	removeCopyBlocker()
+	if !strings.Contains(copyRec.Body.String(), "persist file log failed") {
+		t.Fatalf("storage copy file log persistence failure was not reported: %s", copyRec.Body.String())
+	}
+	assertStorageContent("copy-source.txt", "copy source")
+	assertStorageMissing("copy-new.txt")
+
+	assertStatus(t, handler, http.MethodPost, "/api/admin/storages/"+storage.ID+"/files-write", map[string]any{"path": "copy-overwrite-source.txt", "content": "copy new"}, adminCookie, http.StatusCreated)
+	assertStatus(t, handler, http.MethodPost, "/api/admin/storages/"+storage.ID+"/files-write", map[string]any{"path": "copy-overwrite-target.txt", "content": "copy old"}, adminCookie, http.StatusCreated)
+	removeCopyOverwriteBlocker := blockPlatformItemCreate(t, srv.cfg.Store, "file_logs")
+	copyOverwriteRec := assertStatus(t, handler, http.MethodPost, "/api/admin/storages/"+storage.ID+"/files-copy", map[string]any{"path": "copy-overwrite-source.txt", "destination": "copy-overwrite-target.txt", "overwrite": true}, adminCookie, http.StatusInternalServerError)
+	removeCopyOverwriteBlocker()
+	if !strings.Contains(copyOverwriteRec.Body.String(), "persist file log failed") {
+		t.Fatalf("storage copy overwrite file log persistence failure was not reported: %s", copyOverwriteRec.Body.String())
+	}
+	assertStorageContent("copy-overwrite-source.txt", "copy new")
+	assertStorageContent("copy-overwrite-target.txt", "copy old")
+
+	assertStatus(t, handler, http.MethodPost, "/api/admin/storages/"+storage.ID+"/files-write", map[string]any{"path": "copy-dir/source.txt", "content": "copy dir"}, adminCookie, http.StatusCreated)
+	removeCopyDirBlocker := blockPlatformItemCreate(t, srv.cfg.Store, "file_logs")
+	copyDirRec := assertStatus(t, handler, http.MethodPost, "/api/admin/storages/"+storage.ID+"/files-copy", map[string]any{"path": "copy-dir", "destination": "copy-dir-new"}, adminCookie, http.StatusInternalServerError)
+	removeCopyDirBlocker()
+	if !strings.Contains(copyDirRec.Body.String(), "persist file log failed") {
+		t.Fatalf("storage copy directory file log persistence failure was not reported: %s", copyDirRec.Body.String())
+	}
+	assertStorageContent("copy-dir/source.txt", "copy dir")
+	assertStorageMissing("copy-dir-new")
 
 	assertStatus(t, handler, http.MethodPost, "/api/admin/storages/"+storage.ID+"/files-write", map[string]any{"path": "delete-me.txt", "content": "keep me"}, adminCookie, http.StatusCreated)
 	removeDeleteBlocker := blockPlatformItemCreate(t, srv.cfg.Store, "file_logs")
@@ -9863,9 +9941,7 @@ func TestStorageFileLogPersistenceFailureReturnsServerError(t *testing.T) {
 	if !strings.Contains(deleteRec.Body.String(), "persist file log failed") {
 		t.Fatalf("storage delete file log persistence failure was not reported: %s", deleteRec.Body.String())
 	}
-	if data, err := os.ReadFile(filepath.Join(srv.cfg.DataDir, "drives", storage.ID, "delete-me.txt")); err != nil || string(data) != "keep me" {
-		t.Fatalf("storage delete removed file before file log persisted: data=%q err=%v", string(data), err)
-	}
+	assertStorageContent("delete-me.txt", "keep me")
 }
 
 func TestStorageQuotaEnforcedAndUsageUpdated(t *testing.T) {

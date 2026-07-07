@@ -1418,17 +1418,29 @@ func (s *Server) handleStorageMkdir(w http.ResponseWriter, r *http.Request, root
 	if !s.requireStoragePermission(w, r, storage.ID, "upload", rel) {
 		return
 	}
+	rollback, err := prepareStorageMkdirRollback(root, target)
+	if err != nil {
+		if errors.Is(err, errStorageSpecialFile) {
+			writeError(w, http.StatusBadRequest, "storage path contains a non-directory entry")
+			return
+		}
+		writeError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
 	if !s.ensureStorageDirectory(w, root, target) {
 		return
 	}
 	usage, err := s.updateStorageUsage(storage.ID, root)
 	if err != nil {
+		err = rollback.restoreError(err)
 		writeError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
 	if err := s.recordStorageFileLog(r, storage.ID, "mkdir", "success", rel, "created directory", map[string]any{
 		"path": filepath.ToSlash(rel),
 	}); err != nil {
+		err = rollback.restoreError(err)
+		_, _ = s.updateStorageUsage(storage.ID, root)
 		writeError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
@@ -1570,15 +1582,28 @@ func (s *Server) handleStorageRename(w http.ResponseWriter, r *http.Request, roo
 	if !s.ensureStorageParentDirectory(w, root, destination) {
 		return
 	}
-	if req.Overwrite {
-		_ = os.RemoveAll(destination)
-	}
-	if err := os.Rename(source, destination); err != nil {
+	destinationRollback, err := prepareStoragePathRollback(destination)
+	if err != nil {
 		writeError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
+	if err := os.Rename(source, destination); err != nil {
+		_ = destinationRollback.restore()
+		writeError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	rollbackRename := func(err error) error {
+		if restoreErr := os.Rename(destination, source); restoreErr != nil {
+			err = fmt.Errorf("%w; additionally failed to restore source: %v", err, restoreErr)
+		}
+		if restoreErr := destinationRollback.restore(); restoreErr != nil {
+			err = fmt.Errorf("%w; additionally failed to restore destination: %v", err, restoreErr)
+		}
+		return err
+	}
 	usage, err := s.updateStorageUsage(storage.ID, root)
 	if err != nil {
+		err = rollbackRename(err)
 		writeError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
@@ -1588,9 +1613,12 @@ func (s *Server) handleStorageRename(w http.ResponseWriter, r *http.Request, roo
 		"destination_path": filepath.ToSlash(destinationRel),
 		"overwrite":        req.Overwrite,
 	}); err != nil {
+		err = rollbackRename(err)
+		_, _ = s.updateStorageUsage(storage.ID, root)
 		writeError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
+	destinationRollback.cleanup()
 	_ = s.audit(r, "storage.files.rename", storage.ID, "", "renamed "+sourceRel+" to "+destinationRel)
 	writeJSON(w, http.StatusOK, map[string]any{"path": filepath.ToSlash(destinationRel), "usage": usage})
 }
@@ -1676,11 +1704,14 @@ func (s *Server) handleStorageCopy(w http.ResponseWriter, r *http.Request, root 
 	if !s.ensureStorageParentDirectory(w, root, destination) {
 		return
 	}
-	if req.Overwrite {
-		_ = os.RemoveAll(destination)
+	destinationRollback, err := prepareStoragePathRollback(destination)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err.Error())
+		return
 	}
 	if info.IsDir() {
 		if err := copyDirectory(source, destination); err != nil {
+			_ = destinationRollback.restore()
 			if errors.Is(err, errStorageSpecialFile) {
 				writeError(w, http.StatusBadRequest, "source contains a non-regular file")
 				return
@@ -1689,6 +1720,7 @@ func (s *Server) handleStorageCopy(w http.ResponseWriter, r *http.Request, root 
 			return
 		}
 	} else if err := copyFile(source, destination); err != nil {
+		_ = destinationRollback.restore()
 		if errors.Is(err, errStorageSpecialFile) {
 			writeError(w, http.StatusBadRequest, "source is not a regular file")
 			return
@@ -1698,6 +1730,7 @@ func (s *Server) handleStorageCopy(w http.ResponseWriter, r *http.Request, root 
 	}
 	usage, err := s.updateStorageUsage(storage.ID, root)
 	if err != nil {
+		err = destinationRollback.restoreError(err)
 		writeError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
@@ -1708,9 +1741,12 @@ func (s *Server) handleStorageCopy(w http.ResponseWriter, r *http.Request, root 
 		"size":             sourceBytes,
 		"overwrite":        req.Overwrite,
 	}); err != nil {
+		err = destinationRollback.restoreError(err)
+		_, _ = s.updateStorageUsage(storage.ID, root)
 		writeError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
+	destinationRollback.cleanup()
 	_ = s.audit(r, "storage.files.copy", storage.ID, "", "copied "+sourceRel+" to "+destinationRel)
 	writeJSON(w, http.StatusCreated, map[string]any{"path": filepath.ToSlash(destinationRel), "usage": usage})
 }
@@ -2094,6 +2130,142 @@ func (r *storageFileRollback) restoreError(err error) error {
 func (r *storageFileRollback) cleanup() {
 	if r != nil && r.backupPath != "" {
 		_ = os.Remove(r.backupPath)
+		r.backupPath = ""
+	}
+}
+
+type storageMkdirRollback struct {
+	paths []string
+}
+
+func prepareStorageMkdirRollback(root, target string) (*storageMkdirRollback, error) {
+	rollback := &storageMkdirRollback{}
+	rootAbs, err := filepath.Abs(root)
+	if err != nil {
+		return nil, err
+	}
+	targetAbs, err := filepath.Abs(target)
+	if err != nil {
+		return nil, err
+	}
+	rel, err := filepath.Rel(rootAbs, targetAbs)
+	if err != nil {
+		return nil, err
+	}
+	rel = filepath.Clean(rel)
+	if rel == "." {
+		return rollback, nil
+	}
+	if err := ensureChildPath(rootAbs, targetAbs); err != nil {
+		return nil, err
+	}
+	current := rootAbs
+	for _, part := range strings.Split(rel, string(filepath.Separator)) {
+		if part == "" || part == "." {
+			continue
+		}
+		current = filepath.Join(current, part)
+		info, exists, err := storagePathInfo(current)
+		if err != nil {
+			return nil, err
+		}
+		if !exists {
+			rollback.paths = append(rollback.paths, current)
+			continue
+		}
+		if !info.IsDir() {
+			return nil, errStorageSpecialFile
+		}
+	}
+	return rollback, nil
+}
+
+func (r *storageMkdirRollback) restore() error {
+	if r == nil {
+		return nil
+	}
+	for i := len(r.paths) - 1; i >= 0; i-- {
+		if err := os.Remove(r.paths[i]); err != nil && !errors.Is(err, os.ErrNotExist) {
+			return err
+		}
+	}
+	return nil
+}
+
+func (r *storageMkdirRollback) restoreError(err error) error {
+	if restoreErr := r.restore(); restoreErr != nil {
+		return fmt.Errorf("%w; additionally failed to restore directory: %v", err, restoreErr)
+	}
+	return err
+}
+
+type storagePathRollback struct {
+	path       string
+	existed    bool
+	backupDir  string
+	backupPath string
+}
+
+func prepareStoragePathRollback(path string) (*storagePathRollback, error) {
+	rollback := &storagePathRollback{path: path}
+	info, exists, err := storagePathInfo(path)
+	if err != nil {
+		return nil, err
+	}
+	if !exists {
+		return rollback, nil
+	}
+	if !info.IsDir() && !info.Mode().IsRegular() {
+		return nil, errStorageSpecialFile
+	}
+	backupDir, err := os.MkdirTemp(filepath.Dir(path), ".openwebservermanager-rollback-")
+	if err != nil {
+		return nil, err
+	}
+	backupPath := filepath.Join(backupDir, "item")
+	if err := os.Rename(path, backupPath); err != nil {
+		_ = os.RemoveAll(backupDir)
+		return nil, err
+	}
+	rollback.existed = true
+	rollback.backupDir = backupDir
+	rollback.backupPath = backupPath
+	return rollback, nil
+}
+
+func (r *storagePathRollback) restore() error {
+	if r == nil || r.path == "" {
+		return nil
+	}
+	if err := os.RemoveAll(r.path); err != nil && !errors.Is(err, os.ErrNotExist) {
+		return err
+	}
+	if !r.existed {
+		return nil
+	}
+	if r.backupPath == "" {
+		return errors.New("path rollback backup is missing")
+	}
+	if err := os.Rename(r.backupPath, r.path); err != nil {
+		return err
+	}
+	_ = os.RemoveAll(r.backupDir)
+	r.backupDir = ""
+	r.backupPath = ""
+	return nil
+}
+
+func (r *storagePathRollback) restoreError(err error) error {
+	if restoreErr := r.restore(); restoreErr != nil {
+		return fmt.Errorf("%w; additionally failed to restore path: %v", err, restoreErr)
+	}
+	return err
+}
+
+func (r *storagePathRollback) cleanup() {
+	if r != nil && r.backupDir != "" {
+		_ = os.RemoveAll(r.backupDir)
+		r.backupDir = ""
 		r.backupPath = ""
 	}
 }

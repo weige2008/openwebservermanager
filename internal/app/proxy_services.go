@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"net"
 	"net/http"
+	"os"
 	"strconv"
 	"strings"
 	"time"
@@ -44,8 +45,29 @@ func (s *Server) handleProxyServices(w http.ResponseWriter, r *http.Request) {
 		if !decodeJSON(w, r, &req) {
 			return
 		}
+		snapshot, err := s.proxyServicesSnapshot()
+		if err != nil {
+			writeError(w, http.StatusInternalServerError, err.Error())
+			return
+		}
 		item, err := s.saveProxyServices(req)
 		if err != nil {
+			err = s.restoreProxyServicesSnapshotError(err, snapshot)
+			writeError(w, http.StatusInternalServerError, err.Error())
+			return
+		}
+		if err := s.createOperationLog(r, model.PlatformItemRequest{
+			Name:        "proxy_services.update",
+			Type:        "proxy_services",
+			Status:      "success",
+			TargetID:    item.ID,
+			OwnerID:     s.currentUserID(r),
+			Description: "updated proxy service settings",
+			Metadata: map[string]any{
+				"client_ip": s.clientIP(r),
+			},
+		}); err != nil {
+			err = s.restoreProxyServicesSnapshotError(err, snapshot)
 			writeError(w, http.StatusInternalServerError, err.Error())
 			return
 		}
@@ -117,6 +139,83 @@ func (s *Server) upsertProxyServiceSetting(metadata map[string]any) (model.Platf
 		return s.cfg.Store.UpdatePlatformItem("system_settings", existing.ID, req)
 	}
 	return s.cfg.Store.CreatePlatformItem("system_settings", req)
+}
+
+type proxyServicesSnapshot struct {
+	settingExists bool
+	setting       model.PlatformItem
+	gatewayExists bool
+	gateway       model.PlatformItem
+}
+
+func (s *Server) proxyServicesSnapshot() (proxyServicesSnapshot, error) {
+	snapshot := proxyServicesSnapshot{}
+	setting, ok, err := s.rawSystemSettingByType("proxy")
+	if err != nil {
+		return proxyServicesSnapshot{}, err
+	}
+	if ok {
+		setting.Metadata = cloneMetadata(setting.Metadata)
+		snapshot.settingExists = true
+		snapshot.setting = setting
+	}
+	gateway, ok, err := s.rawSSHGatewayForProxySettings()
+	if err != nil {
+		return proxyServicesSnapshot{}, err
+	}
+	if ok {
+		gateway.Metadata = cloneMetadata(gateway.Metadata)
+		snapshot.gatewayExists = true
+		snapshot.gateway = gateway
+	}
+	return snapshot, nil
+}
+
+func (s *Server) restoreProxyServicesSnapshot(snapshot proxyServicesSnapshot) error {
+	if snapshot.settingExists {
+		if _, err := s.cfg.Store.SavePlatformItem("system_settings", snapshot.setting); err != nil {
+			return err
+		}
+	} else {
+		current, ok, err := s.rawSystemSettingByType("proxy")
+		if err != nil {
+			return err
+		}
+		if ok {
+			if err := s.cfg.Store.DeletePlatformItem("system_settings", current.ID); err != nil && !errors.Is(err, os.ErrNotExist) {
+				return err
+			}
+		}
+	}
+	if snapshot.gatewayExists {
+		if _, err := s.cfg.Store.SavePlatformItem("ssh_gateways", snapshot.gateway); err != nil {
+			return err
+		}
+	} else {
+		current, ok, err := s.rawSSHGatewayForProxySettings()
+		if err != nil {
+			return err
+		}
+		if ok {
+			if err := s.cfg.Store.DeletePlatformItem("ssh_gateways", current.ID); err != nil && !errors.Is(err, os.ErrNotExist) {
+				return err
+			}
+		}
+	}
+	if err := s.reloadSSHGatewayRuntime(); err != nil {
+		return err
+	}
+	if err := s.reloadRDPProxyRuntime(); err != nil {
+		return err
+	}
+	return s.reloadDatabaseProxyRuntime()
+}
+
+func (s *Server) restoreProxyServicesSnapshotError(err error, snapshot proxyServicesSnapshot) error {
+	if restoreErr := s.restoreProxyServicesSnapshot(snapshot); restoreErr != nil {
+		return fmt.Errorf("%w; additionally failed to restore proxy service settings: %v", err, restoreErr)
+	}
+	return err
 }
 
 func (s *Server) syncSSHGatewayFromProxySetting(enabled bool, listenAddress string, disablePasswordAuth bool, allowlist []string) error {

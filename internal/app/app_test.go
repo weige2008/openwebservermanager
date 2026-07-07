@@ -21,6 +21,7 @@ import (
 	"encoding/json"
 	"encoding/pem"
 	"errors"
+	"fmt"
 	"io"
 	"log/slog"
 	"math/big"
@@ -8525,6 +8526,61 @@ func TestProxyServiceSettingsPersistStatusAndSyncSSHGateway(t *testing.T) {
 	logsRec := assertStatus(t, handler, http.MethodGet, "/api/admin/audit/operation-logs", nil, cookie, http.StatusOK)
 	if !strings.Contains(logsRec.Body.String(), "proxy_services.update") {
 		t.Fatalf("proxy service update was not audited: %s", logsRec.Body.String())
+	}
+}
+
+func TestProxyServiceOperationLogFailureRollsBackSettings(t *testing.T) {
+	handler, cookie := newTestHandler(t)
+	srv := handler.(*Server)
+
+	assertStatus(t, handler, http.MethodPost, "/api/admin/proxy-services", map[string]any{
+		"ssh_enabled":               true,
+		"ssh_listen_address":        "127.0.0.1:22024",
+		"ssh_disable_password_auth": true,
+		"ssh_forward_allowlist":     []string{"initial.internal:22"},
+		"proxy_private_key":         "initial-proxy-secret",
+	}, cookie, http.StatusOK)
+
+	removeBlocker := blockPlatformItemCreate(t, srv.cfg.Store, "operation_logs")
+	failureRec := assertStatus(t, handler, http.MethodPost, "/api/admin/proxy-services", map[string]any{
+		"ssh_enabled":               false,
+		"ssh_listen_address":        "127.0.0.1:22025",
+		"ssh_disable_password_auth": false,
+		"ssh_forward_allowlist":     []string{"changed.internal:22"},
+		"proxy_private_key":         "changed-proxy-secret",
+	}, cookie, http.StatusInternalServerError)
+	removeBlocker()
+	if !strings.Contains(failureRec.Body.String(), "persist operation log failed") {
+		t.Fatalf("proxy operation log failure was not reported: %s", failureRec.Body.String())
+	}
+
+	setting, ok, err := srv.rawSystemSettingByType("proxy")
+	if err != nil || !ok {
+		t.Fatalf("load proxy setting after rollback: ok=%v err=%v", ok, err)
+	}
+	if firstMetadataString(setting.Metadata, "ssh_listen_address") != "127.0.0.1:22024" || setting.Metadata["ssh_gateway_enabled"] != true {
+		t.Fatalf("proxy setting was not restored after operation log failure: %#v", setting.Metadata)
+	}
+	if strings.Contains(fmt.Sprint(setting.Metadata), "changed.internal") {
+		t.Fatalf("proxy setting retained failed allowlist change: %#v", setting.Metadata)
+	}
+	proxyPrivateKey, ok, err := srv.cfg.Store.SystemSettingProxyPrivateKey()
+	if err != nil || !ok || proxyPrivateKey != "initial-proxy-secret" {
+		t.Fatalf("proxy private key after rollback = %q ok=%v err=%v", proxyPrivateKey, ok, err)
+	}
+
+	gateway, ok, err := srv.rawSSHGatewayForProxySettings()
+	if err != nil || !ok {
+		t.Fatalf("load ssh gateway after rollback: ok=%v err=%v", ok, err)
+	}
+	if gateway.Status != "enabled" || gateway.Host != "127.0.0.1" || gateway.Port != 22024 {
+		t.Fatalf("ssh gateway was not restored after operation log failure: %#v", gateway)
+	}
+	if strings.Contains(fmt.Sprint(gateway.Metadata), "changed.internal") {
+		t.Fatalf("ssh gateway retained failed allowlist change: %#v", gateway.Metadata)
+	}
+	if !coreAuditLogsContainAction(srv.cfg.Store, "operation.log.persist_failed") {
+		t.Fatal("proxy operation log persistence failure was not written to core audit logs")
 	}
 }
 

@@ -1,6 +1,7 @@
 package app
 
 import (
+	"errors"
 	"io"
 	"net/http"
 	"os"
@@ -136,9 +137,17 @@ func (s *Server) handleDesktopDriveDownload(w http.ResponseWriter, r *http.Reque
 	if !ok {
 		return
 	}
-	info, err := os.Stat(target)
-	if err != nil || info.IsDir() {
+	info, err := regularStorageFileInfo(target)
+	if errors.Is(err, os.ErrNotExist) {
 		writeError(w, http.StatusNotFound, "file not found")
+		return
+	}
+	if errors.Is(err, errStorageSpecialFile) {
+		writeError(w, http.StatusBadRequest, "file is not a regular file")
+		return
+	}
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
 	s.recordDesktopDriveFileLog(r, session, "download", "success", rel, map[string]any{
@@ -179,12 +188,20 @@ func (s *Server) handleDesktopDriveUpload(w http.ResponseWriter, r *http.Request
 	if !ok {
 		return
 	}
-	if info, err := os.Stat(target); err == nil && info.IsDir() {
+	info, exists, err := storagePathInfo(target)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	if exists && info.IsDir() {
 		writeError(w, http.StatusBadRequest, "target is a directory")
 		return
 	}
-	if err := os.MkdirAll(filepath.Dir(target), 0o770); err != nil {
-		writeError(w, http.StatusInternalServerError, err.Error())
+	if exists && !info.Mode().IsRegular() {
+		writeError(w, http.StatusBadRequest, "target is not a regular file")
+		return
+	}
+	if !s.ensureStorageParentDirectory(w, root, target) {
 		return
 	}
 	output, err := os.OpenFile(target, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0o660)
@@ -222,7 +239,7 @@ func (s *Server) handleDesktopDriveDelete(w http.ResponseWriter, r *http.Request
 		writeError(w, http.StatusBadRequest, "cannot delete session drive root")
 		return
 	}
-	if _, err := os.Stat(target); err != nil {
+	if _, err := os.Lstat(target); err != nil {
 		writeError(w, http.StatusNotFound, "file not found")
 		return
 	}

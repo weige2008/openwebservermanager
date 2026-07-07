@@ -86,6 +86,7 @@ type storageUsageInfo struct {
 
 var (
 	errStoragePermissionDenied = errors.New("storage permission denied")
+	errStorageSpecialFile      = errors.New("storage path is not a regular file")
 	errCertificateNotUsable    = errors.New("certificate is not usable")
 )
 
@@ -1228,8 +1229,13 @@ func (s *Server) handleStorageWrite(w http.ResponseWriter, r *http.Request, root
 	if !ok {
 		return
 	}
+	info, exists, err := storagePathInfo(target)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
 	permission := "upload"
-	if _, err := os.Stat(target); err == nil {
+	if exists {
 		permission = "edit"
 	}
 	if !s.requireStoragePermission(w, r, storage.ID, permission, rel) {
@@ -1244,20 +1250,22 @@ func (s *Server) handleStorageWrite(w http.ResponseWriter, r *http.Request, root
 		}
 		content = decoded
 	}
-	existingBytes, exists, isDir, err := storageNodeBytes(target)
-	if err != nil {
-		writeError(w, http.StatusInternalServerError, err.Error())
-		return
-	}
-	if exists && isDir {
+	if exists && info.IsDir() {
 		writeError(w, http.StatusBadRequest, "target is a directory")
 		return
+	}
+	if exists && !info.Mode().IsRegular() {
+		writeError(w, http.StatusBadRequest, "target is not a regular file")
+		return
+	}
+	existingBytes := int64(0)
+	if exists {
+		existingBytes = info.Size()
 	}
 	if !s.requireStorageQuota(w, r, storage, root, "write", rel, int64(len(content))-existingBytes) {
 		return
 	}
-	if err := os.MkdirAll(filepath.Dir(target), 0o770); err != nil {
-		writeError(w, http.StatusInternalServerError, err.Error())
+	if !s.ensureStorageParentDirectory(w, root, target) {
 		return
 	}
 	if err := os.WriteFile(target, content, 0o660); err != nil {
@@ -1304,21 +1312,29 @@ func (s *Server) handleStorageUpload(w http.ResponseWriter, r *http.Request, roo
 	if !ok {
 		return
 	}
+	info, exists, err := storagePathInfo(target)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
 	permission := "upload"
-	if _, err := os.Stat(target); err == nil {
+	if exists {
 		permission = "edit"
 	}
 	if !s.requireStoragePermission(w, r, storage.ID, permission, rel) {
 		return
 	}
-	existingBytes, exists, isDir, err := storageNodeBytes(target)
-	if err != nil {
-		writeError(w, http.StatusInternalServerError, err.Error())
-		return
-	}
-	if exists && isDir {
+	if exists && info.IsDir() {
 		writeError(w, http.StatusBadRequest, "target is a directory")
 		return
+	}
+	if exists && !info.Mode().IsRegular() {
+		writeError(w, http.StatusBadRequest, "target is not a regular file")
+		return
+	}
+	existingBytes := int64(0)
+	if exists {
+		existingBytes = info.Size()
 	}
 	incomingBytes := int64(0)
 	if header != nil {
@@ -1327,8 +1343,7 @@ func (s *Server) handleStorageUpload(w http.ResponseWriter, r *http.Request, roo
 	if !s.requireStorageQuota(w, r, storage, root, "upload", rel, incomingBytes-existingBytes) {
 		return
 	}
-	if err := os.MkdirAll(filepath.Dir(target), 0o770); err != nil {
-		writeError(w, http.StatusInternalServerError, err.Error())
+	if !s.ensureStorageParentDirectory(w, root, target) {
 		return
 	}
 	output, err := os.OpenFile(target, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0o660)
@@ -1375,8 +1390,7 @@ func (s *Server) handleStorageMkdir(w http.ResponseWriter, r *http.Request, root
 	if !s.requireStoragePermission(w, r, storage.ID, "upload", rel) {
 		return
 	}
-	if err := os.MkdirAll(target, 0o770); err != nil {
-		writeError(w, http.StatusInternalServerError, err.Error())
+	if !s.ensureStorageDirectory(w, root, target) {
 		return
 	}
 	usage, err := s.updateStorageUsage(storage.ID, root)
@@ -1424,9 +1438,17 @@ func (s *Server) handleStorageDownload(w http.ResponseWriter, r *http.Request, r
 	if !ok {
 		return
 	}
-	info, err := os.Stat(target)
-	if err != nil || info.IsDir() {
+	info, err := regularStorageFileInfo(target)
+	if errors.Is(err, os.ErrNotExist) {
 		writeError(w, http.StatusNotFound, "file not found")
+		return
+	}
+	if errors.Is(err, errStorageSpecialFile) {
+		writeError(w, http.StatusBadRequest, "file is not a regular file")
+		return
+	}
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
 	if !s.requireStoragePermission(w, r, storageID, "download", rel) {
@@ -1458,8 +1480,17 @@ func (s *Server) handleStorageRename(w http.ResponseWriter, r *http.Request, roo
 		writeError(w, http.StatusBadRequest, "source and destination are required")
 		return
 	}
-	if _, err := os.Stat(source); err != nil {
+	sourceInfo, err := os.Lstat(source)
+	if errors.Is(err, os.ErrNotExist) {
 		writeError(w, http.StatusNotFound, "source not found")
+		return
+	}
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	if !sourceInfo.IsDir() && !sourceInfo.Mode().IsRegular() {
+		writeError(w, http.StatusBadRequest, "source is not a regular file")
 		return
 	}
 	if !s.requireStorageTreePermission(w, r, storage.ID, "rename", source, sourceRel) {
@@ -1468,9 +1499,18 @@ func (s *Server) handleStorageRename(w http.ResponseWriter, r *http.Request, roo
 	if !s.requireMappedStorageTreePermission(w, r, storage.ID, "paste", source, destinationRel) {
 		return
 	}
-	if _, err := os.Stat(destination); err == nil {
+	destinationInfo, destinationExists, err := storagePathInfo(destination)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	if destinationExists {
 		if !req.Overwrite {
 			writeError(w, http.StatusConflict, "destination exists")
+			return
+		}
+		if !destinationInfo.IsDir() && !destinationInfo.Mode().IsRegular() {
+			writeError(w, http.StatusBadRequest, "destination is not a regular file")
 			return
 		}
 		if !s.requireStorageTreePermission(w, r, storage.ID, "edit", destination, destinationRel) {
@@ -1481,8 +1521,7 @@ func (s *Server) handleStorageRename(w http.ResponseWriter, r *http.Request, roo
 		writeError(w, http.StatusBadRequest, "source and destination are the same")
 		return
 	}
-	if err := os.MkdirAll(filepath.Dir(destination), 0o770); err != nil {
-		writeError(w, http.StatusInternalServerError, err.Error())
+	if !s.ensureStorageParentDirectory(w, root, destination) {
 		return
 	}
 	if req.Overwrite {
@@ -1524,9 +1563,17 @@ func (s *Server) handleStorageCopy(w http.ResponseWriter, r *http.Request, root 
 		writeError(w, http.StatusBadRequest, "source and destination are required")
 		return
 	}
-	info, err := os.Stat(source)
-	if err != nil {
+	info, err := os.Lstat(source)
+	if errors.Is(err, os.ErrNotExist) {
 		writeError(w, http.StatusNotFound, "source not found")
+		return
+	}
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	if !info.IsDir() && !info.Mode().IsRegular() {
+		writeError(w, http.StatusBadRequest, "source is not a regular file")
 		return
 	}
 	if !s.requireStorageTreePermission(w, r, storage.ID, "copy", source, sourceRel) {
@@ -1535,9 +1582,18 @@ func (s *Server) handleStorageCopy(w http.ResponseWriter, r *http.Request, root 
 	if !s.requireMappedStorageTreePermission(w, r, storage.ID, "paste", source, destinationRel) {
 		return
 	}
-	if _, err := os.Stat(destination); err == nil {
+	destinationInfo, destinationExists, err := storagePathInfo(destination)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	if destinationExists {
 		if !req.Overwrite {
 			writeError(w, http.StatusConflict, "destination exists")
+			return
+		}
+		if !destinationInfo.IsDir() && !destinationInfo.Mode().IsRegular() {
+			writeError(w, http.StatusBadRequest, "destination is not a regular file")
 			return
 		}
 		if !s.requireStorageTreePermission(w, r, storage.ID, "edit", destination, destinationRel) {
@@ -1565,15 +1621,26 @@ func (s *Server) handleStorageCopy(w http.ResponseWriter, r *http.Request, root 
 	if !s.requireStorageQuota(w, r, storage, root, "copy", destinationRel, sourceBytes-destinationBytes) {
 		return
 	}
+	if !s.ensureStorageParentDirectory(w, root, destination) {
+		return
+	}
 	if req.Overwrite {
 		_ = os.RemoveAll(destination)
 	}
 	if info.IsDir() {
 		if err := copyDirectory(source, destination); err != nil {
+			if errors.Is(err, errStorageSpecialFile) {
+				writeError(w, http.StatusBadRequest, "source contains a non-regular file")
+				return
+			}
 			writeError(w, http.StatusInternalServerError, err.Error())
 			return
 		}
 	} else if err := copyFile(source, destination); err != nil {
+		if errors.Is(err, errStorageSpecialFile) {
+			writeError(w, http.StatusBadRequest, "source is not a regular file")
+			return
+		}
 		writeError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
@@ -1816,14 +1883,17 @@ func parseStorageByteString(value string) (int64, bool) {
 }
 
 func storageNodeBytes(path string) (int64, bool, bool, error) {
-	info, err := os.Stat(path)
-	if errors.Is(err, os.ErrNotExist) {
-		return 0, false, false, nil
-	}
+	info, exists, err := storagePathInfo(path)
 	if err != nil {
 		return 0, false, false, err
 	}
+	if !exists {
+		return 0, false, false, nil
+	}
 	if !info.IsDir() {
+		if !info.Mode().IsRegular() {
+			return 0, true, false, errStorageSpecialFile
+		}
 		return info.Size(), true, false, nil
 	}
 	usage, err := collectStorageUsage(path)
@@ -1831,6 +1901,105 @@ func storageNodeBytes(path string) (int64, bool, bool, error) {
 		return 0, true, true, err
 	}
 	return usage.Bytes, true, true, nil
+}
+
+func storagePathInfo(path string) (os.FileInfo, bool, error) {
+	info, err := os.Lstat(path)
+	if errors.Is(err, os.ErrNotExist) {
+		return nil, false, nil
+	}
+	if err != nil {
+		return nil, false, err
+	}
+	return info, true, nil
+}
+
+func regularStorageFileInfo(path string) (os.FileInfo, error) {
+	info, exists, err := storagePathInfo(path)
+	if err != nil {
+		return nil, err
+	}
+	if !exists || info.IsDir() {
+		return nil, os.ErrNotExist
+	}
+	if !info.Mode().IsRegular() {
+		return nil, errStorageSpecialFile
+	}
+	return info, nil
+}
+
+func (s *Server) ensureStorageParentDirectory(w http.ResponseWriter, root, target string) bool {
+	return s.ensureStorageDirectory(w, root, filepath.Dir(target))
+}
+
+func (s *Server) ensureStorageDirectory(w http.ResponseWriter, root, dir string) bool {
+	if err := ensureRealStorageDirectory(root, dir); err != nil {
+		if errors.Is(err, errStorageSpecialFile) {
+			writeError(w, http.StatusBadRequest, "storage path contains a non-directory entry")
+			return false
+		}
+		writeError(w, http.StatusInternalServerError, err.Error())
+		return false
+	}
+	return true
+}
+
+func ensureRealStorageDirectory(root, dir string) error {
+	rootAbs, err := filepath.Abs(root)
+	if err != nil {
+		return err
+	}
+	dirAbs, err := filepath.Abs(dir)
+	if err != nil {
+		return err
+	}
+	relToRoot, err := filepath.Rel(rootAbs, dirAbs)
+	if err != nil {
+		return err
+	}
+	if relToRoot != "." {
+		if err := ensureChildPath(rootAbs, dirAbs); err != nil {
+			return err
+		}
+	}
+	if err := os.MkdirAll(root, 0o770); err != nil {
+		return err
+	}
+	rootInfo, exists, err := storagePathInfo(root)
+	if err != nil {
+		return err
+	}
+	if !exists || !rootInfo.IsDir() {
+		return errStorageSpecialFile
+	}
+	if relToRoot == "." {
+		return nil
+	}
+	rel := filepath.Clean(relToRoot)
+	if rel == "." {
+		return nil
+	}
+	current := root
+	for _, part := range strings.Split(rel, string(filepath.Separator)) {
+		if part == "" || part == "." {
+			continue
+		}
+		current = filepath.Join(current, part)
+		info, exists, err := storagePathInfo(current)
+		if err != nil {
+			return err
+		}
+		if !exists {
+			if err := os.Mkdir(current, 0o770); err != nil && !errors.Is(err, os.ErrExist) {
+				return err
+			}
+			continue
+		}
+		if !info.IsDir() {
+			return errStorageSpecialFile
+		}
+	}
+	return nil
 }
 
 func formatStorageBytes(bytes int64) string {
@@ -1917,7 +2086,7 @@ func (s *Server) requireStorageTreePermission(w http.ResponseWriter, r *http.Req
 	if !s.requireStoragePermission(w, r, storageID, action, rootRel) {
 		return false
 	}
-	info, err := os.Stat(rootPath)
+	info, err := os.Lstat(rootPath)
 	if errors.Is(err, os.ErrNotExist) {
 		return true
 	}
@@ -1935,7 +2104,7 @@ func (s *Server) requireMappedStorageTreePermission(w http.ResponseWriter, r *ht
 	if !s.requireStoragePermission(w, r, storageID, action, destinationRel) {
 		return false
 	}
-	info, err := os.Stat(sourcePath)
+	info, err := os.Lstat(sourcePath)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, err.Error())
 		return false
@@ -2105,8 +2274,13 @@ func joinStoragePolicyPath(base, child string) string {
 }
 
 func copyFile(source, destination string) error {
-	if err := os.MkdirAll(filepath.Dir(destination), 0o770); err != nil {
+	if _, err := regularStorageFileInfo(source); err != nil {
 		return err
+	}
+	if info, exists, err := storagePathInfo(destination); err != nil {
+		return err
+	} else if exists && (info.IsDir() || !info.Mode().IsRegular()) {
+		return errStorageSpecialFile
 	}
 	input, err := os.Open(source)
 	if err != nil {
@@ -2134,6 +2308,13 @@ func copyDirectory(source, destination string) error {
 		target := filepath.Join(destination, rel)
 		if entry.IsDir() {
 			return os.MkdirAll(target, 0o770)
+		}
+		info, err := entry.Info()
+		if err != nil {
+			return err
+		}
+		if !info.Mode().IsRegular() {
+			return errStorageSpecialFile
 		}
 		return copyFile(path, target)
 	})

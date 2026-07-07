@@ -8725,6 +8725,71 @@ func TestStorageFileOperationsRejectDisabledStorage(t *testing.T) {
 	}
 }
 
+func TestStorageFileOperationsRejectSymlinkTargets(t *testing.T) {
+	srv, adminCookie := newTestServer(t, nil)
+	handler := http.Handler(srv)
+
+	storageRec := assertStatus(t, handler, http.MethodPost, "/api/admin/storages", map[string]any{
+		"name":   "symlink-drive",
+		"type":   "local",
+		"status": "enabled",
+	}, adminCookie, http.StatusCreated)
+	var storage model.PlatformItem
+	decodeResponse(t, storageRec, &storage)
+
+	assertStatus(t, handler, http.MethodPost, "/api/admin/storages/"+storage.ID+"/files-write", map[string]any{"path": "safe.txt", "content": "safe"}, adminCookie, http.StatusCreated)
+	root := filepath.Join(srv.cfg.DataDir, "drives", storage.ID)
+	externalContent := "external storage secret"
+	externalPath := filepath.Join(t.TempDir(), "outside-storage.txt")
+	if err := os.WriteFile(externalPath, []byte(externalContent), 0o660); err != nil {
+		t.Fatalf("write external storage fixture: %v", err)
+	}
+	if err := os.Symlink(externalPath, filepath.Join(root, "linked.txt")); err != nil {
+		t.Skipf("symlink unavailable: %v", err)
+	}
+	if err := os.Symlink(externalPath, filepath.Join(root, "destination-link.txt")); err != nil {
+		t.Fatalf("create destination symlink: %v", err)
+	}
+	externalDir := filepath.Join(t.TempDir(), "outside-dir")
+	if err := os.MkdirAll(externalDir, 0o770); err != nil {
+		t.Fatalf("create external directory fixture: %v", err)
+	}
+	if err := os.Symlink(externalDir, filepath.Join(root, "linked-dir")); err != nil {
+		t.Fatalf("create directory symlink: %v", err)
+	}
+
+	normalDownload := assertStatus(t, handler, http.MethodGet, "/api/admin/storages/"+storage.ID+"/files-download?path=safe.txt", nil, adminCookie, http.StatusOK)
+	if strings.TrimSpace(normalDownload.Body.String()) != "safe" {
+		t.Fatalf("normal storage download body = %q", normalDownload.Body.String())
+	}
+	symlinkDownload := assertStatus(t, handler, http.MethodGet, "/api/admin/storages/"+storage.ID+"/files-download?path=linked.txt", nil, adminCookie, http.StatusBadRequest)
+	if strings.Contains(symlinkDownload.Body.String(), externalContent) {
+		t.Fatalf("symlink download leaked external content: %s", symlinkDownload.Body.String())
+	}
+	assertStatus(t, handler, http.MethodPost, "/api/admin/storages/"+storage.ID+"/files-write", map[string]any{"path": "linked.txt", "content": "overwrite"}, adminCookie, http.StatusBadRequest)
+	assertMultipartStatus(t, handler, "/api/admin/storages/"+storage.ID+"/files-upload", map[string]string{}, "linked.txt", []byte("upload"), adminCookie, http.StatusBadRequest)
+	assertStatus(t, handler, http.MethodPost, "/api/admin/storages/"+storage.ID+"/files-copy", map[string]any{"path": "linked.txt", "destination": "copied.txt"}, adminCookie, http.StatusBadRequest)
+	assertStatus(t, handler, http.MethodPost, "/api/admin/storages/"+storage.ID+"/files-rename", map[string]any{"path": "linked.txt", "destination": "renamed.txt"}, adminCookie, http.StatusBadRequest)
+	assertStatus(t, handler, http.MethodPost, "/api/admin/storages/"+storage.ID+"/files-copy", map[string]any{"path": "safe.txt", "destination": "destination-link.txt", "overwrite": true}, adminCookie, http.StatusBadRequest)
+	assertStatus(t, handler, http.MethodPost, "/api/admin/storages/"+storage.ID+"/files-rename", map[string]any{"path": "safe.txt", "destination": "destination-link.txt", "overwrite": true}, adminCookie, http.StatusBadRequest)
+	assertStatus(t, handler, http.MethodPost, "/api/admin/storages/"+storage.ID+"/files-write", map[string]any{"path": "linked-dir/escaped.txt", "content": "escape"}, adminCookie, http.StatusBadRequest)
+	assertMultipartStatus(t, handler, "/api/admin/storages/"+storage.ID+"/files-upload", map[string]string{"path": "linked-dir"}, "escaped-upload.txt", []byte("escape"), adminCookie, http.StatusBadRequest)
+	assertStatus(t, handler, http.MethodPost, "/api/admin/storages/"+storage.ID+"/files-mkdir", map[string]any{"path": "linked-dir/new-dir"}, adminCookie, http.StatusBadRequest)
+	assertStatus(t, handler, http.MethodPost, "/api/admin/storages/"+storage.ID+"/files-copy", map[string]any{"path": "safe.txt", "destination": "linked-dir/copied.txt"}, adminCookie, http.StatusBadRequest)
+	assertStatus(t, handler, http.MethodPost, "/api/admin/storages/"+storage.ID+"/files-rename", map[string]any{"path": "safe.txt", "destination": "linked-dir/renamed.txt"}, adminCookie, http.StatusBadRequest)
+	if data, err := os.ReadFile(externalPath); err != nil || string(data) != externalContent {
+		t.Fatalf("external symlink target changed: content=%q err=%v", string(data), err)
+	}
+	for _, name := range []string{"escaped.txt", "escaped-upload.txt", "new-dir", "copied.txt", "renamed.txt"} {
+		if _, err := os.Stat(filepath.Join(externalDir, name)); !errors.Is(err, os.ErrNotExist) {
+			t.Fatalf("directory symlink operation created %s outside storage: %v", name, err)
+		}
+	}
+	if _, err := os.Stat(filepath.Join(root, "copied.txt")); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("copy from symlink unexpectedly created file: %v", err)
+	}
+}
+
 func TestStorageListFiltersDeniedDownloadPaths(t *testing.T) {
 	handler, adminCookie := newTestHandler(t)
 
@@ -9162,6 +9227,25 @@ func TestDesktopSessionDriveFiles(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(driveRoot, "remove.txt"), []byte("delete me"), 0o660); err != nil {
 		t.Fatalf("write drive delete file: %v", err)
 	}
+	externalDriveContent := "external desktop drive secret"
+	externalDrivePath := filepath.Join(t.TempDir(), "outside-drive.txt")
+	if err := os.WriteFile(externalDrivePath, []byte(externalDriveContent), 0o660); err != nil {
+		t.Fatalf("write external drive fixture: %v", err)
+	}
+	driveSymlinkCreated := true
+	if err := os.Symlink(externalDrivePath, filepath.Join(driveRoot, "linked.txt")); err != nil {
+		driveSymlinkCreated = false
+		t.Logf("skip desktop drive symlink assertion: %v", err)
+	}
+	externalDriveDir := filepath.Join(t.TempDir(), "outside-drive-dir")
+	if err := os.MkdirAll(externalDriveDir, 0o770); err != nil {
+		t.Fatalf("create external drive directory fixture: %v", err)
+	}
+	driveDirSymlinkCreated := true
+	if err := os.Symlink(externalDriveDir, filepath.Join(driveRoot, "linked-dir")); err != nil {
+		driveDirSymlinkCreated = false
+		t.Logf("skip desktop drive directory symlink assertion: %v", err)
+	}
 
 	assertMultipartStatus(t, handler, "/api/connections/"+session.ID+"/drive/upload", map[string]string{"path": "../secret"}, "escape.txt", []byte("escape"), adminCookie, http.StatusForbidden)
 	uploadRec := assertMultipartStatus(t, handler, "/api/connections/"+session.ID+"/drive/upload", map[string]string{"path": "reports"}, `C:\Users\ops\Downloads\uploaded.bin`, []byte{4, 5, 6}, adminCookie, http.StatusCreated)
@@ -9189,6 +9273,22 @@ func TestDesktopSessionDriveFiles(t *testing.T) {
 		t.Fatalf("drive uploaded download body = %v", uploadDownloadRec.Body.Bytes())
 	}
 	assertStatus(t, handler, http.MethodGet, "/api/connections/"+session.ID+"/drive/download?path=../secret.txt", nil, adminCookie, http.StatusForbidden)
+	if driveSymlinkCreated {
+		symlinkDownload := assertStatus(t, handler, http.MethodGet, "/api/connections/"+session.ID+"/drive/download?path=reports/linked.txt", nil, adminCookie, http.StatusBadRequest)
+		if strings.Contains(symlinkDownload.Body.String(), externalDriveContent) {
+			t.Fatalf("desktop drive symlink download leaked external content: %s", symlinkDownload.Body.String())
+		}
+		assertMultipartStatus(t, handler, "/api/connections/"+session.ID+"/drive/upload", map[string]string{"path": "reports"}, "linked.txt", []byte("overwrite"), adminCookie, http.StatusBadRequest)
+		if data, err := os.ReadFile(externalDrivePath); err != nil || string(data) != externalDriveContent {
+			t.Fatalf("external desktop drive symlink target changed: content=%q err=%v", string(data), err)
+		}
+	}
+	if driveDirSymlinkCreated {
+		assertMultipartStatus(t, handler, "/api/connections/"+session.ID+"/drive/upload", map[string]string{"path": "reports/linked-dir"}, "escaped.txt", []byte("escape"), adminCookie, http.StatusBadRequest)
+		if _, err := os.Stat(filepath.Join(externalDriveDir, "escaped.txt")); !errors.Is(err, os.ErrNotExist) {
+			t.Fatalf("desktop drive directory symlink upload created outside file: %v", err)
+		}
+	}
 	assertStatus(t, handler, http.MethodDelete, "/api/connections/"+session.ID+"/drive?path=reports/remove.txt", nil, adminCookie, http.StatusOK)
 	if _, err := os.Stat(filepath.Join(driveRoot, "remove.txt")); !errors.Is(err, os.ErrNotExist) {
 		t.Fatalf("drive delete did not remove file: %v", err)

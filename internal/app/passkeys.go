@@ -559,7 +559,12 @@ func (s *Server) handlePasskeyLoginVerify(w http.ResponseWriter, r *http.Request
 func (s *Server) recordPasskeyLoginFailure(w http.ResponseWriter, r *http.Request, username, clientIP, failureKey, detail string) {
 	failure := s.auth.recordLoginFailure(failureKey, s.loginFailurePolicy())
 	if !failure.LockedUntil.IsZero() {
-		s.createLoginLock(username, clientIP, failure)
+		if err := s.createLoginLock(username, clientIP, failure); err != nil {
+			lockDetail := "persist login lock failed: " + err.Error()
+			_ = s.audit(r, "auth.login.lock.persist_failed", "", "", lockDetail)
+			writeError(w, http.StatusInternalServerError, lockDetail)
+			return
+		}
 	}
 	_, _ = s.cfg.Store.CreatePlatformItem("login_logs", model.PlatformItemRequest{
 		Name:        username,

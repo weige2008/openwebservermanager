@@ -672,7 +672,12 @@ func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		failure := s.auth.recordLoginFailure(failureKey, failurePolicy)
 		if !failure.LockedUntil.IsZero() {
-			s.createLoginLock(username, clientIP, failure)
+			if err := s.createLoginLock(username, clientIP, failure); err != nil {
+				detail := "persist login lock failed: " + err.Error()
+				_ = s.audit(r, "auth.login.lock.persist_failed", "", "", detail)
+				writeError(w, http.StatusInternalServerError, detail)
+				return
+			}
 		}
 		_, _ = s.cfg.Store.CreatePlatformItem("login_logs", model.PlatformItemRequest{
 			Name:        username,

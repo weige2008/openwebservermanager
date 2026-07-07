@@ -107,12 +107,12 @@ func (s *Server) activeLoginLock(username, clientIP string) (time.Duration, bool
 	return 0, false
 }
 
-func (s *Server) createLoginLock(username, clientIP string, failure loginFailure) {
+func (s *Server) createLoginLock(username, clientIP string, failure loginFailure) error {
 	lockedUntil := failure.LockedUntil
 	if lockedUntil.IsZero() {
 		lockedUntil = time.Now().UTC().Add(5 * time.Minute)
 	}
-	_, _ = s.cfg.Store.CreatePlatformItem("login_locks", model.PlatformItemRequest{
+	_, err := s.cfg.Store.CreatePlatformItem("login_locks", model.PlatformItemRequest{
 		Name:        username,
 		Type:        "password",
 		Status:      "locked",
@@ -127,6 +127,7 @@ func (s *Server) createLoginLock(username, clientIP string, failure loginFailure
 			"last_failure":  failure.LastFailure.UTC(),
 		},
 	})
+	return err
 }
 
 func (s *Server) passwordLoginDisabled() bool {

@@ -3995,6 +3995,42 @@ func TestConfigurableLoginFailureLockPolicy(t *testing.T) {
 	t.Fatalf("custom-lock-user lock was not created: %#v", locks.Items)
 }
 
+func TestLoginLockPersistenceFailureReturnsServerError(t *testing.T) {
+	srv, adminCookie := newTestServer(t, nil)
+	handler := http.Handler(srv)
+
+	assertStatus(t, handler, http.MethodPost, "/api/admin/system-settings", map[string]any{
+		"name":   "Login lock persistence policy",
+		"type":   "security",
+		"status": "enabled",
+		"metadata": map[string]any{
+			"login_failure_threshold":      2,
+			"login_failure_window_minutes": 30,
+			"login_lock_minutes":           1,
+		},
+	}, adminCookie, http.StatusCreated)
+	assertStatus(t, handler, http.MethodPost, "/api/admin/users", map[string]any{
+		"name":     "persist-lock-user",
+		"type":     "local",
+		"status":   "enabled",
+		"password": "password123",
+		"metadata": map[string]any{"role": "user"},
+	}, adminCookie, http.StatusCreated)
+
+	assertStatus(t, handler, http.MethodPost, "/api/auth/login", map[string]any{"username": "persist-lock-user", "password": "wrong-password"}, nil, http.StatusUnauthorized)
+	removeBlocker := blockPlatformItemCreate(t, srv.cfg.Store, "login_locks")
+	lockFailureRec := assertStatus(t, handler, http.MethodPost, "/api/auth/login", map[string]any{"username": "persist-lock-user", "password": "wrong-password"}, nil, http.StatusInternalServerError)
+	removeBlocker()
+	if !strings.Contains(lockFailureRec.Body.String(), "persist login lock failed") {
+		t.Fatalf("login lock persistence failure was not reported: %s", lockFailureRec.Body.String())
+	}
+
+	operationLogsRec := assertStatus(t, handler, http.MethodGet, "/api/admin/audit/operation-logs", nil, adminCookie, http.StatusOK)
+	if !strings.Contains(operationLogsRec.Body.String(), "auth.login.lock.persist_failed") {
+		t.Fatalf("login lock persistence failure was not audited: %s", operationLogsRec.Body.String())
+	}
+}
+
 func TestLoginCaptchaRequirement(t *testing.T) {
 	handler, adminCookie := newTestHandler(t)
 
@@ -10723,6 +10759,32 @@ func newUnconfiguredTestServer(t *testing.T, configure func(*Config)) *Server {
 func blockSQLWorkOrderStatusUpdate(t *testing.T, st *store.Store, orderID, status string) func() {
 	t.Helper()
 	return blockPlatformItemStatusUpdate(t, st, "sql_work_orders", orderID, status)
+}
+
+func blockPlatformItemCreate(t *testing.T, st *store.Store, collection string) func() {
+	t.Helper()
+	db, err := sql.Open("sqlite", st.DatabasePath())
+	if err != nil {
+		t.Fatalf("open store database for create blocker: %v", err)
+	}
+	triggerName := "block_platform_item_create"
+	if _, err := db.Exec(`DROP TRIGGER IF EXISTS ` + triggerName); err != nil {
+		_ = db.Close()
+		t.Fatalf("drop stale create blocker trigger: %v", err)
+	}
+	triggerSQL := `CREATE TRIGGER ` + triggerName + ` BEFORE INSERT ON platform_records
+WHEN NEW.collection = ` + sqliteTestStringLiteral(collection) + `
+BEGIN
+  SELECT RAISE(ABORT, 'forced platform item create failure');
+END`
+	if _, err := db.Exec(triggerSQL); err != nil {
+		_ = db.Close()
+		t.Fatalf("create platform item blocker trigger: %v", err)
+	}
+	return func() {
+		_, _ = db.Exec(`DROP TRIGGER IF EXISTS ` + triggerName)
+		_ = db.Close()
+	}
 }
 
 func blockPlatformItemStatusUpdate(t *testing.T, st *store.Store, collection, itemID, status string) func() {

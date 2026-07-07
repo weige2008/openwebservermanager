@@ -102,6 +102,15 @@ func (s *Server) handleMFACompleteLogin(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 	challenge.User = currentUser
+	previous, ok, err := s.userMFASnapshot(challenge.User.UserID)
+	if err != nil || !ok {
+		if err == nil {
+			err = fmt.Errorf("user not found")
+		}
+		writeError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	mfaMutated := false
 	var recoveryCodes []string
 	var method string
 	if challenge.SetupRequired {
@@ -119,6 +128,7 @@ func (s *Server) handleMFACompleteLogin(w http.ResponseWriter, r *http.Request) 
 			writeError(w, http.StatusInternalServerError, err.Error())
 			return
 		}
+		mfaMutated = true
 		method = "totp_setup"
 		_ = s.audit(r, "auth.mfa.enable", challenge.User.UserID, "", "enabled MFA during forced enrollment")
 	} else {
@@ -137,9 +147,24 @@ func (s *Server) handleMFACompleteLogin(w http.ResponseWriter, r *http.Request) 
 			return
 		}
 		method = verifiedMethod
+		mfaMutated = method == "recovery_code"
 		_ = s.audit(r, "auth.mfa.verify", challenge.User.UserID, "", "verified login MFA with "+method)
 	}
 
+	if err := s.createLoginLog(r, model.PlatformItemRequest{
+		Name:        challenge.Username,
+		Type:        "mfa",
+		Status:      "success",
+		OwnerID:     challenge.User.UserID,
+		Description: "signed in with MFA",
+		Metadata:    map[string]any{"client_ip": challenge.ClientIP, "account": challenge.Username, "method": method},
+	}); err != nil {
+		if mfaMutated {
+			_, _ = s.cfg.Store.SavePlatformItem("users", previous)
+		}
+		writeError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
 	s.auth.resetLoginFailures(challenge.FailureKey)
 	authToken, session, err := s.auth.create(challenge.User)
 	if err != nil {
@@ -148,17 +173,6 @@ func (s *Server) handleMFACompleteLogin(w http.ResponseWriter, r *http.Request) 
 	}
 	_ = s.cfg.Store.RecordUserLogin(session.UserID, challenge.ClientIP, r.UserAgent())
 	_ = s.audit(r, "auth.login", session.UserID, "", "signed in with MFA")
-	if err := s.createLoginLog(r, model.PlatformItemRequest{
-		Name:        challenge.Username,
-		Type:        "mfa",
-		Status:      "success",
-		OwnerID:     session.UserID,
-		Description: "signed in with MFA",
-		Metadata:    map[string]any{"client_ip": challenge.ClientIP, "account": challenge.Username, "method": method},
-	}); err != nil {
-		writeError(w, http.StatusInternalServerError, err.Error())
-		return
-	}
 	http.SetCookie(w, s.authCookie(r, authToken, int(authSessionTTL.Seconds())))
 	writeJSON(w, http.StatusOK, map[string]any{"user": s.authUserPayload(session), "recovery_codes": recoveryCodes})
 }

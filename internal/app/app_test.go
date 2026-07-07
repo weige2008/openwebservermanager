@@ -4642,6 +4642,117 @@ func TestMFAOperationLogFailureRollsBackMutations(t *testing.T) {
 	}
 }
 
+func TestMFACompleteLoginLogFailureRollsBackMutations(t *testing.T) {
+	t.Run("forced enrollment", func(t *testing.T) {
+		srv, adminCookie := newTestServer(t, nil)
+		handler := http.Handler(srv)
+		adminUser := rawPlatformUserByName(t, srv, "admin")
+
+		assertStatus(t, handler, http.MethodPost, "/api/admin/system-settings", map[string]any{
+			"name":   "Force MFA rollback",
+			"type":   "security",
+			"status": "enabled",
+			"metadata": map[string]any{
+				"force_mfa": true,
+			},
+		}, adminCookie, http.StatusCreated)
+		loginRec := assertStatus(t, handler, http.MethodPost, "/api/auth/login", map[string]any{"username": "admin", "password": "password123"}, nil, http.StatusAccepted)
+		var challenge map[string]any
+		decodeResponse(t, loginRec, &challenge)
+		token, _ := challenge["mfa_token"].(string)
+		secret, _ := challenge["secret"].(string)
+		if token == "" || secret == "" || challenge["mfa_setup_required"] != true {
+			t.Fatalf("forced MFA did not return setup challenge: %v", challenge)
+		}
+
+		removeBlocker := blockPlatformItemCreate(t, srv.cfg.Store, "login_logs")
+		completeRec := assertStatus(t, handler, http.MethodPost, "/api/auth/mfa/complete-login", map[string]any{
+			"token":    token,
+			"mfa_code": totpCode(secret, time.Now().UTC()),
+		}, nil, http.StatusInternalServerError)
+		removeBlocker()
+		if !strings.Contains(completeRec.Body.String(), "persist login log failed") {
+			t.Fatalf("forced MFA login log failure was not reported: %s", completeRec.Body.String())
+		}
+		if len(completeRec.Result().Cookies()) > 0 {
+			t.Fatalf("forced MFA completion issued cookies after failed login log write: %#v", completeRec.Result().Cookies())
+		}
+		profile, _, err := srv.cfg.Store.UserMFAProfile(adminUser.ID)
+		if err != nil {
+			t.Fatalf("load MFA profile after failed forced enrollment: %v", err)
+		}
+		if profile.Enabled {
+			t.Fatalf("forced MFA enrollment survived failed login log write: %#v", profile)
+		}
+		if !coreAuditLogsContainAction(srv.cfg.Store, "auth.login.log.persist_failed") {
+			t.Fatal("forced MFA login log persistence failure was not written to core audit logs")
+		}
+	})
+
+	t.Run("recovery code", func(t *testing.T) {
+		srv, adminCookie := newTestServer(t, nil)
+		handler := http.Handler(srv)
+		adminUser := rawPlatformUserByName(t, srv, "admin")
+
+		setupRec := assertStatus(t, handler, http.MethodPost, "/api/auth/mfa/setup", nil, adminCookie, http.StatusOK)
+		var setup map[string]any
+		decodeResponse(t, setupRec, &setup)
+		secret, _ := setup["secret"].(string)
+		enableRec := assertStatus(t, handler, http.MethodPost, "/api/auth/mfa/enable", map[string]any{
+			"secret":   secret,
+			"mfa_code": totpCode(secret, time.Now().UTC()),
+		}, adminCookie, http.StatusOK)
+		var enabled map[string]any
+		decodeResponse(t, enableRec, &enabled)
+		recoveryCodes := stringSliceFromAny(enabled["recovery_codes"])
+		if len(recoveryCodes) == 0 {
+			t.Fatalf("MFA enable did not return recovery codes: %s", enableRec.Body.String())
+		}
+
+		loginRec := assertStatus(t, handler, http.MethodPost, "/api/auth/login", map[string]any{"username": "admin", "password": "password123"}, nil, http.StatusAccepted)
+		var challenge map[string]any
+		decodeResponse(t, loginRec, &challenge)
+		token, _ := challenge["mfa_token"].(string)
+		if token == "" {
+			t.Fatalf("MFA login did not return challenge: %v", challenge)
+		}
+
+		removeBlocker := blockPlatformItemCreate(t, srv.cfg.Store, "login_logs")
+		completeRec := assertStatus(t, handler, http.MethodPost, "/api/auth/mfa/complete-login", map[string]any{
+			"token":         token,
+			"recovery_code": recoveryCodes[0],
+		}, nil, http.StatusInternalServerError)
+		removeBlocker()
+		if !strings.Contains(completeRec.Body.String(), "persist login log failed") {
+			t.Fatalf("recovery MFA login log failure was not reported: %s", completeRec.Body.String())
+		}
+		if len(completeRec.Result().Cookies()) > 0 {
+			t.Fatalf("recovery MFA completion issued cookies after failed login log write: %#v", completeRec.Result().Cookies())
+		}
+		profile, _, err := srv.cfg.Store.UserMFAProfile(adminUser.ID)
+		if err != nil {
+			t.Fatalf("load MFA profile after failed recovery login: %v", err)
+		}
+		if !profile.Enabled || profile.RecoveryCount != 8 {
+			t.Fatalf("recovery MFA login did not restore consumed code after failed login log: %#v", profile)
+		}
+
+		retryLoginRec := assertStatus(t, handler, http.MethodPost, "/api/auth/login", map[string]any{"username": "admin", "password": "password123"}, nil, http.StatusAccepted)
+		decodeResponse(t, retryLoginRec, &challenge)
+		retryToken, _ := challenge["mfa_token"].(string)
+		retryRec := assertStatus(t, handler, http.MethodPost, "/api/auth/mfa/complete-login", map[string]any{
+			"token":         retryToken,
+			"recovery_code": recoveryCodes[0],
+		}, nil, http.StatusOK)
+		if len(retryRec.Result().Cookies()) == 0 {
+			t.Fatal("restored recovery code did not complete MFA login")
+		}
+		if !coreAuditLogsContainAction(srv.cfg.Store, "auth.login.log.persist_failed") {
+			t.Fatal("recovery MFA login log persistence failure was not written to core audit logs")
+		}
+	})
+}
+
 func TestLoginMFAFailuresAccumulateAcrossPasswordChallenges(t *testing.T) {
 	handler, adminCookie := newTestHandler(t)
 

@@ -522,9 +522,6 @@ func (s *Server) handleWebAssetProxy(w http.ResponseWriter, r *http.Request, ass
 		}
 		stripProxyInternalCookies(req.Out.Header)
 	}
-	recorder := &statusCaptureWriter{ResponseWriter: w, status: http.StatusOK}
-	proxy.ServeHTTP(recorder, r)
-	duration := time.Since(started)
 	metadata := map[string]any{
 		"asset_id":      asset.ID,
 		"asset_name":    asset.Name,
@@ -535,28 +532,52 @@ func (s *Server) handleWebAssetProxy(w http.ResponseWriter, r *http.Request, ass
 		"request_host":  r.Host,
 		"method":        r.Method,
 		"uri":           r.URL.RequestURI(),
-		"status_code":   recorder.status,
-		"response_size": recorder.bytes,
-		"duration_ms":   duration.Milliseconds(),
 		"user_agent":    r.UserAgent(),
 		"referer":       r.Referer(),
 		"upstream":      redactedURLString(target),
+		"started_at":    started.UTC().Format(time.RFC3339Nano),
 	}
 	applyGatewayRouteMetadata(metadata, gatewayRoute)
 	if certificateID := webAssetMTLSCertificateID(asset); certificateID != "" {
 		metadata["mtls_certificate_id"] = certificateID
 	}
-	_, _ = s.cfg.Store.CreatePlatformItem("access_logs", model.PlatformItemRequest{
+	accessLog, err := s.createAccessLog(r, model.PlatformItemRequest{
 		Name:        r.Method + " " + r.URL.RequestURI(),
 		Type:        r.Method,
-		Status:      strconv.Itoa(recorder.status),
+		Status:      "pending",
 		Protocol:    model.ProtocolHTTP,
 		OwnerID:     userID,
 		TargetID:    asset.ID,
 		Description: "proxied web asset request",
 		Metadata:    metadata,
 	})
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+
+	if webAssetProxyUpgradeRequest(r) {
+		recorder := &statusCaptureWriter{ResponseWriter: w, status: http.StatusOK}
+		proxy.ServeHTTP(recorder, r)
+		duration := time.Since(started)
+		finalizeWebAccessLogMetadata(metadata, recorder.status, recorder.bytes, duration)
+		_ = s.finalizeAccessLog(r, accessLog, strconv.Itoa(recorder.status), metadata)
+		_ = s.audit(r, "access.web.proxy", asset.ID, model.ProtocolHTTP, "proxied web asset request")
+		return
+	}
+
+	recorder := newBufferedProxyWriter()
+	proxy.ServeHTTP(recorder, r)
+	duration := time.Since(started)
+	finalizeWebAccessLogMetadata(metadata, recorder.statusCode(), recorder.bytes, duration)
+	if err := s.finalizeAccessLog(r, accessLog, strconv.Itoa(recorder.statusCode()), metadata); err != nil {
+		writeError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
 	_ = s.audit(r, "access.web.proxy", asset.ID, model.ProtocolHTTP, "proxied web asset request")
+	if err := recorder.FlushTo(w); err != nil {
+		return
+	}
 }
 
 func (s *Server) rawWebAssetForProxy(w http.ResponseWriter, asset model.PlatformItem) (model.PlatformItem, bool) {
@@ -612,6 +633,104 @@ func (w *statusCaptureWriter) Hijack() (net.Conn, *bufio.ReadWriter, error) {
 
 func (w *statusCaptureWriter) Unwrap() http.ResponseWriter {
 	return w.ResponseWriter
+}
+
+type bufferedProxyWriter struct {
+	header      http.Header
+	status      int
+	wroteHeader bool
+	body        bytes.Buffer
+	bytes       int64
+}
+
+func newBufferedProxyWriter() *bufferedProxyWriter {
+	return &bufferedProxyWriter{header: http.Header{}, status: http.StatusOK}
+}
+
+func (w *bufferedProxyWriter) Header() http.Header {
+	return w.header
+}
+
+func (w *bufferedProxyWriter) WriteHeader(status int) {
+	if w.wroteHeader {
+		return
+	}
+	w.status = status
+	w.wroteHeader = true
+}
+
+func (w *bufferedProxyWriter) Write(payload []byte) (int, error) {
+	if !w.wroteHeader {
+		w.WriteHeader(http.StatusOK)
+	}
+	n, err := w.body.Write(payload)
+	w.bytes += int64(n)
+	return n, err
+}
+
+func (w *bufferedProxyWriter) Flush() {
+}
+
+func (w *bufferedProxyWriter) statusCode() int {
+	if w.status == 0 {
+		return http.StatusOK
+	}
+	return w.status
+}
+
+func (w *bufferedProxyWriter) FlushTo(dst http.ResponseWriter) error {
+	for key, values := range w.header {
+		dst.Header().Del(key)
+		for _, value := range values {
+			dst.Header().Add(key, value)
+		}
+	}
+	dst.WriteHeader(w.statusCode())
+	if w.body.Len() == 0 {
+		return nil
+	}
+	_, err := dst.Write(w.body.Bytes())
+	return err
+}
+
+func finalizeWebAccessLogMetadata(metadata map[string]any, status int, responseSize int64, duration time.Duration) {
+	metadata["status_code"] = status
+	metadata["response_size"] = responseSize
+	metadata["duration_ms"] = duration.Milliseconds()
+	metadata["completed_at"] = time.Now().UTC().Format(time.RFC3339Nano)
+}
+
+func (s *Server) createAccessLog(r *http.Request, req model.PlatformItemRequest) (model.PlatformItem, error) {
+	item, err := s.cfg.Store.CreatePlatformItem("access_logs", req)
+	if err != nil {
+		detail := "persist access log failed: " + err.Error()
+		_ = s.audit(r, "access.log.persist_failed", req.TargetID, req.Protocol, detail)
+		return model.PlatformItem{}, errors.New(detail)
+	}
+	return item, nil
+}
+
+func (s *Server) finalizeAccessLog(r *http.Request, item model.PlatformItem, status string, metadata map[string]any) error {
+	item.Status = status
+	item.Metadata = metadata
+	if _, err := s.cfg.Store.SavePlatformItem("access_logs", item); err != nil {
+		detail := "persist access log failed: " + err.Error()
+		_ = s.audit(r, "access.log.persist_failed", item.TargetID, item.Protocol, detail)
+		return errors.New(detail)
+	}
+	return nil
+}
+
+func webAssetProxyUpgradeRequest(r *http.Request) bool {
+	if strings.TrimSpace(r.Header.Get("Upgrade")) == "" {
+		return false
+	}
+	for _, token := range strings.Split(r.Header.Get("Connection"), ",") {
+		if strings.EqualFold(strings.TrimSpace(token), "upgrade") {
+			return true
+		}
+	}
+	return false
 }
 
 func webAssetAccessDomain(asset model.PlatformItem, target *url.URL) string {

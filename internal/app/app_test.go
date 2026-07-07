@@ -2953,6 +2953,72 @@ func TestWebAssetProxyRequiresAuthorizationAndLogs(t *testing.T) {
 	}
 }
 
+func TestWebAssetProxyAccessLogPersistenceFailures(t *testing.T) {
+	upstreamHits := make(chan string, 4)
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		upstreamHits <- r.URL.Path
+		_, _ = w.Write([]byte("proxied ok"))
+	}))
+	defer upstream.Close()
+
+	srv, adminCookie := newTestServer(t, nil)
+	handler := http.Handler(srv)
+	webRec := assertStatus(t, handler, http.MethodPost, "/api/admin/websites", map[string]any{
+		"name":     "access-log-persistence-web",
+		"type":     "http",
+		"status":   "enabled",
+		"metadata": map[string]any{"target_url": upstream.URL},
+	}, adminCookie, http.StatusCreated)
+	var webAsset model.PlatformItem
+	decodeResponse(t, webRec, &webAsset)
+
+	removeCreateBlocker := blockPlatformItemCreate(t, srv.cfg.Store, "access_logs")
+	createFailureRec := assertStatus(t, handler, http.MethodGet, "/api/access/http/"+webAsset.ID+"/proxy/ok", nil, adminCookie, http.StatusInternalServerError)
+	removeCreateBlocker()
+	if !strings.Contains(createFailureRec.Body.String(), "persist access log failed") {
+		t.Fatalf("access log create failure was not reported: %s", createFailureRec.Body.String())
+	}
+	if strings.Contains(createFailureRec.Body.String(), "proxied ok") {
+		t.Fatalf("proxy returned upstream body after access log create failure: %s", createFailureRec.Body.String())
+	}
+	select {
+	case path := <-upstreamHits:
+		t.Fatalf("upstream was called before access log create succeeded: %s", path)
+	default:
+	}
+
+	removeUpdateBlocker := blockPlatformItemCollectionStatusUpdate(t, srv.cfg.Store, "access_logs", "200")
+	updateFailureRec := assertStatus(t, handler, http.MethodGet, "/api/access/http/"+webAsset.ID+"/proxy/ok", nil, adminCookie, http.StatusInternalServerError)
+	removeUpdateBlocker()
+	if !strings.Contains(updateFailureRec.Body.String(), "persist access log failed") {
+		t.Fatalf("access log update failure was not reported: %s", updateFailureRec.Body.String())
+	}
+	if strings.Contains(updateFailureRec.Body.String(), "proxied ok") {
+		t.Fatalf("proxy returned upstream body after access log update failure: %s", updateFailureRec.Body.String())
+	}
+	select {
+	case path := <-upstreamHits:
+		if path != "/ok" {
+			t.Fatalf("upstream path = %q, want /ok", path)
+		}
+	default:
+		t.Fatal("upstream was not called before access log finalize path")
+	}
+	operationLogsRec := assertStatus(t, handler, http.MethodGet, "/api/admin/audit/operation-logs", nil, adminCookie, http.StatusOK)
+	if !strings.Contains(operationLogsRec.Body.String(), "access.log.persist_failed") {
+		t.Fatalf("access log persistence failure was not audited: %s", operationLogsRec.Body.String())
+	}
+	accessLogsRec := assertStatus(t, handler, http.MethodGet, "/api/admin/audit/access-logs", nil, adminCookie, http.StatusOK)
+	if !strings.Contains(accessLogsRec.Body.String(), `"status":"pending"`) {
+		t.Fatalf("failed access log finalize did not leave a pending access log: %s", accessLogsRec.Body.String())
+	}
+
+	proxyRec := assertStatus(t, handler, http.MethodGet, "/api/access/http/"+webAsset.ID+"/proxy/ok", nil, adminCookie, http.StatusOK)
+	if proxyRec.Body.String() != "proxied ok" {
+		t.Fatalf("proxy response after restoring access log persistence = %q", proxyRec.Body.String())
+	}
+}
+
 func TestWebAssetProxyUsesMTLSCertificate(t *testing.T) {
 	caPEM, clientCertPEM, clientKeyPEM, serverCert := testMTLSMaterials(t)
 	clientCAPool := x509.NewCertPool()
@@ -10914,6 +10980,34 @@ END`
 	if _, err := db.Exec(triggerSQL); err != nil {
 		_ = db.Close()
 		t.Fatalf("create status blocker trigger: %v", err)
+	}
+	return func() {
+		_, _ = db.Exec(`DROP TRIGGER IF EXISTS ` + triggerName)
+		_ = db.Close()
+	}
+}
+
+func blockPlatformItemCollectionStatusUpdate(t *testing.T, st *store.Store, collection, status string) func() {
+	t.Helper()
+	db, err := sql.Open("sqlite", st.DatabasePath())
+	if err != nil {
+		t.Fatalf("open store database for collection status blocker: %v", err)
+	}
+	triggerName := "block_platform_item_collection_status_update"
+	if _, err := db.Exec(`DROP TRIGGER IF EXISTS ` + triggerName); err != nil {
+		_ = db.Close()
+		t.Fatalf("drop stale collection status blocker trigger: %v", err)
+	}
+	statusFragment := `"status":"` + status + `"`
+	triggerSQL := `CREATE TRIGGER ` + triggerName + ` BEFORE INSERT ON platform_records
+WHEN NEW.collection = ` + sqliteTestStringLiteral(collection) + `
+  AND instr(NEW.payload, ` + sqliteTestStringLiteral(statusFragment) + `) > 0
+BEGIN
+  SELECT RAISE(ABORT, 'forced platform item collection status update failure');
+END`
+	if _, err := db.Exec(triggerSQL); err != nil {
+		_ = db.Close()
+		t.Fatalf("create collection status blocker trigger: %v", err)
 	}
 	return func() {
 		_, _ = db.Exec(`DROP TRIGGER IF EXISTS ` + triggerName)

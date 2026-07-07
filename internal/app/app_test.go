@@ -5358,6 +5358,11 @@ func TestExternalLDAPLoginFailureRedactsSecrets(t *testing.T) {
 	if !strings.Contains(loginLogsBody, `"type":"ldap"`) || !strings.Contains(loginLogsBody, "[redacted]") {
 		t.Fatalf("ldap login log missing redacted ldap failure: %s", loginLogsBody)
 	}
+	operationLogsRec := assertStatus(t, handler, http.MethodGet, "/api/admin/audit/operation-logs", nil, adminCookie, http.StatusOK)
+	operationLogsBody := operationLogsRec.Body.String()
+	if !strings.Contains(operationLogsBody, "auth.ldap.login_failed") || strings.Contains(operationLogsBody, "directory-secret") || strings.Contains(operationLogsBody, "directory-password") {
+		t.Fatalf("ldap login failure audit missing or leaked secret: %s", operationLogsBody)
+	}
 }
 
 func TestExternalLDAPLoginRejectsAutoCreateDisabledAndDisabledUsers(t *testing.T) {

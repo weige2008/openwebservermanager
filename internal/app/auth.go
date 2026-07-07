@@ -661,13 +661,7 @@ func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
 			if errors.Is(err, errExternalLDAPUserDisabled) || errors.Is(err, errExternalLDAPUserNotAllowed) {
 				status = http.StatusForbidden
 			}
-			_, _ = s.cfg.Store.CreatePlatformItem("login_logs", model.PlatformItemRequest{
-				Name:        username,
-				Type:        "ldap",
-				Status:      "failed",
-				Description: err.Error(),
-				Metadata:    map[string]any{"client_ip": clientIP, "account": username, "provider_id": providerID},
-			})
+			s.recordExternalLDAPLoginFailure(r, username, providerID, err)
 			writeError(w, status, err.Error())
 			return
 		}
@@ -716,6 +710,21 @@ func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
 		Metadata:    map[string]any{"client_ip": clientIP, "account": username},
 	})
 	writeJSON(w, http.StatusOK, map[string]any{"user": s.authUserPayload(session)})
+}
+
+func (s *Server) recordExternalLDAPLoginFailure(r *http.Request, username, providerID string, err error) {
+	detail := "external ldap login failed"
+	if err != nil {
+		detail = err.Error()
+	}
+	_, _ = s.cfg.Store.CreatePlatformItem("login_logs", model.PlatformItemRequest{
+		Name:        username,
+		Type:        "ldap",
+		Status:      "failed",
+		Description: detail,
+		Metadata:    map[string]any{"client_ip": s.clientIP(r), "account": username, "provider_id": providerID},
+	})
+	_ = s.audit(r, "auth.ldap.login_failed", providerID, "ldap", detail)
 }
 
 func (s *Server) handleLogout(w http.ResponseWriter, r *http.Request) {

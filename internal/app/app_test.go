@@ -4077,6 +4077,52 @@ func TestTOTPLoginMFASetupChallengeRecoveryAndDisable(t *testing.T) {
 	assertStatus(t, handler, http.MethodPost, "/api/auth/login", map[string]any{"username": "admin", "password": "password123"}, nil, http.StatusOK)
 }
 
+func TestLoginMFAFailuresAccumulateAcrossPasswordChallenges(t *testing.T) {
+	handler, adminCookie := newTestHandler(t)
+
+	setupRec := assertStatus(t, handler, http.MethodPost, "/api/auth/mfa/setup", nil, adminCookie, http.StatusOK)
+	var setup map[string]any
+	decodeResponse(t, setupRec, &setup)
+	secret, _ := setup["secret"].(string)
+	if secret == "" {
+		t.Fatal("MFA setup did not return secret")
+	}
+	assertStatus(t, handler, http.MethodPost, "/api/auth/mfa/enable", map[string]any{
+		"secret":   secret,
+		"mfa_code": totpCode(secret, time.Now().UTC()),
+	}, adminCookie, http.StatusOK)
+	assertStatus(t, handler, http.MethodPost, "/api/admin/system-settings", map[string]any{
+		"name":   "MFA lock policy",
+		"type":   "security",
+		"status": "enabled",
+		"metadata": map[string]any{
+			"login_failure_threshold":      2,
+			"login_failure_window_minutes": 30,
+			"login_lock_minutes":           5,
+		},
+	}, adminCookie, http.StatusCreated)
+
+	for attempt := 0; attempt < 2; attempt++ {
+		loginRec := assertStatus(t, handler, http.MethodPost, "/api/auth/login", map[string]any{"username": "admin", "password": "password123"}, nil, http.StatusAccepted)
+		var challenge map[string]any
+		decodeResponse(t, loginRec, &challenge)
+		token, _ := challenge["mfa_token"].(string)
+		if token == "" {
+			t.Fatalf("login attempt %d did not return MFA token: %v", attempt+1, challenge)
+		}
+		assertStatus(t, handler, http.MethodPost, "/api/auth/mfa/complete-login", map[string]any{"token": token, "mfa_code": "000000"}, nil, http.StatusUnauthorized)
+	}
+
+	lockedRec := assertStatus(t, handler, http.MethodPost, "/api/auth/login", map[string]any{"username": "admin", "password": "password123"}, nil, http.StatusTooManyRequests)
+	if lockedRec.Result().Header.Get("Retry-After") == "" {
+		t.Fatal("MFA failure lock response did not include Retry-After")
+	}
+	locksRec := assertStatus(t, handler, http.MethodGet, "/api/admin/login-locked", nil, adminCookie, http.StatusOK)
+	if !strings.Contains(locksRec.Body.String(), "admin") || !strings.Contains(locksRec.Body.String(), `"failure_count":2`) {
+		t.Fatalf("MFA failures did not create expected login lock: %s", locksRec.Body.String())
+	}
+}
+
 func TestForcedMFAEnrollmentDuringLogin(t *testing.T) {
 	handler, adminCookie := newTestHandler(t)
 

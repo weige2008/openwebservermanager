@@ -690,7 +690,6 @@ func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusUnauthorized, "invalid username or password")
 		return
 	}
-	s.auth.resetLoginFailures(failureKey)
 
 	if proceed, handled := s.handleLoginMFA(w, r, admin, username, clientIP, failureKey, req); handled {
 		return
@@ -698,6 +697,7 @@ func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	s.auth.resetLoginFailures(failureKey)
 	token, session, err := s.auth.create(admin)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, err.Error())

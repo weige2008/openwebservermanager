@@ -795,7 +795,10 @@ func rewriteWebAssetProxyText(body string, target *url.URL, proxyBasePath string
 	rewritten := rewriteWebAssetProxyQuotedURLs(body, target, proxyBasePath)
 	rewritten = rewriteWebAssetProxySrcsetURLs(rewritten, target, proxyBasePath)
 	rewritten = rewriteWebAssetProxyMetaRefreshURLs(rewritten, target, proxyBasePath)
-	return rewriteWebAssetProxyCSSURLs(rewritten, target, proxyBasePath)
+	rewritten = rewriteWebAssetProxyCSSURLs(rewritten, target, proxyBasePath)
+	rewritten = rewriteWebAssetProxyCSSImports(rewritten, target, proxyBasePath)
+	rewritten = rewriteWebAssetProxyModuleSpecifiers(rewritten, target, proxyBasePath)
+	return rewriteWebAssetProxyScriptCallURLs(rewritten, target, proxyBasePath)
 }
 
 func rewriteWebAssetProxyQuotedURLs(body string, target *url.URL, proxyBasePath string) string {
@@ -867,6 +870,137 @@ func rewriteWebAssetProxyCSSURLs(body string, target *url.URL, proxyBasePath str
 		out.WriteString(suffixWhitespace)
 		out.WriteByte(')')
 		cursor = valueEnd + 1
+	}
+}
+
+func rewriteWebAssetProxyCSSImports(body string, target *url.URL, proxyBasePath string) string {
+	var out strings.Builder
+	cursor := 0
+	lower := strings.ToLower(body)
+	for {
+		index := strings.Index(lower[cursor:], "@import")
+		if index < 0 {
+			out.WriteString(body[cursor:])
+			return out.String()
+		}
+		index += cursor
+		valueStart := skipASCIISpace(body, index+len("@import"))
+		if valueStart >= len(body) || (body[valueStart] != '\'' && body[valueStart] != '"') {
+			out.WriteString(body[cursor : index+len("@import")])
+			cursor = index + len("@import")
+			continue
+		}
+		quote := body[valueStart]
+		valueEnd := strings.IndexByte(body[valueStart+1:], quote)
+		if valueEnd < 0 {
+			out.WriteString(body[cursor:])
+			return out.String()
+		}
+		valueEnd += valueStart + 1
+		out.WriteString(body[cursor : valueStart+1])
+		out.WriteString(rewriteWebAssetProxyURLValue(body[valueStart+1:valueEnd], target, proxyBasePath))
+		cursor = valueEnd
+	}
+}
+
+func rewriteWebAssetProxyModuleSpecifiers(body string, target *url.URL, proxyBasePath string) string {
+	for _, keyword := range []string{"from", "import"} {
+		body = rewriteWebAssetProxyKeywordStringURLs(body, keyword, target, proxyBasePath)
+	}
+	return body
+}
+
+func rewriteWebAssetProxyKeywordStringURLs(body, keyword string, target *url.URL, proxyBasePath string) string {
+	var out strings.Builder
+	cursor := 0
+	for {
+		index := strings.Index(body[cursor:], keyword)
+		if index < 0 {
+			out.WriteString(body[cursor:])
+			return out.String()
+		}
+		index += cursor
+		afterKeyword := index + len(keyword)
+		if !webAssetTokenBoundary(body, index, afterKeyword) {
+			out.WriteString(body[cursor:afterKeyword])
+			cursor = afterKeyword
+			continue
+		}
+		valueStart := skipASCIISpace(body, afterKeyword)
+		if valueStart >= len(body) || (body[valueStart] != '\'' && body[valueStart] != '"') {
+			out.WriteString(body[cursor:afterKeyword])
+			cursor = afterKeyword
+			continue
+		}
+		quote := body[valueStart]
+		valueEnd := strings.IndexByte(body[valueStart+1:], quote)
+		if valueEnd < 0 {
+			out.WriteString(body[cursor:])
+			return out.String()
+		}
+		valueEnd += valueStart + 1
+		out.WriteString(body[cursor : valueStart+1])
+		out.WriteString(rewriteWebAssetProxyURLValue(body[valueStart+1:valueEnd], target, proxyBasePath))
+		cursor = valueEnd
+	}
+}
+
+func rewriteWebAssetProxyScriptCallURLs(body string, target *url.URL, proxyBasePath string) string {
+	for _, token := range []string{
+		"fetch",
+		"import",
+		"EventSource",
+		"WebSocket",
+		"Worker",
+		"SharedWorker",
+		"navigator.sendBeacon",
+		"window.open",
+		"location.assign",
+		"location.replace",
+	} {
+		body = rewriteWebAssetProxyFunctionCallURLs(body, token, target, proxyBasePath)
+	}
+	return body
+}
+
+func rewriteWebAssetProxyFunctionCallURLs(body, token string, target *url.URL, proxyBasePath string) string {
+	var out strings.Builder
+	cursor := 0
+	for {
+		index := strings.Index(body[cursor:], token)
+		if index < 0 {
+			out.WriteString(body[cursor:])
+			return out.String()
+		}
+		index += cursor
+		afterToken := index + len(token)
+		if !webAssetTokenBoundary(body, index, afterToken) {
+			out.WriteString(body[cursor:afterToken])
+			cursor = afterToken
+			continue
+		}
+		openParen := skipASCIISpace(body, afterToken)
+		if openParen >= len(body) || body[openParen] != '(' {
+			out.WriteString(body[cursor:afterToken])
+			cursor = afterToken
+			continue
+		}
+		valueStart := skipASCIISpace(body, openParen+1)
+		if valueStart >= len(body) || (body[valueStart] != '\'' && body[valueStart] != '"') {
+			out.WriteString(body[cursor : openParen+1])
+			cursor = openParen + 1
+			continue
+		}
+		quote := body[valueStart]
+		valueEnd := strings.IndexByte(body[valueStart+1:], quote)
+		if valueEnd < 0 {
+			out.WriteString(body[cursor:])
+			return out.String()
+		}
+		valueEnd += valueStart + 1
+		out.WriteString(body[cursor : valueStart+1])
+		out.WriteString(rewriteWebAssetProxyURLValue(body[valueStart+1:valueEnd], target, proxyBasePath))
+		cursor = valueEnd
 	}
 }
 
@@ -978,6 +1112,12 @@ func rewriteWebAssetProxyURLValue(raw string, target *url.URL, proxyBasePath str
 	if trimmed == "" || strings.HasPrefix(trimmed, "#") || strings.HasPrefix(trimmed, "{{") {
 		return raw
 	}
+	normalizedProxyBase := strings.TrimRight(proxyBasePath, "/")
+	if normalizedProxyBase != "" && normalizedProxyBase != "/" {
+		if trimmed == normalizedProxyBase || strings.HasPrefix(trimmed, normalizedProxyBase+"/") || strings.HasPrefix(trimmed, normalizedProxyBase+"?") {
+			return raw
+		}
+	}
 	lower := strings.ToLower(trimmed)
 	for _, prefix := range []string{"mailto:", "tel:", "javascript:", "data:", "blob:", "about:"} {
 		if strings.HasPrefix(lower, prefix) {
@@ -993,7 +1133,7 @@ func rewriteWebAssetProxyURLValue(raw string, target *url.URL, proxyBasePath str
 		return raw
 	}
 	if parsed.IsAbs() {
-		if !sameURLOrigin(parsed, target) {
+		if !sameWebAssetProxyOrigin(parsed, target) {
 			return raw
 		}
 		return webAssetProxyURLForParsed(parsed, target, proxyBasePath)
@@ -1002,6 +1142,27 @@ func rewriteWebAssetProxyURLValue(raw string, target *url.URL, proxyBasePath str
 		return webAssetProxyURLForParsed(parsed, target, proxyBasePath)
 	}
 	return raw
+}
+
+func sameWebAssetProxyOrigin(left, target *url.URL) bool {
+	if left == nil || target == nil {
+		return false
+	}
+	if !strings.EqualFold(canonicalHost(left.Host), canonicalHost(target.Host)) {
+		return false
+	}
+	return webAssetProxySchemeFamily(left.Scheme) == webAssetProxySchemeFamily(target.Scheme)
+}
+
+func webAssetProxySchemeFamily(scheme string) string {
+	switch strings.ToLower(scheme) {
+	case "http", "ws":
+		return "http"
+	case "https", "wss":
+		return "https"
+	default:
+		return strings.ToLower(scheme)
+	}
 }
 
 func webAssetProxyURLForParsed(parsed, target *url.URL, proxyBasePath string) string {
@@ -1037,6 +1198,27 @@ func isASCIISpace(value byte) bool {
 	default:
 		return false
 	}
+}
+
+func skipASCIISpace(value string, index int) int {
+	for index < len(value) && isASCIISpace(value[index]) {
+		index++
+	}
+	return index
+}
+
+func webAssetTokenBoundary(value string, start int, end int) bool {
+	if start > 0 && isWebAssetIdentifierByte(value[start-1]) {
+		return false
+	}
+	if end < len(value) && isWebAssetIdentifierByte(value[end]) {
+		return false
+	}
+	return true
+}
+
+func isWebAssetIdentifierByte(value byte) bool {
+	return (value >= 'a' && value <= 'z') || (value >= 'A' && value <= 'Z') || (value >= '0' && value <= '9') || value == '_' || value == '$'
 }
 
 func rewriteWebAssetLocation(resp *http.Response, target *url.URL, proxyBasePath string) {

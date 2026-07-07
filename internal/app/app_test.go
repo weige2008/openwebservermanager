@@ -2472,7 +2472,21 @@ func TestWebAssetProxyRequiresAuthorizationAndLogs(t *testing.T) {
 			body := `<html><head>` +
 				`<meta http-equiv="refresh" content="0; url=/root/refresh-login">` +
 				`<script src="/static/app.js"></script>` +
-				`<style>.hero{background:url('/root/assets/bg.png')}.external{background:url("https://cdn.example.test/bg.png")}</style>` +
+				`<style>@import "/root/styles/theme.css";.hero{background:url('/root/assets/bg.png')}.external{background:url("https://cdn.example.test/bg.png")}</style>` +
+				`<script type="module">` +
+				`import boot from "/root/modules/boot.js";` +
+				`import "/root/modules/side-effect.js";` +
+				`export { boot as default } from "http://` + r.Host + `/root/modules/export.js";` +
+				`const lazy = import('/root/modules/lazy.js');` +
+				`fetch("/root/api/data?x=1");` +
+				`new EventSource('/root/events');` +
+				`new WebSocket('ws://` + r.Host + `/root/socket');` +
+				`new Worker("/root/worker.js");` +
+				`navigator.sendBeacon('/root/beacon');` +
+				`window.open('/root/popout');` +
+				`location.assign("/root/next");` +
+				`fetch("https://cdn.example.test/api");` +
+				`</script>` +
 				`</head><body>` +
 				`<img srcset="/root/img-small.png 480w, http://` + r.Host + `/root/img-large.png 960w, https://cdn.example.test/img.png 2x, data:image/png;base64,abc 1x">` +
 				`<a href="/root/dashboard?tab=1">Dashboard</a>` +
@@ -2613,17 +2627,30 @@ func TestWebAssetProxyRequiresAuthorizationAndLogs(t *testing.T) {
 		`href="` + proxyBase + `/dashboard?tab=1"`,
 		`href="` + proxyBase + `/reports"`,
 		`action="` + proxyBase + `/login?next=/root/dashboard"`,
+		`@import "` + proxyBase + `/styles/theme.css"`,
 		`url('` + proxyBase + `/assets/bg.png')`,
 		`content="0; url=` + proxyBase + `/refresh-login"`,
 		`srcset="` + proxyBase + `/img-small.png 480w, ` + proxyBase + `/img-large.png 960w, https://cdn.example.test/img.png 2x, data:image/png;base64,abc 1x"`,
+		`from "` + proxyBase + `/modules/boot.js"`,
+		`import "` + proxyBase + `/modules/side-effect.js"`,
+		`from "` + proxyBase + `/modules/export.js"`,
+		`import('` + proxyBase + `/modules/lazy.js')`,
+		`fetch("` + proxyBase + `/api/data?x=1")`,
+		`new EventSource('` + proxyBase + `/events')`,
+		`new WebSocket('` + proxyBase + `/socket')`,
+		`new Worker("` + proxyBase + `/worker.js")`,
+		`navigator.sendBeacon('` + proxyBase + `/beacon')`,
+		`window.open('` + proxyBase + `/popout')`,
+		`location.assign("` + proxyBase + `/next")`,
 		`href="mailto:ops@example.test"`,
 		`url("https://cdn.example.test/bg.png")`,
+		`fetch("https://cdn.example.test/api")`,
 	} {
 		if !strings.Contains(pageBody, want) {
 			t.Fatalf("rewritten proxy page missing %q: %s", want, pageBody)
 		}
 	}
-	for _, leaked := range []string{`href="/root/dashboard`, `src="/static/app.js"`, `url=/root/refresh-login`, `/root/img-small.png`, upstreamURL.Host + `/root/reports`, upstreamURL.Host + `/root/login`, upstreamURL.Host + `/root/img-large.png`} {
+	for _, leaked := range []string{`href="/root/dashboard`, `src="/static/app.js"`, `url=/root/refresh-login`, `/root/img-small.png`, `@import "/root/styles/theme.css"`, `from "/root/modules`, `import "/root/modules`, `fetch("/root/api`, `EventSource('/root/events`, `WebSocket('ws://` + upstreamURL.Host + `/root/socket`, `Worker("/root/worker`, `sendBeacon('/root/beacon`, `window.open('/root/popout`, `location.assign("/root/next`, upstreamURL.Host + `/root/reports`, upstreamURL.Host + `/root/login`, upstreamURL.Host + `/root/img-large.png`, upstreamURL.Host + `/root/modules/export.js`} {
 		if strings.Contains(pageBody, leaked) {
 			t.Fatalf("rewritten proxy page retained upstream URL %q: %s", leaked, pageBody)
 		}

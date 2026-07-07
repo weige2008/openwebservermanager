@@ -391,10 +391,68 @@ func databaseAssetSQLitePath(dataDir string, asset model.PlatformItem) (string, 
 	if err := ensureChildPath(root, target); err != nil {
 		return "", err
 	}
-	if err := os.MkdirAll(filepath.Dir(target), 0o770); err != nil {
+	if err := ensureRealDatabaseAssetDirectory(root, filepath.Dir(target)); err != nil {
 		return "", err
 	}
 	return target, nil
+}
+
+func ensureRealDatabaseAssetDirectory(root, dir string) error {
+	rootAbs, err := filepath.Abs(root)
+	if err != nil {
+		return err
+	}
+	dirAbs, err := filepath.Abs(dir)
+	if err != nil {
+		return err
+	}
+	relToRoot, err := filepath.Rel(rootAbs, dirAbs)
+	if err != nil {
+		return err
+	}
+	if relToRoot != "." {
+		if err := ensureChildPath(rootAbs, dirAbs); err != nil {
+			return err
+		}
+	}
+	if err := os.MkdirAll(rootAbs, 0o770); err != nil {
+		return err
+	}
+	rootInfo, err := os.Lstat(rootAbs)
+	if err != nil {
+		return err
+	}
+	if !rootInfo.IsDir() {
+		return errors.New("sqlite database path contains a non-directory entry")
+	}
+	if relToRoot == "." {
+		return nil
+	}
+	rel := filepath.Clean(relToRoot)
+	if rel == "." {
+		return nil
+	}
+	current := rootAbs
+	for _, part := range strings.Split(rel, string(filepath.Separator)) {
+		if part == "" || part == "." {
+			continue
+		}
+		current = filepath.Join(current, part)
+		info, err := os.Lstat(current)
+		if errors.Is(err, os.ErrNotExist) {
+			if err := os.Mkdir(current, 0o770); err != nil && !errors.Is(err, os.ErrExist) {
+				return err
+			}
+			info, err = os.Lstat(current)
+		}
+		if err != nil {
+			return err
+		}
+		if !info.IsDir() {
+			return errors.New("sqlite database path contains a non-directory entry")
+		}
+	}
+	return nil
 }
 
 func databaseAssetMySQLDSN(asset model.PlatformItem, secret databaseAssetSecret) (string, error) {

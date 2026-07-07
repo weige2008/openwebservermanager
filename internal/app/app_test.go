@@ -3105,6 +3105,45 @@ func TestDatabaseAssetQueryRequiresAuthorizationAndLogs(t *testing.T) {
 	}
 }
 
+func TestDatabaseAssetSQLiteRejectsSymlinkDirectory(t *testing.T) {
+	dataDir := t.TempDir()
+	handler, adminCookie := newTestServer(t, func(cfg *Config) {
+		cfg.DataDir = dataDir
+	})
+	root := filepath.Join(dataDir, "database-assets")
+	if err := os.MkdirAll(root, 0o770); err != nil {
+		t.Fatalf("create database asset root: %v", err)
+	}
+	externalDir := filepath.Join(t.TempDir(), "external")
+	if err := os.MkdirAll(externalDir, 0o770); err != nil {
+		t.Fatalf("create external dir: %v", err)
+	}
+	linkDir := filepath.Join(root, "linked")
+	if err := os.Symlink(externalDir, linkDir); err != nil {
+		t.Skipf("symlink unavailable: %v", err)
+	}
+
+	databaseRec := assertStatus(t, handler, http.MethodPost, "/api/admin/database-assets", map[string]any{
+		"name":     "symlink-sqlite",
+		"type":     "sqlite",
+		"status":   "enabled",
+		"protocol": "database",
+		"metadata": map[string]any{"sqlite_path": "linked/escape.db"},
+	}, adminCookie, http.StatusCreated)
+	var databaseAsset model.PlatformItem
+	decodeResponse(t, databaseRec, &databaseAsset)
+
+	queryRec := assertStatus(t, handler, http.MethodPost, "/api/access/database/"+databaseAsset.ID+"/query", map[string]any{
+		"sql": "CREATE TABLE escaped(id INTEGER)",
+	}, adminCookie, http.StatusBadRequest)
+	if !strings.Contains(queryRec.Body.String(), "non-directory") {
+		t.Fatalf("symlink sqlite path response did not explain rejection: %s", queryRec.Body.String())
+	}
+	if _, err := os.Stat(filepath.Join(externalDir, "escape.db")); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("sqlite symlink path created or touched external database file: %v", err)
+	}
+}
+
 func TestDatabaseAssetConnectionBuildsExternalDriverDSN(t *testing.T) {
 	mysqlAsset := model.PlatformItem{
 		ID:       "db_mysql",

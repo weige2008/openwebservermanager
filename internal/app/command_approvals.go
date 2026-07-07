@@ -50,6 +50,9 @@ func (s *Server) handleCommandApprovalDecision(w http.ResponseWriter, r *http.Re
 		writeError(w, http.StatusForbidden, "command approval cannot be self-approved")
 		return
 	}
+	if _, _, ok := s.commandApprovalSSHAsset(w, r, approval); !ok {
+		return
+	}
 	nextMetadata := cloneMetadata(approval.Metadata)
 	now := time.Now().UTC()
 	if nextStatus == "approved" {
@@ -104,18 +107,8 @@ func (s *Server) handleCommandApprovalExecute(w http.ResponseWriter, r *http.Req
 		writeError(w, http.StatusBadRequest, "command approval is missing command")
 		return
 	}
-	assetID := commandApprovalAssetID(approval)
-	if assetID == "" {
-		writeError(w, http.StatusBadRequest, "command approval is missing ssh asset")
-		return
-	}
-	asset, ok, err := s.cfg.Store.GetPlatformItem("assets", assetID)
-	if err != nil {
-		writeError(w, http.StatusInternalServerError, err.Error())
-		return
-	}
-	if !ok || asset.Protocol != model.ProtocolSSH || !platformAccessItemEnabled(asset) {
-		writeError(w, http.StatusNotFound, "ssh asset not found")
+	asset, _, ok := s.commandApprovalSSHAsset(w, r, approval)
+	if !ok {
 		return
 	}
 	credentialID := firstMetadataString(approval.Metadata, "credential_id")
@@ -228,4 +221,29 @@ func commandApprovalAssetID(approval model.PlatformItem) string {
 		strings.TrimSpace(approval.TargetID),
 		firstMetadataString(approval.Metadata, "server_id", "asset_id", "target_id"),
 	)
+}
+
+func (s *Server) commandApprovalSSHAsset(w http.ResponseWriter, r *http.Request, approval model.PlatformItem) (model.PlatformItem, string, bool) {
+	assetID := commandApprovalAssetID(approval)
+	if assetID == "" {
+		writeError(w, http.StatusBadRequest, "command approval is missing ssh asset")
+		return model.PlatformItem{}, "", false
+	}
+	platform, err := s.cfg.Store.PlatformBootstrap()
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err.Error())
+		return model.PlatformItem{}, "", false
+	}
+	asset, ok := findAccessAsset(platform, model.ProtocolSSH, assetID)
+	if !ok {
+		writeError(w, http.StatusNotFound, "ssh asset not found")
+		return model.PlatformItem{}, "", false
+	}
+	userID, isAdmin := s.accessUser(r)
+	if !isAccessAuthorized(platform, model.ProtocolSSH, asset.ID, userID, isAdmin) {
+		_ = s.audit(r, "command_approval.asset_access.denied", approval.ID, model.ProtocolSSH, "ssh asset access denied: "+asset.ID)
+		writeError(w, http.StatusForbidden, "ssh asset access denied")
+		return model.PlatformItem{}, "", false
+	}
+	return asset, userID, true
 }

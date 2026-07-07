@@ -1153,6 +1153,16 @@ func TestSSHExecAccessRunsCommandAndLogs(t *testing.T) {
 	}
 	handler, adminCookie := newTestHandler(t)
 
+	assertStatus(t, handler, http.MethodPost, "/api/admin/roles", map[string]any{
+		"name":   "command-approval-reviewer",
+		"type":   "custom",
+		"status": "enabled",
+		"metadata": map[string]any{
+			"api_permissions": []string{
+				"POST /api/admin/command-approvals/*",
+			},
+		},
+	}, adminCookie, http.StatusCreated)
 	userRec := assertStatus(t, handler, http.MethodPost, "/api/admin/users", map[string]any{
 		"name":     "exec-user",
 		"type":     "local",
@@ -1162,6 +1172,13 @@ func TestSSHExecAccessRunsCommandAndLogs(t *testing.T) {
 	}, adminCookie, http.StatusCreated)
 	var user model.PlatformItem
 	decodeResponse(t, userRec, &user)
+	assertStatus(t, handler, http.MethodPost, "/api/admin/users", map[string]any{
+		"name":     "command-limited-approver",
+		"type":     "local",
+		"status":   "enabled",
+		"password": "password123",
+		"metadata": map[string]any{"role": "command-approval-reviewer"},
+	}, adminCookie, http.StatusCreated)
 
 	assetRec := assertStatus(t, handler, http.MethodPost, "/api/admin/assets", map[string]any{
 		"name":     "exec-host",
@@ -1186,6 +1203,8 @@ func TestSSHExecAccessRunsCommandAndLogs(t *testing.T) {
 
 	loginRec := assertStatus(t, handler, http.MethodPost, "/api/auth/login", map[string]any{"username": "exec-user", "password": "password123"}, nil, http.StatusOK)
 	userCookie := loginRec.Result().Cookies()[0]
+	limitedLoginRec := assertStatus(t, handler, http.MethodPost, "/api/auth/login", map[string]any{"username": "command-limited-approver", "password": "password123"}, nil, http.StatusOK)
+	limitedCookie := limitedLoginRec.Result().Cookies()[0]
 	assertStatus(t, handler, http.MethodPost, "/api/access/ssh/"+asset.ID+"/exec", map[string]any{"command": "printf ok"}, userCookie, http.StatusForbidden)
 
 	assertStatus(t, handler, http.MethodPost, "/api/admin/authorizations/assets", map[string]any{
@@ -1248,9 +1267,21 @@ func TestSSHExecAccessRunsCommandAndLogs(t *testing.T) {
 		t.Fatalf("command approval was not listed as pending: %s", commandApprovalsRec.Body.String())
 	}
 	assertStatus(t, handler, http.MethodPost, "/api/admin/command-approvals/"+approvalID+"/execute", map[string]any{}, adminCookie, http.StatusConflict)
+	limitedApproveRec := assertStatus(t, handler, http.MethodPost, "/api/admin/command-approvals/"+approvalID+"/approve", map[string]any{"note": "no asset access"}, limitedCookie, http.StatusForbidden)
+	if !strings.Contains(limitedApproveRec.Body.String(), "ssh asset access denied") {
+		t.Fatalf("limited command approver denial did not explain asset authorization: %s", limitedApproveRec.Body.String())
+	}
+	assetDeniedLogsRec := assertStatus(t, handler, http.MethodGet, "/api/admin/audit/operation-logs", nil, adminCookie, http.StatusOK)
+	if !strings.Contains(assetDeniedLogsRec.Body.String(), "command_approval.asset_access.denied") || !strings.Contains(assetDeniedLogsRec.Body.String(), approvalID) || !strings.Contains(assetDeniedLogsRec.Body.String(), asset.ID) {
+		t.Fatalf("command approval asset denial was not audited: %s", assetDeniedLogsRec.Body.String())
+	}
 	approvedRec := assertStatus(t, handler, http.MethodPost, "/api/admin/command-approvals/"+approvalID+"/approve", map[string]any{"note": "maintenance window approved"}, adminCookie, http.StatusOK)
 	if !strings.Contains(approvedRec.Body.String(), `"status":"approved"`) || !strings.Contains(approvedRec.Body.String(), "maintenance window approved") {
 		t.Fatalf("command approval response did not include approved state: %s", approvedRec.Body.String())
+	}
+	limitedExecuteRec := assertStatus(t, handler, http.MethodPost, "/api/admin/command-approvals/"+approvalID+"/execute", map[string]any{"timeout_seconds": 5}, limitedCookie, http.StatusForbidden)
+	if !strings.Contains(limitedExecuteRec.Body.String(), "ssh asset access denied") {
+		t.Fatalf("limited command executor denial did not explain asset authorization: %s", limitedExecuteRec.Body.String())
 	}
 	approvedExecRec := assertStatus(t, handler, http.MethodPost, "/api/admin/command-approvals/"+approvalID+"/execute", map[string]any{"timeout_seconds": 5}, adminCookie, http.StatusOK)
 	var approvedExecResult map[string]any

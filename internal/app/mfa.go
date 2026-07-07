@@ -225,8 +225,21 @@ func (s *Server) handleMFAEnable(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
+	previous, ok, err := s.userMFASnapshot(session.UserID)
+	if err != nil || !ok {
+		if err == nil {
+			err = fmt.Errorf("user not found")
+		}
+		writeError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
 	profile, err := s.cfg.Store.EnableUserMFA(session.UserID, secret, recoveryCodes)
 	if err != nil {
+		writeError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	if err := s.createMFAOperationLog(r, "auth.mfa.enable", session.UserID, "enabled MFA", nil); err != nil {
+		_, _ = s.cfg.Store.SavePlatformItem("users", previous)
 		writeError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
@@ -249,6 +262,14 @@ func (s *Server) handleMFADisable(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
+	previous, ok, err := s.userMFASnapshot(session.UserID)
+	if err != nil || !ok {
+		if err == nil {
+			err = fmt.Errorf("user not found")
+		}
+		writeError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
 	if profile.Enabled {
 		verified, _, err := s.verifyMFAInput(session.UserID, profile, req.MFACode, req.RecoveryCode)
 		if err != nil {
@@ -261,6 +282,11 @@ func (s *Server) handleMFADisable(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	if err := s.cfg.Store.DisableUserMFA(session.UserID); err != nil {
+		writeError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	if err := s.createMFAOperationLog(r, "auth.mfa.disable", session.UserID, "disabled MFA", nil); err != nil {
+		_, _ = s.cfg.Store.SavePlatformItem("users", previous)
 		writeError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
@@ -287,6 +313,14 @@ func (s *Server) handleMFARegenerateRecoveryCodes(w http.ResponseWriter, r *http
 		writeError(w, http.StatusConflict, "MFA is not enabled")
 		return
 	}
+	previous, ok, err := s.userMFASnapshot(session.UserID)
+	if err != nil || !ok {
+		if err == nil {
+			err = fmt.Errorf("user not found")
+		}
+		writeError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
 	verified, _, err := s.verifyMFAInput(session.UserID, profile, req.MFACode, req.RecoveryCode)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, err.Error())
@@ -306,11 +340,43 @@ func (s *Server) handleMFARegenerateRecoveryCodes(w http.ResponseWriter, r *http
 		writeError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
+	if err := s.createMFAOperationLog(r, "auth.mfa.recovery_codes.regenerate", session.UserID, "regenerated MFA recovery codes", nil); err != nil {
+		_, _ = s.cfg.Store.SavePlatformItem("users", previous)
+		writeError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
 	_ = s.audit(r, "auth.mfa.recovery_codes.regenerate", session.UserID, "", "regenerated MFA recovery codes")
 	writeJSON(w, http.StatusOK, map[string]any{
 		"enabled":        nextProfile.Enabled,
 		"recovery_count": nextProfile.RecoveryCount,
 		"recovery_codes": recoveryCodes,
+	})
+}
+
+func (s *Server) userMFASnapshot(userID string) (model.PlatformItem, bool, error) {
+	item, ok, err := s.cfg.Store.GetPlatformItem("users", userID)
+	if err != nil || !ok {
+		return item, ok, err
+	}
+	item.Metadata = cloneMetadata(item.Metadata)
+	return item, true, nil
+}
+
+func (s *Server) createMFAOperationLog(r *http.Request, name, userID, description string, metadata map[string]any) error {
+	if metadata == nil {
+		metadata = map[string]any{}
+	} else {
+		metadata = cloneMetadata(metadata)
+	}
+	metadata["client_ip"] = s.clientIP(r)
+	return s.createOperationLog(r, model.PlatformItemRequest{
+		Name:        name,
+		Type:        "mfa",
+		Status:      "success",
+		OwnerID:     userID,
+		TargetID:    userID,
+		Description: description,
+		Metadata:    metadata,
 	})
 }
 

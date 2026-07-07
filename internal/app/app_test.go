@@ -4553,6 +4553,95 @@ func TestTOTPLoginMFASetupChallengeRecoveryAndDisable(t *testing.T) {
 	assertStatus(t, handler, http.MethodPost, "/api/auth/login", map[string]any{"username": "admin", "password": "password123"}, nil, http.StatusOK)
 }
 
+func TestMFAOperationLogFailureRollsBackMutations(t *testing.T) {
+	srv, adminCookie := newTestServer(t, nil)
+	handler := http.Handler(srv)
+	adminUser := rawPlatformUserByName(t, srv, "admin")
+	loadAdmin := func() model.PlatformItem {
+		t.Helper()
+		item, ok, err := srv.cfg.Store.GetPlatformItem("users", adminUser.ID)
+		if err != nil || !ok {
+			t.Fatalf("load admin user: ok=%v err=%v", ok, err)
+		}
+		return item
+	}
+	recoveryHashesJSON := func(item model.PlatformItem) string {
+		t.Helper()
+		data, err := json.Marshal(item.Metadata["mfa_recovery_hashes"])
+		if err != nil {
+			t.Fatalf("marshal recovery hashes: %v", err)
+		}
+		return string(data)
+	}
+
+	secret, err := generateTOTPSecret()
+	if err != nil {
+		t.Fatalf("generate TOTP secret: %v", err)
+	}
+	removeEnableBlocker := blockPlatformItemCreate(t, srv.cfg.Store, "operation_logs")
+	enableFailureRec := assertStatus(t, handler, http.MethodPost, "/api/auth/mfa/enable", map[string]any{
+		"secret":   secret,
+		"mfa_code": totpCode(secret, time.Now().UTC()),
+	}, adminCookie, http.StatusInternalServerError)
+	removeEnableBlocker()
+	if !strings.Contains(enableFailureRec.Body.String(), "persist operation log failed") {
+		t.Fatalf("MFA enable operation log failure was not reported: %s", enableFailureRec.Body.String())
+	}
+	profile, _, err := srv.cfg.Store.UserMFAProfile(adminUser.ID)
+	if err != nil {
+		t.Fatalf("load MFA profile after failed enable: %v", err)
+	}
+	if profile.Enabled {
+		t.Fatalf("MFA remained enabled after failed enable operation log: %#v", profile)
+	}
+
+	enableRec := assertStatus(t, handler, http.MethodPost, "/api/auth/mfa/enable", map[string]any{
+		"secret":   secret,
+		"mfa_code": totpCode(secret, time.Now().UTC()),
+	}, adminCookie, http.StatusOK)
+	var enabled map[string]any
+	decodeResponse(t, enableRec, &enabled)
+	if len(stringSliceFromAny(enabled["recovery_codes"])) != 8 {
+		t.Fatalf("successful MFA enable did not return recovery codes: %s", enableRec.Body.String())
+	}
+
+	beforeRecovery := loadAdmin()
+	beforeRecoveryHashes := recoveryHashesJSON(beforeRecovery)
+	removeRecoveryBlocker := blockPlatformItemCreate(t, srv.cfg.Store, "operation_logs")
+	recoveryFailureRec := assertStatus(t, handler, http.MethodPost, "/api/auth/mfa/recovery-codes", map[string]any{
+		"current_password": "password123",
+		"mfa_code":         totpCode(secret, time.Now().UTC()),
+	}, adminCookie, http.StatusInternalServerError)
+	removeRecoveryBlocker()
+	if !strings.Contains(recoveryFailureRec.Body.String(), "persist operation log failed") {
+		t.Fatalf("MFA recovery operation log failure was not reported: %s", recoveryFailureRec.Body.String())
+	}
+	afterRecovery := loadAdmin()
+	if afterRecoveryHashes := recoveryHashesJSON(afterRecovery); afterRecoveryHashes != beforeRecoveryHashes {
+		t.Fatalf("MFA recovery hashes changed after failed operation log: before=%s after=%s", beforeRecoveryHashes, afterRecoveryHashes)
+	}
+
+	removeDisableBlocker := blockPlatformItemCreate(t, srv.cfg.Store, "operation_logs")
+	disableFailureRec := assertStatus(t, handler, http.MethodPost, "/api/auth/mfa/disable", map[string]any{
+		"current_password": "password123",
+		"mfa_code":         totpCode(secret, time.Now().UTC()),
+	}, adminCookie, http.StatusInternalServerError)
+	removeDisableBlocker()
+	if !strings.Contains(disableFailureRec.Body.String(), "persist operation log failed") {
+		t.Fatalf("MFA disable operation log failure was not reported: %s", disableFailureRec.Body.String())
+	}
+	profile, _, err = srv.cfg.Store.UserMFAProfile(adminUser.ID)
+	if err != nil {
+		t.Fatalf("load MFA profile after failed disable: %v", err)
+	}
+	if !profile.Enabled || profile.Secret != secret || profile.RecoveryCount != 8 {
+		t.Fatalf("MFA disable did not restore enabled profile after failed operation log: %#v", profile)
+	}
+	if !coreAuditLogsContainAction(srv.cfg.Store, "operation.log.persist_failed") {
+		t.Fatal("MFA operation log persistence failure was not written to core audit logs")
+	}
+}
+
 func TestLoginMFAFailuresAccumulateAcrossPasswordChallenges(t *testing.T) {
 	handler, adminCookie := newTestHandler(t)
 
@@ -12430,6 +12519,21 @@ func platformUserFromList(t *testing.T, handler http.Handler, adminCookie *http.
 		}
 	}
 	t.Fatalf("user %s not found in user list", userID)
+	return model.PlatformItem{}
+}
+
+func rawPlatformUserByName(t *testing.T, srv *Server, username string) model.PlatformItem {
+	t.Helper()
+	items, err := srv.cfg.Store.ListPlatformItems("users")
+	if err != nil {
+		t.Fatalf("list users: %v", err)
+	}
+	for _, item := range items {
+		if item.Name == username {
+			return item
+		}
+	}
+	t.Fatalf("user %s not found", username)
 	return model.PlatformItem{}
 }
 

@@ -2751,6 +2751,23 @@ func (s *Store) GetServer(id string) (model.Server, bool) {
 	return server, ok
 }
 
+func (s *Store) DeleteServer(id string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	if _, ok := s.state.Servers[id]; !ok {
+		return os.ErrNotExist
+	}
+	delete(s.state.Servers, id)
+	if err := s.saveLocked(); err != nil {
+		return err
+	}
+	if err := s.DeletePlatformItem("assets", id); err != nil && !errors.Is(err, os.ErrNotExist) {
+		return err
+	}
+	return nil
+}
+
 func (s *Store) CreateCredential(credential model.Credential, secret CredentialSecret) (model.CredentialPublic, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -2790,6 +2807,23 @@ func (s *Store) CreateCredential(credential model.Credential, secret CredentialS
 		UpdatedAt:   credential.UpdatedAt,
 	})
 	return credential.Public(), nil
+}
+
+func (s *Store) DeleteCredential(id string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	if _, ok := s.state.Credentials[id]; !ok {
+		return os.ErrNotExist
+	}
+	delete(s.state.Credentials, id)
+	if err := s.saveLocked(); err != nil {
+		return err
+	}
+	if err := s.DeletePlatformItem("credentials", id); err != nil && !errors.Is(err, os.ErrNotExist) {
+		return err
+	}
+	return nil
 }
 
 func (s *Store) GetCredential(id string) (model.Credential, CredentialSecret, bool, error) {

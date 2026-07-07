@@ -318,6 +318,13 @@ func (s *Server) handleCreateServer(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
+	if err := s.createLegacyServerCreateOperationLog(r, server); err != nil {
+		if rollbackErr := s.cfg.Store.DeleteServer(server.ID); rollbackErr != nil && !errors.Is(rollbackErr, os.ErrNotExist) {
+			err = fmt.Errorf("%w; additionally failed to roll back created server: %v", err, rollbackErr)
+		}
+		writeError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
 	_ = s.audit(r, "server.create", server.ID, "", "created server "+server.Name)
 	writeJSON(w, http.StatusCreated, server)
 }
@@ -372,6 +379,13 @@ func (s *Server) handleCreateCredential(w http.ResponseWriter, r *http.Request) 
 		Passphrase: req.Passphrase,
 	})
 	if err != nil {
+		writeError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	if err := s.createLegacyCredentialCreateOperationLog(r, credential); err != nil {
+		if rollbackErr := s.cfg.Store.DeleteCredential(credential.ID); rollbackErr != nil && !errors.Is(rollbackErr, os.ErrNotExist) {
+			err = fmt.Errorf("%w; additionally failed to roll back created credential: %v", err, rollbackErr)
+		}
 		writeError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
@@ -813,6 +827,49 @@ func (s *Server) createOperationLog(r *http.Request, req model.PlatformItemReque
 	return nil
 }
 
+func (s *Server) createLegacyServerCreateOperationLog(r *http.Request, server model.Server) error {
+	return s.createOperationLog(r, model.PlatformItemRequest{
+		Name:        "server.create",
+		Type:        "server",
+		Status:      "success",
+		Protocol:    legacyServerProtocol(server),
+		TargetID:    server.ID,
+		OwnerID:     s.currentUserID(r),
+		Description: "created server " + server.Name,
+		Metadata: map[string]any{
+			"server_id": server.ID,
+			"host":      server.Host,
+			"ssh_port":  server.SSHPort,
+			"rdp_port":  server.RDPPort,
+			"os":        server.OS,
+			"group":     server.Group,
+			"client_ip": s.clientIP(r),
+			"source":    "legacy_api",
+		},
+	})
+}
+
+func (s *Server) createLegacyCredentialCreateOperationLog(r *http.Request, credential model.CredentialPublic) error {
+	return s.createOperationLog(r, model.PlatformItemRequest{
+		Name:        "credential.create",
+		Type:        "credential",
+		Status:      "success",
+		Protocol:    legacyCredentialProtocol(credential.Type),
+		TargetID:    credential.ID,
+		OwnerID:     s.currentUserID(r),
+		Description: "created credential " + credential.Name,
+		Metadata: map[string]any{
+			"credential_id": credential.ID,
+			"server_id":     credential.ServerID,
+			"type":          credential.Type,
+			"username":      credential.Username,
+			"domain":        credential.Domain,
+			"client_ip":     s.clientIP(r),
+			"source":        "legacy_api",
+		},
+	})
+}
+
 func (s *Server) createSessionLifecycleOperationLog(r *http.Request, name, status, id string, protocol model.Protocol, description string, metadata map[string]any) error {
 	if metadata == nil {
 		metadata = map[string]any{}
@@ -908,6 +965,26 @@ func rollbackCreatedConnectionSessionError(rollbackErr, err error) error {
 		return fmt.Errorf("%w; additionally failed to roll back created session: %v", err, rollbackErr)
 	}
 	return err
+}
+
+func legacyServerProtocol(server model.Server) model.Protocol {
+	if server.OS == model.ServerOSWindows {
+		return model.ProtocolRDP
+	}
+	return model.ProtocolSSH
+}
+
+func legacyCredentialProtocol(credentialType model.CredentialType) model.Protocol {
+	switch credentialType {
+	case model.CredentialRDPPassword:
+		return model.ProtocolRDP
+	case model.CredentialVNCPassword:
+		return model.ProtocolVNC
+	case model.CredentialDatabase:
+		return model.ProtocolDatabase
+	default:
+		return model.ProtocolSSH
+	}
 }
 
 func validateCredentialForServer(credentialType model.CredentialType, server model.Server) error {

@@ -289,6 +289,79 @@ func TestPlatformCollectionOperationLogFailureRollsBackMutations(t *testing.T) {
 	}
 }
 
+func TestLegacyServerCredentialOperationLogFailuresRollBackMutations(t *testing.T) {
+	srv, adminCookie := newTestServer(t, nil)
+	handler := http.Handler(srv)
+
+	removeServerBlocker := blockOperationLogName(t, srv.cfg.Store, "server.create")
+	serverFailureRec := assertStatus(t, handler, http.MethodPost, "/api/servers", map[string]any{
+		"name":     "no-audit-legacy-server",
+		"host":     "192.0.2.55",
+		"os":       "linux",
+		"ssh_port": 22,
+	}, adminCookie, http.StatusInternalServerError)
+	removeServerBlocker()
+	if !strings.Contains(serverFailureRec.Body.String(), "persist operation log failed") {
+		t.Fatalf("legacy server create operation log failure was not reported: %s", serverFailureRec.Body.String())
+	}
+	servers, _, _, _ := srv.cfg.Store.Bootstrap()
+	for _, server := range servers {
+		if server.Name == "no-audit-legacy-server" {
+			t.Fatalf("legacy server create was not rolled back after operation log failure: %#v", server)
+		}
+	}
+
+	serverRec := assertStatus(t, handler, http.MethodPost, "/api/servers", map[string]any{
+		"name":     "audited-legacy-server",
+		"host":     "192.0.2.56",
+		"os":       "linux",
+		"ssh_port": 22,
+	}, adminCookie, http.StatusCreated)
+	var server model.Server
+	decodeResponse(t, serverRec, &server)
+
+	removeCredentialBlocker := blockOperationLogName(t, srv.cfg.Store, "credential.create")
+	credentialFailureRec := assertStatus(t, handler, http.MethodPost, "/api/credentials", map[string]any{
+		"name":        "no-audit-legacy-credential",
+		"server_id":   server.ID,
+		"type":        "ssh_key",
+		"username":    "root",
+		"private_key": "blocked-private-key",
+		"passphrase":  "blocked-passphrase",
+	}, adminCookie, http.StatusInternalServerError)
+	removeCredentialBlocker()
+	if !strings.Contains(credentialFailureRec.Body.String(), "persist operation log failed") {
+		t.Fatalf("legacy credential create operation log failure was not reported: %s", credentialFailureRec.Body.String())
+	}
+	if strings.Contains(credentialFailureRec.Body.String(), "blocked-private-key") || strings.Contains(credentialFailureRec.Body.String(), "blocked-passphrase") {
+		t.Fatalf("legacy credential failure response leaked secret material: %s", credentialFailureRec.Body.String())
+	}
+	_, credentials, _, _ := srv.cfg.Store.Bootstrap()
+	for _, credential := range credentials {
+		if credential.Name == "no-audit-legacy-credential" {
+			t.Fatalf("legacy credential create was not rolled back after operation log failure: %#v", credential)
+		}
+	}
+	if !coreAuditLogsContainAction(srv.cfg.Store, "operation.log.persist_failed") {
+		t.Fatal("legacy server or credential operation log failure was not written to core audit logs")
+	}
+
+	credentialRec := assertStatus(t, handler, http.MethodPost, "/api/credentials", map[string]any{
+		"name":      "audited-legacy-credential",
+		"server_id": server.ID,
+		"type":      "ssh_password",
+		"username":  "root",
+		"password":  "target-secret",
+	}, adminCookie, http.StatusCreated)
+	if strings.Contains(credentialRec.Body.String(), "target-secret") || strings.Contains(credentialRec.Body.String(), "encrypted_password") {
+		t.Fatalf("legacy credential create response leaked secret material: %s", credentialRec.Body.String())
+	}
+	logsRec := assertStatus(t, handler, http.MethodGet, "/api/admin/audit/operation-logs", nil, adminCookie, http.StatusOK)
+	if !strings.Contains(logsRec.Body.String(), "server.create") || !strings.Contains(logsRec.Body.String(), "credential.create") {
+		t.Fatalf("legacy server or credential create was not written to operation logs: %s", logsRec.Body.String())
+	}
+}
+
 func TestAuditLogExportJSONAndCSV(t *testing.T) {
 	handler, adminCookie := newTestHandler(t)
 

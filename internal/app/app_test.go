@@ -1261,7 +1261,7 @@ func TestSSHExecAccessRunsCommandAndLogs(t *testing.T) {
 		t.Fatalf("unexpected denied ssh exec result: %#v", deniedResult)
 	}
 
-	assertStatus(t, handler, http.MethodPost, "/api/admin/command-filters", map[string]any{
+	approvalFilterRec := assertStatus(t, handler, http.MethodPost, "/api/admin/command-filters", map[string]any{
 		"name":      "approve service restart",
 		"type":      "approval",
 		"status":    "enabled",
@@ -1270,6 +1270,8 @@ func TestSSHExecAccessRunsCommandAndLogs(t *testing.T) {
 		"target_id": asset.ID,
 		"metadata":  map[string]any{"pattern": "systemctl restart", "risk": "critical"},
 	}, adminCookie, http.StatusCreated)
+	var approvalFilter model.PlatformItem
+	decodeResponse(t, approvalFilterRec, &approvalFilter)
 	approvalRequiredRec := assertStatus(t, handler, http.MethodPost, "/api/access/ssh/"+asset.ID+"/exec", map[string]any{
 		"command":         "systemctl restart nginx",
 		"credential_id":   credential.ID,
@@ -1302,6 +1304,7 @@ func TestSSHExecAccessRunsCommandAndLogs(t *testing.T) {
 	if !strings.Contains(limitedExecuteRec.Body.String(), "ssh asset access denied") {
 		t.Fatalf("limited command executor denial did not explain asset authorization: %s", limitedExecuteRec.Body.String())
 	}
+	assertStatus(t, handler, http.MethodPatch, "/api/admin/command-filters/"+approvalFilter.ID, map[string]any{"status": "disabled"}, adminCookie, http.StatusOK)
 	approvedExecRec := assertStatus(t, handler, http.MethodPost, "/api/admin/command-approvals/"+approvalID+"/execute", map[string]any{"timeout_seconds": 5}, adminCookie, http.StatusOK)
 	var approvedExecResult map[string]any
 	decodeResponse(t, approvedExecRec, &approvedExecResult)
@@ -1313,9 +1316,42 @@ func TestSSHExecAccessRunsCommandAndLogs(t *testing.T) {
 		t.Fatalf("executed command approval did not persist execution metadata: %s", executedApprovalRec.Body.String())
 	}
 
+	assertStatus(t, handler, http.MethodPatch, "/api/admin/command-filters/"+approvalFilter.ID, map[string]any{"status": "enabled"}, adminCookie, http.StatusOK)
+	blockedApprovalRequiredRec := assertStatus(t, handler, http.MethodPost, "/api/access/ssh/"+asset.ID+"/exec", map[string]any{
+		"command":         "systemctl restart postgresql",
+		"credential_id":   credential.ID,
+		"timeout_seconds": 5,
+	}, userCookie, http.StatusForbidden)
+	var blockedApprovalRequiredResult map[string]any
+	decodeResponse(t, blockedApprovalRequiredRec, &blockedApprovalRequiredResult)
+	blockedApprovalID, _ := blockedApprovalRequiredResult["approval_id"].(string)
+	if blockedApprovalRequiredResult["status"] != "approval_required" || blockedApprovalID == "" {
+		t.Fatalf("unexpected second approval-required ssh exec result: %#v", blockedApprovalRequiredResult)
+	}
+	assertStatus(t, handler, http.MethodPost, "/api/admin/command-approvals/"+blockedApprovalID+"/approve", map[string]any{"note": "approved before deny rule"}, adminCookie, http.StatusOK)
+	assertStatus(t, handler, http.MethodPost, "/api/admin/command-filters", map[string]any{
+		"name":      "deny restarted database",
+		"type":      "deny",
+		"status":    "enabled",
+		"protocol":  "ssh",
+		"owner_id":  user.ID,
+		"target_id": asset.ID,
+		"metadata":  map[string]any{"pattern": "systemctl restart postgresql", "risk": "emergency"},
+	}, adminCookie, http.StatusCreated)
+	blockedApprovedExecRec := assertStatus(t, handler, http.MethodPost, "/api/admin/command-approvals/"+blockedApprovalID+"/execute", map[string]any{"timeout_seconds": 5}, adminCookie, http.StatusForbidden)
+	var blockedApprovedExecResult map[string]any
+	decodeResponse(t, blockedApprovedExecRec, &blockedApprovedExecResult)
+	if blockedApprovedExecResult["status"] != "denied" || blockedApprovedExecResult["approved_execution"] != true || blockedApprovedExecResult["approval_id"] != blockedApprovalID || blockedApprovedExecResult["blocked"] != true {
+		t.Fatalf("approved command was not blocked by later deny rule: %#v", blockedApprovedExecResult)
+	}
+	blockedApprovalRec := assertStatus(t, handler, http.MethodGet, "/api/admin/command-approvals/"+blockedApprovalID, nil, adminCookie, http.StatusOK)
+	if !strings.Contains(blockedApprovalRec.Body.String(), `"status":"denied"`) || !strings.Contains(blockedApprovalRec.Body.String(), `"execution_status":"denied"`) || !strings.Contains(blockedApprovalRec.Body.String(), `"approved_execution":true`) {
+		t.Fatalf("denied approved command did not persist execution metadata: %s", blockedApprovalRec.Body.String())
+	}
+
 	logsRec := assertStatus(t, handler, http.MethodGet, "/api/admin/audit/exec-command-logs", nil, adminCookie, http.StatusOK)
 	logsBody := logsRec.Body.String()
-	for _, want := range []string{"printf ok", "rm -rf /tmp/test", "systemctl restart nginx", `"exit_code":0`, `"risk":"high"`, `"risk":"critical"`, `"interactive":false`, approvalID, `"approved_execution":true`} {
+	for _, want := range []string{"printf ok", "rm -rf /tmp/test", "systemctl restart nginx", "systemctl restart postgresql", `"exit_code":0`, `"risk":"high"`, `"risk":"critical"`, `"risk":"emergency"`, `"interactive":false`, approvalID, blockedApprovalID, `"approved_execution":true`} {
 		if !strings.Contains(logsBody, want) {
 			t.Fatalf("exec command logs missing %s in %s", want, logsBody)
 		}

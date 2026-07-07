@@ -100,6 +100,10 @@ func (i *commandInterceptor) evaluate(command string) commandDecision {
 	if err != nil {
 		return decision
 	}
+	var approvalDecision commandDecision
+	hasApprovalDecision := false
+	var fallbackDecision commandDecision
+	hasFallbackDecision := false
 	for _, filter := range filters {
 		if !commandFilterEnabled(filter) {
 			continue
@@ -111,15 +115,36 @@ func (i *commandInterceptor) evaluate(command string) commandDecision {
 			if !commandMatchesPattern(command, pattern) {
 				continue
 			}
-			decision.Action = commandFilterAction(filter)
-			decision.Risk = commandFilterRisk(filter)
-			decision.RuleID = filter.ID
-			decision.RuleName = filter.Name
-			decision.Pattern = pattern
-			decision.Blocked = commandActionBlocks(decision.Action)
-			decision.Status = commandDecisionStatus(decision.Action, decision.Blocked)
-			return decision
+			matched := commandDecision{
+				Action:   commandFilterAction(filter),
+				Risk:     commandFilterRisk(filter),
+				RuleID:   filter.ID,
+				RuleName: filter.Name,
+				Pattern:  pattern,
+			}
+			matched.Blocked = commandActionBlocks(matched.Action)
+			matched.Status = commandDecisionStatus(matched.Action, matched.Blocked)
+			switch matched.Status {
+			case "denied", "blocked":
+				return matched
+			case "approval_required":
+				if !hasApprovalDecision {
+					approvalDecision = matched
+					hasApprovalDecision = true
+				}
+			default:
+				if !hasFallbackDecision {
+					fallbackDecision = matched
+					hasFallbackDecision = true
+				}
+			}
 		}
+	}
+	if hasApprovalDecision {
+		return approvalDecision
+	}
+	if hasFallbackDecision {
+		return fallbackDecision
 	}
 	return decision
 }

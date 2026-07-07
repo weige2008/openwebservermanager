@@ -972,6 +972,25 @@ func TestPasskeyRegistrationAndLogin(t *testing.T) {
 	badOptions := testPasskeyLoginOptions(t, handler, "admin")
 	badPayload := testPasskeyAssertionPayload(t, badOptions.ChallengeID, badOptions.PublicKey.Challenge, badOptions.PublicKey.RPID, credentialID, privateKey, 3, true)
 	assertStatus(t, handler, http.MethodPost, "/api/auth/passkeys/login/verify", badPayload, nil, http.StatusUnauthorized)
+	validAfterBadPayload := testPasskeyAssertionPayload(t, badOptions.ChallengeID, badOptions.PublicKey.Challenge, badOptions.PublicKey.RPID, credentialID, privateKey, 3, false)
+	validAfterBadRec := assertStatus(t, handler, http.MethodPost, "/api/auth/passkeys/login/verify", validAfterBadPayload, nil, http.StatusUnauthorized)
+	if len(validAfterBadRec.Result().Cookies()) > 0 {
+		t.Fatal("passkey login challenge was reused after failed verification")
+	}
+
+	registerOptionsRec := assertStatus(t, handler, http.MethodPost, "/api/auth/passkeys/register/options", map[string]any{}, adminCookie, http.StatusOK)
+	var registerOptions testPasskeyCreationOptionsResponse
+	decodeResponse(t, registerOptionsRec, &registerOptions)
+	extraPrivateKey, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	if err != nil {
+		t.Fatalf("generate extra passkey key: %v", err)
+	}
+	extraCredentialID := []byte("admin-passkey-extra-credential")
+	badRegisterPayload := testPasskeyRegistrationPayload(t, registerOptions, "admin", extraCredentialID, extraPrivateKey)
+	badRegisterPayload["type"] = "not-public-key"
+	assertStatus(t, handler, http.MethodPost, "/api/auth/passkeys/register/verify", badRegisterPayload, adminCookie, http.StatusBadRequest)
+	validRegisterAfterBad := testPasskeyRegistrationPayload(t, registerOptions, "admin", extraCredentialID, extraPrivateKey)
+	assertStatus(t, handler, http.MethodPost, "/api/auth/passkeys/register/verify", validRegisterAfterBad, adminCookie, http.StatusUnauthorized)
 
 	assertStatus(t, handler, http.MethodPost, "/api/admin/users", map[string]any{
 		"name":     "passkey-user",

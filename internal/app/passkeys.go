@@ -259,6 +259,7 @@ func (s *Server) handlePasskeyRegisterVerify(w http.ResponseWriter, r *http.Requ
 		writeError(w, http.StatusUnauthorized, "passkey registration challenge expired")
 		return
 	}
+	defer s.auth.deletePasskeyRegistrationChallenge(challengeID)
 	if strings.TrimSpace(req.Type) != "" && req.Type != "public-key" {
 		writeError(w, http.StatusBadRequest, "unsupported passkey credential type")
 		return
@@ -326,7 +327,6 @@ func (s *Server) handlePasskeyRegisterVerify(w http.ResponseWriter, r *http.Requ
 		writeError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
-	s.auth.deletePasskeyRegistrationChallenge(challengeID)
 	_ = s.audit(r, "auth.passkey.register", item.ID, "", "registered passkey")
 	writeJSON(w, http.StatusCreated, publicPasskeyItem(item))
 }
@@ -459,13 +459,13 @@ func (s *Server) handlePasskeyLoginVerify(w http.ResponseWriter, r *http.Request
 		writeError(w, http.StatusUnauthorized, "passkey login challenge expired")
 		return
 	}
+	defer s.auth.deletePasskeyLoginChallenge(challengeID)
 	currentUser, ok, err := s.passkeyUserByID(challenge.User.UserID)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
 	if !ok {
-		s.auth.deletePasskeyLoginChallenge(challengeID)
 		s.recordPasskeyLoginFailure(w, r, challenge.Username, challenge.ClientIP, challenge.FailureKey, "passkey account is disabled or no longer exists")
 		return
 	}
@@ -530,7 +530,6 @@ func (s *Server) handlePasskeyLoginVerify(w http.ResponseWriter, r *http.Request
 		writeError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
-	s.auth.deletePasskeyLoginChallenge(challengeID)
 	s.auth.resetLoginFailures(challenge.FailureKey)
 	token, session, err := s.auth.create(challenge.User)
 	if err != nil {

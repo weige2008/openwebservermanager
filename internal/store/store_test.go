@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -170,6 +171,83 @@ func TestRestoreSnapshotRestoresSQLiteCoreRecords(t *testing.T) {
 	}
 }
 
+func TestRestoreSnapshotRejectsDuplicatePlatformRecordsWithoutChangingCoreState(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "openwebservermanager.json")
+	st, err := Open(path, testCipher(t))
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	defer st.Close()
+	if _, err := st.SetupAdmin("old-admin", "password123"); err != nil {
+		t.Fatalf("setup old admin: %v", err)
+	}
+	existingAsset, err := st.CreatePlatformItem("assets", model.PlatformItemRequest{
+		Name:     "existing asset",
+		Type:     "linux",
+		Status:   "enabled",
+		Protocol: model.ProtocolSSH,
+		Host:     "192.0.2.10",
+		Port:     22,
+	})
+	if err != nil {
+		t.Fatalf("create existing platform asset: %v", err)
+	}
+
+	restoreDB := filepath.Join(t.TempDir(), "restore.db")
+	now := time.Now().UTC()
+	restoredState := state{
+		Servers:     map[string]model.Server{},
+		Credentials: map[string]model.Credential{},
+		Sessions:    map[string]model.ConnectionSession{},
+		AuditLogs:   []model.AuditLog{{ID: "audit_restore", UserID: "user_restore", Action: "restore.audit", TargetID: "restore", CreatedAt: now}},
+		Admin:       &AdminAuth{UserID: "user_restore", Username: "restored-admin", PasswordHash: mustPasswordHash(t, "new-password123"), CreatedAt: now, UpdatedAt: now},
+	}
+	writeCoreRestoreDB(t, restoreDB, restoredState)
+	writeDuplicatePlatformRestoreRecords(t, restoreDB)
+
+	_, err = st.RestoreSnapshot(nil, restoreDB)
+	if err == nil || !strings.Contains(err.Error(), "duplicate platform record") {
+		t.Fatalf("restore duplicate platform records err = %v, want duplicate platform record", err)
+	}
+	if _, ok, err := st.VerifyAdmin("old-admin", "password123"); err != nil || !ok {
+		t.Fatalf("old admin should remain valid after failed restore: ok=%v err=%v", ok, err)
+	}
+	if _, ok, err := st.VerifyAdmin("restored-admin", "new-password123"); err != nil || ok {
+		t.Fatalf("restored admin should not become valid after failed restore: ok=%v err=%v", ok, err)
+	}
+	if _, ok, err := st.GetPlatformItem("assets", existingAsset.ID); err != nil || !ok {
+		t.Fatalf("existing platform asset should remain after failed restore: ok=%v err=%v", ok, err)
+	}
+}
+
+func TestRestoreSnapshotRejectsSQLiteCoreRecordsWithoutAdmin(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "openwebservermanager.json")
+	st, err := Open(path, testCipher(t))
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	defer st.Close()
+	if _, err := st.SetupAdmin("old-admin", "password123"); err != nil {
+		t.Fatalf("setup old admin: %v", err)
+	}
+
+	restoreDB := filepath.Join(t.TempDir(), "restore.db")
+	writeCoreRestoreDB(t, restoreDB, state{
+		Servers:     map[string]model.Server{},
+		Credentials: map[string]model.Credential{},
+		Sessions:    map[string]model.ConnectionSession{},
+		AuditLogs:   []model.AuditLog{{ID: "audit_restore", UserID: "user_restore", Action: "restore.audit", TargetID: "restore", CreatedAt: time.Now().UTC()}},
+	})
+
+	_, err = st.RestoreSnapshot(nil, restoreDB)
+	if err == nil || !strings.Contains(err.Error(), "administrator") {
+		t.Fatalf("restore core records without admin err = %v, want administrator error", err)
+	}
+	if _, ok, err := st.VerifyAdmin("old-admin", "password123"); err != nil || !ok {
+		t.Fatalf("old admin should remain valid after rejected restore: ok=%v err=%v", ok, err)
+	}
+}
+
 func testCipher(t *testing.T) *security.Cipher {
 	t.Helper()
 	key := sha256.Sum256([]byte("store-test-key"))
@@ -238,8 +316,50 @@ func writeCoreRestoreDB(t *testing.T, dbPath string, source state) {
 			t.Fatalf("insert core record: %v", err)
 		}
 	}
-	insertCoreRecord("admin", source.Admin.UserID, source.Admin, source.Admin.CreatedAt, source.Admin.UpdatedAt)
+	if source.Admin != nil {
+		insertCoreRecord("admin", source.Admin.UserID, source.Admin, source.Admin.CreatedAt, source.Admin.UpdatedAt)
+	}
 	for _, log := range source.AuditLogs {
 		insertCoreRecord("audit_logs", log.ID, log, log.CreatedAt, log.CreatedAt)
+	}
+}
+
+func writeDuplicatePlatformRestoreRecords(t *testing.T, dbPath string) {
+	t.Helper()
+	db, err := sql.Open("sqlite", dbPath)
+	if err != nil {
+		t.Fatalf("open restore db for platform records: %v", err)
+	}
+	defer db.Close()
+	if _, err := db.Exec(`CREATE TABLE platform_records (
+		collection TEXT NOT NULL,
+		id TEXT NOT NULL,
+		payload TEXT NOT NULL,
+		created_at TEXT NOT NULL,
+		updated_at TEXT NOT NULL
+	)`); err != nil {
+		t.Fatalf("create platform_records: %v", err)
+	}
+	now := time.Now().UTC()
+	item := model.PlatformItem{
+		ID:        "asset_duplicate",
+		Module:    "assets",
+		Name:      "duplicate restore asset",
+		Type:      "linux",
+		Status:    "enabled",
+		Protocol:  model.ProtocolSSH,
+		Host:      "192.0.2.20",
+		Port:      22,
+		CreatedAt: now,
+		UpdatedAt: now,
+	}
+	raw, err := json.Marshal(item)
+	if err != nil {
+		t.Fatalf("marshal duplicate platform item: %v", err)
+	}
+	for i := 0; i < 2; i++ {
+		if _, err := db.Exec(`INSERT INTO platform_records(collection, id, payload, created_at, updated_at) VALUES (?, ?, ?, ?, ?)`, "assets", item.ID, string(raw), now.Format(time.RFC3339Nano), now.Format(time.RFC3339Nano)); err != nil {
+			t.Fatalf("insert duplicate platform record: %v", err)
+		}
 	}
 }

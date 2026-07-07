@@ -1214,6 +1214,9 @@ func (s *Store) RestoreSnapshot(legacyRaw []byte, sqlitePath string) (RestoreSum
 			if err != nil {
 				return RestoreSummary{}, err
 			}
+			if restoredState.Admin == nil || restoredState.Admin.PasswordHash == "" {
+				return RestoreSummary{}, errors.New("backup core records do not contain an administrator")
+			}
 			nextState = &restoredState
 			legacyStateRestored = false
 			coreStateRestored = true
@@ -1289,6 +1292,7 @@ func (s *Store) readPlatformRecordSnapshot(sqlitePath string) ([]platformRecordS
 	}
 	defer rows.Close()
 	allowedCollections := platformCollectionSet()
+	seen := map[string]bool{}
 	records := []platformRecordSnapshot{}
 	for rows.Next() {
 		var record platformRecordSnapshot
@@ -1301,6 +1305,11 @@ func (s *Store) readPlatformRecordSnapshot(sqlitePath string) ([]platformRecordS
 		if record.Collection == "" || record.ID == "" || record.Payload == "" {
 			return nil, errors.New("backup contains an invalid platform record")
 		}
+		key := record.Collection + "\x00" + record.ID
+		if seen[key] {
+			return nil, fmt.Errorf("backup contains duplicate platform record %s/%s", record.Collection, record.ID)
+		}
+		seen[key] = true
 		var item model.PlatformItem
 		if err := json.Unmarshal([]byte(record.Payload), &item); err != nil {
 			return nil, fmt.Errorf("decode backup platform record %s/%s: %w", record.Collection, record.ID, err)
@@ -1333,6 +1342,7 @@ func (s *Store) readCoreRecordSnapshot(sqlitePath string) ([]coreRecordSnapshot,
 		return nil, fmt.Errorf("read core records: %w", err)
 	}
 	defer rows.Close()
+	seen := map[string]bool{}
 	records := []coreRecordSnapshot{}
 	for rows.Next() {
 		var record coreRecordSnapshot
@@ -1342,6 +1352,14 @@ func (s *Store) readCoreRecordSnapshot(sqlitePath string) ([]coreRecordSnapshot,
 		if !allowedCoreRecordKind(record.Kind) {
 			return nil, fmt.Errorf("backup contains unsupported core record kind %q", record.Kind)
 		}
+		if record.Kind == "" || record.ID == "" || record.Payload == "" {
+			return nil, errors.New("backup contains an invalid core record")
+		}
+		key := record.Kind + "\x00" + record.ID
+		if seen[key] {
+			return nil, fmt.Errorf("backup contains duplicate core record %s/%s", record.Kind, record.ID)
+		}
+		seen[key] = true
 		records = append(records, record)
 	}
 	if err := rows.Err(); err != nil {

@@ -61,13 +61,13 @@ const resourceItems: PlatformPageConfig[] = [
   page('/app/credentials', 'credentials', '授权凭证', 'Credentials', '独立凭据库，敏感字段服务端加密保存。', 'Credential vault with server-side encrypted secrets.', KeyRound, '/api/admin/credentials'),
   page('/app/command-snippets', 'command_snippets', '命令片段', 'Command snippets', '维护公开或私有命令片段，供 SSH 终端快速插入。', 'Manage public or private command snippets for SSH terminals.', Code2, '/api/admin/command-snippets'),
   page('/app/storages', 'storages', '存储', 'Storage', '用户文件盘、共享开关、容量限制和文件系统入口。', 'User drives, sharing, quotas, and filesystem entry points.', HardDrive, '/api/admin/storages'),
-  page('/app/web-assets', 'web_assets', 'Web资产', 'Web assets', 'Web 资产域名、目标地址、启用状态和反向代理入口。', 'Web asset domains, upstreams, status, and reverse proxy entry points.', Globe2, '/api/admin/websites'),
+  page('/app/web-assets', 'web_assets', 'Web 资产', 'Web assets', 'Web 资产域名、目标地址、启用状态和反向代理入口。', 'Web asset domains, upstreams, status, and reverse proxy entry points.', Globe2, '/api/admin/websites'),
   page('/app/certificates', 'certificates', '证书管理', 'Certificates', '自签、上传、ACME、DNS 供应商、mTLS 和默认证书管理。', 'Self-signed, uploaded, ACME, DNS provider, mTLS, and default certificate management.', FileKey2, '/api/admin/certificates'),
   page('/app/sql-work-orders', 'sql_work_orders', 'SQL 工单', 'SQL work orders', 'SQL 申请、审批、执行原因、影响行数和执行时间。', 'SQL requests, approvals, reasons, affected rows, and execution time.', ClipboardList, '/api/admin/sql-work-orders'),
 ]
 
 const gatewayItems: PlatformPageConfig[] = [
-  page('/app/ssh-gateways', 'ssh_gateways', 'SSH网关', 'SSH gateways', '原生 SSH 客户端接入、资产选择、直连资产和端口转发白名单。', 'Native SSH client gateway, asset selection, direct connect, and forwarding allowlist.', SquareTerminal, '/api/admin/ssh-gateways'),
+  page('/app/ssh-gateways', 'ssh_gateways', 'SSH 网关', 'SSH gateways', '原生 SSH 客户端接入、资产选择、直连资产和端口转发白名单。', 'Native SSH client gateway, asset selection, direct connect, and forwarding allowlist.', SquareTerminal, '/api/admin/ssh-gateways'),
   page('/app/agent-gateways', 'agent_gateways', '安全网关', 'Secure gateways', 'Agent 注册、通信令牌、延迟、负载和资源指标。', 'Agent registration, tokens, latency, load, and resource metrics.', RadioTower, '/api/admin/agent-gateways'),
   page('/app/gateway-groups', 'gateway_groups', '网关分组', 'Gateway groups', '手动或自动选择网关成员，用于资产接入路由。', 'Manual or automatic gateway member selection for asset routing.', Network, '/api/admin/gateway-groups'),
 ]
@@ -78,7 +78,7 @@ const auditItems: PlatformPageConfig[] = [
   page('/app/exec-command-logs', 'exec_command_logs', '远程命令记录', 'Remote command logs', '记录 SSH exec 非交互命令、结果、退出码、耗时和风险等级。', 'Record SSH exec commands, result, exit code, duration, and risk level.', SquareTerminal, '/api/admin/audit/exec-command-logs'),
   page('/app/file-logs', 'file_logs', '文件日志', 'File logs', '记录上传、下载、删除、重命名等文件操作。', 'Record file upload, download, delete, and rename operations.', FileText, '/api/admin/audit/file-logs'),
   page('/app/access-logs', 'access_logs', '访问日志', 'Access logs', '记录 Web 资产请求方法、URI、状态码、IP、耗时和 User-Agent。', 'Record Web asset method, URI, status, IP, latency, and User-Agent.', ScrollText, '/api/admin/audit/access-logs'),
-  page('/app/access-stats', 'access_stats', '访问日志统计', 'Access stats', 'PV、UV、独立 IP、流量、错误率、热门页面和来源统计。', 'PV, UV, unique IPs, traffic, error rate, top pages, and referrers.', Gauge, '/api/admin/audit/access-stats'),
+  page('/app/access-stats', 'access_stats', '访问统计', 'Access stats', 'PV、UV、独立 IP、流量、错误率、热门页面和来源统计。', 'PV, UV, unique IPs, traffic, error rate, top pages, and referrers.', Gauge, '/api/admin/audit/access-stats'),
   page('/app/login-logs', 'login_logs', '登录日志', 'Login logs', '账号、客户端 IP、登录状态、失败原因、客户端和登录时间。', 'Account, client IP, status, failure reason, client, and login time.', LockKeyhole, '/api/admin/audit/login-logs'),
   page('/app/operation-logs', 'operation_logs', '操作日志', 'Operation logs', '账户、模块、资源、操作类型、状态、请求和客户端。', 'Account, module, resource, action, status, request, and client.', ListChecks, '/api/admin/audit/operation-logs'),
   page('/app/sql-logs', 'sql_logs', 'SQL 日志', 'SQL logs', '数据库资产、用户、来源、状态、耗时、影响行数和 SQL。', 'Database asset, user, source, status, duration, affected rows, and SQL.', Database, '/api/admin/audit/sql-logs'),
@@ -93,7 +93,7 @@ const opsItems: PlatformPageConfig[] = [
 
 const identityItems: PlatformPageConfig[] = [
   page('/app/users', 'users', '用户', 'Users', '用户列表、新建、编辑、删除、启用禁用、导入和登录状态。', 'Users, create/edit/delete, enable/disable, import, and login status.', Users, '/api/admin/users'),
-  page('/app/roles', 'roles', '角色', 'Roles', 'Built-in and custom roles with menu/API permissions.', '内置与自定义角色、菜单/API 权限。', BadgeCheck, '/api/admin/roles'),
+  page('/app/roles', 'roles', '角色', 'Roles', '内置与自定义角色、菜单/API 权限。', 'Built-in and custom roles with menu/API permissions.', BadgeCheck, '/api/admin/roles'),
   page('/app/departments', 'departments', '部门', 'Departments', '表格/树形视图、上级部门、排序和成员数量。', 'Table/tree view, parent department, order, and member count.', Landmark, '/api/admin/departments'),
   page('/app/login-policies', 'login_policies', '登录策略', 'Login policies', 'IP 组、优先级、动作、状态和失效时间。', 'IP groups, priority, action, status, and expiry.', Shield, '/api/admin/login-policies'),
   page('/app/login-locked', 'login_locks', '登录锁定', 'Login locks', 'IP、账号、锁定类型、锁定时间和失效时间。', 'IP, account, lock type, lock time, and expiry.', LockKeyhole, '/api/admin/login-locked'),
@@ -105,7 +105,7 @@ const authzItems: PlatformPageConfig[] = [
   page('/app/command-approvals', 'command_approvals', '命令审批', 'Command approvals', '审批由命令拦截器提交的高风险 SSH 命令，并在批准后执行。', 'Review high-risk SSH commands submitted by command filters and execute them after approval.', ClipboardCheck, '/api/admin/command-approvals'),
   page('/app/authorization-strategies', 'authorization_strategies', '授权策略', 'Authorization strategies', '上传、下载、编辑、删除、重命名、复制和粘贴权限矩阵。', 'Upload, download, edit, delete, rename, copy, and paste permission matrix.', BookText, '/api/admin/strategies'),
   page('/app/authorized-assets', 'authorized_assets', '授权资产', 'Authorized assets', '按用户、部门、资产组和资产授权，支持失效时间。', 'Authorize by user, department, asset group, and asset with expiry.', Server, '/api/admin/authorizations/assets'),
-  page('/app/authorized-web-assets', 'authorized_web_assets', '授权Web资产', 'Authorized Web assets', '按用户、部门、Web 资产组和 Web 资产授权。', 'Authorize Web assets by user, department, and group.', Globe2, '/api/admin/authorizations/websites'),
+  page('/app/authorized-web-assets', 'authorized_web_assets', '授权 Web 资产', 'Authorized Web assets', '按用户、部门、Web 资产组和 Web 资产授权。', 'Authorize Web assets by user, department, and group.', Globe2, '/api/admin/authorizations/websites'),
   page('/app/authorized-database-assets', 'authorized_database_assets', '授权数据库资产', 'Authorized database assets', '按用户、部门和数据库资产授权。', 'Authorize database assets by user and department.', Database, '/api/admin/authorizations/databases'),
 ]
 
@@ -154,7 +154,7 @@ export const platformHomeStats = [
   { key: 'users', labelZh: '用户', labelEn: 'Users', icon: Users },
   { key: 'assets', labelZh: '资产', labelEn: 'Assets', icon: Server },
   { key: 'asset_groups', labelZh: '资产组', labelEn: 'Asset groups', icon: FolderTree },
-  { key: 'web_assets', labelZh: 'Web资产', labelEn: 'Web assets', icon: Globe2 },
+  { key: 'web_assets', labelZh: 'Web 资产', labelEn: 'Web assets', icon: Globe2 },
   { key: 'database_assets', labelZh: '数据库资产', labelEn: 'Database assets', icon: Database },
   { key: 'online_sessions', labelZh: '在线会话', labelEn: 'Online sessions', icon: Activity },
   { key: 'offline_sessions', labelZh: '离线会话', labelEn: 'Offline sessions', icon: Archive },

@@ -1916,6 +1916,127 @@ func TestVNCPlatformAccessCreatesDesktopSession(t *testing.T) {
 	}
 }
 
+func TestConnectionCreateOperationLogFailuresRollbackSessions(t *testing.T) {
+	srv, adminCookie := newTestServer(t, nil)
+	handler := http.Handler(srv)
+
+	linuxRec := assertStatus(t, handler, http.MethodPost, "/api/servers", map[string]any{
+		"name":     "rollback-ssh",
+		"host":     "127.0.0.1",
+		"os":       "linux",
+		"ssh_port": 22,
+	}, adminCookie, http.StatusCreated)
+	var linux model.Server
+	decodeResponse(t, linuxRec, &linux)
+	sshCredRec := assertStatus(t, handler, http.MethodPost, "/api/credentials", map[string]any{
+		"name":      "rollback-ssh-root",
+		"server_id": linux.ID,
+		"type":      "ssh_password",
+		"username":  "root",
+		"password":  "secret",
+	}, adminCookie, http.StatusCreated)
+	var sshCred model.CredentialPublic
+	decodeResponse(t, sshCredRec, &sshCred)
+
+	removeLegacySSHLogBlocker := blockOperationLogName(t, srv.cfg.Store, "connection.ssh.create")
+	legacySSHRec := assertStatus(t, handler, http.MethodPost, "/api/connections/ssh", map[string]any{
+		"server_id":     linux.ID,
+		"credential_id": sshCred.ID,
+	}, adminCookie, http.StatusInternalServerError)
+	removeLegacySSHLogBlocker()
+	if !strings.Contains(legacySSHRec.Body.String(), "persist operation log failed") {
+		t.Fatalf("legacy ssh create operation log failure was not reported: %s", legacySSHRec.Body.String())
+	}
+	if connectionSessionsForTarget(t, srv, linux.ID) != 0 || platformItemsForTarget(t, srv, "online_sessions", linux.ID) != 0 {
+		t.Fatal("legacy ssh create left a session after operation log failure")
+	}
+	if !coreAuditLogsContainAction(srv.cfg.Store, "operation.log.persist_failed") {
+		t.Fatal("legacy ssh create operation log failure was not audited")
+	}
+
+	userRec := assertStatus(t, handler, http.MethodPost, "/api/admin/users", map[string]any{
+		"name":     "connection-create-rollback-user",
+		"type":     "local",
+		"status":   "enabled",
+		"password": "password123",
+		"metadata": map[string]any{"role": "user"},
+	}, adminCookie, http.StatusCreated)
+	var user model.PlatformItem
+	decodeResponse(t, userRec, &user)
+	loginRec := assertStatus(t, handler, http.MethodPost, "/api/auth/login", map[string]any{
+		"username": "connection-create-rollback-user",
+		"password": "password123",
+	}, nil, http.StatusOK)
+	userCookie := loginRec.Result().Cookies()[0]
+
+	vncAssetRec := assertStatus(t, handler, http.MethodPost, "/api/admin/assets", map[string]any{
+		"name":     "rollback-vnc",
+		"type":     "linux-desktop",
+		"status":   "active",
+		"protocol": "vnc",
+		"host":     "127.0.0.1",
+		"port":     5901,
+	}, adminCookie, http.StatusCreated)
+	var vncAsset model.PlatformItem
+	decodeResponse(t, vncAssetRec, &vncAsset)
+	assertStatus(t, handler, http.MethodPost, "/api/admin/credentials", map[string]any{
+		"name":      "rollback-vnc-password",
+		"type":      "vnc_password",
+		"status":    "encrypted",
+		"username":  "operator",
+		"password":  "secret-vnc",
+		"target_id": vncAsset.ID,
+	}, adminCookie, http.StatusCreated)
+	assertStatus(t, handler, http.MethodPost, "/api/admin/authorizations/assets", map[string]any{
+		"name":      "rollback-user vnc",
+		"owner_id":  user.ID,
+		"target_id": vncAsset.ID,
+		"status":    "enabled",
+	}, adminCookie, http.StatusCreated)
+
+	recordingDirBefore := recordingDirCountForTest(t, srv)
+	removeVNCLogBlocker := blockOperationLogName(t, srv.cfg.Store, "connection.vnc.create")
+	vncRec := assertStatus(t, handler, http.MethodPost, "/api/access/vnc/"+vncAsset.ID, map[string]any{
+		"recording_enabled": true,
+	}, userCookie, http.StatusInternalServerError)
+	removeVNCLogBlocker()
+	if !strings.Contains(vncRec.Body.String(), "persist operation log failed") {
+		t.Fatalf("vnc create operation log failure was not reported: %s", vncRec.Body.String())
+	}
+	if connectionSessionsForTarget(t, srv, vncAsset.ID) != 0 || platformItemsForTarget(t, srv, "online_sessions", vncAsset.ID) != 0 {
+		t.Fatal("vnc create left a session after operation log failure")
+	}
+	if got := recordingDirCountForTest(t, srv); got != recordingDirBefore {
+		t.Fatalf("vnc create left recording directories after operation log failure: got %d want %d", got, recordingDirBefore)
+	}
+
+	webAssetRec := assertStatus(t, handler, http.MethodPost, "/api/admin/websites", map[string]any{
+		"name":     "rollback-web",
+		"type":     "http",
+		"status":   "active",
+		"protocol": "http",
+		"host":     "http://127.0.0.1:8080",
+	}, adminCookie, http.StatusCreated)
+	var webAsset model.PlatformItem
+	decodeResponse(t, webAssetRec, &webAsset)
+	assertStatus(t, handler, http.MethodPost, "/api/admin/authorizations/websites", map[string]any{
+		"name":      "rollback-user web",
+		"owner_id":  user.ID,
+		"target_id": webAsset.ID,
+		"status":    "enabled",
+	}, adminCookie, http.StatusCreated)
+
+	removeWebLogBlocker := blockOperationLogName(t, srv.cfg.Store, "access.http.create")
+	webRec := assertStatus(t, handler, http.MethodPost, "/api/access/http/"+webAsset.ID, nil, userCookie, http.StatusInternalServerError)
+	removeWebLogBlocker()
+	if !strings.Contains(webRec.Body.String(), "persist operation log failed") {
+		t.Fatalf("web access create operation log failure was not reported: %s", webRec.Body.String())
+	}
+	if platformItemsForTarget(t, srv, "online_sessions", webAsset.ID) != 0 {
+		t.Fatal("web access create left an online session after operation log failure")
+	}
+}
+
 func TestPlatformConnectionsRejectDisabledAssetsAndCredentialsAtOpen(t *testing.T) {
 	handler, adminCookie := newTestHandler(t)
 	srv := handler.(*Server)
@@ -12851,6 +12972,51 @@ func scheduledTaskLogsForTest(t *testing.T, srv *Server, taskID string) []model.
 		}
 	}
 	return result
+}
+
+func connectionSessionsForTarget(t *testing.T, srv *Server, targetID string) int {
+	t.Helper()
+	_, _, sessions, _ := srv.cfg.Store.Bootstrap()
+	count := 0
+	for _, session := range sessions {
+		if session.ServerID == targetID {
+			count++
+		}
+	}
+	return count
+}
+
+func platformItemsForTarget(t *testing.T, srv *Server, collection, targetID string) int {
+	t.Helper()
+	items, err := srv.cfg.Store.ListPlatformItems(collection)
+	if err != nil {
+		t.Fatalf("list %s: %v", collection, err)
+	}
+	count := 0
+	for _, item := range items {
+		if item.TargetID == targetID {
+			count++
+		}
+	}
+	return count
+}
+
+func recordingDirCountForTest(t *testing.T, srv *Server) int {
+	t.Helper()
+	entries, err := os.ReadDir(filepath.Join(srv.cfg.DataDir, "recordings"))
+	if errors.Is(err, os.ErrNotExist) {
+		return 0
+	}
+	if err != nil {
+		t.Fatalf("read recordings dir: %v", err)
+	}
+	count := 0
+	for _, entry := range entries {
+		if entry.IsDir() {
+			count++
+		}
+	}
+	return count
 }
 
 type fakeLDAPUser struct {

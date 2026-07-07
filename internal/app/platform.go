@@ -548,6 +548,13 @@ func (s *Server) handleAccessAction(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
+	if err := s.createPlatformOnlineSessionCreateOperationLog(r, item, "created access portal session"); err != nil {
+		if rollbackErr := s.cfg.Store.DeletePlatformItem("online_sessions", item.ID); rollbackErr != nil && !errors.Is(rollbackErr, os.ErrNotExist) {
+			err = fmt.Errorf("%w; additionally failed to roll back access portal session: %v", err, rollbackErr)
+		}
+		writeError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
 	_ = s.audit(r, "access."+string(protocol)+".create", item.ID, protocol, "created access portal session")
 	writeJSON(w, http.StatusAccepted, item)
 }

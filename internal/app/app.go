@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"io/fs"
 	"log/slog"
@@ -428,6 +429,11 @@ func (s *Server) handleCreateSSH(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
+	if err := s.createConnectionSessionCreateOperationLog(r, session, "created ssh session"); err != nil {
+		err = rollbackCreatedConnectionSessionError(s.cfg.Store.DeleteSession(session.ID), err)
+		writeError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
 	_ = s.audit(r, "connection.ssh.create", session.ID, model.ProtocolSSH, "created ssh session")
 	writeJSON(w, http.StatusCreated, session)
 }
@@ -520,14 +526,25 @@ func (s *Server) handleCreateRDP(w http.ResponseWriter, r *http.Request) {
 	if req.RecordingEnabled || policy.RecordingEnabled {
 		recordingPath := filepath.Join(s.cfg.DataDir, "recordings", session.ID)
 		if err := os.MkdirAll(recordingPath, 0o770); err != nil {
+			err = rollbackCreatedConnectionSessionError(s.cfg.Store.DeleteSession(session.ID), err)
 			writeError(w, http.StatusInternalServerError, err.Error())
 			return
 		}
 		_ = os.Chmod(recordingPath, 0o770)
-		_, _ = s.cfg.Store.UpdateSession(session.ID, func(item *model.ConnectionSession) {
+		updated, err := s.cfg.Store.UpdateSession(session.ID, func(item *model.ConnectionSession) {
 			item.RecordingPath = recordingPath
 		})
-		session.RecordingPath = recordingPath
+		if err != nil {
+			err = rollbackCreatedConnectionSessionError(s.rollbackCreatedConnectionSession(session.ID, recordingPath), err)
+			writeError(w, http.StatusInternalServerError, err.Error())
+			return
+		}
+		session = updated
+	}
+	if err := s.createConnectionSessionCreateOperationLog(r, session, "created rdp session"); err != nil {
+		err = rollbackCreatedConnectionSessionError(s.rollbackCreatedConnectionSession(session.ID, session.RecordingPath), err)
+		writeError(w, http.StatusInternalServerError, err.Error())
+		return
 	}
 	_ = s.audit(r, "connection.rdp.create", session.ID, model.ProtocolRDP, "created rdp session")
 	writeJSON(w, http.StatusCreated, session)
@@ -804,6 +821,65 @@ func (s *Server) createSessionLifecycleOperationLog(r *http.Request, name, statu
 		Description: description,
 		Metadata:    metadata,
 	})
+}
+
+func (s *Server) createConnectionSessionCreateOperationLog(r *http.Request, session model.ConnectionSession, description string) error {
+	return s.createOperationLog(r, model.PlatformItemRequest{
+		Name:        "connection." + string(session.Protocol) + ".create",
+		Type:        "connection_session",
+		Status:      "success",
+		Protocol:    session.Protocol,
+		TargetID:    session.ID,
+		OwnerID:     s.currentUserID(r),
+		Description: description,
+		Metadata: map[string]any{
+			"session_id":    session.ID,
+			"server_id":     session.ServerID,
+			"credential_id": session.CredentialID,
+			"client_ip":     s.clientIP(r),
+			"width":         session.Width,
+			"height":        session.Height,
+			"dpi":           session.DPI,
+		},
+	})
+}
+
+func (s *Server) createPlatformOnlineSessionCreateOperationLog(r *http.Request, item model.PlatformItem, description string) error {
+	return s.createOperationLog(r, model.PlatformItemRequest{
+		Name:        "access." + string(item.Protocol) + ".create",
+		Type:        "online_session",
+		Status:      "success",
+		Protocol:    item.Protocol,
+		TargetID:    item.ID,
+		OwnerID:     s.currentUserID(r),
+		Description: description,
+		Metadata: map[string]any{
+			"session_id": item.ID,
+			"asset_id":   item.TargetID,
+			"client_ip":  s.clientIP(r),
+			"source":     "access_portal",
+		},
+	})
+}
+
+func (s *Server) rollbackCreatedConnectionSession(sessionID, recordingPath string) error {
+	var errs []error
+	if strings.TrimSpace(recordingPath) != "" {
+		if err := os.RemoveAll(recordingPath); err != nil {
+			errs = append(errs, fmt.Errorf("remove recording path: %w", err))
+		}
+	}
+	if err := s.cfg.Store.DeleteSession(sessionID); err != nil && !errors.Is(err, os.ErrNotExist) {
+		errs = append(errs, err)
+	}
+	return errors.Join(errs...)
+}
+
+func rollbackCreatedConnectionSessionError(rollbackErr, err error) error {
+	if rollbackErr != nil {
+		return fmt.Errorf("%w; additionally failed to roll back created session: %v", err, rollbackErr)
+	}
+	return err
 }
 
 func validateCredentialForServer(credentialType model.CredentialType, server model.Server) error {

@@ -248,14 +248,25 @@ func (s *Server) createPlatformDesktopSession(w http.ResponseWriter, r *http.Req
 	if req.RecordingEnabled || policy.RecordingEnabled {
 		recordingPath := filepath.Join(s.cfg.DataDir, "recordings", session.ID)
 		if err := os.MkdirAll(recordingPath, 0o770); err != nil {
+			err = rollbackCreatedConnectionSessionError(s.cfg.Store.DeleteSession(session.ID), err)
 			writeError(w, http.StatusInternalServerError, err.Error())
 			return
 		}
 		_ = os.Chmod(recordingPath, 0o770)
-		_, _ = s.cfg.Store.UpdateSession(session.ID, func(item *model.ConnectionSession) {
+		updated, err := s.cfg.Store.UpdateSession(session.ID, func(item *model.ConnectionSession) {
 			item.RecordingPath = recordingPath
 		})
-		session.RecordingPath = recordingPath
+		if err != nil {
+			err = rollbackCreatedConnectionSessionError(s.rollbackCreatedConnectionSession(session.ID, recordingPath), err)
+			writeError(w, http.StatusInternalServerError, err.Error())
+			return
+		}
+		session = updated
+	}
+	if err := s.createConnectionSessionCreateOperationLog(r, session, "created "+string(protocol)+" session"); err != nil {
+		err = rollbackCreatedConnectionSessionError(s.rollbackCreatedConnectionSession(session.ID, session.RecordingPath), err)
+		writeError(w, http.StatusInternalServerError, err.Error())
+		return
 	}
 	_ = s.audit(r, "connection."+string(protocol)+".create", session.ID, protocol, "created "+string(protocol)+" session")
 	writeJSON(w, statusCode, session)
@@ -313,6 +324,11 @@ func (s *Server) createPlatformSSHSession(w http.ResponseWriter, r *http.Request
 	applyGatewayRouteSession(&sessionRequest, gatewayRoute)
 	session, err := s.cfg.Store.CreateSession(sessionRequest)
 	if err != nil {
+		writeError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	if err := s.createConnectionSessionCreateOperationLog(r, session, "created ssh session"); err != nil {
+		err = rollbackCreatedConnectionSessionError(s.cfg.Store.DeleteSession(session.ID), err)
 		writeError(w, http.StatusInternalServerError, err.Error())
 		return
 	}

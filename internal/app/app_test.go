@@ -4021,6 +4021,19 @@ func TestTOTPLoginMFASetupChallengeRecoveryAndDisable(t *testing.T) {
 		t.Fatalf("login did not return MFA challenge: %v", challenge)
 	}
 	assertStatus(t, handler, http.MethodPost, "/api/auth/mfa/complete-login", map[string]any{"token": token, "mfa_code": "000000"}, nil, http.StatusUnauthorized)
+	reusedAfterFailureRec := assertStatus(t, handler, http.MethodPost, "/api/auth/mfa/complete-login", map[string]any{
+		"token":    token,
+		"mfa_code": totpCode(secret, time.Now().UTC()),
+	}, nil, http.StatusUnauthorized)
+	if len(reusedAfterFailureRec.Result().Cookies()) > 0 {
+		t.Fatal("failed MFA challenge token was reused to create a session")
+	}
+	loginChallengeRec = assertStatus(t, handler, http.MethodPost, "/api/auth/login", map[string]any{"username": "admin", "password": "password123"}, nil, http.StatusAccepted)
+	decodeResponse(t, loginChallengeRec, &challenge)
+	token, _ = challenge["mfa_token"].(string)
+	if token == "" || challenge["mfa_required"] != true {
+		t.Fatalf("second login did not return MFA challenge: %v", challenge)
+	}
 	completeRec := assertStatus(t, handler, http.MethodPost, "/api/auth/mfa/complete-login", map[string]any{
 		"token":    token,
 		"mfa_code": totpCode(secret, time.Now().UTC()),

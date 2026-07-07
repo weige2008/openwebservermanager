@@ -91,13 +91,13 @@ func (s *Server) handleMFACompleteLogin(w http.ResponseWriter, r *http.Request) 
 		writeError(w, http.StatusUnauthorized, "MFA challenge expired")
 		return
 	}
+	defer s.auth.deleteMFAChallenge(token)
 	currentUser, userOK, err := s.authUserByID(challenge.User.UserID)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
 	if !userOK {
-		s.auth.deleteMFAChallenge(token)
 		s.recordMFAFailure(w, r, challenge.Username, challenge.ClientIP, challenge.FailureKey, "MFA account is disabled or no longer exists")
 		return
 	}
@@ -140,7 +140,6 @@ func (s *Server) handleMFACompleteLogin(w http.ResponseWriter, r *http.Request) 
 		_ = s.audit(r, "auth.mfa.verify", challenge.User.UserID, "", "verified login MFA with "+method)
 	}
 
-	s.auth.deleteMFAChallenge(token)
 	s.auth.resetLoginFailures(challenge.FailureKey)
 	authToken, session, err := s.auth.create(challenge.User)
 	if err != nil {

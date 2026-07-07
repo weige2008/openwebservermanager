@@ -1186,6 +1186,9 @@ func (s *Server) handleStorageList(w http.ResponseWriter, r *http.Request, root 
 	if !s.requireStorageListPermission(w, r, storage.ID, rel) {
 		return
 	}
+	if !s.requireExistingStorageDirectory(w, root, dirPath) {
+		return
+	}
 	entries, err := os.ReadDir(dirPath)
 	if err != nil {
 		writeError(w, http.StatusNotFound, "path not found")
@@ -1414,6 +1417,9 @@ func (s *Server) handleStorageDelete(w http.ResponseWriter, r *http.Request, roo
 		writeError(w, http.StatusBadRequest, "cannot delete storage root")
 		return
 	}
+	if !s.requireExistingStorageParentDirectory(w, root, target) {
+		return
+	}
 	if !s.requireStorageTreePermission(w, r, storage.ID, "delete", target, rel) {
 		return
 	}
@@ -1436,6 +1442,9 @@ func (s *Server) handleStorageDelete(w http.ResponseWriter, r *http.Request, roo
 func (s *Server) handleStorageDownload(w http.ResponseWriter, r *http.Request, root, storageID string) {
 	target, rel, ok := s.storagePath(w, r, root, r.URL.Query().Get("path"))
 	if !ok {
+		return
+	}
+	if !s.requireExistingStorageParentDirectory(w, root, target) {
 		return
 	}
 	info, err := regularStorageFileInfo(target)
@@ -1478,6 +1487,9 @@ func (s *Server) handleStorageRename(w http.ResponseWriter, r *http.Request, roo
 	}
 	if sourceRel == "." || destinationRel == "." || strings.TrimSpace(req.Destination) == "" {
 		writeError(w, http.StatusBadRequest, "source and destination are required")
+		return
+	}
+	if !s.requireExistingStorageParentDirectory(w, root, source) {
 		return
 	}
 	sourceInfo, err := os.Lstat(source)
@@ -1561,6 +1573,9 @@ func (s *Server) handleStorageCopy(w http.ResponseWriter, r *http.Request, root 
 	}
 	if sourceRel == "." || destinationRel == "." || strings.TrimSpace(req.Destination) == "" {
 		writeError(w, http.StatusBadRequest, "source and destination are required")
+		return
+	}
+	if !s.requireExistingStorageParentDirectory(w, root, source) {
 		return
 	}
 	info, err := os.Lstat(source)
@@ -1942,6 +1957,81 @@ func (s *Server) ensureStorageDirectory(w http.ResponseWriter, root, dir string)
 		return false
 	}
 	return true
+}
+
+func (s *Server) requireExistingStorageParentDirectory(w http.ResponseWriter, root, target string) bool {
+	return s.requireExistingStorageDirectory(w, root, filepath.Dir(target))
+}
+
+func (s *Server) requireExistingStorageDirectory(w http.ResponseWriter, root, dir string) bool {
+	if err := ensureExistingRealStorageDirectory(root, dir); err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			writeError(w, http.StatusNotFound, "path not found")
+			return false
+		}
+		if errors.Is(err, errStorageSpecialFile) {
+			writeError(w, http.StatusBadRequest, "storage path contains a non-directory entry")
+			return false
+		}
+		writeError(w, http.StatusInternalServerError, err.Error())
+		return false
+	}
+	return true
+}
+
+func ensureExistingRealStorageDirectory(root, dir string) error {
+	rootAbs, err := filepath.Abs(root)
+	if err != nil {
+		return err
+	}
+	dirAbs, err := filepath.Abs(dir)
+	if err != nil {
+		return err
+	}
+	relToRoot, err := filepath.Rel(rootAbs, dirAbs)
+	if err != nil {
+		return err
+	}
+	if relToRoot != "." {
+		if err := ensureChildPath(rootAbs, dirAbs); err != nil {
+			return err
+		}
+	}
+	rootInfo, exists, err := storagePathInfo(rootAbs)
+	if err != nil {
+		return err
+	}
+	if !exists {
+		return os.ErrNotExist
+	}
+	if !rootInfo.IsDir() {
+		return errStorageSpecialFile
+	}
+	if relToRoot == "." {
+		return nil
+	}
+	rel := filepath.Clean(relToRoot)
+	if rel == "." {
+		return nil
+	}
+	current := rootAbs
+	for _, part := range strings.Split(rel, string(filepath.Separator)) {
+		if part == "" || part == "." {
+			continue
+		}
+		current = filepath.Join(current, part)
+		info, exists, err := storagePathInfo(current)
+		if err != nil {
+			return err
+		}
+		if !exists {
+			return os.ErrNotExist
+		}
+		if !info.IsDir() {
+			return errStorageSpecialFile
+		}
+	}
+	return nil
 }
 
 func ensureRealStorageDirectory(root, dir string) error {

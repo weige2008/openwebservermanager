@@ -8840,6 +8840,10 @@ func TestStorageFileOperationsRejectSymlinkTargets(t *testing.T) {
 	if err := os.MkdirAll(externalDir, 0o770); err != nil {
 		t.Fatalf("create external directory fixture: %v", err)
 	}
+	externalDirFile := filepath.Join(externalDir, "inside.txt")
+	if err := os.WriteFile(externalDirFile, []byte("external dir file"), 0o660); err != nil {
+		t.Fatalf("write external directory file fixture: %v", err)
+	}
 	if err := os.Symlink(externalDir, filepath.Join(root, "linked-dir")); err != nil {
 		t.Fatalf("create directory symlink: %v", err)
 	}
@@ -8858,6 +8862,14 @@ func TestStorageFileOperationsRejectSymlinkTargets(t *testing.T) {
 	assertStatus(t, handler, http.MethodPost, "/api/admin/storages/"+storage.ID+"/files-rename", map[string]any{"path": "linked.txt", "destination": "renamed.txt"}, adminCookie, http.StatusBadRequest)
 	assertStatus(t, handler, http.MethodPost, "/api/admin/storages/"+storage.ID+"/files-copy", map[string]any{"path": "safe.txt", "destination": "destination-link.txt", "overwrite": true}, adminCookie, http.StatusBadRequest)
 	assertStatus(t, handler, http.MethodPost, "/api/admin/storages/"+storage.ID+"/files-rename", map[string]any{"path": "safe.txt", "destination": "destination-link.txt", "overwrite": true}, adminCookie, http.StatusBadRequest)
+	assertStatus(t, handler, http.MethodGet, "/api/admin/storages/"+storage.ID+"/files?path=linked-dir", nil, adminCookie, http.StatusBadRequest)
+	nestedSymlinkDownload := assertStatus(t, handler, http.MethodGet, "/api/admin/storages/"+storage.ID+"/files-download?path=linked-dir/inside.txt", nil, adminCookie, http.StatusBadRequest)
+	if strings.Contains(nestedSymlinkDownload.Body.String(), "external dir file") {
+		t.Fatalf("directory symlink nested download leaked external content: %s", nestedSymlinkDownload.Body.String())
+	}
+	assertStatus(t, handler, http.MethodDelete, "/api/admin/storages/"+storage.ID+"/files?path=linked-dir/inside.txt", nil, adminCookie, http.StatusBadRequest)
+	assertStatus(t, handler, http.MethodPost, "/api/admin/storages/"+storage.ID+"/files-copy", map[string]any{"path": "linked-dir/inside.txt", "destination": "nested-copy.txt"}, adminCookie, http.StatusBadRequest)
+	assertStatus(t, handler, http.MethodPost, "/api/admin/storages/"+storage.ID+"/files-rename", map[string]any{"path": "linked-dir/inside.txt", "destination": "nested-rename.txt"}, adminCookie, http.StatusBadRequest)
 	assertStatus(t, handler, http.MethodPost, "/api/admin/storages/"+storage.ID+"/files-write", map[string]any{"path": "linked-dir/escaped.txt", "content": "escape"}, adminCookie, http.StatusBadRequest)
 	assertMultipartStatus(t, handler, "/api/admin/storages/"+storage.ID+"/files-upload", map[string]string{"path": "linked-dir"}, "escaped-upload.txt", []byte("escape"), adminCookie, http.StatusBadRequest)
 	assertStatus(t, handler, http.MethodPost, "/api/admin/storages/"+storage.ID+"/files-mkdir", map[string]any{"path": "linked-dir/new-dir"}, adminCookie, http.StatusBadRequest)
@@ -8866,7 +8878,10 @@ func TestStorageFileOperationsRejectSymlinkTargets(t *testing.T) {
 	if data, err := os.ReadFile(externalPath); err != nil || string(data) != externalContent {
 		t.Fatalf("external symlink target changed: content=%q err=%v", string(data), err)
 	}
-	for _, name := range []string{"escaped.txt", "escaped-upload.txt", "new-dir", "copied.txt", "renamed.txt"} {
+	if data, err := os.ReadFile(externalDirFile); err != nil || string(data) != "external dir file" {
+		t.Fatalf("external symlink directory file changed: content=%q err=%v", string(data), err)
+	}
+	for _, name := range []string{"escaped.txt", "escaped-upload.txt", "new-dir", "copied.txt", "renamed.txt", "nested-copy.txt", "nested-rename.txt"} {
 		if _, err := os.Stat(filepath.Join(externalDir, name)); !errors.Is(err, os.ErrNotExist) {
 			t.Fatalf("directory symlink operation created %s outside storage: %v", name, err)
 		}
@@ -9327,6 +9342,10 @@ func TestDesktopSessionDriveFiles(t *testing.T) {
 	if err := os.MkdirAll(externalDriveDir, 0o770); err != nil {
 		t.Fatalf("create external drive directory fixture: %v", err)
 	}
+	externalDriveDirFile := filepath.Join(externalDriveDir, "inside.txt")
+	if err := os.WriteFile(externalDriveDirFile, []byte("external desktop dir file"), 0o660); err != nil {
+		t.Fatalf("write external drive directory file fixture: %v", err)
+	}
 	driveDirSymlinkCreated := true
 	if err := os.Symlink(externalDriveDir, filepath.Join(driveRoot, "linked-dir")); err != nil {
 		driveDirSymlinkCreated = false
@@ -9370,6 +9389,18 @@ func TestDesktopSessionDriveFiles(t *testing.T) {
 		}
 	}
 	if driveDirSymlinkCreated {
+		linkedDirList := assertStatus(t, handler, http.MethodGet, "/api/connections/"+session.ID+"/drive?path=reports/linked-dir", nil, adminCookie, http.StatusBadRequest)
+		if strings.Contains(linkedDirList.Body.String(), "inside.txt") {
+			t.Fatalf("desktop drive symlink directory list leaked external entries: %s", linkedDirList.Body.String())
+		}
+		nestedSymlinkDownload := assertStatus(t, handler, http.MethodGet, "/api/connections/"+session.ID+"/drive/download?path=reports/linked-dir/inside.txt", nil, adminCookie, http.StatusBadRequest)
+		if strings.Contains(nestedSymlinkDownload.Body.String(), "external desktop dir file") {
+			t.Fatalf("desktop drive symlink nested download leaked external content: %s", nestedSymlinkDownload.Body.String())
+		}
+		assertStatus(t, handler, http.MethodDelete, "/api/connections/"+session.ID+"/drive?path=reports/linked-dir/inside.txt", nil, adminCookie, http.StatusBadRequest)
+		if data, err := os.ReadFile(externalDriveDirFile); err != nil || string(data) != "external desktop dir file" {
+			t.Fatalf("external desktop drive directory file changed: content=%q err=%v", string(data), err)
+		}
 		assertMultipartStatus(t, handler, "/api/connections/"+session.ID+"/drive/upload", map[string]string{"path": "reports/linked-dir"}, "escaped.txt", []byte("escape"), adminCookie, http.StatusBadRequest)
 		if _, err := os.Stat(filepath.Join(externalDriveDir, "escaped.txt")); !errors.Is(err, os.ErrNotExist) {
 			t.Fatalf("desktop drive directory symlink upload created outside file: %v", err)

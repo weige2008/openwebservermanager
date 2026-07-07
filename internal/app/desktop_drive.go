@@ -103,6 +103,9 @@ func (s *Server) handleDesktopDriveList(w http.ResponseWriter, r *http.Request, 
 	if !ok {
 		return
 	}
+	if !s.requireExistingStorageDirectory(w, root, dirPath) {
+		return
+	}
 	entries, err := os.ReadDir(dirPath)
 	if err != nil {
 		writeError(w, http.StatusNotFound, "path not found")
@@ -135,6 +138,9 @@ func (s *Server) handleDesktopDriveList(w http.ResponseWriter, r *http.Request, 
 func (s *Server) handleDesktopDriveDownload(w http.ResponseWriter, r *http.Request, session model.ConnectionSession, root string) {
 	target, rel, ok := s.storagePath(w, r, root, r.URL.Query().Get("path"))
 	if !ok {
+		return
+	}
+	if !s.requireExistingStorageParentDirectory(w, root, target) {
 		return
 	}
 	info, err := regularStorageFileInfo(target)
@@ -237,6 +243,9 @@ func (s *Server) handleDesktopDriveDelete(w http.ResponseWriter, r *http.Request
 	}
 	if rel == "." || strings.TrimSpace(rel) == "" {
 		writeError(w, http.StatusBadRequest, "cannot delete session drive root")
+		return
+	}
+	if !s.requireExistingStorageParentDirectory(w, root, target) {
 		return
 	}
 	if _, err := os.Lstat(target); err != nil {

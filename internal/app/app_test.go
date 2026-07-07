@@ -828,6 +828,22 @@ func TestAuthenticatedPasswordChange(t *testing.T) {
 		"new_password":     "short",
 	}, adminCookie, http.StatusBadRequest)
 
+	removeAdminPasswordLogBlocker := blockOperationLogName(t, handler.(*Server).cfg.Store, "auth.password.change")
+	blockedAdminChangeRec := assertStatus(t, handler, http.MethodPost, "/api/auth/password", map[string]any{
+		"current_password": "password123",
+		"new_password":     "blocked-admin-password",
+	}, adminCookie, http.StatusInternalServerError)
+	removeAdminPasswordLogBlocker()
+	if !strings.Contains(blockedAdminChangeRec.Body.String(), "persist operation log failed") {
+		t.Fatalf("admin password change operation log failure was not reported: %s", blockedAdminChangeRec.Body.String())
+	}
+	if !coreAuditLogsContainAction(handler.(*Server).cfg.Store, "operation.log.persist_failed") {
+		t.Fatal("admin password change operation log failure was not audited")
+	}
+	assertStatus(t, handler, http.MethodGet, "/api/auth/me", nil, secondAdminCookie, http.StatusOK)
+	assertStatus(t, handler, http.MethodPost, "/api/auth/login", map[string]any{"username": "admin", "password": "blocked-admin-password"}, nil, http.StatusUnauthorized)
+	assertStatus(t, handler, http.MethodPost, "/api/auth/login", map[string]any{"username": "admin", "password": "password123"}, nil, http.StatusOK)
+
 	changeRec := assertStatus(t, handler, http.MethodPost, "/api/auth/password", map[string]any{
 		"current_password": "password123",
 		"new_password":     "new-admin-password",
@@ -851,6 +867,18 @@ func TestAuthenticatedPasswordChange(t *testing.T) {
 	decodeResponse(t, userRec, &user)
 	loginRec := assertStatus(t, handler, http.MethodPost, "/api/auth/login", map[string]any{"username": "password-user", "password": "password123"}, nil, http.StatusOK)
 	userCookie := loginRec.Result().Cookies()[0]
+
+	removeUserPasswordLogBlocker := blockOperationLogName(t, handler.(*Server).cfg.Store, "auth.password.change")
+	blockedUserChangeRec := assertStatus(t, handler, http.MethodPost, "/api/auth/password", map[string]any{
+		"current_password": "password123",
+		"new_password":     "blocked-user-password",
+	}, userCookie, http.StatusInternalServerError)
+	removeUserPasswordLogBlocker()
+	if !strings.Contains(blockedUserChangeRec.Body.String(), "persist operation log failed") {
+		t.Fatalf("user password change operation log failure was not reported: %s", blockedUserChangeRec.Body.String())
+	}
+	assertStatus(t, handler, http.MethodPost, "/api/auth/login", map[string]any{"username": "password-user", "password": "blocked-user-password"}, nil, http.StatusUnauthorized)
+	assertStatus(t, handler, http.MethodPost, "/api/auth/login", map[string]any{"username": "password-user", "password": "password123"}, nil, http.StatusOK)
 
 	userChangeRec := assertStatus(t, handler, http.MethodPost, "/api/auth/password", map[string]any{
 		"current_password": "password123",

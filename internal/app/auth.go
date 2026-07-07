@@ -4,6 +4,7 @@ import (
 	"crypto/rand"
 	"encoding/hex"
 	"errors"
+	"fmt"
 	"net/http"
 	"strconv"
 	"strings"
@@ -832,8 +833,23 @@ func (s *Server) handlePasswordChange(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "password must be at least 8 characters")
 		return
 	}
+	snapshot, err := s.cfg.Store.SnapshotUserPassword(session.UserID)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
 	user, err := s.cfg.Store.UpdateUserPassword(session.UserID, req.NewPassword)
 	if err != nil {
+		if restoreErr := s.cfg.Store.RestoreUserPasswordSnapshot(snapshot); restoreErr != nil {
+			err = fmt.Errorf("%w; additionally failed to restore password: %v", err, restoreErr)
+		}
+		writeError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	if err := s.createPasswordChangeOperationLog(r, session.UserID); err != nil {
+		if restoreErr := s.cfg.Store.RestoreUserPasswordSnapshot(snapshot); restoreErr != nil {
+			err = fmt.Errorf("%w; additionally failed to restore password: %v", err, restoreErr)
+		}
 		writeError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
@@ -846,6 +862,21 @@ func (s *Server) handlePasswordChange(w http.ResponseWriter, r *http.Request) {
 		Role:      user.Role,
 		ExpiresAt: session.ExpiresAt,
 	})})
+}
+
+func (s *Server) createPasswordChangeOperationLog(r *http.Request, userID string) error {
+	return s.createOperationLog(r, model.PlatformItemRequest{
+		Name:        "auth.password.change",
+		Type:        "auth",
+		Status:      "success",
+		TargetID:    userID,
+		OwnerID:     s.currentUserID(r),
+		Description: "changed local password",
+		Metadata: map[string]any{
+			"user_id":   userID,
+			"client_ip": s.clientIP(r),
+		},
+	})
 }
 
 func (s *Server) authCookie(r *http.Request, value string, maxAge int) *http.Cookie {

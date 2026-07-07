@@ -68,6 +68,15 @@ type AdminPublic struct {
 	UpdatedAt time.Time `json:"updated_at"`
 }
 
+type UserPasswordSnapshot struct {
+	UserID             string
+	LegacyAdmin        bool
+	LegacyPasswordHash string
+	LegacyUpdatedAt    time.Time
+	PlatformUser       bool
+	PlatformItem       model.PlatformItem
+}
+
 type RestoreSummary struct {
 	LegacyStateRestored     bool           `json:"legacy_state_restored"`
 	CoreStateRestored       bool           `json:"core_state_restored,omitempty"`
@@ -313,6 +322,64 @@ func (s *Store) VerifyUserPassword(userID, password string) (bool, error) {
 		return false, nil
 	}
 	return bcrypt.CompareHashAndPassword([]byte(hash), []byte(password)) == nil, nil
+}
+
+func (s *Store) SnapshotUserPassword(userID string) (UserPasswordSnapshot, error) {
+	userID = strings.TrimSpace(userID)
+	if userID == "" {
+		return UserPasswordSnapshot{}, errors.New("user id is required")
+	}
+	snapshot := UserPasswordSnapshot{UserID: userID}
+	s.mu.RLock()
+	if s.state.Admin != nil && s.state.Admin.UserID == userID {
+		snapshot.LegacyAdmin = true
+		snapshot.LegacyPasswordHash = s.state.Admin.PasswordHash
+		snapshot.LegacyUpdatedAt = s.state.Admin.UpdatedAt
+	}
+	s.mu.RUnlock()
+	item, ok, err := s.GetPlatformItem("users", userID)
+	if err != nil {
+		return UserPasswordSnapshot{}, err
+	}
+	if ok {
+		snapshot.PlatformUser = true
+		snapshot.PlatformItem = item
+	}
+	if !snapshot.LegacyAdmin && !snapshot.PlatformUser {
+		return UserPasswordSnapshot{}, os.ErrNotExist
+	}
+	return snapshot, nil
+}
+
+func (s *Store) RestoreUserPasswordSnapshot(snapshot UserPasswordSnapshot) error {
+	userID := strings.TrimSpace(snapshot.UserID)
+	if userID == "" {
+		return errors.New("user id is required")
+	}
+	if snapshot.LegacyAdmin {
+		s.mu.Lock()
+		if s.state.Admin == nil || s.state.Admin.UserID != userID {
+			s.mu.Unlock()
+			return os.ErrNotExist
+		}
+		s.state.Admin.PasswordHash = snapshot.LegacyPasswordHash
+		s.state.Admin.UpdatedAt = snapshot.LegacyUpdatedAt
+		if err := s.saveLocked(); err != nil {
+			s.mu.Unlock()
+			return err
+		}
+		s.mu.Unlock()
+	}
+	if snapshot.PlatformUser {
+		item := snapshot.PlatformItem
+		if item.Metadata == nil {
+			item.Metadata = map[string]any{}
+		}
+		if _, err := s.SavePlatformItem("users", item); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 func (s *Store) UpdateUserPassword(userID, password string) (AdminPublic, error) {

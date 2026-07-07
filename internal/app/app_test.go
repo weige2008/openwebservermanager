@@ -6701,7 +6701,7 @@ func TestResourceOperationEndpoints(t *testing.T) {
 		"type":     "sqlite",
 		"status":   "enabled",
 		"protocol": "database",
-		"metadata": map[string]any{"sqlite_path": "resource-ops.db"},
+		"metadata": map[string]any{"sqlite_path": "resource-ops.db", "query_timeout_ms": 1234},
 	}, cookie, http.StatusCreated)
 	var databaseAsset model.PlatformItem
 	decodeResponse(t, databaseRec, &databaseAsset)
@@ -6717,8 +6717,25 @@ func TestResourceOperationEndpoints(t *testing.T) {
 	var order model.PlatformItem
 	decodeResponse(t, sqlRec, &order)
 	sqlLogRec := assertStatus(t, handler, http.MethodPost, "/api/admin/sql-work-orders/"+order.ID+"/execute", map[string]any{}, cookie, http.StatusOK)
-	if !strings.Contains(sqlLogRec.Body.String(), "answer") {
-		t.Fatal("sql execution log did not include query result")
+	if !strings.Contains(sqlLogRec.Body.String(), "answer") || !strings.Contains(sqlLogRec.Body.String(), `"timeout_ms":1234`) {
+		t.Fatal("sql execution log did not include query result and timeout metadata")
+	}
+	canceledReq := httptest.NewRequest(http.MethodPost, "/api/access/database/"+databaseAsset.ID+"/query", nil)
+	ctx, cancel := context.WithCancel(canceledReq.Context())
+	cancel()
+	canceledReq = canceledReq.WithContext(ctx)
+	canceledLog, statusCode, err := server.executeDatabaseAssetSQL(canceledReq, databaseAsset, "admin", "SELECT 1 AS canceled", databaseSQLExecutionOptions{
+		Source:  "test",
+		LogType: "database_timeout",
+	})
+	if err != nil {
+		t.Fatalf("canceled sql execution returned infrastructure error: %v", err)
+	}
+	if statusCode != http.StatusBadRequest || canceledLog.Status != "failed" || !strings.Contains(canceledLog.Description, "context canceled") {
+		t.Fatalf("canceled sql execution did not fail through query context: status=%d log=%#v", statusCode, canceledLog)
+	}
+	if got, ok := metadataInt(canceledLog.Metadata["timeout_ms"]); !ok || got != 1234 {
+		t.Fatalf("canceled sql log timeout_ms = %v/%v, want 1234 in %#v", got, ok, canceledLog.Metadata)
 	}
 }
 

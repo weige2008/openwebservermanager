@@ -1,6 +1,7 @@
 package app
 
 import (
+	"context"
 	"database/sql"
 	"errors"
 	"fmt"
@@ -18,6 +19,8 @@ import (
 	"github.com/go-sql-driver/mysql"
 	_ "github.com/jackc/pgx/v5/stdlib"
 )
+
+const defaultDatabaseSQLTimeoutMS = 30000
 
 type databaseSQLExecutionOptions struct {
 	Source        string
@@ -155,6 +158,7 @@ func (s *Server) executeDatabaseAssetSQL(r *http.Request, asset model.PlatformIt
 	if configured, ok := metadataInt(asset.Metadata["row_limit"]); ok {
 		rowLimit = clampInt(configured, 1, 1000, 100)
 	}
+	timeoutMS := databaseSQLTimeoutMS(asset.Metadata)
 	metadata := map[string]any{
 		"sql":         sqlText,
 		"database":    connection.Name,
@@ -165,6 +169,7 @@ func (s *Server) executeDatabaseAssetSQL(r *http.Request, asset model.PlatformIt
 		"driver":      connection.Driver,
 		"db_username": connection.Username,
 		"row_limit":   rowLimit,
+		"timeout_ms":  timeoutMS,
 	}
 	if opts.WorkOrderID != "" {
 		metadata["work_order_id"] = opts.WorkOrderID
@@ -175,8 +180,14 @@ func (s *Server) executeDatabaseAssetSQL(r *http.Request, asset model.PlatformIt
 	for key, value := range opts.ExtraMetadata {
 		metadata[key] = value
 	}
+	ctx := context.Background()
+	if r != nil {
+		ctx = r.Context()
+	}
+	ctx, cancel := context.WithTimeout(ctx, time.Duration(timeoutMS)*time.Millisecond)
+	defer cancel()
 	if isSQLQuery(sqlText) {
-		queryRows, err := db.Query(sqlText)
+		queryRows, err := db.QueryContext(ctx, sqlText)
 		if err != nil {
 			status = "failed"
 			detail = err.Error()
@@ -194,7 +205,7 @@ func (s *Server) executeDatabaseAssetSQL(r *http.Request, asset model.PlatformIt
 			}
 		}
 	} else {
-		result, err := db.Exec(sqlText)
+		result, err := db.ExecContext(ctx, sqlText)
 		if err != nil {
 			status = "failed"
 			detail = err.Error()
@@ -233,6 +244,15 @@ func (s *Server) executeDatabaseAssetSQL(r *http.Request, asset model.PlatformIt
 		return logItem, http.StatusBadRequest, nil
 	}
 	return logItem, http.StatusOK, nil
+}
+
+func databaseSQLTimeoutMS(metadata map[string]any) int {
+	for _, key := range []string{"query_timeout_ms", "sql_timeout_ms", "execution_timeout_ms", "timeout_ms"} {
+		if value, ok := metadataInt(metadata[key]); ok {
+			return clampInt(value, 100, 600000, defaultDatabaseSQLTimeoutMS)
+		}
+	}
+	return defaultDatabaseSQLTimeoutMS
 }
 
 func (s *Server) databaseAssetConnection(asset model.PlatformItem) (databaseAssetConnection, error) {

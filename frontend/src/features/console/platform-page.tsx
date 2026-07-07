@@ -3278,6 +3278,16 @@ function PlatformItemDialog({
               <Field label={app.t('rowLimit', '行数限制')}>
                 <Input type='number' placeholder='100' value={metadataFormText(form.metadata, 'row_limit')} onChange={(event) => onChange({ metadata: metadataWithValue(form.metadata, 'row_limit', event.currentTarget.value ? Number(event.currentTarget.value) : '') })} />
               </Field>
+              <Field label={app.t('queryTimeoutMs', '查询超时 ms')}>
+                <Input
+                  type='number'
+                  min={100}
+                  max={600000}
+                  placeholder='30000'
+                  value={metadataFormText(form.metadata, 'query_timeout_ms')}
+                  onChange={(event) => onChange({ metadata: metadataWithValue(form.metadata, 'query_timeout_ms', event.currentTarget.value ? Number(event.currentTarget.value) : '') })}
+                />
+              </Field>
               {form.databaseDSNSet ? (
                 <div className='grid gap-2 rounded-lg border border-border bg-muted/20 p-3 sm:col-span-2'>
                   <div className='flex flex-wrap items-center justify-between gap-2'>
@@ -3687,7 +3697,7 @@ function defaultPlatformMetadata(collection: string) {
     token_endpoint_auth_method: 'client_secret_basic',
   }, null, 2)
   if (collection === 'web_assets') return JSON.stringify({ target_url: '' }, null, 2)
-  if (collection === 'database_assets') return JSON.stringify({ sqlite_path: '', row_limit: 100 }, null, 2)
+  if (collection === 'database_assets') return JSON.stringify({ sqlite_path: '', row_limit: 100, query_timeout_ms: 30000 }, null, 2)
   if (collection === 'scheduled_tasks') return JSON.stringify({ interval_seconds: 600, timeout_ms: 2000 }, null, 2)
   return ''
 }

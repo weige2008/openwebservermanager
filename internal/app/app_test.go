@@ -7811,6 +7811,142 @@ func TestResourceOperationEndpoints(t *testing.T) {
 	}
 }
 
+func TestCertificateOperationLogPersistenceFailureRollsBackMutations(t *testing.T) {
+	srv, adminCookie := newTestServer(t, nil)
+	handler := http.Handler(srv)
+
+	assertNoCertificateNamed := func(name string) {
+		t.Helper()
+		rec := assertStatus(t, handler, http.MethodGet, "/api/admin/certificates", nil, adminCookie, http.StatusOK)
+		if strings.Contains(rec.Body.String(), name) {
+			t.Fatalf("certificate %q exists after failed audited operation: %s", name, rec.Body.String())
+		}
+	}
+
+	removeSelfSignedBlocker := blockPlatformItemCreate(t, srv.cfg.Store, "operation_logs")
+	selfSignedFailureRec := assertStatus(t, handler, http.MethodPost, "/api/admin/certificates/self-signed", map[string]any{
+		"name":   "no-audit-self-signed",
+		"domain": "no-audit-self-signed.example.test",
+	}, adminCookie, http.StatusInternalServerError)
+	removeSelfSignedBlocker()
+	if !strings.Contains(selfSignedFailureRec.Body.String(), "persist operation log failed") {
+		t.Fatalf("self-signed operation log failure was not reported: %s", selfSignedFailureRec.Body.String())
+	}
+	assertNoCertificateNamed("no-audit-self-signed")
+
+	certRec := assertStatus(t, handler, http.MethodPost, "/api/admin/certificates/self-signed", map[string]any{
+		"name":   "audited-cert-a",
+		"domain": "audited-a.example.test",
+	}, adminCookie, http.StatusCreated)
+	var certA model.PlatformItem
+	decodeResponse(t, certRec, &certA)
+	certBRec := assertStatus(t, handler, http.MethodPost, "/api/admin/certificates/self-signed", map[string]any{
+		"name":   "audited-cert-b",
+		"domain": "audited-b.example.test",
+	}, adminCookie, http.StatusCreated)
+	var certB model.PlatformItem
+	decodeResponse(t, certBRec, &certB)
+
+	removeDownloadBlocker := blockPlatformItemCreate(t, srv.cfg.Store, "operation_logs")
+	downloadFailureRec := assertStatus(t, handler, http.MethodGet, "/api/admin/certificates/"+certA.ID+"/download", nil, adminCookie, http.StatusInternalServerError)
+	removeDownloadBlocker()
+	if !strings.Contains(downloadFailureRec.Body.String(), "persist operation log failed") || strings.Contains(downloadFailureRec.Body.String(), "BEGIN CERTIFICATE") {
+		t.Fatalf("certificate download returned content or hid operation log failure: %s", downloadFailureRec.Body.String())
+	}
+
+	removeBundleBlocker := blockPlatformItemCreate(t, srv.cfg.Store, "operation_logs")
+	bundleFailureRec := assertStatus(t, handler, http.MethodGet, "/api/admin/certificates/"+certA.ID+"/bundle", nil, adminCookie, http.StatusInternalServerError)
+	removeBundleBlocker()
+	if !strings.Contains(bundleFailureRec.Body.String(), "persist operation log failed") || strings.Contains(bundleFailureRec.Body.String(), "BEGIN RSA PRIVATE KEY") {
+		t.Fatalf("certificate bundle returned secret material or hid operation log failure: %s", bundleFailureRec.Body.String())
+	}
+
+	assertStatus(t, handler, http.MethodPost, "/api/admin/certificates/"+certA.ID+"/default", map[string]any{}, adminCookie, http.StatusOK)
+	removeDefaultBlocker := blockPlatformItemCreate(t, srv.cfg.Store, "operation_logs")
+	defaultFailureRec := assertStatus(t, handler, http.MethodPost, "/api/admin/certificates/"+certB.ID+"/default", map[string]any{}, adminCookie, http.StatusInternalServerError)
+	removeDefaultBlocker()
+	if !strings.Contains(defaultFailureRec.Body.String(), "persist operation log failed") {
+		t.Fatalf("default certificate operation log failure was not reported: %s", defaultFailureRec.Body.String())
+	}
+	storedA, ok, err := srv.cfg.Store.GetPlatformItem("certificates", certA.ID)
+	if err != nil || !ok {
+		t.Fatalf("load certificate A after failed default: ok=%v err=%v", ok, err)
+	}
+	storedB, ok, err := srv.cfg.Store.GetPlatformItem("certificates", certB.ID)
+	if err != nil || !ok {
+		t.Fatalf("load certificate B after failed default: ok=%v err=%v", ok, err)
+	}
+	if storedA.Metadata["default"] != true || storedB.Metadata["default"] == true {
+		t.Fatalf("default certificate change was not rolled back: A=%#v B=%#v", storedA.Metadata, storedB.Metadata)
+	}
+
+	clientCAPEM, _, err := makeSelfSignedCertificate(certificateRequest{Domain: "blocked-mtls-ca.example.test", Days: 365})
+	if err != nil {
+		t.Fatalf("make blocked mTLS client CA: %v", err)
+	}
+	removeMTLSBlocker := blockPlatformItemCreate(t, srv.cfg.Store, "operation_logs")
+	mtlsFailureRec := assertStatus(t, handler, http.MethodPost, "/api/admin/certificates/"+certA.ID+"/mtls", map[string]any{
+		"enabled":   true,
+		"client_ca": string(clientCAPEM),
+	}, adminCookie, http.StatusInternalServerError)
+	removeMTLSBlocker()
+	if !strings.Contains(mtlsFailureRec.Body.String(), "persist operation log failed") {
+		t.Fatalf("mTLS operation log failure was not reported: %s", mtlsFailureRec.Body.String())
+	}
+	storedAfterMTLS, ok, err := srv.cfg.Store.GetPlatformItem("certificates", certA.ID)
+	if err != nil || !ok {
+		t.Fatalf("load certificate after failed mTLS: ok=%v err=%v", ok, err)
+	}
+	if storedAfterMTLS.Metadata["mtls_enabled"] == true || firstMetadataString(storedAfterMTLS.Metadata, "mtls_client_ca") != "" {
+		t.Fatalf("mTLS update was not rolled back after operation log failure: %#v", storedAfterMTLS.Metadata)
+	}
+
+	uploadCertPEM, uploadKeyPEM, err := makeSelfSignedCertificate(certificateRequest{Domain: "no-audit-upload.example.test", Days: 90})
+	if err != nil {
+		t.Fatalf("make upload certificate: %v", err)
+	}
+	removeUploadBlocker := blockPlatformItemCreate(t, srv.cfg.Store, "operation_logs")
+	uploadFailureRec := assertMultipartFilesStatus(t, handler, "/api/admin/certificates/upload", map[string]string{"name": "no-audit-upload"}, map[string]multipartFile{
+		"certificate": {Name: "no-audit-upload.crt", Content: uploadCertPEM},
+		"private_key": {Name: "no-audit-upload.key", Content: uploadKeyPEM},
+	}, adminCookie, http.StatusInternalServerError)
+	removeUploadBlocker()
+	if !strings.Contains(uploadFailureRec.Body.String(), "persist operation log failed") {
+		t.Fatalf("certificate upload operation log failure was not reported: %s", uploadFailureRec.Body.String())
+	}
+	assertNoCertificateNamed("no-audit-upload")
+
+	removeACMEBlocker := blockPlatformItemCreate(t, srv.cfg.Store, "operation_logs")
+	acmeFailureRec := assertStatus(t, handler, http.MethodPost, "/api/admin/certificates/acme", map[string]any{
+		"name":   "no-audit-acme",
+		"domain": "no-audit-acme.example.test",
+	}, adminCookie, http.StatusInternalServerError)
+	removeACMEBlocker()
+	if !strings.Contains(acmeFailureRec.Body.String(), "persist operation log failed") {
+		t.Fatalf("ACME operation log failure was not reported: %s", acmeFailureRec.Body.String())
+	}
+	assertNoCertificateNamed("no-audit-acme")
+
+	removeDNSBlocker := blockPlatformItemCreate(t, srv.cfg.Store, "operation_logs")
+	dnsFailureRec := assertStatus(t, handler, http.MethodPost, "/api/admin/certificates/dns-providers", map[string]any{
+		"name":     "no-audit-dns",
+		"provider": "cloudflare",
+		"zone":     "example.test",
+		"token":    "no-audit-dns-token",
+	}, adminCookie, http.StatusInternalServerError)
+	removeDNSBlocker()
+	if !strings.Contains(dnsFailureRec.Body.String(), "persist operation log failed") {
+		t.Fatalf("DNS provider operation log failure was not reported: %s", dnsFailureRec.Body.String())
+	}
+	dnsListRec := assertStatus(t, handler, http.MethodGet, "/api/admin/certificates/dns-providers", nil, adminCookie, http.StatusOK)
+	if strings.Contains(dnsListRec.Body.String(), "no-audit-dns") || strings.Contains(dnsListRec.Body.String(), "no-audit-dns-token") {
+		t.Fatalf("DNS provider was not rolled back or leaked token after operation log failure: %s", dnsListRec.Body.String())
+	}
+	if !coreAuditLogsContainAction(srv.cfg.Store, "operation.log.persist_failed") {
+		t.Fatal("certificate operation log persistence failure was not written to core audit logs")
+	}
+}
+
 func TestAssetSensitiveMetadataIsNotPersistedOrExported(t *testing.T) {
 	handler, cookie := newTestHandler(t)
 	server := handler.(*Server)

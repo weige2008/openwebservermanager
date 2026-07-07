@@ -2798,6 +2798,13 @@ func (s *Server) handleCertificateSelfSigned(w http.ResponseWriter, r *http.Requ
 		writeError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
+	if err := s.createCertificateOperationLog(r, "certificate.self_signed", "success", item.ID, "issued self-signed certificate", map[string]any{
+		"domain": req.Domain,
+	}); err != nil {
+		err = s.rollbackCreatedPlatformItem("certificates", item.ID, err)
+		writeError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
 	_ = s.audit(r, "certificate.self_signed", item.ID, "", "issued self-signed certificate")
 	writeJSON(w, http.StatusCreated, item)
 }
@@ -2909,6 +2916,15 @@ func (s *Server) handleCertificateUpload(w http.ResponseWriter, r *http.Request)
 		writeError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
+	if err := s.createCertificateOperationLog(r, "certificate.upload", "success", item.ID, "uploaded certificate", map[string]any{
+		"certificate_filename": certName,
+		"private_key_filename": keyName,
+		"chain_filename":       chainName,
+	}); err != nil {
+		err = s.rollbackCreatedPlatformItem("certificates", item.ID, err)
+		writeError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
 	_ = s.audit(r, "certificate.upload", item.ID, "", "uploaded certificate")
 	writeJSON(w, http.StatusCreated, item)
 }
@@ -3007,10 +3023,40 @@ func (s *Server) handleCertificateACME(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
+	if err := s.createCertificateOperationLog(r, "certificate.acme.request", "success", item.ID, "requested ACME certificate for "+req.Domain, map[string]any{
+		"domain":         req.Domain,
+		"challenge_type": challengeType,
+		"directory_url":  directoryURL,
+	}); err != nil {
+		err = s.rollbackCreatedPlatformItem("certificates", item.ID, err)
+		writeError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	if err := s.createCertificateOperationLog(r, "certificate.acme.issue", "success", item.ID, "issued local ACME certificate for "+req.Domain, map[string]any{
+		"domain": req.Domain,
+	}); err != nil {
+		err = s.rollbackCreatedPlatformItem("certificates", item.ID, err)
+		writeError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
 	_ = s.audit(r, "certificate.acme.request", item.ID, "", "requested ACME certificate for "+req.Domain)
 	_ = s.audit(r, "certificate.acme.issue", item.ID, "", "issued local ACME certificate for "+req.Domain)
 	if req.Default {
+		snapshot, err := s.certificateSnapshot()
+		if err != nil {
+			_ = s.cfg.Store.DeletePlatformItem("certificates", item.ID)
+			writeError(w, http.StatusInternalServerError, err.Error())
+			return
+		}
 		if _, err := s.setDefaultCertificate(item.ID); err != nil {
+			if restoreErr := s.restoreCertificateSnapshot(snapshot); restoreErr != nil {
+				err = fmt.Errorf("%w; additionally failed to restore certificates: %v", err, restoreErr)
+			}
+			writeError(w, http.StatusInternalServerError, err.Error())
+			return
+		}
+		if err := s.createCertificateOperationLog(r, "certificate.default", "success", item.ID, "set default certificate "+item.Name, nil); err != nil {
+			err = restoreCertificateSnapshotError(err, s.restoreCertificateSnapshot(snapshot))
 			writeError(w, http.StatusInternalServerError, err.Error())
 			return
 		}
@@ -3087,6 +3133,14 @@ func (s *Server) handleCertificateDNSProviders(w http.ResponseWriter, r *http.Re
 			Metadata:    metadata,
 		})
 		if err != nil {
+			writeError(w, http.StatusInternalServerError, err.Error())
+			return
+		}
+		if err := s.createCertificateOperationLog(r, "certificate.dns_provider.create", "success", item.ID, "created DNS provider "+name, map[string]any{
+			"provider": strings.TrimSpace(req.Provider),
+			"zone":     strings.TrimSpace(req.Zone),
+		}); err != nil {
+			err = s.rollbackCreatedPlatformItem("system_settings", item.ID, err)
 			writeError(w, http.StatusInternalServerError, err.Error())
 			return
 		}
@@ -3241,6 +3295,10 @@ func (s *Server) handleCertificateDownload(w http.ResponseWriter, r *http.Reques
 		writeError(w, http.StatusNotFound, "certificate payload not found")
 		return
 	}
+	if err := s.createCertificateOperationLog(r, "certificate.download", "success", id, "downloaded certificate", nil); err != nil {
+		writeError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
 	_ = s.audit(r, "certificate.download", id, "", "downloaded certificate")
 	w.Header().Set("Content-Type", "application/x-pem-file")
 	w.Header().Set("Content-Disposition", "attachment; filename=\""+id+".crt\"")
@@ -3268,6 +3326,10 @@ func (s *Server) handleCertificateBundleDownload(w http.ResponseWriter, r *http.
 	bundle, err := certificateBundleZip(item)
 	if err != nil {
 		writeError(w, http.StatusNotFound, err.Error())
+		return
+	}
+	if err := s.createCertificateOperationLog(r, "certificate.bundle_download", "success", id, "downloaded certificate deployment bundle", nil); err != nil {
+		writeError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
 	_ = s.audit(r, "certificate.bundle_download", id, "", "downloaded certificate deployment bundle")
@@ -3396,6 +3458,11 @@ func (s *Server) handleCertificateDefault(w http.ResponseWriter, r *http.Request
 		writeError(w, http.StatusMethodNotAllowed, "method not allowed")
 		return
 	}
+	snapshot, err := s.certificateSnapshot()
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
 	item, err := s.setDefaultCertificate(id)
 	if err != nil {
 		if errors.Is(err, os.ErrNotExist) {
@@ -3406,6 +3473,11 @@ func (s *Server) handleCertificateDefault(w http.ResponseWriter, r *http.Request
 			writeError(w, http.StatusBadRequest, err.Error())
 			return
 		}
+		writeError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	if err := s.createCertificateOperationLog(r, "certificate.default", "success", id, "set default certificate "+item.Name, nil); err != nil {
+		err = restoreCertificateSnapshotError(err, s.restoreCertificateSnapshot(snapshot))
 		writeError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
@@ -3486,6 +3558,8 @@ func (s *Server) handleCertificateMTLS(w http.ResponseWriter, r *http.Request, i
 		writeError(w, http.StatusNotFound, "certificate not found")
 		return
 	}
+	previous := item
+	previous.Metadata = cloneMetadata(item.Metadata)
 	var req certificateMTLSRequest
 	if !decodeJSON(w, r, &req) {
 		return
@@ -3512,6 +3586,15 @@ func (s *Server) handleCertificateMTLS(w http.ResponseWriter, r *http.Request, i
 		writeError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
+	if err := s.createCertificateOperationLog(r, "certificate.mtls.update", "success", id, "updated mTLS settings for "+item.Name, map[string]any{
+		"enabled": req.Enabled,
+	}); err != nil {
+		if _, restoreErr := s.cfg.Store.SavePlatformItem("certificates", previous); restoreErr != nil {
+			err = fmt.Errorf("%w; additionally failed to restore certificate: %v", err, restoreErr)
+		}
+		writeError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
 	_ = s.audit(r, "certificate.mtls.update", id, "", "updated mTLS settings for "+item.Name)
 	writeJSON(w, http.StatusOK, saved)
 }
@@ -3521,6 +3604,64 @@ func clearCertificateMTLSCA(metadata map[string]any) {
 		delete(metadata, key)
 	}
 	metadata["mtls_client_ca_set"] = false
+}
+
+func (s *Server) createCertificateOperationLog(r *http.Request, name, status, id, description string, metadata map[string]any) error {
+	if metadata == nil {
+		metadata = map[string]any{}
+	}
+	metadata["certificate_id"] = id
+	metadata["client_ip"] = s.clientIP(r)
+	return s.createOperationLog(r, model.PlatformItemRequest{
+		Name:        name,
+		Type:        "certificate",
+		Status:      status,
+		TargetID:    id,
+		OwnerID:     s.currentUserID(r),
+		Description: description,
+		Metadata:    metadata,
+	})
+}
+
+func (s *Server) rollbackCreatedPlatformItem(collection, id string, err error) error {
+	if rollbackErr := s.cfg.Store.DeletePlatformItem(collection, id); rollbackErr != nil && !errors.Is(rollbackErr, os.ErrNotExist) {
+		return fmt.Errorf("%w; additionally failed to roll back created record: %v", err, rollbackErr)
+	}
+	return err
+}
+
+func (s *Server) certificateSnapshot() ([]model.PlatformItem, error) {
+	items, err := s.cfg.Store.ListPlatformItems("certificates")
+	if err != nil {
+		return nil, err
+	}
+	snapshot := make([]model.PlatformItem, 0, len(items))
+	for _, item := range items {
+		raw, ok, err := s.cfg.Store.GetPlatformItem("certificates", item.ID)
+		if err != nil {
+			return nil, err
+		}
+		if ok {
+			snapshot = append(snapshot, raw)
+		}
+	}
+	return snapshot, nil
+}
+
+func (s *Server) restoreCertificateSnapshot(snapshot []model.PlatformItem) error {
+	for _, item := range snapshot {
+		if _, err := s.cfg.Store.SavePlatformItem("certificates", item); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func restoreCertificateSnapshotError(err, restoreErr error) error {
+	if restoreErr != nil {
+		return fmt.Errorf("%w; additionally failed to restore certificates: %v", err, restoreErr)
+	}
+	return err
 }
 
 func (s *Server) handleCertificateLogs(w http.ResponseWriter, r *http.Request, id string) {

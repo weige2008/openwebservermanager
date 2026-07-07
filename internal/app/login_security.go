@@ -1,7 +1,9 @@
 package app
 
 import (
+	"errors"
 	"net"
+	"net/http"
 	"strings"
 	"time"
 
@@ -128,6 +130,15 @@ func (s *Server) createLoginLock(username, clientIP string, failure loginFailure
 		},
 	})
 	return err
+}
+
+func (s *Server) createLoginLog(r *http.Request, req model.PlatformItemRequest) error {
+	if _, err := s.cfg.Store.CreatePlatformItem("login_logs", req); err != nil {
+		detail := "persist login log failed: " + err.Error()
+		_ = s.audit(r, "auth.login.log.persist_failed", "", "", detail)
+		return errors.New(detail)
+	}
+	return nil
 }
 
 func (s *Server) passwordLoginDisabled() bool {

@@ -133,21 +133,30 @@ func (s *Server) handleExternalWeComCallback(w http.ResponseWriter, r *http.Requ
 	}
 	if errText := strings.TrimSpace(r.URL.Query().Get("error")); errText != "" {
 		err := errors.New("wecom provider returned error: " + errText)
-		s.recordExternalWeComLoginFailure(r, provider, externalWeComClaims{}, err)
+		if logErr := s.recordExternalWeComLoginFailure(r, provider, externalWeComClaims{}, err); logErr != nil {
+			writeError(w, http.StatusInternalServerError, logErr.Error())
+			return
+		}
 		writeError(w, http.StatusBadRequest, err.Error())
 		return
 	}
 	code := strings.TrimSpace(r.URL.Query().Get("code"))
 	if code == "" {
 		err := errors.New("code is required")
-		s.recordExternalWeComLoginFailure(r, provider, externalWeComClaims{}, err)
+		if logErr := s.recordExternalWeComLoginFailure(r, provider, externalWeComClaims{}, err); logErr != nil {
+			writeError(w, http.StatusInternalServerError, logErr.Error())
+			return
+		}
 		writeError(w, http.StatusBadRequest, err.Error())
 		return
 	}
 	claims, err := s.fetchExternalWeComClaims(provider, code)
 	if err != nil {
 		safeErr := sanitizedExternalProviderError(err, provider.AgentSecret)
-		s.recordExternalWeComLoginFailure(r, provider, externalWeComClaims{}, safeErr)
+		if logErr := s.recordExternalWeComLoginFailure(r, provider, externalWeComClaims{}, safeErr); logErr != nil {
+			writeError(w, http.StatusInternalServerError, logErr.Error())
+			return
+		}
 		writeError(w, http.StatusBadGateway, safeErr.Error())
 		return
 	}
@@ -157,7 +166,10 @@ func (s *Server) handleExternalWeComCallback(w http.ResponseWriter, r *http.Requ
 		if errors.Is(err, errExternalWeComUserDisabled) || errors.Is(err, errExternalWeComUserNotAllowed) {
 			status = http.StatusForbidden
 		}
-		s.recordExternalWeComLoginFailure(r, provider, claims, err)
+		if logErr := s.recordExternalWeComLoginFailure(r, provider, claims, err); logErr != nil {
+			writeError(w, http.StatusInternalServerError, logErr.Error())
+			return
+		}
 		writeError(w, status, err.Error())
 		return
 	}
@@ -166,27 +178,30 @@ func (s *Server) handleExternalWeComCallback(w http.ResponseWriter, r *http.Requ
 		writeError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
-	http.SetCookie(w, s.authCookie(r, token, int(authSessionTTL.Seconds())))
 	_ = s.cfg.Store.RecordUserLogin(session.UserID, s.clientIP(r), r.UserAgent())
 	_ = s.audit(r, "auth.wecom.login", session.UserID, "", "signed in with enterprise wechat provider "+provider.ID)
-	_, _ = s.cfg.Store.CreatePlatformItem("login_logs", model.PlatformItemRequest{
+	if err := s.createLoginLog(r, model.PlatformItemRequest{
 		Name:        session.Username,
 		Type:        "wecom",
 		Status:      "success",
 		OwnerID:     session.UserID,
 		Description: "signed in with enterprise wechat",
 		Metadata:    map[string]any{"client_ip": s.clientIP(r), "provider_id": provider.ID, "subject": claims.Subject},
-	})
+	}); err != nil {
+		writeError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	http.SetCookie(w, s.authCookie(r, token, int(authSessionTTL.Seconds())))
 	http.Redirect(w, r, state.Next, http.StatusFound)
 }
 
-func (s *Server) recordExternalWeComLoginFailure(r *http.Request, provider externalWeComProvider, claims externalWeComClaims, err error) {
+func (s *Server) recordExternalWeComLoginFailure(r *http.Request, provider externalWeComProvider, claims externalWeComClaims, err error) error {
 	detail := "external wecom login failed"
 	if err != nil {
 		detail = err.Error()
 	}
 	account := firstNonEmpty(claims.Username, claims.UserID, claims.OpenID, claims.Subject)
-	_, _ = s.cfg.Store.CreatePlatformItem("login_logs", model.PlatformItemRequest{
+	if logErr := s.createLoginLog(r, model.PlatformItemRequest{
 		Name:        account,
 		Type:        "wecom",
 		Status:      "failed",
@@ -197,8 +212,11 @@ func (s *Server) recordExternalWeComLoginFailure(r *http.Request, provider exter
 			"provider_id": provider.ID,
 			"subject":     claims.Subject,
 		},
-	})
+	}); logErr != nil {
+		return logErr
+	}
 	_ = s.audit(r, "auth.wecom.login_failed", provider.ID, "wecom", detail)
+	return nil
 }
 
 func (s *Server) fetchExternalWeComClaims(provider externalWeComProvider, code string) (externalWeComClaims, error) {

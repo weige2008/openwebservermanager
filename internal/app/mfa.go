@@ -146,17 +146,20 @@ func (s *Server) handleMFACompleteLogin(w http.ResponseWriter, r *http.Request) 
 		writeError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
-	http.SetCookie(w, s.authCookie(r, authToken, int(authSessionTTL.Seconds())))
 	_ = s.cfg.Store.RecordUserLogin(session.UserID, challenge.ClientIP, r.UserAgent())
 	_ = s.audit(r, "auth.login", session.UserID, "", "signed in with MFA")
-	_, _ = s.cfg.Store.CreatePlatformItem("login_logs", model.PlatformItemRequest{
+	if err := s.createLoginLog(r, model.PlatformItemRequest{
 		Name:        challenge.Username,
 		Type:        "mfa",
 		Status:      "success",
 		OwnerID:     session.UserID,
 		Description: "signed in with MFA",
 		Metadata:    map[string]any{"client_ip": challenge.ClientIP, "account": challenge.Username, "method": method},
-	})
+	}); err != nil {
+		writeError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	http.SetCookie(w, s.authCookie(r, authToken, int(authSessionTTL.Seconds())))
 	writeJSON(w, http.StatusOK, map[string]any{"user": s.authUserPayload(session), "recovery_codes": recoveryCodes})
 }
 
@@ -333,13 +336,16 @@ func (s *Server) writeMFAChallenge(w http.ResponseWriter, r *http.Request, user 
 		payload["digits"] = totpDigits
 		payload["period"] = totpPeriod
 	}
-	_, _ = s.cfg.Store.CreatePlatformItem("login_logs", model.PlatformItemRequest{
+	if err := s.createLoginLog(r, model.PlatformItemRequest{
 		Name:        username,
 		Type:        "mfa",
 		Status:      "challenge",
 		Description: "MFA verification required",
 		Metadata:    metadata,
-	})
+	}); err != nil {
+		writeError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
 	writeJSON(w, http.StatusAccepted, payload)
 }
 
@@ -371,13 +377,16 @@ func (s *Server) recordMFAFailure(w http.ResponseWriter, r *http.Request, userna
 			return
 		}
 	}
-	_, _ = s.cfg.Store.CreatePlatformItem("login_logs", model.PlatformItemRequest{
+	if err := s.createLoginLog(r, model.PlatformItemRequest{
 		Name:        username,
 		Type:        "mfa",
 		Status:      "failed",
 		Description: detail,
 		Metadata:    map[string]any{"client_ip": clientIP, "account": username},
-	})
+	}); err != nil {
+		writeError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
 	writeError(w, http.StatusUnauthorized, detail)
 }
 

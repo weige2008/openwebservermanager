@@ -118,27 +118,39 @@ func (s *Server) handleExternalOIDCCallback(w http.ResponseWriter, r *http.Reque
 	}
 	if errText := strings.TrimSpace(r.URL.Query().Get("error")); errText != "" {
 		err := errors.New("oidc provider returned error: " + errText)
-		s.recordExternalOIDCLoginFailure(r, provider, nil, err)
+		if logErr := s.recordExternalOIDCLoginFailure(r, provider, nil, err); logErr != nil {
+			writeError(w, http.StatusInternalServerError, logErr.Error())
+			return
+		}
 		writeError(w, http.StatusBadRequest, err.Error())
 		return
 	}
 	code := strings.TrimSpace(r.URL.Query().Get("code"))
 	if code == "" {
 		err := errors.New("code is required")
-		s.recordExternalOIDCLoginFailure(r, provider, nil, err)
+		if logErr := s.recordExternalOIDCLoginFailure(r, provider, nil, err); logErr != nil {
+			writeError(w, http.StatusInternalServerError, logErr.Error())
+			return
+		}
 		writeError(w, http.StatusBadRequest, err.Error())
 		return
 	}
 	claims, err := s.exchangeExternalOIDCCode(r, provider, code, state.Nonce)
 	if err != nil {
 		safeErr := sanitizedExternalProviderError(err, provider.ClientSecret)
-		s.recordExternalOIDCLoginFailure(r, provider, nil, safeErr)
+		if logErr := s.recordExternalOIDCLoginFailure(r, provider, nil, safeErr); logErr != nil {
+			writeError(w, http.StatusInternalServerError, logErr.Error())
+			return
+		}
 		writeError(w, http.StatusBadGateway, safeErr.Error())
 		return
 	}
 	if nonce := firstMetadataString(claims, "nonce"); nonce != "" && nonce != state.Nonce {
 		err := errors.New("oidc nonce mismatch")
-		s.recordExternalOIDCLoginFailure(r, provider, claims, err)
+		if logErr := s.recordExternalOIDCLoginFailure(r, provider, claims, err); logErr != nil {
+			writeError(w, http.StatusInternalServerError, logErr.Error())
+			return
+		}
 		writeError(w, http.StatusBadRequest, err.Error())
 		return
 	}
@@ -151,7 +163,10 @@ func (s *Server) handleExternalOIDCCallback(w http.ResponseWriter, r *http.Reque
 		if errors.Is(err, errExternalOIDCUserNotAllowed) {
 			status = http.StatusForbidden
 		}
-		s.recordExternalOIDCLoginFailure(r, provider, claims, err)
+		if logErr := s.recordExternalOIDCLoginFailure(r, provider, claims, err); logErr != nil {
+			writeError(w, http.StatusInternalServerError, logErr.Error())
+			return
+		}
 		writeError(w, status, err.Error())
 		return
 	}
@@ -160,21 +175,24 @@ func (s *Server) handleExternalOIDCCallback(w http.ResponseWriter, r *http.Reque
 		writeError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
-	http.SetCookie(w, s.authCookie(r, token, int(authSessionTTL.Seconds())))
 	_ = s.cfg.Store.RecordUserLogin(session.UserID, s.clientIP(r), r.UserAgent())
 	_ = s.audit(r, "auth.oidc.login", session.UserID, "", "signed in with external oidc provider "+provider.ID)
-	_, _ = s.cfg.Store.CreatePlatformItem("login_logs", model.PlatformItemRequest{
+	if err := s.createLoginLog(r, model.PlatformItemRequest{
 		Name:        session.Username,
 		Type:        "oidc",
 		Status:      "success",
 		OwnerID:     session.UserID,
 		Description: "signed in with external oidc",
 		Metadata:    map[string]any{"client_ip": s.clientIP(r), "provider_id": provider.ID, "subject": firstMetadataString(claims, "sub")},
-	})
+	}); err != nil {
+		writeError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	http.SetCookie(w, s.authCookie(r, token, int(authSessionTTL.Seconds())))
 	http.Redirect(w, r, state.Next, http.StatusFound)
 }
 
-func (s *Server) recordExternalOIDCLoginFailure(r *http.Request, provider externalOIDCProvider, claims map[string]any, err error) {
+func (s *Server) recordExternalOIDCLoginFailure(r *http.Request, provider externalOIDCProvider, claims map[string]any, err error) error {
 	detail := "external oidc login failed"
 	if err != nil {
 		detail = err.Error()
@@ -184,7 +202,7 @@ func (s *Server) recordExternalOIDCLoginFailure(r *http.Request, provider extern
 	if account == "" {
 		account = subject
 	}
-	_, _ = s.cfg.Store.CreatePlatformItem("login_logs", model.PlatformItemRequest{
+	if logErr := s.createLoginLog(r, model.PlatformItemRequest{
 		Name:        account,
 		Type:        "oidc",
 		Status:      "failed",
@@ -195,8 +213,11 @@ func (s *Server) recordExternalOIDCLoginFailure(r *http.Request, provider extern
 			"provider_id": provider.ID,
 			"subject":     subject,
 		},
-	})
+	}); logErr != nil {
+		return logErr
+	}
 	_ = s.audit(r, "auth.oidc.login_failed", provider.ID, "oidc", detail)
+	return nil
 }
 
 func sanitizedExternalProviderError(err error, secrets ...string) error {

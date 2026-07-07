@@ -559,17 +559,20 @@ func (s *Server) handleSetup(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
-	http.SetCookie(w, s.authCookie(r, token, int(authSessionTTL.Seconds())))
 	_ = s.cfg.Store.RecordUserLogin(session.UserID, s.clientIP(r), r.UserAgent())
 	_ = s.audit(r, "auth.setup", session.UserID, "", "admin initialized")
-	_, _ = s.cfg.Store.CreatePlatformItem("login_logs", model.PlatformItemRequest{
+	if err := s.createLoginLog(r, model.PlatformItemRequest{
 		Name:        username,
 		Type:        "setup",
 		Status:      "success",
 		OwnerID:     session.UserID,
 		Description: "administrator initialized",
 		Metadata:    map[string]any{"client_ip": s.clientIP(r), "account": username},
-	})
+	}); err != nil {
+		writeError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	http.SetCookie(w, s.authCookie(r, token, int(authSessionTTL.Seconds())))
 	writeJSON(w, http.StatusCreated, map[string]any{"user": s.authUserPayload(session)})
 }
 
@@ -589,40 +592,59 @@ func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
 	clientIP := s.clientIP(r)
 	passwordLoginDisabled := s.passwordLoginDisabled()
 	if passwordLoginDisabled && !s.ldapLoginConfigured() {
-		_, _ = s.cfg.Store.CreatePlatformItem("login_logs", model.PlatformItemRequest{
+		if err := s.createLoginLog(r, model.PlatformItemRequest{
 			Name:        username,
 			Type:        "password",
 			Status:      "denied",
 			Description: "password login is disabled",
 			Metadata:    map[string]any{"client_ip": clientIP, "account": username},
-		})
+		}); err != nil {
+			writeError(w, http.StatusInternalServerError, err.Error())
+			return
+		}
 		_ = s.audit(r, "auth.login.password_denied", "", "", "password login is disabled")
 		writeError(w, http.StatusForbidden, "password login is disabled")
 		return
 	}
 	if s.captchaRequired() && !s.verifyCaptcha(req.CaptchaID, req.CaptchaAnswer) {
-		_, _ = s.cfg.Store.CreatePlatformItem("login_logs", model.PlatformItemRequest{
+		if err := s.createLoginLog(r, model.PlatformItemRequest{
 			Name:        username,
 			Type:        "captcha",
 			Status:      "failed",
 			Description: "invalid captcha",
 			Metadata:    map[string]any{"client_ip": clientIP, "account": username},
-		})
+		}); err != nil {
+			writeError(w, http.StatusInternalServerError, err.Error())
+			return
+		}
 		writeError(w, http.StatusBadRequest, "captcha is required or invalid")
 		return
 	}
 	if ok, reason := s.loginPolicyAllows(username, clientIP); !ok {
-		_, _ = s.cfg.Store.CreatePlatformItem("login_logs", model.PlatformItemRequest{
+		if err := s.createLoginLog(r, model.PlatformItemRequest{
 			Name:        username,
 			Type:        "policy",
 			Status:      "denied",
 			Description: reason,
 			Metadata:    map[string]any{"client_ip": clientIP, "account": username},
-		})
+		}); err != nil {
+			writeError(w, http.StatusInternalServerError, err.Error())
+			return
+		}
 		writeError(w, http.StatusForbidden, reason)
 		return
 	}
 	if retryAfter, locked := s.activeLoginLock(username, clientIP); locked {
+		if err := s.createLoginLog(r, model.PlatformItemRequest{
+			Name:        username,
+			Type:        "lock",
+			Status:      "denied",
+			Description: "account or client ip is locked",
+			Metadata:    map[string]any{"client_ip": clientIP, "account": username, "retry_after_seconds": int(retryAfter.Seconds())},
+		}); err != nil {
+			writeError(w, http.StatusInternalServerError, err.Error())
+			return
+		}
 		w.Header().Set("Retry-After", strconv.Itoa(int(retryAfter.Seconds())))
 		writeError(w, http.StatusTooManyRequests, "account or client ip is locked; try again later")
 		return
@@ -630,6 +652,16 @@ func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
 	failureKey := clientIP + ":" + strings.ToLower(username)
 	failurePolicy := s.loginFailurePolicy()
 	if retryAfter, ok := s.auth.checkLoginAllowed(failureKey, failurePolicy); !ok {
+		if err := s.createLoginLog(r, model.PlatformItemRequest{
+			Name:        username,
+			Type:        "lock",
+			Status:      "denied",
+			Description: "too many failed login attempts",
+			Metadata:    map[string]any{"client_ip": clientIP, "account": username, "retry_after_seconds": int(retryAfter.Seconds())},
+		}); err != nil {
+			writeError(w, http.StatusInternalServerError, err.Error())
+			return
+		}
 		w.Header().Set("Retry-After", strconv.Itoa(int(retryAfter.Seconds())))
 		writeError(w, http.StatusTooManyRequests, "too many failed login attempts; try again later")
 		return
@@ -661,7 +693,10 @@ func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
 			if errors.Is(err, errExternalLDAPUserDisabled) || errors.Is(err, errExternalLDAPUserNotAllowed) {
 				status = http.StatusForbidden
 			}
-			s.recordExternalLDAPLoginFailure(r, username, providerID, err)
+			if logErr := s.recordExternalLDAPLoginFailure(r, username, providerID, err); logErr != nil {
+				writeError(w, http.StatusInternalServerError, logErr.Error())
+				return
+			}
 			writeError(w, status, err.Error())
 			return
 		}
@@ -679,13 +714,16 @@ func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
 				return
 			}
 		}
-		_, _ = s.cfg.Store.CreatePlatformItem("login_logs", model.PlatformItemRequest{
+		if err := s.createLoginLog(r, model.PlatformItemRequest{
 			Name:        username,
 			Type:        "password",
 			Status:      "failed",
 			Description: "invalid username or password",
 			Metadata:    map[string]any{"client_ip": clientIP, "account": username},
-		})
+		}); err != nil {
+			writeError(w, http.StatusInternalServerError, err.Error())
+			return
+		}
 		writeError(w, http.StatusUnauthorized, "invalid username or password")
 		return
 	}
@@ -703,33 +741,39 @@ func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	http.SetCookie(w, s.authCookie(r, token, int(authSessionTTL.Seconds())))
 	_ = s.cfg.Store.RecordUserLogin(session.UserID, clientIP, r.UserAgent())
 	_ = s.audit(r, "auth.login", session.UserID, "", "signed in with "+loginType)
-	_, _ = s.cfg.Store.CreatePlatformItem("login_logs", model.PlatformItemRequest{
+	if err := s.createLoginLog(r, model.PlatformItemRequest{
 		Name:        username,
 		Type:        loginType,
 		Status:      "success",
 		OwnerID:     session.UserID,
 		Description: "signed in",
 		Metadata:    map[string]any{"client_ip": clientIP, "account": username},
-	})
+	}); err != nil {
+		writeError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	http.SetCookie(w, s.authCookie(r, token, int(authSessionTTL.Seconds())))
 	writeJSON(w, http.StatusOK, map[string]any{"user": s.authUserPayload(session)})
 }
 
-func (s *Server) recordExternalLDAPLoginFailure(r *http.Request, username, providerID string, err error) {
+func (s *Server) recordExternalLDAPLoginFailure(r *http.Request, username, providerID string, err error) error {
 	detail := "external ldap login failed"
 	if err != nil {
 		detail = err.Error()
 	}
-	_, _ = s.cfg.Store.CreatePlatformItem("login_logs", model.PlatformItemRequest{
+	if logErr := s.createLoginLog(r, model.PlatformItemRequest{
 		Name:        username,
 		Type:        "ldap",
 		Status:      "failed",
 		Description: detail,
 		Metadata:    map[string]any{"client_ip": s.clientIP(r), "account": username, "provider_id": providerID},
-	})
+	}); logErr != nil {
+		return logErr
+	}
 	_ = s.audit(r, "auth.ldap.login_failed", providerID, "ldap", detail)
+	return nil
 }
 
 func (s *Server) handleLogout(w http.ResponseWriter, r *http.Request) {

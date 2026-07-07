@@ -3974,6 +3974,10 @@ func TestConfigurableLoginFailureLockPolicy(t *testing.T) {
 	if lockedRec.Result().Header.Get("Retry-After") == "" {
 		t.Fatal("locked login response did not include Retry-After")
 	}
+	loginLogsRec := assertStatus(t, handler, http.MethodGet, "/api/admin/audit/login-logs", nil, adminCookie, http.StatusOK)
+	if !strings.Contains(loginLogsRec.Body.String(), `"type":"lock"`) || !strings.Contains(loginLogsRec.Body.String(), "account or client ip is locked") {
+		t.Fatalf("locked login denial was not written to login logs: %s", loginLogsRec.Body.String())
+	}
 
 	locksRec := assertStatus(t, handler, http.MethodGet, "/api/admin/login-locked", nil, adminCookie, http.StatusOK)
 	var locks struct {
@@ -3993,6 +3997,32 @@ func TestConfigurableLoginFailureLockPolicy(t *testing.T) {
 		return
 	}
 	t.Fatalf("custom-lock-user lock was not created: %#v", locks.Items)
+}
+
+func TestLoginLogPersistenceFailureReturnsServerError(t *testing.T) {
+	srv, adminCookie := newTestServer(t, nil)
+	handler := http.Handler(srv)
+
+	removeFailureBlocker := blockPlatformItemCreate(t, srv.cfg.Store, "login_logs")
+	failedLoginRec := assertStatus(t, handler, http.MethodPost, "/api/auth/login", map[string]any{"username": "admin", "password": "wrong-password"}, nil, http.StatusInternalServerError)
+	removeFailureBlocker()
+	if !strings.Contains(failedLoginRec.Body.String(), "persist login log failed") {
+		t.Fatalf("failed login log persistence failure was not reported: %s", failedLoginRec.Body.String())
+	}
+	operationLogsRec := assertStatus(t, handler, http.MethodGet, "/api/admin/audit/operation-logs", nil, adminCookie, http.StatusOK)
+	if !strings.Contains(operationLogsRec.Body.String(), "auth.login.log.persist_failed") {
+		t.Fatalf("failed login log persistence failure was not audited: %s", operationLogsRec.Body.String())
+	}
+
+	removeSuccessBlocker := blockPlatformItemCreate(t, srv.cfg.Store, "login_logs")
+	successLoginRec := assertStatus(t, handler, http.MethodPost, "/api/auth/login", map[string]any{"username": "admin", "password": "password123"}, nil, http.StatusInternalServerError)
+	removeSuccessBlocker()
+	if !strings.Contains(successLoginRec.Body.String(), "persist login log failed") {
+		t.Fatalf("successful login log persistence failure was not reported: %s", successLoginRec.Body.String())
+	}
+	if cookies := successLoginRec.Result().Cookies(); len(cookies) != 0 {
+		t.Fatalf("successful login issued cookies even though login log persistence failed: %#v", cookies)
+	}
 }
 
 func TestLoginLockPersistenceFailureReturnsServerError(t *testing.T) {

@@ -374,13 +374,16 @@ func (s *Server) handlePasskeyLoginOptions(w http.ResponseWriter, r *http.Reques
 		return
 	}
 	if ok, reason := s.loginPolicyAllows(username, clientIP); !ok {
-		_, _ = s.cfg.Store.CreatePlatformItem("login_logs", model.PlatformItemRequest{
+		if err := s.createLoginLog(r, model.PlatformItemRequest{
 			Name:        username,
 			Type:        "passkey",
 			Status:      "denied",
 			Description: reason,
 			Metadata:    map[string]any{"client_ip": clientIP, "account": username},
-		})
+		}); err != nil {
+			writeError(w, http.StatusInternalServerError, err.Error())
+			return
+		}
 		writeError(w, http.StatusForbidden, reason)
 		return
 	}
@@ -536,10 +539,9 @@ func (s *Server) handlePasskeyLoginVerify(w http.ResponseWriter, r *http.Request
 		writeError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
-	http.SetCookie(w, s.authCookie(r, token, int(authSessionTTL.Seconds())))
 	_ = s.cfg.Store.RecordUserLogin(session.UserID, challenge.ClientIP, r.UserAgent())
 	_ = s.audit(r, "auth.passkey.login", session.UserID, "", "signed in with passkey")
-	_, _ = s.cfg.Store.CreatePlatformItem("login_logs", model.PlatformItemRequest{
+	if err := s.createLoginLog(r, model.PlatformItemRequest{
 		Name:        challenge.Username,
 		Type:        "passkey",
 		Status:      "success",
@@ -552,7 +554,11 @@ func (s *Server) handlePasskeyLoginVerify(w http.ResponseWriter, r *http.Request
 			"passkey_id":    item.ID,
 			"user_agent":    trimMetadataTextForPasskey(r.UserAgent(), 512),
 		},
-	})
+	}); err != nil {
+		writeError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	http.SetCookie(w, s.authCookie(r, token, int(authSessionTTL.Seconds())))
 	writeJSON(w, http.StatusOK, map[string]any{"user": s.authUserPayload(session)})
 }
 
@@ -566,13 +572,16 @@ func (s *Server) recordPasskeyLoginFailure(w http.ResponseWriter, r *http.Reques
 			return
 		}
 	}
-	_, _ = s.cfg.Store.CreatePlatformItem("login_logs", model.PlatformItemRequest{
+	if err := s.createLoginLog(r, model.PlatformItemRequest{
 		Name:        username,
 		Type:        "passkey",
 		Status:      "failed",
 		Description: detail,
 		Metadata:    map[string]any{"client_ip": clientIP, "account": username},
-	})
+	}); err != nil {
+		writeError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
 	_ = s.audit(r, "auth.passkey.login_failed", "", "", detail)
 	writeError(w, http.StatusUnauthorized, detail)
 }

@@ -174,6 +174,70 @@ func TestPlatformCollectionEndpoints(t *testing.T) {
 	}
 }
 
+func TestPlatformCollectionOperationLogFailureRollsBackMutations(t *testing.T) {
+	srv, adminCookie := newTestServer(t, nil)
+	handler := http.Handler(srv)
+
+	removeCreateBlocker := blockPlatformItemCreate(t, srv.cfg.Store, "operation_logs")
+	createRec := assertStatus(t, handler, http.MethodPost, "/api/admin/assets", map[string]any{
+		"name":     "no-audit-create",
+		"type":     "ssh",
+		"status":   "enabled",
+		"protocol": "ssh",
+		"host":     "127.0.0.1",
+		"port":     22,
+	}, adminCookie, http.StatusInternalServerError)
+	removeCreateBlocker()
+	if !strings.Contains(createRec.Body.String(), "persist operation log failed") {
+		t.Fatalf("create operation log failure was not reported: %s", createRec.Body.String())
+	}
+	assetsRec := assertStatus(t, handler, http.MethodGet, "/api/admin/assets", nil, adminCookie, http.StatusOK)
+	if strings.Contains(assetsRec.Body.String(), "no-audit-create") {
+		t.Fatalf("asset create was not rolled back after operation log failure: %s", assetsRec.Body.String())
+	}
+
+	assetRec := assertStatus(t, handler, http.MethodPost, "/api/admin/assets", map[string]any{
+		"name":     "audited-asset",
+		"type":     "ssh",
+		"status":   "enabled",
+		"protocol": "ssh",
+		"host":     "127.0.0.1",
+		"port":     22,
+	}, adminCookie, http.StatusCreated)
+	var asset model.PlatformItem
+	decodeResponse(t, assetRec, &asset)
+
+	removeUpdateBlocker := blockPlatformItemCreate(t, srv.cfg.Store, "operation_logs")
+	updateRec := assertStatus(t, handler, http.MethodPatch, "/api/admin/assets/"+asset.ID, map[string]any{
+		"name":   "no-audit-update",
+		"status": "disabled",
+	}, adminCookie, http.StatusInternalServerError)
+	removeUpdateBlocker()
+	if !strings.Contains(updateRec.Body.String(), "persist operation log failed") {
+		t.Fatalf("update operation log failure was not reported: %s", updateRec.Body.String())
+	}
+	detailRec := assertStatus(t, handler, http.MethodGet, "/api/admin/assets/"+asset.ID, nil, adminCookie, http.StatusOK)
+	var restoredAsset model.PlatformItem
+	decodeResponse(t, detailRec, &restoredAsset)
+	if restoredAsset.Name != "audited-asset" || restoredAsset.Status != "enabled" {
+		t.Fatalf("asset update was not rolled back after operation log failure: %#v", restoredAsset)
+	}
+
+	removeDeleteBlocker := blockPlatformItemCreate(t, srv.cfg.Store, "operation_logs")
+	deleteRec := assertStatus(t, handler, http.MethodDelete, "/api/admin/assets/"+asset.ID, nil, adminCookie, http.StatusInternalServerError)
+	removeDeleteBlocker()
+	if !strings.Contains(deleteRec.Body.String(), "persist operation log failed") {
+		t.Fatalf("delete operation log failure was not reported: %s", deleteRec.Body.String())
+	}
+	afterDeleteRec := assertStatus(t, handler, http.MethodGet, "/api/admin/assets/"+asset.ID, nil, adminCookie, http.StatusOK)
+	if !strings.Contains(afterDeleteRec.Body.String(), "audited-asset") {
+		t.Fatalf("asset delete was not rolled back after operation log failure: %s", afterDeleteRec.Body.String())
+	}
+	if !coreAuditLogsContainAction(srv.cfg.Store, "operation.log.persist_failed") {
+		t.Fatal("platform mutation operation log failure was not written to core audit logs")
+	}
+}
+
 func TestAuditLogExportJSONAndCSV(t *testing.T) {
 	handler, adminCookie := newTestHandler(t)
 

@@ -6,6 +6,7 @@ import (
 	"context"
 	"database/sql"
 	"errors"
+	"fmt"
 	"io"
 	"net"
 	"net/http"
@@ -191,6 +192,13 @@ func (s *Server) handleCollection(w http.ResponseWriter, r *http.Request, collec
 			writeError(w, http.StatusInternalServerError, err.Error())
 			return
 		}
+		if err := s.createPlatformMutationOperationLog(r, collection, "create", item, "created "+item.Name); err != nil {
+			if rollbackErr := s.cfg.Store.DeletePlatformItem(collection, item.ID); rollbackErr != nil && !errors.Is(rollbackErr, os.ErrNotExist) {
+				err = fmt.Errorf("%w; additionally failed to roll back created record: %v", err, rollbackErr)
+			}
+			writeError(w, http.StatusInternalServerError, err.Error())
+			return
+		}
 		_ = s.audit(r, collection+".create", item.ID, item.Protocol, "created "+item.Name)
 		writeJSON(w, http.StatusCreated, item)
 	case id != "" && r.Method == http.MethodPatch:
@@ -202,11 +210,27 @@ func (s *Server) handleCollection(w http.ResponseWriter, r *http.Request, collec
 			writeError(w, http.StatusBadRequest, err.Error())
 			return
 		}
+		previous, ok, err := s.cfg.Store.GetPlatformItem(collection, id)
+		if err != nil {
+			writeError(w, http.StatusInternalServerError, err.Error())
+			return
+		}
+		if !ok {
+			writeError(w, http.StatusNotFound, "record not found")
+			return
+		}
 		item, err := s.cfg.Store.UpdatePlatformItem(collection, id, req)
 		if err != nil {
 			if errors.Is(err, os.ErrNotExist) {
 				writeError(w, http.StatusNotFound, "record not found")
 				return
+			}
+			writeError(w, http.StatusInternalServerError, err.Error())
+			return
+		}
+		if err := s.createPlatformMutationOperationLog(r, collection, "update", item, "updated "+item.Name); err != nil {
+			if _, restoreErr := s.cfg.Store.SavePlatformItem(collection, previous); restoreErr != nil {
+				err = fmt.Errorf("%w; additionally failed to restore updated record: %v", err, restoreErr)
 			}
 			writeError(w, http.StatusInternalServerError, err.Error())
 			return
@@ -218,8 +242,28 @@ func (s *Server) handleCollection(w http.ResponseWriter, r *http.Request, collec
 			s.handleDeleteLoginLock(w, r, id)
 			return
 		}
-		if err := s.cfg.Store.DeletePlatformItem(collection, id); err != nil {
+		previous, ok, err := s.cfg.Store.GetPlatformItem(collection, id)
+		if err != nil {
+			writeError(w, http.StatusInternalServerError, err.Error())
+			return
+		}
+		if !ok {
 			writeError(w, http.StatusNotFound, "record not found")
+			return
+		}
+		if err := s.cfg.Store.DeletePlatformItem(collection, id); err != nil {
+			if errors.Is(err, os.ErrNotExist) {
+				writeError(w, http.StatusNotFound, "record not found")
+				return
+			}
+			writeError(w, http.StatusInternalServerError, err.Error())
+			return
+		}
+		if err := s.createPlatformMutationOperationLog(r, collection, "delete", previous, "deleted record"); err != nil {
+			if _, restoreErr := s.cfg.Store.SavePlatformItem(collection, previous); restoreErr != nil {
+				err = fmt.Errorf("%w; additionally failed to restore deleted record: %v", err, restoreErr)
+			}
+			writeError(w, http.StatusInternalServerError, err.Error())
 			return
 		}
 		_ = s.audit(r, collection+".delete", id, "", "deleted record")
@@ -227,6 +271,23 @@ func (s *Server) handleCollection(w http.ResponseWriter, r *http.Request, collec
 	default:
 		writeError(w, http.StatusMethodNotAllowed, "method not allowed")
 	}
+}
+
+func (s *Server) createPlatformMutationOperationLog(r *http.Request, collection, action string, item model.PlatformItem, description string) error {
+	return s.createOperationLog(r, model.PlatformItemRequest{
+		Name:        collection + "." + action,
+		Type:        collection,
+		Status:      "success",
+		Protocol:    item.Protocol,
+		TargetID:    item.ID,
+		OwnerID:     s.currentUserID(r),
+		Description: description,
+		Metadata: map[string]any{
+			"collection": collection,
+			"item_id":    item.ID,
+			"client_ip":  s.clientIP(r),
+		},
+	})
 }
 
 func validateAuthorizationRequest(collection string, req model.PlatformItemRequest) error {

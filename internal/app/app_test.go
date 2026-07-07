@@ -10491,6 +10491,80 @@ func TestAuditSessionOperations(t *testing.T) {
 	}
 }
 
+func TestRecordingOperationLogPersistenceFailures(t *testing.T) {
+	srv, adminCookie := newTestServer(t, nil)
+	handler := http.Handler(srv)
+
+	windowsRec := assertStatus(t, handler, http.MethodPost, "/api/servers", map[string]any{
+		"name":     "recording-log-windows",
+		"host":     "127.0.0.1",
+		"os":       "windows",
+		"rdp_port": 3389,
+	}, adminCookie, http.StatusCreated)
+	var windows model.Server
+	decodeResponse(t, windowsRec, &windows)
+	rdpCredRec := assertStatus(t, handler, http.MethodPost, "/api/credentials", map[string]any{
+		"name":      "recording-log-rdp-admin",
+		"server_id": windows.ID,
+		"type":      "rdp_password",
+		"username":  "Administrator",
+		"password":  "secret",
+	}, adminCookie, http.StatusCreated)
+	var rdpCred model.CredentialPublic
+	decodeResponse(t, rdpCredRec, &rdpCred)
+	sessionRec := assertStatus(t, handler, http.MethodPost, "/api/connections/rdp", map[string]any{
+		"server_id":         windows.ID,
+		"credential_id":     rdpCred.ID,
+		"recording_enabled": true,
+	}, adminCookie, http.StatusCreated)
+	var session model.ConnectionSession
+	decodeResponse(t, sessionRec, &session)
+	if session.RecordingPath == "" {
+		t.Fatal("recording path was not created")
+	}
+	recordingFile := filepath.Join(session.RecordingPath, "recording.guac")
+	if err := os.WriteFile(recordingFile, []byte("audit frames"), 0o660); err != nil {
+		t.Fatalf("write recording fixture: %v", err)
+	}
+
+	removeLegacyDownloadBlocker := blockPlatformItemCreate(t, srv.cfg.Store, "operation_logs")
+	legacyDownloadRec := assertStatus(t, handler, http.MethodGet, "/api/connections/"+session.ID+"/recording.zip", nil, adminCookie, http.StatusInternalServerError)
+	removeLegacyDownloadBlocker()
+	if !strings.Contains(legacyDownloadRec.Body.String(), "persist operation log failed") {
+		t.Fatalf("legacy recording download operation log failure was not reported: %s", legacyDownloadRec.Body.String())
+	}
+	if strings.Contains(legacyDownloadRec.Body.String(), "audit frames") {
+		t.Fatalf("legacy recording download returned recording content after operation log failure: %s", legacyDownloadRec.Body.String())
+	}
+
+	removeAuditDownloadBlocker := blockPlatformItemCreate(t, srv.cfg.Store, "operation_logs")
+	auditDownloadRec := assertStatus(t, handler, http.MethodGet, "/api/admin/audit/offline-sessions/"+session.ID+"/recording", nil, adminCookie, http.StatusInternalServerError)
+	removeAuditDownloadBlocker()
+	if !strings.Contains(auditDownloadRec.Body.String(), "persist operation log failed") {
+		t.Fatalf("audit recording download operation log failure was not reported: %s", auditDownloadRec.Body.String())
+	}
+	if strings.Contains(auditDownloadRec.Body.String(), "audit frames") {
+		t.Fatalf("audit recording download returned recording content after operation log failure: %s", auditDownloadRec.Body.String())
+	}
+
+	removeDeleteBlocker := blockPlatformItemCreate(t, srv.cfg.Store, "operation_logs")
+	deleteRec := assertStatus(t, handler, http.MethodDelete, "/api/admin/audit/offline-sessions/"+session.ID+"/recording", nil, adminCookie, http.StatusInternalServerError)
+	removeDeleteBlocker()
+	if !strings.Contains(deleteRec.Body.String(), "persist operation log failed") {
+		t.Fatalf("recording delete operation log failure was not reported: %s", deleteRec.Body.String())
+	}
+	if data, err := os.ReadFile(recordingFile); err != nil || string(data) != "audit frames" {
+		t.Fatalf("recording delete removed or changed recording before operation log persisted: data=%q err=%v", string(data), err)
+	}
+	storedSession, ok := srv.cfg.Store.GetSession(session.ID)
+	if !ok || storedSession.RecordingPath == "" || storedSession.RecordingSize != 0 {
+		t.Fatalf("recording delete changed session metadata before operation log persisted: ok=%v session=%#v", ok, storedSession)
+	}
+	if !coreAuditLogsContainAction(srv.cfg.Store, "operation.log.persist_failed") {
+		t.Fatal("recording operation log persistence failure was not written to core audit logs")
+	}
+}
+
 func TestRecordingAuditRejectsSymlinkRecordingRoot(t *testing.T) {
 	srv, adminCookie := newTestServer(t, nil)
 	handler := http.Handler(srv)

@@ -3596,6 +3596,12 @@ func (s *Server) downloadAuditRecording(w http.ResponseWriter, r *http.Request, 
 	if !ok {
 		return
 	}
+	if err := s.createRecordingOperationLog(r, "audit.recording.download", "success", id, recording.protocol, "downloaded offline session recording", map[string]any{
+		"recording_path": recording.path,
+	}); err != nil {
+		writeError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
 	_ = s.audit(r, "audit.recording.download", id, recording.protocol, "downloaded offline session recording")
 	s.serveRecordingZip(w, r, id, recording.path)
 }
@@ -3603,6 +3609,12 @@ func (s *Server) downloadAuditRecording(w http.ResponseWriter, r *http.Request, 
 func (s *Server) deleteAuditRecording(w http.ResponseWriter, r *http.Request, id string) {
 	recording, ok := s.auditRecordingTarget(w, r, id)
 	if !ok {
+		return
+	}
+	if err := s.createRecordingOperationLog(r, "audit.recording.delete", "requested", id, recording.protocol, "delete offline session recording requested", map[string]any{
+		"recording_path": recording.path,
+	}); err != nil {
+		writeError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
 	if err := os.RemoveAll(recording.path); err != nil {
@@ -3647,6 +3659,10 @@ type auditRecording struct {
 func (s *Server) auditRecordingTarget(w http.ResponseWriter, r *http.Request, id string) (auditRecording, bool) {
 	if session, ok := s.cfg.Store.GetSession(id); ok {
 		if !s.canAccessSession(r, session) {
+			if err := s.createRecordingOperationLog(r, "audit.recording.access.denied", "denied", id, session.Protocol, "recording access denied", nil); err != nil {
+				writeError(w, http.StatusInternalServerError, err.Error())
+				return auditRecording{}, false
+			}
 			_ = s.audit(r, "audit.recording.access.denied", id, session.Protocol, "recording access denied")
 			writeError(w, http.StatusForbidden, "session access denied")
 			return auditRecording{}, false
@@ -3663,12 +3679,34 @@ func (s *Server) auditRecordingTarget(w http.ResponseWriter, r *http.Request, id
 		return auditRecording{}, false
 	}
 	if !s.canAccessPlatformSession(r, item) {
+		if err := s.createRecordingOperationLog(r, "audit.recording.access.denied", "denied", id, item.Protocol, "recording access denied", nil); err != nil {
+			writeError(w, http.StatusInternalServerError, err.Error())
+			return auditRecording{}, false
+		}
 		_ = s.audit(r, "audit.recording.access.denied", id, item.Protocol, "recording access denied")
 		writeError(w, http.StatusForbidden, "session access denied")
 		return auditRecording{}, false
 	}
 	path, _ := item.Metadata["recording_path"].(string)
 	return s.validateRecordingPath(w, path, item.Protocol)
+}
+
+func (s *Server) createRecordingOperationLog(r *http.Request, name, status, id string, protocol model.Protocol, description string, metadata map[string]any) error {
+	if metadata == nil {
+		metadata = map[string]any{}
+	}
+	metadata["session_id"] = id
+	metadata["client_ip"] = s.clientIP(r)
+	return s.createOperationLog(r, model.PlatformItemRequest{
+		Name:        name,
+		Type:        "recording",
+		Status:      status,
+		Protocol:    protocol,
+		TargetID:    id,
+		OwnerID:     s.currentUserID(r),
+		Description: description,
+		Metadata:    metadata,
+	})
 }
 
 func (s *Server) canAccessPlatformSession(r *http.Request, item model.PlatformItem) bool {

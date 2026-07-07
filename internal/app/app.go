@@ -549,11 +549,21 @@ func (s *Server) handleRecordingDownload(w http.ResponseWriter, r *http.Request)
 		return
 	}
 	if !s.canAccessSession(r, session) {
+		if err := s.createRecordingOperationLog(r, "recording.access.denied", "denied", session.ID, session.Protocol, "recording access denied", nil); err != nil {
+			writeError(w, http.StatusInternalServerError, err.Error())
+			return
+		}
 		writeError(w, http.StatusForbidden, "session access denied")
 		return
 	}
 	recording, ok := s.validateRecordingPath(w, session.RecordingPath, session.Protocol)
 	if !ok {
+		return
+	}
+	if err := s.createRecordingOperationLog(r, "recording.download", "success", session.ID, session.Protocol, "downloaded recording", map[string]any{
+		"recording_path": recording.path,
+	}); err != nil {
+		writeError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
 	_ = s.audit(r, "recording.download", session.ID, session.Protocol, "downloaded recording")

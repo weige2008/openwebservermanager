@@ -9539,6 +9539,30 @@ func TestStorageAuthorizationStrategyPermissions(t *testing.T) {
 	assertStatus(t, handler, http.MethodPost, "/api/admin/storages/"+storage.ID+"/files-rename", map[string]any{"path": "open/rename-overwrite-source.txt", "destination": "open/existing-rename.txt", "overwrite": true}, userCookie, http.StatusOK)
 }
 
+func TestStorageFileLogPersistenceFailureReturnsServerError(t *testing.T) {
+	srv, adminCookie := newTestServer(t, nil)
+	handler := http.Handler(srv)
+
+	storageRec := assertStatus(t, handler, http.MethodPost, "/api/admin/storages", map[string]any{
+		"name":   "persist-file-log-drive",
+		"type":   "local",
+		"status": "enabled",
+	}, adminCookie, http.StatusCreated)
+	var storage model.PlatformItem
+	decodeResponse(t, storageRec, &storage)
+
+	removeBlocker := blockPlatformItemCreate(t, srv.cfg.Store, "file_logs")
+	writeRec := assertStatus(t, handler, http.MethodPost, "/api/admin/storages/"+storage.ID+"/files-write", map[string]any{"path": "audit.txt", "content": "audit"}, adminCookie, http.StatusInternalServerError)
+	removeBlocker()
+	if !strings.Contains(writeRec.Body.String(), "persist file log failed") {
+		t.Fatalf("storage file log persistence failure was not reported: %s", writeRec.Body.String())
+	}
+	operationLogsRec := assertStatus(t, handler, http.MethodGet, "/api/admin/audit/operation-logs", nil, adminCookie, http.StatusOK)
+	if !strings.Contains(operationLogsRec.Body.String(), "file.log.persist_failed") {
+		t.Fatalf("storage file log persistence failure was not audited: %s", operationLogsRec.Body.String())
+	}
+}
+
 func TestStorageQuotaEnforcedAndUsageUpdated(t *testing.T) {
 	srv, adminCookie := newTestServer(t, nil)
 	handler := http.Handler(srv)
@@ -10422,6 +10446,57 @@ func TestDesktopSessionDriveFiles(t *testing.T) {
 		if !strings.Contains(operationLogs.Body.String(), want) {
 			t.Fatalf("drive denied operation log missing %q: %s", want, operationLogs.Body.String())
 		}
+	}
+}
+
+func TestDesktopDriveFileLogPersistenceFailureReturnsServerError(t *testing.T) {
+	srv, adminCookie := newTestServer(t, nil)
+	handler := http.Handler(srv)
+
+	windowsRec := assertStatus(t, handler, http.MethodPost, "/api/servers", map[string]any{
+		"name":     "windows-drive-log",
+		"host":     "127.0.0.1",
+		"os":       "windows",
+		"rdp_port": 3389,
+	}, adminCookie, http.StatusCreated)
+	var windows model.Server
+	decodeResponse(t, windowsRec, &windows)
+	rdpCredRec := assertStatus(t, handler, http.MethodPost, "/api/credentials", map[string]any{
+		"name":      "rdp-drive-log-admin",
+		"server_id": windows.ID,
+		"type":      "rdp_password",
+		"username":  "Administrator",
+		"password":  "secret",
+	}, adminCookie, http.StatusCreated)
+	var rdpCred model.CredentialPublic
+	decodeResponse(t, rdpCredRec, &rdpCred)
+	sessionRec := assertStatus(t, handler, http.MethodPost, "/api/connections/rdp", map[string]any{
+		"server_id":     windows.ID,
+		"credential_id": rdpCred.ID,
+	}, adminCookie, http.StatusCreated)
+	var session model.ConnectionSession
+	decodeResponse(t, sessionRec, &session)
+
+	driveRoot := filepath.Join(srv.cfg.DataDir, "drives", session.ID, "reports")
+	if err := os.MkdirAll(driveRoot, 0o770); err != nil {
+		t.Fatalf("create session drive: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(driveRoot, "download.txt"), []byte("desktop file"), 0o660); err != nil {
+		t.Fatalf("write drive download file: %v", err)
+	}
+
+	removeBlocker := blockPlatformItemCreate(t, srv.cfg.Store, "file_logs")
+	downloadRec := assertStatus(t, handler, http.MethodGet, "/api/connections/"+session.ID+"/drive/download?path=reports/download.txt", nil, adminCookie, http.StatusInternalServerError)
+	removeBlocker()
+	if !strings.Contains(downloadRec.Body.String(), "persist file log failed") {
+		t.Fatalf("desktop drive file log persistence failure was not reported: %s", downloadRec.Body.String())
+	}
+	if strings.Contains(downloadRec.Body.String(), "desktop file") {
+		t.Fatalf("desktop drive download returned file content after audit log failure: %s", downloadRec.Body.String())
+	}
+	operationLogsRec := assertStatus(t, handler, http.MethodGet, "/api/admin/audit/operation-logs", nil, adminCookie, http.StatusOK)
+	if !strings.Contains(operationLogsRec.Body.String(), "file.log.persist_failed") {
+		t.Fatalf("desktop drive file log persistence failure was not audited: %s", operationLogsRec.Body.String())
 	}
 }
 

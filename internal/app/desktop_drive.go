@@ -76,13 +76,19 @@ func (s *Server) desktopDriveTarget(w http.ResponseWriter, r *http.Request, sess
 		return model.ConnectionSession{}, "", false
 	}
 	if !s.canAccessSession(r, session) {
-		s.recordDesktopDriveDenied(r, session, operation, "session_access", r.URL.Query().Get("path"))
+		if err := s.recordDesktopDriveDenied(r, session, operation, "session_access", r.URL.Query().Get("path")); err != nil {
+			writeError(w, http.StatusInternalServerError, err.Error())
+			return model.ConnectionSession{}, "", false
+		}
 		writeError(w, http.StatusForbidden, "session access denied")
 		return model.ConnectionSession{}, "", false
 	}
 	policy := s.desktopAccessPolicy(session.Protocol)
 	if !boolPtrValue(session.FileTransferEnabled, policy.FileTransferEnabled) {
-		s.recordDesktopDriveDenied(r, session, operation, "file_transfer_disabled", r.URL.Query().Get("path"))
+		if err := s.recordDesktopDriveDenied(r, session, operation, "file_transfer_disabled", r.URL.Query().Get("path")); err != nil {
+			writeError(w, http.StatusInternalServerError, err.Error())
+			return model.ConnectionSession{}, "", false
+		}
 		writeError(w, http.StatusForbidden, "desktop file transfer is disabled")
 		return model.ConnectionSession{}, "", false
 	}
@@ -156,10 +162,13 @@ func (s *Server) handleDesktopDriveDownload(w http.ResponseWriter, r *http.Reque
 		writeError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
-	s.recordDesktopDriveFileLog(r, session, "download", "success", rel, map[string]any{
+	if err := s.recordDesktopDriveFileLog(r, session, "download", "success", rel, map[string]any{
 		"path": filepath.ToSlash(rel),
 		"size": info.Size(),
-	})
+	}); err != nil {
+		writeError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
 	_ = s.audit(r, "connection.drive.download", session.ID, session.Protocol, "downloaded session drive file")
 	w.Header().Set("Content-Type", "application/octet-stream")
 	w.Header().Set("Content-Disposition", `attachment; filename="`+sanitizeAttachmentName(filepath.Base(rel))+`"`)
@@ -227,11 +236,14 @@ func (s *Server) handleDesktopDriveUpload(w http.ResponseWriter, r *http.Request
 		writeError(w, http.StatusInternalServerError, closeErr.Error())
 		return
 	}
-	s.recordDesktopDriveFileLog(r, session, "upload", "success", rel, map[string]any{
+	if err := s.recordDesktopDriveFileLog(r, session, "upload", "success", rel, map[string]any{
 		"path":     filepath.ToSlash(rel),
 		"filename": fileName,
 		"size":     written,
-	})
+	}); err != nil {
+		writeError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
 	_ = s.audit(r, "connection.drive.upload", session.ID, session.Protocol, "uploaded session drive file")
 	writeJSON(w, http.StatusCreated, map[string]any{"path": filepath.ToSlash(rel), "size": written, "name": fileName})
 }
@@ -256,14 +268,17 @@ func (s *Server) handleDesktopDriveDelete(w http.ResponseWriter, r *http.Request
 		writeError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
-	s.recordDesktopDriveFileLog(r, session, "delete", "success", rel, map[string]any{
+	if err := s.recordDesktopDriveFileLog(r, session, "delete", "success", rel, map[string]any{
 		"path": filepath.ToSlash(rel),
-	})
+	}); err != nil {
+		writeError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
 	_ = s.audit(r, "connection.drive.delete", session.ID, session.Protocol, "deleted session drive file")
 	writeJSON(w, http.StatusOK, map[string]bool{"ok": true})
 }
 
-func (s *Server) recordDesktopDriveFileLog(r *http.Request, session model.ConnectionSession, action, status, path string, metadata map[string]any) {
+func (s *Server) recordDesktopDriveFileLog(r *http.Request, session model.ConnectionSession, action, status, path string, metadata map[string]any) error {
 	if metadata == nil {
 		metadata = map[string]any{}
 	}
@@ -271,7 +286,7 @@ func (s *Server) recordDesktopDriveFileLog(r *http.Request, session model.Connec
 	metadata["asset_id"] = session.ServerID
 	metadata["protocol"] = session.Protocol
 	metadata["client_ip"] = s.clientIP(r)
-	_, _ = s.cfg.Store.CreatePlatformItem("file_logs", model.PlatformItemRequest{
+	return s.createFileLog(r, model.PlatformItemRequest{
 		Name:        filepath.ToSlash(path),
 		Type:        action,
 		Status:      status,
@@ -283,7 +298,7 @@ func (s *Server) recordDesktopDriveFileLog(r *http.Request, session model.Connec
 	})
 }
 
-func (s *Server) recordDesktopDriveDenied(r *http.Request, session model.ConnectionSession, action, reason, path string) {
+func (s *Server) recordDesktopDriveDenied(r *http.Request, session model.ConnectionSession, action, reason, path string) error {
 	action = strings.TrimSpace(action)
 	if action == "" {
 		action = "access"
@@ -292,8 +307,11 @@ func (s *Server) recordDesktopDriveDenied(r *http.Request, session model.Connect
 		"path":   filepath.ToSlash(strings.TrimSpace(path)),
 		"reason": reason,
 	}
-	s.recordDesktopDriveFileLog(r, session, action, "denied", path, metadata)
+	if err := s.recordDesktopDriveFileLog(r, session, action, "denied", path, metadata); err != nil {
+		return err
+	}
 	_ = s.audit(r, "connection.drive."+action+".denied", session.ID, session.Protocol, "denied session drive "+action+": "+reason)
+	return nil
 }
 
 func sanitizeAttachmentName(value string) string {

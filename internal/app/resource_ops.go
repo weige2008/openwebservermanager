@@ -1280,11 +1280,14 @@ func (s *Server) handleStorageWrite(w http.ResponseWriter, r *http.Request, root
 		writeError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
-	s.recordStorageFileLog(r, storage.ID, "write", "success", rel, "wrote file", map[string]any{
+	if err := s.recordStorageFileLog(r, storage.ID, "write", "success", rel, "wrote file", map[string]any{
 		"path":       filepath.ToSlash(rel),
 		"size":       len(content),
 		"permission": permission,
-	})
+	}); err != nil {
+		writeError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
 	_ = s.audit(r, "storage.files.write", storage.ID, "", "wrote "+rel)
 	writeJSON(w, http.StatusCreated, map[string]any{"path": filepath.ToSlash(rel), "size": len(content), "usage": usage})
 }
@@ -1371,12 +1374,15 @@ func (s *Server) handleStorageUpload(w http.ResponseWriter, r *http.Request, roo
 		writeError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
-	s.recordStorageFileLog(r, storage.ID, "upload", "success", rel, "uploaded file", map[string]any{
+	if err := s.recordStorageFileLog(r, storage.ID, "upload", "success", rel, "uploaded file", map[string]any{
 		"path":       filepath.ToSlash(rel),
 		"filename":   fileName,
 		"size":       written,
 		"permission": permission,
-	})
+	}); err != nil {
+		writeError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
 	_ = s.audit(r, "storage.files.upload", storage.ID, "", "uploaded "+rel)
 	writeJSON(w, http.StatusCreated, map[string]any{"path": filepath.ToSlash(rel), "size": written, "name": fileName, "usage": usage})
 }
@@ -1401,9 +1407,12 @@ func (s *Server) handleStorageMkdir(w http.ResponseWriter, r *http.Request, root
 		writeError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
-	s.recordStorageFileLog(r, storage.ID, "mkdir", "success", rel, "created directory", map[string]any{
+	if err := s.recordStorageFileLog(r, storage.ID, "mkdir", "success", rel, "created directory", map[string]any{
 		"path": filepath.ToSlash(rel),
-	})
+	}); err != nil {
+		writeError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
 	_ = s.audit(r, "storage.files.mkdir", storage.ID, "", "created "+rel)
 	writeJSON(w, http.StatusCreated, map[string]any{"path": filepath.ToSlash(rel), "usage": usage})
 }
@@ -1432,9 +1441,12 @@ func (s *Server) handleStorageDelete(w http.ResponseWriter, r *http.Request, roo
 		writeError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
-	s.recordStorageFileLog(r, storage.ID, "delete", "success", rel, "deleted file", map[string]any{
+	if err := s.recordStorageFileLog(r, storage.ID, "delete", "success", rel, "deleted file", map[string]any{
 		"path": filepath.ToSlash(rel),
-	})
+	}); err != nil {
+		writeError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
 	_ = s.audit(r, "storage.files.delete", storage.ID, "", "deleted "+rel)
 	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "usage": usage})
 }
@@ -1463,10 +1475,13 @@ func (s *Server) handleStorageDownload(w http.ResponseWriter, r *http.Request, r
 	if !s.requireStoragePermission(w, r, storageID, "download", rel) {
 		return
 	}
-	s.recordStorageFileLog(r, storageID, "download", "success", rel, "downloaded file", map[string]any{
+	if err := s.recordStorageFileLog(r, storageID, "download", "success", rel, "downloaded file", map[string]any{
 		"path": filepath.ToSlash(rel),
 		"size": info.Size(),
-	})
+	}); err != nil {
+		writeError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
 	_ = s.audit(r, "storage.files.download", storageID, "", "downloaded "+rel)
 	w.Header().Set("Content-Disposition", `attachment; filename="`+sanitizeAttachmentName(filepath.Base(rel))+`"`)
 	http.ServeFile(w, r, target)
@@ -1548,12 +1563,15 @@ func (s *Server) handleStorageRename(w http.ResponseWriter, r *http.Request, roo
 		writeError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
-	s.recordStorageFileLog(r, storage.ID, "rename", "success", sourceRel+" -> "+destinationRel, "renamed file", map[string]any{
+	if err := s.recordStorageFileLog(r, storage.ID, "rename", "success", sourceRel+" -> "+destinationRel, "renamed file", map[string]any{
 		"path":             filepath.ToSlash(destinationRel),
 		"source_path":      filepath.ToSlash(sourceRel),
 		"destination_path": filepath.ToSlash(destinationRel),
 		"overwrite":        req.Overwrite,
-	})
+	}); err != nil {
+		writeError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
 	_ = s.audit(r, "storage.files.rename", storage.ID, "", "renamed "+sourceRel+" to "+destinationRel)
 	writeJSON(w, http.StatusOK, map[string]any{"path": filepath.ToSlash(destinationRel), "usage": usage})
 }
@@ -1664,18 +1682,21 @@ func (s *Server) handleStorageCopy(w http.ResponseWriter, r *http.Request, root 
 		writeError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
-	s.recordStorageFileLog(r, storage.ID, "copy", "success", sourceRel+" -> "+destinationRel, "copied file", map[string]any{
+	if err := s.recordStorageFileLog(r, storage.ID, "copy", "success", sourceRel+" -> "+destinationRel, "copied file", map[string]any{
 		"path":             filepath.ToSlash(destinationRel),
 		"source_path":      filepath.ToSlash(sourceRel),
 		"destination_path": filepath.ToSlash(destinationRel),
 		"size":             sourceBytes,
 		"overwrite":        req.Overwrite,
-	})
+	}); err != nil {
+		writeError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
 	_ = s.audit(r, "storage.files.copy", storage.ID, "", "copied "+sourceRel+" to "+destinationRel)
 	writeJSON(w, http.StatusCreated, map[string]any{"path": filepath.ToSlash(destinationRel), "usage": usage})
 }
 
-func (s *Server) recordStorageFileLog(r *http.Request, storageID, action, status, name, description string, metadata map[string]any) {
+func (s *Server) recordStorageFileLog(r *http.Request, storageID, action, status, name, description string, metadata map[string]any) error {
 	if metadata == nil {
 		metadata = map[string]any{}
 	}
@@ -1684,7 +1705,7 @@ func (s *Server) recordStorageFileLog(r *http.Request, storageID, action, status
 	}
 	metadata["storage_id"] = storageID
 	metadata["client_ip"] = s.clientIP(r)
-	_, _ = s.cfg.Store.CreatePlatformItem("file_logs", model.PlatformItemRequest{
+	return s.createFileLog(r, model.PlatformItemRequest{
 		Name:        filepath.ToSlash(name),
 		Type:        action,
 		Status:      status,
@@ -1693,6 +1714,15 @@ func (s *Server) recordStorageFileLog(r *http.Request, storageID, action, status
 		Description: description,
 		Metadata:    metadata,
 	})
+}
+
+func (s *Server) createFileLog(r *http.Request, req model.PlatformItemRequest) error {
+	if _, err := s.cfg.Store.CreatePlatformItem("file_logs", req); err != nil {
+		detail := "persist file log failed: " + err.Error()
+		_ = s.audit(r, "file.log.persist_failed", req.TargetID, req.Protocol, detail)
+		return errors.New(detail)
+	}
+	return nil
 }
 
 func (s *Server) storagePath(w http.ResponseWriter, _ *http.Request, root, value string) (string, string, bool) {
@@ -1736,13 +1766,16 @@ func (s *Server) requireStorageQuota(w http.ResponseWriter, r *http.Request, sto
 	if usage.Bytes+deltaBytes <= limitBytes {
 		return true
 	}
-	s.recordStorageFileLog(r, storage.ID, action, "denied", path, "storage quota exceeded", map[string]any{
+	if err := s.recordStorageFileLog(r, storage.ID, action, "denied", path, "storage quota exceeded", map[string]any{
 		"path":           filepath.ToSlash(path),
 		"reason":         "quota",
 		"used_bytes":     usage.Bytes,
 		"incoming_bytes": deltaBytes,
 		"limit_bytes":    limitBytes,
-	})
+	}); err != nil {
+		writeError(w, http.StatusInternalServerError, err.Error())
+		return false
+	}
 	_ = s.audit(r, "storage.files."+action+".quota.denied", storage.ID, "", "quota denied "+path)
 	writeError(w, http.StatusRequestEntityTooLarge, "storage quota exceeded")
 	return false
@@ -2128,10 +2161,13 @@ func (s *Server) requireStoragePermission(w http.ResponseWriter, r *http.Request
 	if allowed {
 		return true
 	}
-	s.recordStorageFileLog(r, storageID, action, "denied", path, "blocked by authorization strategy", map[string]any{
+	if err := s.recordStorageFileLog(r, storageID, action, "denied", path, "blocked by authorization strategy", map[string]any{
 		"path":   filepath.ToSlash(path),
 		"reason": "authorization_strategy",
-	})
+	}); err != nil {
+		writeError(w, http.StatusInternalServerError, err.Error())
+		return false
+	}
 	_ = s.audit(r, "storage.files."+action+".denied", storageID, "", "blocked "+action+" on "+path)
 	writeError(w, http.StatusForbidden, "file permission denied: "+action)
 	return false
@@ -2145,10 +2181,13 @@ func (s *Server) requireStorageListPermission(w http.ResponseWriter, r *http.Req
 	if !matched || allowed {
 		return true
 	}
-	s.recordStorageFileLog(r, storageID, "list", "denied", path, "blocked by authorization strategy", map[string]any{
+	if err := s.recordStorageFileLog(r, storageID, "list", "denied", path, "blocked by authorization strategy", map[string]any{
 		"path":   filepath.ToSlash(path),
 		"reason": "authorization_strategy",
-	})
+	}); err != nil {
+		writeError(w, http.StatusInternalServerError, err.Error())
+		return false
+	}
 	_ = s.audit(r, "storage.files.list.denied", storageID, "", "blocked list on "+path)
 	writeError(w, http.StatusForbidden, "file permission denied: list")
 	return false

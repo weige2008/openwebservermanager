@@ -327,6 +327,13 @@ func (s *Server) handlePasskeyRegisterVerify(w http.ResponseWriter, r *http.Requ
 		writeError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
+	if err := s.createPasskeyOperationLog(r, "auth.passkey.register", "success", item.ID, session.UserID, "registered passkey", map[string]any{
+		"credential_id": credentialID,
+	}); err != nil {
+		_ = s.cfg.Store.DeletePlatformItem("passkeys", item.ID)
+		writeError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
 	_ = s.audit(r, "auth.passkey.register", item.ID, "", "registered passkey")
 	writeJSON(w, http.StatusCreated, publicPasskeyItem(item))
 }
@@ -347,12 +354,37 @@ func (s *Server) handlePasskeyDelete(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusNotFound, "passkey not found")
 		return
 	}
+	previous := item
+	previous.Metadata = cloneMetadata(item.Metadata)
 	if err := s.cfg.Store.DeletePlatformItem("passkeys", id); err != nil {
 		writeError(w, http.StatusNotFound, "passkey not found")
 		return
 	}
+	if err := s.createPasskeyOperationLog(r, "auth.passkey.delete", "success", id, session.UserID, "deleted passkey", nil); err != nil {
+		_, _ = s.cfg.Store.SavePlatformItem("passkeys", previous)
+		writeError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
 	_ = s.audit(r, "auth.passkey.delete", id, "", "deleted passkey")
 	writeJSON(w, http.StatusOK, map[string]bool{"ok": true})
+}
+
+func (s *Server) createPasskeyOperationLog(r *http.Request, name, status, id, userID, description string, metadata map[string]any) error {
+	if metadata == nil {
+		metadata = map[string]any{}
+	} else {
+		metadata = cloneMetadata(metadata)
+	}
+	metadata["client_ip"] = s.clientIP(r)
+	return s.createOperationLog(r, model.PlatformItemRequest{
+		Name:        name,
+		Type:        "passkey",
+		Status:      status,
+		OwnerID:     userID,
+		TargetID:    id,
+		Description: description,
+		Metadata:    metadata,
+	})
 }
 
 func (s *Server) handlePasskeyLoginOptions(w http.ResponseWriter, r *http.Request) {

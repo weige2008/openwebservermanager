@@ -1166,6 +1166,47 @@ func TestPasskeyRegistrationAndLogin(t *testing.T) {
 	}
 }
 
+func TestPasskeyOperationLogFailureRollsBackMutations(t *testing.T) {
+	srv, adminCookie := newTestServer(t, nil)
+	handler := http.Handler(srv)
+
+	optionsRec := assertStatus(t, handler, http.MethodPost, "/api/auth/passkeys/register/options", map[string]any{}, adminCookie, http.StatusOK)
+	var options testPasskeyCreationOptionsResponse
+	decodeResponse(t, optionsRec, &options)
+	privateKey, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	if err != nil {
+		t.Fatalf("generate blocked passkey key: %v", err)
+	}
+	blockedCredentialID := []byte("blocked-passkey-credential")
+	blockedPayload := testPasskeyRegistrationPayload(t, options, "admin", blockedCredentialID, privateKey)
+
+	removeRegisterBlocker := blockPlatformItemCreate(t, srv.cfg.Store, "operation_logs")
+	registerFailureRec := assertStatus(t, handler, http.MethodPost, "/api/auth/passkeys/register/verify", blockedPayload, adminCookie, http.StatusInternalServerError)
+	removeRegisterBlocker()
+	if !strings.Contains(registerFailureRec.Body.String(), "persist operation log failed") {
+		t.Fatalf("passkey register operation log failure was not reported: %s", registerFailureRec.Body.String())
+	}
+	listAfterRegisterFailure := assertStatus(t, handler, http.MethodGet, "/api/auth/passkeys", nil, adminCookie, http.StatusOK)
+	if strings.Contains(listAfterRegisterFailure.Body.String(), passkeyBase64Encode(blockedCredentialID)) {
+		t.Fatalf("passkey registration survived failed operation log write: %s", listAfterRegisterFailure.Body.String())
+	}
+
+	_, _, passkey := registerTestPasskeyWithCredentialID(t, handler, adminCookie, "admin", []byte("delete-rollback-passkey-credential"))
+	removeDeleteBlocker := blockPlatformItemCreate(t, srv.cfg.Store, "operation_logs")
+	deleteFailureRec := assertStatus(t, handler, http.MethodDelete, "/api/auth/passkeys/"+passkey.ID, nil, adminCookie, http.StatusInternalServerError)
+	removeDeleteBlocker()
+	if !strings.Contains(deleteFailureRec.Body.String(), "persist operation log failed") {
+		t.Fatalf("passkey delete operation log failure was not reported: %s", deleteFailureRec.Body.String())
+	}
+	listAfterDeleteFailure := assertStatus(t, handler, http.MethodGet, "/api/auth/passkeys", nil, adminCookie, http.StatusOK)
+	if !strings.Contains(listAfterDeleteFailure.Body.String(), passkey.ID) || !strings.Contains(listAfterDeleteFailure.Body.String(), passkey.CredentialID) {
+		t.Fatalf("passkey delete was not restored after failed operation log write: %s", listAfterDeleteFailure.Body.String())
+	}
+	if !coreAuditLogsContainAction(srv.cfg.Store, "operation.log.persist_failed") {
+		t.Fatal("passkey operation log persistence failure was not written to core audit logs")
+	}
+}
+
 func TestUserImportCreatesSkipsAndUpdatesLoginUsers(t *testing.T) {
 	handler, adminCookie := newTestHandler(t)
 

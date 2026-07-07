@@ -4730,6 +4730,287 @@ func TestExternalOIDCCallbackTokenFailureIsAuditedAndRedacted(t *testing.T) {
 	}
 }
 
+func TestExternalOIDCLoginUsesVerifiedIDTokenWhenUserInfoAbsent(t *testing.T) {
+	handler, adminCookie := newTestHandler(t)
+	srv := handler.(*Server)
+	signer := newOIDCManager()
+	var providerURL string
+	var expectedNonce string
+	var tokenEndpointCalls int
+	var jwksEndpointCalls int
+	provider := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/token":
+			tokenEndpointCalls++
+			if err := r.ParseForm(); err != nil {
+				http.Error(w, "bad form", http.StatusBadRequest)
+				return
+			}
+			clientID, clientSecret, _ := r.BasicAuth()
+			if clientID != "openweb-client" || clientSecret != "openweb-secret" || r.PostForm.Get("code") != "id-token-code" {
+				http.Error(w, "bad token request", http.StatusUnauthorized)
+				return
+			}
+			idToken, err := signer.signJWT(map[string]any{
+				"iss":                providerURL,
+				"sub":                "external-idtoken-subject",
+				"aud":                "openweb-client",
+				"exp":                time.Now().UTC().Add(5 * time.Minute).Unix(),
+				"iat":                time.Now().UTC().Unix(),
+				"nonce":              expectedNonce,
+				"preferred_username": "oidc-idtoken-user",
+				"name":               "OIDC ID Token User",
+			})
+			if err != nil {
+				http.Error(w, err.Error(), http.StatusInternalServerError)
+				return
+			}
+			writeJSON(w, http.StatusOK, map[string]any{"access_token": "id-token-access", "token_type": "Bearer", "expires_in": 300, "id_token": idToken})
+		case "/jwks":
+			jwksEndpointCalls++
+			writeJSON(w, http.StatusOK, externalOIDCTestJWKS(signer))
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer provider.Close()
+	providerURL = provider.URL
+
+	assertStatus(t, handler, http.MethodPost, "/api/admin/system-settings", map[string]any{
+		"name":   "External OIDC id token",
+		"type":   "identity",
+		"status": "enabled",
+		"metadata": map[string]any{
+			"oidc_login_enabled":          true,
+			"oidc_provider_id":            "id-token-sso",
+			"oidc_provider_name":          "ID Token SSO",
+			"oidc_issuer":                 provider.URL,
+			"oidc_authorization_endpoint": provider.URL + "/authorize",
+			"oidc_token_endpoint":         provider.URL + "/token",
+			"oidc_jwks_uri":               provider.URL + "/jwks",
+			"oidc_client_id":              "openweb-client",
+			"oidc_client_secret":          "openweb-secret",
+			"oidc_scopes":                 []string{"openid", "profile"},
+			"oidc_role":                   "user",
+		},
+	}, adminCookie, http.StatusCreated)
+	state, nonce, err := srv.auth.createExternalOIDCState("id-token-sso", "/app/access")
+	if err != nil {
+		t.Fatalf("create external oidc state: %v", err)
+	}
+	expectedNonce = nonce
+	callbackRec := assertStatus(t, handler, http.MethodGet, "/api/auth/oidc/callback?state="+url.QueryEscape(state)+"&code=id-token-code", nil, nil, http.StatusFound)
+	if callbackRec.Header().Get("Location") != "/app/access" {
+		t.Fatalf("callback did not redirect to requested next path: %s", callbackRec.Header().Get("Location"))
+	}
+	if tokenEndpointCalls != 1 {
+		t.Fatalf("oidc token endpoint calls = %d, want 1", tokenEndpointCalls)
+	}
+	if jwksEndpointCalls != 1 {
+		t.Fatalf("oidc jwks endpoint calls = %d, want 1", jwksEndpointCalls)
+	}
+	cookies := callbackRec.Result().Cookies()
+	if len(cookies) == 0 {
+		t.Fatal("callback did not set auth cookie")
+	}
+	meRec := assertStatus(t, handler, http.MethodGet, "/api/auth/me", nil, cookies[0], http.StatusOK)
+	if !strings.Contains(meRec.Body.String(), `"username":"oidc-idtoken-user"`) || !strings.Contains(meRec.Body.String(), `"role":"user"`) {
+		t.Fatalf("verified id_token login did not create authenticated user: %s", meRec.Body.String())
+	}
+}
+
+func TestExternalOIDCIDTokenValidationRejectsTamperedSignature(t *testing.T) {
+	signer := newOIDCManager()
+	var providerURL string
+	provider := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/jwks" {
+			http.NotFound(w, r)
+			return
+		}
+		writeJSON(w, http.StatusOK, externalOIDCTestJWKS(signer))
+	}))
+	defer provider.Close()
+	providerURL = provider.URL
+
+	idToken, err := signer.signJWT(map[string]any{
+		"iss":   providerURL,
+		"sub":   "external-tampered-subject",
+		"aud":   "openweb-client",
+		"exp":   time.Now().UTC().Add(5 * time.Minute).Unix(),
+		"iat":   time.Now().UTC().Unix(),
+		"nonce": "nonce-1",
+	})
+	if err != nil {
+		t.Fatalf("sign id_token: %v", err)
+	}
+	parts := strings.Split(idToken, ".")
+	if len(parts) != 3 {
+		t.Fatalf("signed id_token parts = %d, want 3", len(parts))
+	}
+	signature, err := base64.RawURLEncoding.DecodeString(parts[2])
+	if err != nil {
+		t.Fatalf("decode id_token signature: %v", err)
+	}
+	signature[0] ^= 0xff
+	parts[2] = base64.RawURLEncoding.EncodeToString(signature)
+	tampered := strings.Join(parts, ".")
+	_, err = verifyExternalOIDCIDToken(http.Client{Timeout: time.Second}, externalOIDCProvider{
+		Issuer:       provider.URL,
+		JWKSEndpoint: provider.URL + "/jwks",
+		ClientID:     "openweb-client",
+	}, tampered, "nonce-1")
+	if err == nil || !strings.Contains(err.Error(), "signature") {
+		t.Fatalf("tampered id_token was not rejected by signature validation: %v", err)
+	}
+}
+
+func TestExternalOIDCCallbackRejectsIDTokenMissingNonce(t *testing.T) {
+	handler, adminCookie := newTestHandler(t)
+	srv := handler.(*Server)
+	signer := newOIDCManager()
+	var providerURL string
+	provider := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/token":
+			idToken, err := signer.signJWT(map[string]any{
+				"iss":                providerURL,
+				"sub":                "external-missing-nonce-subject",
+				"aud":                "openweb-client",
+				"exp":                time.Now().UTC().Add(5 * time.Minute).Unix(),
+				"iat":                time.Now().UTC().Unix(),
+				"preferred_username": "oidc-missing-nonce",
+			})
+			if err != nil {
+				http.Error(w, err.Error(), http.StatusInternalServerError)
+				return
+			}
+			writeJSON(w, http.StatusOK, map[string]any{"access_token": "missing-nonce-access", "token_type": "Bearer", "expires_in": 300, "id_token": idToken})
+		case "/jwks":
+			writeJSON(w, http.StatusOK, externalOIDCTestJWKS(signer))
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer provider.Close()
+	providerURL = provider.URL
+
+	assertStatus(t, handler, http.MethodPost, "/api/admin/system-settings", map[string]any{
+		"name":   "External OIDC missing nonce",
+		"type":   "identity",
+		"status": "enabled",
+		"metadata": map[string]any{
+			"oidc_login_enabled":          true,
+			"oidc_provider_id":            "missing-nonce-sso",
+			"oidc_provider_name":          "Missing Nonce SSO",
+			"oidc_issuer":                 provider.URL,
+			"oidc_authorization_endpoint": provider.URL + "/authorize",
+			"oidc_token_endpoint":         provider.URL + "/token",
+			"oidc_jwks_uri":               provider.URL + "/jwks",
+			"oidc_client_id":              "openweb-client",
+			"oidc_client_secret":          "openweb-secret",
+			"oidc_scopes":                 []string{"openid", "profile"},
+		},
+	}, adminCookie, http.StatusCreated)
+	state, _, err := srv.auth.createExternalOIDCState("missing-nonce-sso", "/app/access")
+	if err != nil {
+		t.Fatalf("create external oidc state: %v", err)
+	}
+	failedRec := assertStatus(t, handler, http.MethodGet, "/api/auth/oidc/callback?state="+url.QueryEscape(state)+"&code=missing-nonce-code", nil, nil, http.StatusBadGateway)
+	if !strings.Contains(failedRec.Body.String(), "nonce mismatch") {
+		t.Fatalf("missing nonce failure response did not explain nonce validation: %s", failedRec.Body.String())
+	}
+	usersRec := assertStatus(t, handler, http.MethodGet, "/api/admin/users", nil, adminCookie, http.StatusOK)
+	if strings.Contains(usersRec.Body.String(), "oidc-missing-nonce") {
+		t.Fatalf("missing nonce id_token created user: %s", usersRec.Body.String())
+	}
+}
+
+func TestExternalOIDCCallbackDoesNotFallbackToIDTokenWhenUserInfoFails(t *testing.T) {
+	handler, adminCookie := newTestHandler(t)
+	srv := handler.(*Server)
+	signer := newOIDCManager()
+	var providerURL string
+	var expectedNonce string
+	var jwksEndpointCalls int
+	provider := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/token":
+			idToken, err := signer.signJWT(map[string]any{
+				"iss":                providerURL,
+				"sub":                "external-fallback-subject",
+				"aud":                "openweb-client",
+				"exp":                time.Now().UTC().Add(5 * time.Minute).Unix(),
+				"iat":                time.Now().UTC().Unix(),
+				"nonce":              expectedNonce,
+				"preferred_username": "oidc-fallback-user",
+			})
+			if err != nil {
+				http.Error(w, err.Error(), http.StatusInternalServerError)
+				return
+			}
+			writeJSON(w, http.StatusOK, map[string]any{"access_token": "fallback-access", "token_type": "Bearer", "expires_in": 300, "id_token": idToken})
+		case "/userinfo":
+			http.Error(w, "userinfo down", http.StatusInternalServerError)
+		case "/jwks":
+			jwksEndpointCalls++
+			writeJSON(w, http.StatusOK, externalOIDCTestJWKS(signer))
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer provider.Close()
+	providerURL = provider.URL
+
+	assertStatus(t, handler, http.MethodPost, "/api/admin/system-settings", map[string]any{
+		"name":   "External OIDC userinfo failure",
+		"type":   "identity",
+		"status": "enabled",
+		"metadata": map[string]any{
+			"oidc_login_enabled":          true,
+			"oidc_provider_id":            "userinfo-failure-sso",
+			"oidc_provider_name":          "UserInfo Failure SSO",
+			"oidc_issuer":                 provider.URL,
+			"oidc_authorization_endpoint": provider.URL + "/authorize",
+			"oidc_token_endpoint":         provider.URL + "/token",
+			"oidc_userinfo_endpoint":      provider.URL + "/userinfo",
+			"oidc_jwks_uri":               provider.URL + "/jwks",
+			"oidc_client_id":              "openweb-client",
+			"oidc_client_secret":          "openweb-secret",
+			"oidc_scopes":                 []string{"openid", "profile"},
+		},
+	}, adminCookie, http.StatusCreated)
+	state, nonce, err := srv.auth.createExternalOIDCState("userinfo-failure-sso", "/app/access")
+	if err != nil {
+		t.Fatalf("create external oidc state: %v", err)
+	}
+	expectedNonce = nonce
+	failedRec := assertStatus(t, handler, http.MethodGet, "/api/auth/oidc/callback?state="+url.QueryEscape(state)+"&code=fallback-code", nil, nil, http.StatusBadGateway)
+	if !strings.Contains(failedRec.Body.String(), "userinfo failed") {
+		t.Fatalf("userinfo failure response did not explain failure: %s", failedRec.Body.String())
+	}
+	if jwksEndpointCalls != 0 {
+		t.Fatalf("userinfo failure fell back to id_token and fetched jwks: calls = %d", jwksEndpointCalls)
+	}
+	usersRec := assertStatus(t, handler, http.MethodGet, "/api/admin/users", nil, adminCookie, http.StatusOK)
+	if strings.Contains(usersRec.Body.String(), "oidc-fallback-user") {
+		t.Fatalf("userinfo failure fallback created user: %s", usersRec.Body.String())
+	}
+}
+
+func externalOIDCTestJWKS(signer *oidcManager) map[string]any {
+	publicKey := signer.privateKey.Public().(*rsa.PublicKey)
+	return map[string]any{
+		"keys": []map[string]any{{
+			"kty": "RSA",
+			"use": "sig",
+			"kid": signer.keyID,
+			"alg": "RS256",
+			"n":   base64.RawURLEncoding.EncodeToString(publicKey.N.Bytes()),
+			"e":   base64.RawURLEncoding.EncodeToString(big.NewInt(int64(publicKey.E)).Bytes()),
+		}},
+	}
+}
+
 func TestOIDCIntegrationAuthorizationEndpointTest(t *testing.T) {
 	handler, adminCookie := newTestHandler(t)
 	clientSecret := "openweb secret+/=?:&"

@@ -88,9 +88,11 @@ interface LoginPolicyFormState {
 interface OIDCSettingsState {
   enabled: boolean
   providerName: string
+  issuer: string
   authorizationEndpoint: string
   tokenEndpoint: string
   userInfoEndpoint: string
+  jwksEndpoint: string
   clientID: string
   clientSecret: string
   clientSecretSet: boolean
@@ -189,7 +191,7 @@ const loginFailureThresholdKeys = ['login_failure_threshold', 'failure_threshold
 const loginFailureWindowKeys = ['login_failure_window_minutes', 'failure_window_minutes', 'login_lock_window_minutes', 'lock_window_minutes']
 const loginLockMinutesKeys = ['login_lock_minutes', 'lock_minutes', 'login_lock_duration_minutes', 'lock_duration_minutes']
 const defaultLoginPolicyForm: LoginPolicyFormState = { name: '', action: 'deny', account: '*', cidr: '' }
-const oidcSettingKeys = ['oidc_login_enabled', 'external_oidc_enabled', 'oidc_authorization_endpoint', 'oidc_token_endpoint', 'oidc_client_id', 'oidc_provider_id']
+const oidcSettingKeys = ['oidc_login_enabled', 'external_oidc_enabled', 'oidc_issuer', 'oidc_jwks_uri', 'oidc_authorization_endpoint', 'oidc_token_endpoint', 'oidc_client_id', 'oidc_provider_id']
 const ldapSettingKeys = ['ldap_enabled', 'ldap_url', 'ldap_base_dn', 'ldap_bind_dn', 'ldap_user_filter', 'ldap_provider_id', 'ldap_provider_name']
 const wecomSettingKeys = ['wecom_enabled', 'wecom_corp_id', 'wecom_agent_id', 'wecom_provider_id', 'wecom_provider_name']
 
@@ -594,9 +596,11 @@ export function SettingsPage() {
         oidc_login_enabled: oidcSettings.enabled,
         oidc_provider_id: 'default-oidc',
         oidc_provider_name: oidcSettings.providerName.trim() || 'OIDC',
+        oidc_issuer: oidcSettings.issuer.trim(),
         oidc_authorization_endpoint: oidcSettings.authorizationEndpoint.trim(),
         oidc_token_endpoint: oidcSettings.tokenEndpoint.trim(),
         oidc_userinfo_endpoint: oidcSettings.userInfoEndpoint.trim(),
+        oidc_jwks_uri: oidcSettings.jwksEndpoint.trim(),
         oidc_client_id: oidcSettings.clientID.trim(),
         oidc_scopes: oidcSettings.scopes.split(/[,\s]+/).map((item) => item.trim()).filter(Boolean),
         oidc_role: oidcSettings.role || 'user',
@@ -971,6 +975,9 @@ export function SettingsPage() {
             <Field label={t('settingsPage.oidcScopes', { defaultValue: 'Scopes' })}>
               <Input value={oidcSettings.scopes} onChange={(event) => patchOIDC({ scopes: event.currentTarget.value })} placeholder='openid profile email' />
             </Field>
+            <Field label={t('settingsPage.oidcIssuer', { defaultValue: 'Issuer' })}>
+              <Input value={oidcSettings.issuer} onChange={(event) => patchOIDC({ issuer: event.currentTarget.value })} placeholder='https://sso.example.com' />
+            </Field>
             <Field label={t('settingsPage.oidcAuthorizationEndpoint', { defaultValue: 'Authorization endpoint' })}>
               <Input value={oidcSettings.authorizationEndpoint} onChange={(event) => patchOIDC({ authorizationEndpoint: event.currentTarget.value })} placeholder='https://sso.example.com/oauth2/authorize' />
             </Field>
@@ -979,6 +986,9 @@ export function SettingsPage() {
             </Field>
             <Field label={t('settingsPage.oidcUserInfoEndpoint', { defaultValue: 'UserInfo endpoint' })}>
               <Input value={oidcSettings.userInfoEndpoint} onChange={(event) => patchOIDC({ userInfoEndpoint: event.currentTarget.value })} placeholder='https://sso.example.com/oauth2/userinfo' />
+            </Field>
+            <Field label={t('settingsPage.oidcJWKSEndpoint', { defaultValue: 'JWKS URI' })}>
+              <Input value={oidcSettings.jwksEndpoint} onChange={(event) => patchOIDC({ jwksEndpoint: event.currentTarget.value })} placeholder='https://sso.example.com/oauth2/jwks' />
             </Field>
             <Field label={t('settingsPage.defaultRole', { defaultValue: 'Default role' })}>
               <Select value={oidcSettings.role} onChange={(event) => patchOIDC({ role: event.currentTarget.value })}>
@@ -1903,9 +1913,11 @@ function defaultOIDCSettings(): OIDCSettingsState {
   return {
     enabled: false,
     providerName: 'OIDC',
+    issuer: '',
     authorizationEndpoint: '',
     tokenEndpoint: '',
     userInfoEndpoint: '',
+    jwksEndpoint: '',
     clientID: '',
     clientSecret: '',
     clientSecretSet: false,
@@ -1960,9 +1972,11 @@ function oidcSettingsFromSettings(items: PlatformItem[]): OIDCSettingsState {
   return {
     enabled: metadataBoolValue(metadata.oidc_login_enabled) === true || metadataBoolValue(metadata.external_oidc_enabled) === true,
     providerName: metadataText(metadata.oidc_provider_name) || metadataText(metadata.provider_name) || setting.name || 'OIDC',
+    issuer: metadataText(metadata.oidc_issuer) || metadataText(metadata.issuer) || metadataText(metadata.issuer_url) || '',
     authorizationEndpoint: metadataText(metadata.oidc_authorization_endpoint) || metadataText(metadata.authorization_endpoint) || metadataText(metadata.authorize_endpoint) || '',
     tokenEndpoint: metadataText(metadata.oidc_token_endpoint) || metadataText(metadata.token_endpoint) || '',
     userInfoEndpoint: metadataText(metadata.oidc_userinfo_endpoint) || metadataText(metadata.userinfo_endpoint) || metadataText(metadata.user_info_endpoint) || '',
+    jwksEndpoint: metadataText(metadata.oidc_jwks_uri) || metadataText(metadata.jwks_uri) || metadataText(metadata.jwks_endpoint) || metadataText(metadata.jwks_url) || '',
     clientID: metadataText(metadata.oidc_client_id) || metadataText(metadata.client_id) || '',
     clientSecret: '',
     clientSecretSet: metadataBoolValue(metadata.oidc_client_secret_set) === true,

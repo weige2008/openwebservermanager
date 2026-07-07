@@ -1,11 +1,15 @@
 package app
 
 import (
+	"crypto"
+	"crypto/rsa"
+	"crypto/sha256"
 	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
+	"math/big"
 	"net/http"
 	"net/url"
 	"strings"
@@ -27,9 +31,11 @@ type externalOIDCState struct {
 type externalOIDCProvider struct {
 	ID                    string
 	Name                  string
+	Issuer                string
 	AuthorizationEndpoint string
 	TokenEndpoint         string
 	UserInfoEndpoint      string
+	JWKSEndpoint          string
 	ClientID              string
 	ClientSecret          string
 	Scopes                []string
@@ -121,7 +127,7 @@ func (s *Server) handleExternalOIDCCallback(w http.ResponseWriter, r *http.Reque
 		writeError(w, http.StatusBadRequest, err.Error())
 		return
 	}
-	claims, err := s.exchangeExternalOIDCCode(r, provider, code)
+	claims, err := s.exchangeExternalOIDCCode(r, provider, code, state.Nonce)
 	if err != nil {
 		safeErr := sanitizedExternalProviderError(err, provider.ClientSecret)
 		s.recordExternalOIDCLoginFailure(r, provider, nil, safeErr)
@@ -198,7 +204,7 @@ func sanitizedExternalProviderError(err error, secrets ...string) error {
 	return errors.New(redactSecretVariants(err.Error(), secrets...))
 }
 
-func (s *Server) exchangeExternalOIDCCode(r *http.Request, provider externalOIDCProvider, code string) (map[string]any, error) {
+func (s *Server) exchangeExternalOIDCCode(r *http.Request, provider externalOIDCProvider, code, expectedNonce string) (map[string]any, error) {
 	form := url.Values{
 		"grant_type":   {"authorization_code"},
 		"code":         {code},
@@ -236,12 +242,13 @@ func (s *Server) exchangeExternalOIDCCode(r *http.Request, provider externalOIDC
 		if err == nil {
 			return claims, nil
 		}
+		return nil, fmt.Errorf("oidc userinfo failed: %w", err)
 	}
 	idToken := firstMetadataString(tokenPayload, "id_token")
 	if idToken == "" {
 		return nil, errors.New("oidc provider did not return userinfo or id_token")
 	}
-	return parseUnverifiedJWTClaims(idToken)
+	return verifyExternalOIDCIDToken(client, provider, idToken, expectedNonce)
 }
 
 func fetchExternalOIDCUserInfo(client http.Client, endpoint, accessToken string) (map[string]any, error) {
@@ -264,6 +271,252 @@ func fetchExternalOIDCUserInfo(client http.Client, endpoint, accessToken string)
 		return nil, err
 	}
 	return claims, nil
+}
+
+type externalOIDCJWKS struct {
+	Keys []externalOIDCJWK `json:"keys"`
+}
+
+type externalOIDCJWK struct {
+	Kty string `json:"kty"`
+	Use string `json:"use"`
+	Kid string `json:"kid"`
+	Alg string `json:"alg"`
+	N   string `json:"n"`
+	E   string `json:"e"`
+}
+
+func verifyExternalOIDCIDToken(client http.Client, provider externalOIDCProvider, token, expectedNonce string) (map[string]any, error) {
+	parts := strings.Split(token, ".")
+	if len(parts) != 3 {
+		return nil, errors.New("invalid id_token")
+	}
+	header := map[string]any{}
+	if err := decodeJWTPart(parts[0], &header); err != nil {
+		return nil, fmt.Errorf("decode id_token header: %w", err)
+	}
+	if alg := firstMetadataString(header, "alg"); alg != "RS256" {
+		return nil, errors.New("unsupported id_token alg")
+	}
+	claims := map[string]any{}
+	if err := decodeJWTPart(parts[1], &claims); err != nil {
+		return nil, fmt.Errorf("decode id_token claims: %w", err)
+	}
+	jwksURI, issuer, err := externalOIDCJWKSURI(client, provider)
+	if err != nil {
+		return nil, err
+	}
+	publicKey, err := externalOIDCJWKSKey(client, jwksURI, firstMetadataString(header, "kid"))
+	if err != nil {
+		return nil, err
+	}
+	signature, err := base64.RawURLEncoding.DecodeString(parts[2])
+	if err != nil {
+		return nil, fmt.Errorf("decode id_token signature: %w", err)
+	}
+	signingInput := parts[0] + "." + parts[1]
+	sum := sha256.Sum256([]byte(signingInput))
+	if err := rsa.VerifyPKCS1v15(publicKey, crypto.SHA256, sum[:], signature); err != nil {
+		return nil, errors.New("id_token signature is invalid")
+	}
+	if err := validateExternalOIDCIDTokenClaims(claims, provider.ClientID, issuer, expectedNonce, time.Now().UTC()); err != nil {
+		return nil, err
+	}
+	return claims, nil
+}
+
+func externalOIDCJWKSURI(client http.Client, provider externalOIDCProvider) (string, string, error) {
+	jwksURI := strings.TrimSpace(provider.JWKSEndpoint)
+	issuer := strings.TrimRight(strings.TrimSpace(provider.Issuer), "/")
+	if issuer == "" {
+		return "", "", errors.New("oidc id_token verification requires issuer")
+	}
+	if jwksURI != "" {
+		return jwksURI, issuer, nil
+	}
+	discoveryURL := issuer + "/.well-known/openid-configuration"
+	req, err := http.NewRequest(http.MethodGet, discoveryURL, nil)
+	if err != nil {
+		return "", "", err
+	}
+	resp, err := client.Do(req)
+	if err != nil {
+		return "", "", err
+	}
+	defer resp.Body.Close()
+	body, _ := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		return "", "", fmt.Errorf("oidc discovery returned %s", resp.Status)
+	}
+	discovery := map[string]any{}
+	if err := json.Unmarshal(body, &discovery); err != nil {
+		return "", "", fmt.Errorf("decode oidc discovery: %w", err)
+	}
+	if discoveredIssuer := strings.TrimRight(firstMetadataString(discovery, "issuer"), "/"); discoveredIssuer != "" && discoveredIssuer != issuer {
+		return "", "", errors.New("oidc discovery issuer mismatch")
+	}
+	jwksURI = firstMetadataString(discovery, "jwks_uri")
+	if jwksURI == "" {
+		return "", "", errors.New("oidc discovery missing jwks_uri")
+	}
+	return jwksURI, issuer, nil
+}
+
+func externalOIDCJWKSKey(client http.Client, jwksURI, kid string) (*rsa.PublicKey, error) {
+	req, err := http.NewRequest(http.MethodGet, jwksURI, nil)
+	if err != nil {
+		return nil, err
+	}
+	resp, err := client.Do(req)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+	body, _ := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		return nil, fmt.Errorf("oidc jwks returned %s", resp.Status)
+	}
+	var jwks externalOIDCJWKS
+	if err := json.Unmarshal(body, &jwks); err != nil {
+		return nil, fmt.Errorf("decode oidc jwks: %w", err)
+	}
+	keys := []*rsa.PublicKey{}
+	for _, key := range jwks.Keys {
+		if key.Kty != "RSA" || (key.Use != "" && key.Use != "sig") || (key.Alg != "" && key.Alg != "RS256") {
+			continue
+		}
+		if kid != "" && key.Kid != kid {
+			continue
+		}
+		publicKey, err := rsaPublicKeyFromJWK(key)
+		if err != nil {
+			return nil, err
+		}
+		keys = append(keys, publicKey)
+	}
+	if len(keys) == 1 {
+		return keys[0], nil
+	}
+	if len(keys) > 1 {
+		return nil, errors.New("oidc jwks matched multiple signing keys")
+	}
+	if kid == "" {
+		return nil, errors.New("oidc id_token missing kid and jwks has no single matching key")
+	}
+	return nil, errors.New("oidc jwks signing key not found")
+}
+
+func rsaPublicKeyFromJWK(key externalOIDCJWK) (*rsa.PublicKey, error) {
+	if key.N == "" || key.E == "" {
+		return nil, errors.New("oidc jwk missing rsa modulus or exponent")
+	}
+	nRaw, err := base64.RawURLEncoding.DecodeString(key.N)
+	if err != nil {
+		return nil, fmt.Errorf("decode oidc jwk modulus: %w", err)
+	}
+	eRaw, err := base64.RawURLEncoding.DecodeString(key.E)
+	if err != nil {
+		return nil, fmt.Errorf("decode oidc jwk exponent: %w", err)
+	}
+	exponent := new(big.Int).SetBytes(eRaw).Int64()
+	if exponent <= 1 || exponent > int64(^uint(0)>>1) {
+		return nil, errors.New("oidc jwk exponent is invalid")
+	}
+	return &rsa.PublicKey{N: new(big.Int).SetBytes(nRaw), E: int(exponent)}, nil
+}
+
+func validateExternalOIDCIDTokenClaims(claims map[string]any, clientID, issuer, expectedNonce string, now time.Time) error {
+	if subject := firstMetadataString(claims, "sub"); subject == "" {
+		return errors.New("id_token missing subject")
+	}
+	if issuer != "" && firstMetadataString(claims, "iss") != issuer {
+		return errors.New("id_token issuer mismatch")
+	}
+	if !externalOIDCAudienceContains(claims["aud"], clientID) {
+		return errors.New("id_token audience mismatch")
+	}
+	if values := externalOIDCAudiences(claims["aud"]); len(values) > 1 && firstMetadataString(claims, "azp") != clientID {
+		return errors.New("id_token authorized party mismatch")
+	}
+	exp, ok := metadataUnixTime(claims["exp"])
+	if !ok {
+		return errors.New("id_token missing expiration")
+	}
+	if now.After(exp.Add(time.Minute)) {
+		return errors.New("id_token is expired")
+	}
+	if nbf, ok := metadataUnixTime(claims["nbf"]); ok && now.Add(time.Minute).Before(nbf) {
+		return errors.New("id_token is not valid yet")
+	}
+	if iat, ok := metadataUnixTime(claims["iat"]); ok && now.Add(5*time.Minute).Before(iat) {
+		return errors.New("id_token issued-at is in the future")
+	}
+	if expectedNonce == "" || firstMetadataString(claims, "nonce") != expectedNonce {
+		return errors.New("id_token nonce mismatch")
+	}
+	return nil
+}
+
+func externalOIDCAudienceContains(value any, clientID string) bool {
+	for _, audience := range externalOIDCAudiences(value) {
+		if audience == clientID {
+			return true
+		}
+	}
+	return false
+}
+
+func externalOIDCAudiences(value any) []string {
+	switch typed := value.(type) {
+	case string:
+		return []string{strings.TrimSpace(typed)}
+	case []string:
+		return uniqueNonEmptyStrings(typed)
+	case []any:
+		values := []string{}
+		for _, item := range typed {
+			if text, ok := item.(string); ok {
+				values = append(values, strings.TrimSpace(text))
+			}
+		}
+		return uniqueNonEmptyStrings(values)
+	default:
+		return nil
+	}
+}
+
+func metadataUnixTime(value any) (time.Time, bool) {
+	var seconds int64
+	switch typed := value.(type) {
+	case json.Number:
+		parsed, err := typed.Int64()
+		if err != nil {
+			return time.Time{}, false
+		}
+		seconds = parsed
+	case float64:
+		seconds = int64(typed)
+	case int:
+		seconds = int64(typed)
+	case int64:
+		seconds = typed
+	default:
+		return time.Time{}, false
+	}
+	if seconds <= 0 {
+		return time.Time{}, false
+	}
+	return time.Unix(seconds, 0).UTC(), true
+}
+
+func decodeJWTPart(part string, out any) error {
+	raw, err := base64.RawURLEncoding.DecodeString(part)
+	if err != nil {
+		return err
+	}
+	decoder := json.NewDecoder(strings.NewReader(string(raw)))
+	decoder.UseNumber()
+	return decoder.Decode(out)
 }
 
 var (
@@ -437,9 +690,11 @@ func (s *Server) externalOIDCProviderFromObject(object map[string]any, requireEx
 	provider := externalOIDCProvider{
 		ID:                    firstMetadataString(object, "id", "provider_id", "oidc_provider_id"),
 		Name:                  firstMetadataString(object, "name", "label", "provider_name", "oidc_provider_name"),
+		Issuer:                strings.TrimRight(firstMetadataString(object, "issuer", "issuer_url", "oidc_issuer", "oidc_issuer_url"), "/"),
 		AuthorizationEndpoint: firstMetadataString(object, "authorization_endpoint", "authorize_endpoint", "authorization_url", "oidc_authorization_endpoint"),
 		TokenEndpoint:         firstMetadataString(object, "token_endpoint", "token_url", "oidc_token_endpoint"),
 		UserInfoEndpoint:      firstMetadataString(object, "userinfo_endpoint", "user_info_endpoint", "userinfo_url", "oidc_userinfo_endpoint"),
+		JWKSEndpoint:          firstMetadataString(object, "jwks_uri", "jwks_endpoint", "jwks_url", "oidc_jwks_uri", "oidc_jwks_endpoint"),
 		ClientID:              firstMetadataString(object, "client_id", "clientId", "oidc_client_id"),
 		ClientSecret:          clientSecret,
 		Role:                  firstMetadataString(object, "role", "default_role", "oidc_role"),
@@ -538,22 +793,6 @@ func (m *authManager) consumeExternalOIDCState(value string) (externalOIDCState,
 		return externalOIDCState{}, false
 	}
 	return state, true
-}
-
-func parseUnverifiedJWTClaims(token string) (map[string]any, error) {
-	parts := strings.Split(token, ".")
-	if len(parts) < 2 {
-		return nil, errors.New("invalid id_token")
-	}
-	payload, err := base64.RawURLEncoding.DecodeString(parts[1])
-	if err != nil {
-		return nil, err
-	}
-	claims := map[string]any{}
-	if err := json.Unmarshal(payload, &claims); err != nil {
-		return nil, err
-	}
-	return claims, nil
 }
 
 func externalOIDCRedirectURI(r *http.Request, trustProxy bool) string {

@@ -567,7 +567,26 @@ func (s *Server) handleClose(w http.ResponseWriter, r *http.Request) {
 	id := pathSegment(r.URL.Path, 2)
 	existing, ok := s.cfg.Store.GetSession(id)
 	if !ok {
-		writeError(w, http.StatusNotFound, "session not found")
+		item, platformOK, err := s.cfg.Store.GetPlatformItem("online_sessions", id)
+		if err != nil {
+			writeError(w, http.StatusInternalServerError, err.Error())
+			return
+		}
+		if !platformOK {
+			writeError(w, http.StatusNotFound, "session not found")
+			return
+		}
+		if !s.canAccessPlatformSession(r, item) {
+			writeError(w, http.StatusForbidden, "session access denied")
+			return
+		}
+		closed, err := s.closePlatformOnlineSession(id, "closed by user")
+		if err != nil {
+			writeError(w, http.StatusInternalServerError, err.Error())
+			return
+		}
+		_ = s.audit(r, "connection.close", closed.ID, closed.Protocol, "closed platform session")
+		writeJSON(w, http.StatusOK, closed)
 		return
 	}
 	if !s.canAccessSession(r, existing) {
@@ -589,6 +608,33 @@ func (s *Server) handleClose(w http.ResponseWriter, r *http.Request) {
 	}
 	_ = s.audit(r, "connection.close", session.ID, session.Protocol, "closed session")
 	writeJSON(w, http.StatusOK, session)
+}
+
+func (s *Server) closePlatformOnlineSession(id, reason string) (model.PlatformItem, error) {
+	item, ok, err := s.cfg.Store.GetPlatformItem("online_sessions", id)
+	if err != nil {
+		return model.PlatformItem{}, err
+	}
+	if !ok {
+		return model.PlatformItem{}, os.ErrNotExist
+	}
+	now := time.Now().UTC()
+	item.Status = string(model.SessionClosed)
+	item.Description = strings.TrimSpace(reason)
+	if item.Metadata == nil {
+		item.Metadata = map[string]any{}
+	}
+	item.Metadata["ended_at"] = now
+	if reason != "" {
+		item.Metadata["close_reason"] = reason
+	}
+	if size, ok := s.recordingSizeFromMetadata(item.Metadata); ok {
+		item.Metadata["recording_size"] = size
+	}
+	if err := s.cfg.Store.DeletePlatformItem("online_sessions", id); err != nil && !errors.Is(err, os.ErrNotExist) {
+		return model.PlatformItem{}, err
+	}
+	return s.cfg.Store.SavePlatformItem("offline_sessions", item)
 }
 
 func (s *Server) refreshSessionRecordingSize(id string) error {

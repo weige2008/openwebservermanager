@@ -3513,19 +3513,7 @@ func (s *Server) handleAuditSessionDisconnect(w http.ResponseWriter, r *http.Req
 		writeError(w, http.StatusNotFound, "session not found")
 		return
 	}
-	now := time.Now().UTC()
-	item.Status = string(model.SessionClosed)
-	item.Description = "closed by auditor"
-	if item.Metadata == nil {
-		item.Metadata = map[string]any{}
-	}
-	item.Metadata["ended_at"] = now
-	item.Metadata["close_reason"] = "closed by auditor"
-	if size, ok := s.recordingSizeFromMetadata(item.Metadata); ok {
-		item.Metadata["recording_size"] = size
-	}
-	_ = s.cfg.Store.DeletePlatformItem("online_sessions", id)
-	offline, err := s.cfg.Store.SavePlatformItem("offline_sessions", item)
+	offline, err := s.closePlatformOnlineSession(id, "closed by auditor")
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, err.Error())
 		return

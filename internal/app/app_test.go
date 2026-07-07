@@ -9130,6 +9130,99 @@ func TestStorageAuthorizationStrategyPreventsDirectoryBypass(t *testing.T) {
 	download("rename-overwrite-target/protected/existing.txt", http.StatusOK)
 }
 
+func TestPlatformOnlineSessionCloseEndpoint(t *testing.T) {
+	srv, adminCookie := newTestServer(t, nil)
+	handler := http.Handler(srv)
+
+	userRec := assertStatus(t, handler, http.MethodPost, "/api/admin/users", map[string]any{
+		"name":     "platform-close-user",
+		"type":     "local",
+		"status":   "enabled",
+		"password": "password123",
+		"metadata": map[string]any{"role": "user"},
+	}, adminCookie, http.StatusCreated)
+	var user model.PlatformItem
+	decodeResponse(t, userRec, &user)
+
+	webRec := assertStatus(t, handler, http.MethodPost, "/api/admin/websites", map[string]any{
+		"name":   "platform close web",
+		"type":   "http",
+		"status": "enabled",
+		"metadata": map[string]any{
+			"target_url": "http://127.0.0.1",
+		},
+	}, adminCookie, http.StatusCreated)
+	var webAsset model.PlatformItem
+	decodeResponse(t, webRec, &webAsset)
+	assertStatus(t, handler, http.MethodPost, "/api/admin/authorizations/websites", map[string]any{
+		"name":      "platform-close-user web",
+		"owner_id":  user.ID,
+		"target_id": webAsset.ID,
+		"status":    "enabled",
+	}, adminCookie, http.StatusCreated)
+
+	loginRec := assertStatus(t, handler, http.MethodPost, "/api/auth/login", map[string]any{"username": "platform-close-user", "password": "password123"}, nil, http.StatusOK)
+	userCookie := loginRec.Result().Cookies()[0]
+	createRec := assertStatus(t, handler, http.MethodPost, "/api/access/http/"+webAsset.ID, nil, userCookie, http.StatusAccepted)
+	var online model.PlatformItem
+	decodeResponse(t, createRec, &online)
+	if online.ID == "" || online.OwnerID != user.ID || online.Protocol != model.ProtocolHTTP {
+		t.Fatalf("platform online session = %#v", online)
+	}
+
+	recordingPath := filepath.Join(srv.cfg.DataDir, "recordings", online.ID)
+	if err := os.MkdirAll(recordingPath, 0o770); err != nil {
+		t.Fatalf("create platform recording path: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(recordingPath, "recording.guac"), []byte("platform frames"), 0o660); err != nil {
+		t.Fatalf("write platform recording: %v", err)
+	}
+	online.Metadata["recording_path"] = recordingPath
+	if _, err := srv.cfg.Store.SavePlatformItem("online_sessions", online); err != nil {
+		t.Fatalf("save platform online recording metadata: %v", err)
+	}
+
+	closeRec := assertStatus(t, handler, http.MethodPost, "/api/connections/"+online.ID+"/close", nil, userCookie, http.StatusOK)
+	var closed model.PlatformItem
+	decodeResponse(t, closeRec, &closed)
+	if closed.Status != string(model.SessionClosed) || firstMetadataString(closed.Metadata, "close_reason") != "closed by user" {
+		t.Fatalf("closed platform session did not include close status/reason: %#v", closed)
+	}
+	if got, ok := metadataInt(closed.Metadata["recording_size"]); !ok || got != len("platform frames") {
+		t.Fatalf("closed platform recording size = %v/%v, want %d in %#v", got, ok, len("platform frames"), closed.Metadata)
+	}
+	onlineRec := assertStatus(t, handler, http.MethodGet, "/api/admin/audit/online-sessions", nil, adminCookie, http.StatusOK)
+	if strings.Contains(onlineRec.Body.String(), online.ID) {
+		t.Fatalf("closed platform session still appears online: %s", onlineRec.Body.String())
+	}
+	offlineRec := assertStatus(t, handler, http.MethodGet, "/api/admin/audit/offline-sessions", nil, adminCookie, http.StatusOK)
+	if !strings.Contains(offlineRec.Body.String(), online.ID) || !strings.Contains(offlineRec.Body.String(), `"recording_size":15`) {
+		t.Fatalf("closed platform session missing from offline index: %s", offlineRec.Body.String())
+	}
+	logsRec := assertStatus(t, handler, http.MethodGet, "/api/admin/audit/operation-logs", nil, adminCookie, http.StatusOK)
+	if !strings.Contains(logsRec.Body.String(), "connection.close") || !strings.Contains(logsRec.Body.String(), online.ID) {
+		t.Fatalf("platform close was not audited: %s", logsRec.Body.String())
+	}
+
+	secondRec := assertStatus(t, handler, http.MethodPost, "/api/access/http/"+webAsset.ID, nil, userCookie, http.StatusAccepted)
+	var second model.PlatformItem
+	decodeResponse(t, secondRec, &second)
+	assertStatus(t, handler, http.MethodPost, "/api/admin/users", map[string]any{
+		"name":     "platform-close-other",
+		"type":     "local",
+		"status":   "enabled",
+		"password": "password123",
+		"metadata": map[string]any{"role": "user"},
+	}, adminCookie, http.StatusCreated)
+	otherLogin := assertStatus(t, handler, http.MethodPost, "/api/auth/login", map[string]any{"username": "platform-close-other", "password": "password123"}, nil, http.StatusOK)
+	otherCookie := otherLogin.Result().Cookies()[0]
+	assertStatus(t, handler, http.MethodPost, "/api/connections/"+second.ID+"/close", nil, otherCookie, http.StatusForbidden)
+	stillOnlineRec := assertStatus(t, handler, http.MethodGet, "/api/admin/audit/online-sessions", nil, adminCookie, http.StatusOK)
+	if !strings.Contains(stillOnlineRec.Body.String(), second.ID) {
+		t.Fatalf("forbidden close removed platform session from online list: %s", stillOnlineRec.Body.String())
+	}
+}
+
 func TestAuditSessionOperations(t *testing.T) {
 	handler, adminCookie := newTestHandler(t)
 

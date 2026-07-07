@@ -118,6 +118,56 @@ func TestInitialAdminRoleIsCanonicalSuperAdmin(t *testing.T) {
 	}
 }
 
+func TestSetupLoginLogFailureRollsBackAdminInitialization(t *testing.T) {
+	srv := newUnconfiguredTestServer(t, nil)
+	handler := http.Handler(srv)
+
+	removeBlocker := blockPlatformItemCreate(t, srv.cfg.Store, "login_logs")
+	failedRec := assertStatus(t, handler, http.MethodPost, "/api/auth/setup", map[string]any{"username": "admin", "password": "password123"}, nil, http.StatusInternalServerError)
+	removeBlocker()
+	if !strings.Contains(failedRec.Body.String(), "persist login log failed") {
+		t.Fatalf("setup login log failure was not reported: %s", failedRec.Body.String())
+	}
+	if srv.cfg.Store.AdminConfigured() {
+		t.Fatal("admin remained configured after setup login log failure")
+	}
+	users, err := srv.cfg.Store.ListPlatformItems("users")
+	if err != nil {
+		t.Fatalf("list users after setup login log failure: %v", err)
+	}
+	if len(users) != 0 {
+		t.Fatalf("setup login log failure left users behind: %#v", users)
+	}
+	if !coreAuditLogsContainAction(srv.cfg.Store, "auth.login.log.persist_failed") {
+		t.Fatal("setup login log persistence failure was not written to core audit logs")
+	}
+
+	retryRec := assertStatus(t, handler, http.MethodPost, "/api/auth/setup", map[string]any{"username": "admin", "password": "password123"}, nil, http.StatusCreated)
+	if len(retryRec.Result().Cookies()) == 0 {
+		t.Fatal("setup retry after login log failure did not set auth cookie")
+	}
+}
+
+func TestSetupUserCreateFailureRollsBackAdminInitialization(t *testing.T) {
+	srv := newUnconfiguredTestServer(t, nil)
+	handler := http.Handler(srv)
+
+	removeBlocker := blockPlatformItemCreate(t, srv.cfg.Store, "users")
+	failedRec := assertStatus(t, handler, http.MethodPost, "/api/auth/setup", map[string]any{"username": "admin", "password": "password123"}, nil, http.StatusInternalServerError)
+	removeBlocker()
+	if !strings.Contains(failedRec.Body.String(), "forced platform item create failure") {
+		t.Fatalf("setup user create failure was not reported: %s", failedRec.Body.String())
+	}
+	if srv.cfg.Store.AdminConfigured() {
+		t.Fatal("admin remained configured after setup user create failure")
+	}
+
+	retryRec := assertStatus(t, handler, http.MethodPost, "/api/auth/setup", map[string]any{"username": "admin", "password": "password123"}, nil, http.StatusCreated)
+	if len(retryRec.Result().Cookies()) == 0 {
+		t.Fatal("setup retry after user create failure did not set auth cookie")
+	}
+}
+
 func TestPlatformCollectionEndpoints(t *testing.T) {
 	handler, cookie := newTestHandler(t)
 	paths := []string{}

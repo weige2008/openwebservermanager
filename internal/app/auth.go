@@ -554,6 +554,21 @@ func (s *Server) handleSetup(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	if err := s.createLoginLog(r, model.PlatformItemRequest{
+		Name:        username,
+		Type:        "setup",
+		Status:      "success",
+		OwnerID:     admin.UserID,
+		Description: "administrator initialized",
+		Metadata:    map[string]any{"client_ip": s.clientIP(r), "account": username},
+	}); err != nil {
+		if rollbackErr := s.cfg.Store.RollbackSetupAdmin(admin.UserID); rollbackErr != nil {
+			_ = s.audit(r, "auth.setup.rollback_failed", admin.UserID, "", rollbackErr.Error())
+		}
+		writeError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+
 	token, session, err := s.auth.create(admin)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, err.Error())
@@ -561,17 +576,6 @@ func (s *Server) handleSetup(w http.ResponseWriter, r *http.Request) {
 	}
 	_ = s.cfg.Store.RecordUserLogin(session.UserID, s.clientIP(r), r.UserAgent())
 	_ = s.audit(r, "auth.setup", session.UserID, "", "admin initialized")
-	if err := s.createLoginLog(r, model.PlatformItemRequest{
-		Name:        username,
-		Type:        "setup",
-		Status:      "success",
-		OwnerID:     session.UserID,
-		Description: "administrator initialized",
-		Metadata:    map[string]any{"client_ip": s.clientIP(r), "account": username},
-	}); err != nil {
-		writeError(w, http.StatusInternalServerError, err.Error())
-		return
-	}
 	http.SetCookie(w, s.authCookie(r, token, int(authSessionTTL.Seconds())))
 	writeJSON(w, http.StatusCreated, map[string]any{"user": s.authUserPayload(session)})
 }

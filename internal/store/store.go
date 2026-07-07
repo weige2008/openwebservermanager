@@ -211,9 +211,27 @@ func (s *Store) SetupAdmin(username, password string) (AdminPublic, error) {
 		CreatedAt:   admin.CreatedAt,
 		UpdatedAt:   admin.UpdatedAt,
 	}); err != nil {
+		s.state.Admin = nil
+		_ = s.saveLocked()
 		return AdminPublic{}, err
 	}
 	return admin.Public(), nil
+}
+
+func (s *Store) RollbackSetupAdmin(userID string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.state.Admin == nil || s.state.Admin.UserID != userID {
+		return nil
+	}
+	s.state.Admin = nil
+	if err := s.saveLocked(); err != nil {
+		return err
+	}
+	if err := s.DeletePlatformItem("users", userID); err != nil && !errors.Is(err, os.ErrNotExist) {
+		return err
+	}
+	return nil
 }
 
 func (s *Store) VerifyAdmin(username, password string) (AdminPublic, bool, error) {

@@ -1207,6 +1207,46 @@ func TestPasskeyOperationLogFailureRollsBackMutations(t *testing.T) {
 	}
 }
 
+func TestPasskeyLoginLogFailureRollsBackUsage(t *testing.T) {
+	srv, adminCookie := newTestServer(t, nil)
+	handler := http.Handler(srv)
+
+	privateKey, credentialID, passkey := registerTestPasskeyWithCredentialID(t, handler, adminCookie, "admin", []byte("login-log-rollback-passkey"))
+	before, ok, err := srv.cfg.Store.GetPlatformItem("passkeys", passkey.ID)
+	if err != nil || !ok {
+		t.Fatalf("load passkey before failed login: ok=%v err=%v", ok, err)
+	}
+	if got := passkeyMetadataInt(before.Metadata["sign_count"]); got != 1 {
+		t.Fatalf("initial passkey sign_count = %d, want 1", got)
+	}
+
+	loginOptions := testPasskeyLoginOptions(t, handler, "admin")
+	assertionPayload := testPasskeyAssertionPayload(t, loginOptions.ChallengeID, loginOptions.PublicKey.Challenge, loginOptions.PublicKey.RPID, credentialID, privateKey, 2, false)
+	removeLoginLogBlocker := blockPlatformItemCreate(t, srv.cfg.Store, "login_logs")
+	loginFailureRec := assertStatus(t, handler, http.MethodPost, "/api/auth/passkeys/login/verify", assertionPayload, nil, http.StatusInternalServerError)
+	removeLoginLogBlocker()
+	if !strings.Contains(loginFailureRec.Body.String(), "persist login log failed") {
+		t.Fatalf("passkey login log failure was not reported: %s", loginFailureRec.Body.String())
+	}
+	if len(loginFailureRec.Result().Cookies()) > 0 {
+		t.Fatalf("passkey login issued cookies after failed login log write: %#v", loginFailureRec.Result().Cookies())
+	}
+
+	after, ok, err := srv.cfg.Store.GetPlatformItem("passkeys", passkey.ID)
+	if err != nil || !ok {
+		t.Fatalf("load passkey after failed login: ok=%v err=%v", ok, err)
+	}
+	if got := passkeyMetadataInt(after.Metadata["sign_count"]); got != 1 {
+		t.Fatalf("passkey sign_count changed after failed login log write: got %d", got)
+	}
+	if firstMetadataString(after.Metadata, "last_used_at", "last_used_ip") != "" {
+		t.Fatalf("passkey usage metadata survived failed login log write: %#v", after.Metadata)
+	}
+	if !coreAuditLogsContainAction(srv.cfg.Store, "auth.login.log.persist_failed") {
+		t.Fatal("passkey login log persistence failure was not written to core audit logs")
+	}
+}
+
 func TestUserImportCreatesSkipsAndUpdatesLoginUsers(t *testing.T) {
 	handler, adminCookie := newTestHandler(t)
 

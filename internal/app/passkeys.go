@@ -553,6 +553,8 @@ func (s *Server) handlePasskeyLoginVerify(w http.ResponseWriter, r *http.Request
 		s.recordPasskeyLoginFailure(w, r, challenge.Username, challenge.ClientIP, challenge.FailureKey, "passkey sign count did not advance")
 		return
 	}
+	previous := item
+	previous.Metadata = cloneMetadata(item.Metadata)
 	if item.Metadata == nil {
 		item.Metadata = map[string]any{}
 	}
@@ -565,19 +567,11 @@ func (s *Server) handlePasskeyLoginVerify(w http.ResponseWriter, r *http.Request
 		writeError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
-	s.auth.resetLoginFailures(challenge.FailureKey)
-	token, session, err := s.auth.create(challenge.User)
-	if err != nil {
-		writeError(w, http.StatusInternalServerError, err.Error())
-		return
-	}
-	_ = s.cfg.Store.RecordUserLogin(session.UserID, challenge.ClientIP, r.UserAgent())
-	_ = s.audit(r, "auth.passkey.login", session.UserID, "", "signed in with passkey")
 	if err := s.createLoginLog(r, model.PlatformItemRequest{
 		Name:        challenge.Username,
 		Type:        "passkey",
 		Status:      "success",
-		OwnerID:     session.UserID,
+		OwnerID:     challenge.User.UserID,
 		Description: "signed in with passkey",
 		Metadata: map[string]any{
 			"client_ip":     challenge.ClientIP,
@@ -587,9 +581,18 @@ func (s *Server) handlePasskeyLoginVerify(w http.ResponseWriter, r *http.Request
 			"user_agent":    trimMetadataTextForPasskey(r.UserAgent(), 512),
 		},
 	}); err != nil {
+		_, _ = s.cfg.Store.SavePlatformItem("passkeys", previous)
 		writeError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
+	s.auth.resetLoginFailures(challenge.FailureKey)
+	token, session, err := s.auth.create(challenge.User)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	_ = s.cfg.Store.RecordUserLogin(session.UserID, challenge.ClientIP, r.UserAgent())
+	_ = s.audit(r, "auth.passkey.login", session.UserID, "", "signed in with passkey")
 	http.SetCookie(w, s.authCookie(r, token, int(authSessionTTL.Seconds())))
 	writeJSON(w, http.StatusOK, map[string]any{"user": s.authUserPayload(session)})
 }

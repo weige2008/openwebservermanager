@@ -1368,6 +1368,23 @@ func TestPasskeyOperationLogFailureRollsBackMutations(t *testing.T) {
 	if !coreAuditLogsContainAction(srv.cfg.Store, "operation.log.persist_failed") {
 		t.Fatal("passkey operation log persistence failure was not written to core audit logs")
 	}
+
+	_, _, unrestoredPasskey := registerTestPasskeyWithCredentialID(t, handler, adminCookie, "admin", []byte("delete-restore-failed-passkey-credential"))
+	removeDeleteLogBlocker := blockPlatformItemCreate(t, srv.cfg.Store, "operation_logs")
+	removeRestoreBlocker := blockPlatformItemSave(t, srv.cfg.Store, "passkeys", unrestoredPasskey.ID)
+	restoreFailureRec := assertStatus(t, handler, http.MethodDelete, "/api/auth/passkeys/"+unrestoredPasskey.ID, nil, adminCookie, http.StatusInternalServerError)
+	removeRestoreBlocker()
+	removeDeleteLogBlocker()
+	if !strings.Contains(restoreFailureRec.Body.String(), "failed to restore deleted passkey") {
+		t.Fatalf("passkey restore failure was not reported: %s", restoreFailureRec.Body.String())
+	}
+	listAfterRestoreFailure := assertStatus(t, handler, http.MethodGet, "/api/auth/passkeys", nil, adminCookie, http.StatusOK)
+	if strings.Contains(listAfterRestoreFailure.Body.String(), unrestoredPasskey.ID) || strings.Contains(listAfterRestoreFailure.Body.String(), unrestoredPasskey.CredentialID) {
+		t.Fatalf("passkey unexpectedly survived forced restore failure: %s", listAfterRestoreFailure.Body.String())
+	}
+	if !coreAuditLogsContainAction(srv.cfg.Store, "auth.passkey.restore_failed") {
+		t.Fatal("passkey restore failure was not written to core audit logs")
+	}
 }
 
 func TestPasskeyLoginLogFailureRollsBackUsage(t *testing.T) {

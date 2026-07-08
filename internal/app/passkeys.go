@@ -10,6 +10,7 @@ import (
 	"encoding/binary"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"math/big"
 	"net"
 	"net/http"
@@ -361,7 +362,11 @@ func (s *Server) handlePasskeyDelete(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if err := s.createPasskeyOperationLog(r, "auth.passkey.delete", "success", id, session.UserID, "deleted passkey", nil); err != nil {
-		_, _ = s.cfg.Store.SavePlatformItem("passkeys", previous)
+		if _, restoreErr := s.cfg.Store.SavePlatformItem("passkeys", previous); restoreErr != nil {
+			detail := "failed to restore deleted passkey: " + restoreErr.Error()
+			_ = s.audit(r, "auth.passkey.restore_failed", id, "", detail)
+			err = fmt.Errorf("%w; additionally %s", err, detail)
+		}
 		writeError(w, http.StatusInternalServerError, err.Error())
 		return
 	}

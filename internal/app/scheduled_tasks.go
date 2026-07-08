@@ -112,10 +112,12 @@ func (s *Server) executeScheduledTask(r *http.Request, task model.PlatformItem, 
 		delete(nextMetadata, "next_run_at")
 	}
 	if _, updateErr := s.cfg.Store.UpdatePlatformItem("scheduled_tasks", task.ID, model.PlatformItemRequest{Metadata: nextMetadata}); updateErr != nil {
+		detail := "persist scheduled task state failed: " + updateErr.Error()
+		_ = s.audit(r, "scheduled_task.state.persist_failed", task.ID, "", detail)
 		if runErr != nil {
-			return logItem, fmt.Errorf("%w; additionally failed to update scheduled task metadata: %v", runErr, updateErr)
+			return logItem, fmt.Errorf("%w; additionally %s", runErr, detail)
 		}
-		return logItem, updateErr
+		return logItem, errors.New(detail)
 	}
 	if runErr != nil {
 		return logItem, runErr

@@ -10781,6 +10781,21 @@ func TestScheduledTaskRunners(t *testing.T) {
 		t.Fatal("scheduled task log persistence failure was not written to core audit logs")
 	}
 
+	beforeStateFailureLogs := len(scheduledTaskLogsForTest(t, srv, backupTask.ID))
+	removeBackupTaskStateBlocker := blockPlatformItemSave(t, srv.cfg.Store, "scheduled_tasks", backupTask.ID)
+	backupStateFailureRec := assertStatus(t, handler, http.MethodPost, "/api/admin/scheduled-tasks/"+backupTask.ID+"/run", nil, cookie, http.StatusInternalServerError)
+	removeBackupTaskStateBlocker()
+	if !strings.Contains(backupStateFailureRec.Body.String(), "persist scheduled task state failed") {
+		t.Fatalf("scheduled backup task state failure was not reported: %s", backupStateFailureRec.Body.String())
+	}
+	afterStateFailureLogs := scheduledTaskLogsForTest(t, srv, backupTask.ID)
+	if len(afterStateFailureLogs) != beforeStateFailureLogs+1 {
+		t.Fatalf("scheduled task state failure should keep the execution log: before=%d after=%#v", beforeStateFailureLogs, afterStateFailureLogs)
+	}
+	if !coreAuditLogsContainAction(srv.cfg.Store, "scheduled_task.state.persist_failed") {
+		t.Fatal("scheduled task state persistence failure was not written to core audit logs")
+	}
+
 	disabledTaskRec := assertStatus(t, handler, http.MethodPost, "/api/admin/scheduled-tasks", map[string]any{
 		"name":   "Disabled manual backup",
 		"type":   "backup",
@@ -13023,6 +13038,33 @@ END`
 	if _, err := db.Exec(triggerSQL); err != nil {
 		_ = db.Close()
 		t.Fatalf("create platform item blocker trigger: %v", err)
+	}
+	return func() {
+		_, _ = db.Exec(`DROP TRIGGER IF EXISTS ` + triggerName)
+		_ = db.Close()
+	}
+}
+
+func blockPlatformItemSave(t *testing.T, st *store.Store, collection, itemID string) func() {
+	t.Helper()
+	db, err := sql.Open("sqlite", st.DatabasePath())
+	if err != nil {
+		t.Fatalf("open store database for save blocker: %v", err)
+	}
+	triggerName := "block_platform_item_save"
+	if _, err := db.Exec(`DROP TRIGGER IF EXISTS ` + triggerName); err != nil {
+		_ = db.Close()
+		t.Fatalf("drop stale save blocker trigger: %v", err)
+	}
+	triggerSQL := `CREATE TRIGGER ` + triggerName + ` BEFORE INSERT ON platform_records
+WHEN NEW.collection = ` + sqliteTestStringLiteral(collection) + `
+  AND NEW.id = ` + sqliteTestStringLiteral(itemID) + `
+BEGIN
+  SELECT RAISE(ABORT, 'forced platform item save failure');
+END`
+	if _, err := db.Exec(triggerSQL); err != nil {
+		_ = db.Close()
+		t.Fatalf("create platform item save blocker trigger: %v", err)
 	}
 	return func() {
 		_, _ = db.Exec(`DROP TRIGGER IF EXISTS ` + triggerName)

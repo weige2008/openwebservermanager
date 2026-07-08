@@ -141,9 +141,63 @@ func scheduledTaskNeedsPreRunLog(taskType string) bool {
 	}
 }
 
+type scheduledTaskCollectionSnapshot struct {
+	Collection string
+	Items      []model.PlatformItem
+}
+
+func (s *Server) scheduledTaskMutationSnapshot(taskType string) ([]scheduledTaskCollectionSnapshot, error) {
+	switch taskType {
+	case "asset-status":
+		return s.platformCollectionsSnapshot([]string{"assets", "web_assets", "database_assets"})
+	case "certificate-renewal":
+		return s.platformCollectionsSnapshot([]string{"certificates"})
+	default:
+		return nil, nil
+	}
+}
+
+func (s *Server) platformCollectionsSnapshot(collections []string) ([]scheduledTaskCollectionSnapshot, error) {
+	snapshot := make([]scheduledTaskCollectionSnapshot, 0, len(collections))
+	for _, collection := range collections {
+		items, err := s.cfg.Store.ListPlatformItems(collection)
+		if err != nil {
+			return nil, err
+		}
+		collectionSnapshot := scheduledTaskCollectionSnapshot{Collection: collection}
+		for _, item := range items {
+			raw, ok, err := s.cfg.Store.GetPlatformItem(collection, item.ID)
+			if err != nil {
+				return nil, err
+			}
+			if ok {
+				collectionSnapshot.Items = append(collectionSnapshot.Items, raw)
+			}
+		}
+		snapshot = append(snapshot, collectionSnapshot)
+	}
+	return snapshot, nil
+}
+
+func (s *Server) restoreScheduledTaskMutationSnapshot(snapshot []scheduledTaskCollectionSnapshot) error {
+	for _, collectionSnapshot := range snapshot {
+		for _, item := range collectionSnapshot.Items {
+			if _, err := s.cfg.Store.SavePlatformItem(collectionSnapshot.Collection, item); err != nil {
+				return err
+			}
+		}
+	}
+	return nil
+}
+
 func (s *Server) executePreLoggedScheduledTask(r *http.Request, task model.PlatformItem, trigger string) (model.PlatformItem, error) {
 	if trigger == "" {
 		trigger = "manual"
+	}
+	taskType := normalizeScheduledTaskType(task.Type)
+	mutationSnapshot, err := s.scheduledTaskMutationSnapshot(taskType)
+	if err != nil {
+		return model.PlatformItem{}, err
 	}
 	started := time.Now().UTC()
 	ownerID := "system"
@@ -202,6 +256,10 @@ func (s *Server) executePreLoggedScheduledTask(r *http.Request, task model.Platf
 	if logErr != nil {
 		detail := "persist scheduled task log failed: " + logErr.Error()
 		_ = s.audit(r, "scheduled_task.log.persist_failed", task.ID, "", detail)
+		if restoreErr := s.restoreScheduledTaskMutationSnapshot(mutationSnapshot); restoreErr != nil {
+			detail += "; additionally failed to restore scheduled task mutations: " + restoreErr.Error()
+			_ = s.audit(r, "scheduled_task.restore_failed", task.ID, "", detail)
+		}
 		if runErr != nil {
 			return logItem, fmt.Errorf("%w; additionally %s", runErr, detail)
 		}

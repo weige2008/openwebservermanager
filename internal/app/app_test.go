@@ -12018,6 +12018,40 @@ func TestScheduledTaskRunners(t *testing.T) {
 	if storedBlockedStatusWeb.Status != "enabled" || storedBlockedStatusWeb.Metadata["last_check_status"] != nil {
 		t.Fatalf("asset status task changed asset before scheduled task log was persisted: %#v", storedBlockedStatusWeb)
 	}
+	finalizeStatusUpstreamHit := false
+	finalizeStatusUpstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		finalizeStatusUpstreamHit = true
+		_, _ = w.Write([]byte("ok"))
+	}))
+	defer finalizeStatusUpstream.Close()
+	finalizeStatusWebRec := assertStatus(t, handler, http.MethodPost, "/api/admin/websites", map[string]any{
+		"name":     "finalize status web",
+		"type":     "http",
+		"status":   "enabled",
+		"metadata": map[string]any{"target_url": finalizeStatusUpstream.URL},
+	}, cookie, http.StatusCreated)
+	var finalizeStatusWeb model.PlatformItem
+	decodeResponse(t, finalizeStatusWebRec, &finalizeStatusWeb)
+	finalizeStatusBefore, ok, err := srv.cfg.Store.GetPlatformItem("web_assets", finalizeStatusWeb.ID)
+	if err != nil || !ok {
+		t.Fatalf("load finalize status web before task: ok=%v err=%v", ok, err)
+	}
+	removeStatusFinalizeBlocker := blockPlatformItemCollectionStatusUpdate(t, srv.cfg.Store, "operation_logs", "success")
+	finalizeStatusRunRec := assertStatus(t, handler, http.MethodPost, "/api/admin/scheduled-tasks/"+statusTask.ID+"/run", nil, cookie, http.StatusInternalServerError)
+	removeStatusFinalizeBlocker()
+	if !strings.Contains(finalizeStatusRunRec.Body.String(), "persist scheduled task log failed") {
+		t.Fatalf("asset status final log failure was not reported: %s", finalizeStatusRunRec.Body.String())
+	}
+	if !finalizeStatusUpstreamHit {
+		t.Fatal("asset status task did not execute before final log update failure")
+	}
+	finalizeStatusAfter, ok, err := srv.cfg.Store.GetPlatformItem("web_assets", finalizeStatusWeb.ID)
+	if err != nil || !ok {
+		t.Fatalf("load finalize status web after rollback: ok=%v err=%v", ok, err)
+	}
+	if finalizeStatusAfter.Status != finalizeStatusBefore.Status || finalizeStatusAfter.Metadata["last_check_status"] != finalizeStatusBefore.Metadata["last_check_status"] {
+		t.Fatalf("asset status task did not roll back asset after final log failure: before=%#v after=%#v", finalizeStatusBefore, finalizeStatusAfter)
+	}
 
 	certRec := assertStatus(t, handler, http.MethodPost, "/api/admin/certificates/self-signed", map[string]any{
 		"name":   "renew-cert",
@@ -12096,6 +12130,36 @@ func TestScheduledTaskRunners(t *testing.T) {
 	}
 	if blockedCertAfter.Status != blockedCertBefore.Status || fmt.Sprint(blockedCertAfter.Metadata["expires_at"]) != fmt.Sprint(blockedCertBefore.Metadata["expires_at"]) || blockedCertAfter.Metadata["renewed_at"] != nil {
 		t.Fatalf("certificate renewal changed certificate before scheduled task log was persisted: before=%#v after=%#v", blockedCertBefore, blockedCertAfter)
+	}
+	finalizeCertRec := assertStatus(t, handler, http.MethodPost, "/api/admin/certificates/self-signed", map[string]any{
+		"name":   "finalize-renew-cert",
+		"domain": "finalize-renew.example.test",
+		"days":   1,
+	}, cookie, http.StatusCreated)
+	var finalizeCert model.PlatformItem
+	decodeResponse(t, finalizeCertRec, &finalizeCert)
+	finalizeCert.Metadata["expires_at"] = time.Now().Add(-time.Hour).UTC().Format(time.RFC3339)
+	assertStatus(t, handler, http.MethodPatch, "/api/admin/certificates/"+finalizeCert.ID, map[string]any{
+		"name":     finalizeCert.Name,
+		"status":   finalizeCert.Status,
+		"metadata": finalizeCert.Metadata,
+	}, cookie, http.StatusOK)
+	finalizeCertBefore, ok, err := srv.cfg.Store.GetPlatformItem("certificates", finalizeCert.ID)
+	if err != nil || !ok {
+		t.Fatalf("load finalize certificate before renewal failure: ok=%v err=%v", ok, err)
+	}
+	removeRenewFinalizeBlocker := blockPlatformItemCollectionStatusUpdate(t, srv.cfg.Store, "operation_logs", "success")
+	finalizeRenewRunRec := assertStatus(t, handler, http.MethodPost, "/api/admin/scheduled-tasks/"+renewTask.ID+"/run", nil, cookie, http.StatusInternalServerError)
+	removeRenewFinalizeBlocker()
+	if !strings.Contains(finalizeRenewRunRec.Body.String(), "persist scheduled task log failed") {
+		t.Fatalf("certificate renewal final log failure was not reported: %s", finalizeRenewRunRec.Body.String())
+	}
+	finalizeCertAfter, ok, err := srv.cfg.Store.GetPlatformItem("certificates", finalizeCert.ID)
+	if err != nil || !ok {
+		t.Fatalf("load finalize certificate after rollback: ok=%v err=%v", ok, err)
+	}
+	if finalizeCertAfter.Status != finalizeCertBefore.Status || fmt.Sprint(finalizeCertAfter.Metadata["expires_at"]) != fmt.Sprint(finalizeCertBefore.Metadata["expires_at"]) || finalizeCertAfter.Metadata["renewed_at"] != nil {
+		t.Fatalf("certificate renewal did not roll back certificate after final log failure: before=%#v after=%#v", finalizeCertBefore, finalizeCertAfter)
 	}
 }
 

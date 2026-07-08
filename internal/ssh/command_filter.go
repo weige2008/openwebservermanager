@@ -1,6 +1,7 @@
 package sshsession
 
 import (
+	"fmt"
 	"regexp"
 	"strings"
 	"time"
@@ -162,17 +163,17 @@ func (i *commandInterceptor) record(command string, decision commandDecision) st
 			metadata["approval_error"] = err.Error()
 		}
 	}
-	i.recordCommand(command, decision, true, "interactive ssh command "+decision.Status, metadata)
+	_ = i.recordCommand(command, decision, true, "interactive ssh command "+decision.Status, metadata)
 	return approvalID
 }
 
-func (i *commandInterceptor) recordExec(command string, decision commandDecision, description string, metadata map[string]any) {
-	i.recordCommand(command, decision, false, description, metadata)
+func (i *commandInterceptor) recordExec(command string, decision commandDecision, description string, metadata map[string]any) error {
+	return i.recordCommand(command, decision, false, description, metadata)
 }
 
-func (i *commandInterceptor) recordCommand(command string, decision commandDecision, interactive bool, description string, metadata map[string]any) {
+func (i *commandInterceptor) recordCommand(command string, decision commandDecision, interactive bool, description string, metadata map[string]any) error {
 	if i.store == nil {
-		return
+		return nil
 	}
 	if metadata == nil {
 		metadata = map[string]any{}
@@ -190,7 +191,7 @@ func (i *commandInterceptor) recordCommand(command string, decision commandDecis
 	metadata["blocked"] = decision.Blocked
 	metadata["interactive"] = interactive
 	metadata["recorded_at"] = time.Now().UTC()
-	_, _ = i.store.CreatePlatformItem("exec_command_logs", model.PlatformItemRequest{
+	if _, err := i.store.CreatePlatformItem("exec_command_logs", model.PlatformItemRequest{
 		Name:        command,
 		Type:        decision.Action,
 		Status:      decision.Status,
@@ -199,7 +200,10 @@ func (i *commandInterceptor) recordCommand(command string, decision commandDecis
 		TargetID:    i.session.ServerID,
 		Description: description,
 		Metadata:    metadata,
-	})
+	}); err != nil {
+		return fmt.Errorf("%w: %v", ErrExecCommandLogPersist, err)
+	}
+	return nil
 }
 
 func (i *commandInterceptor) createCommandApproval(command string, decision commandDecision, interactive bool, metadata map[string]any) (model.PlatformItem, error) {

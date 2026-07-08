@@ -24,8 +24,9 @@ import (
 )
 
 var (
-	ErrCommandBlocked = errors.New("ssh command blocked")
-	ErrCommandTimeout = errors.New("ssh command timed out")
+	ErrCommandBlocked        = errors.New("ssh command blocked")
+	ErrCommandTimeout        = errors.New("ssh command timed out")
+	ErrExecCommandLogPersist = errors.New("persist exec command log failed")
 )
 
 type Message struct {
@@ -258,7 +259,11 @@ func (r Runner) runCommand(session model.ConnectionSession, server model.Server,
 			metadata["approved_execution"] = true
 			metadata["approval_status"] = "approved"
 		}
-		interceptor.recordExec(command, decision, "ssh exec command "+decision.Status, metadata)
+		if logErr := interceptor.recordExec(command, decision, "ssh exec command "+decision.Status, metadata); logErr != nil {
+			result.Error = logErr.Error()
+			r.finishExecSession(session.ID, model.SessionFailed, logErr.Error())
+			return result, logErr
+		}
 		r.finishExecSession(session.ID, model.SessionFailed, result.Error)
 		return result, ErrCommandBlocked
 	}
@@ -271,7 +276,11 @@ func (r Runner) runCommand(session model.ConnectionSession, server model.Server,
 		result.Status = "failed"
 		result.Error = err.Error()
 		result.DurationMs = time.Since(started).Milliseconds()
-		interceptor.recordExec(command, decision, "ssh exec command failed", result.execMetadata())
+		if logErr := interceptor.recordExec(command, decision, "ssh exec command failed", result.execMetadata()); logErr != nil {
+			result.Error = logErr.Error()
+			r.finishExecSession(session.ID, model.SessionFailed, logErr.Error())
+			return result, logErr
+		}
 		r.finishExecSession(session.ID, model.SessionFailed, err.Error())
 		return result, err
 	}
@@ -281,7 +290,11 @@ func (r Runner) runCommand(session model.ConnectionSession, server model.Server,
 		result.Status = "failed"
 		result.Error = err.Error()
 		result.DurationMs = time.Since(started).Milliseconds()
-		interceptor.recordExec(command, decision, "ssh exec command failed", result.execMetadata())
+		if logErr := interceptor.recordExec(command, decision, "ssh exec command failed", result.execMetadata()); logErr != nil {
+			result.Error = logErr.Error()
+			r.finishExecSession(session.ID, model.SessionFailed, logErr.Error())
+			return result, logErr
+		}
 		r.finishExecSession(session.ID, model.SessionFailed, err.Error())
 		return result, err
 	}
@@ -307,14 +320,22 @@ func (r Runner) runCommand(session model.ConnectionSession, server model.Server,
 	if err == nil {
 		result.ExitCode = 0
 		result.Status = "success"
-		interceptor.recordExec(command, decision, "ssh exec command success", result.execMetadata())
+		if logErr := interceptor.recordExec(command, decision, "ssh exec command success", result.execMetadata()); logErr != nil {
+			result.Error = logErr.Error()
+			r.finishExecSession(session.ID, model.SessionFailed, logErr.Error())
+			return result, logErr
+		}
 		r.finishExecSession(session.ID, model.SessionClosed, "")
 		return result, nil
 	}
 	if errors.Is(err, ErrCommandTimeout) {
 		result.Status = "timeout"
 		result.Error = err.Error()
-		interceptor.recordExec(command, decision, "ssh exec command timeout", result.execMetadata())
+		if logErr := interceptor.recordExec(command, decision, "ssh exec command timeout", result.execMetadata()); logErr != nil {
+			result.Error = logErr.Error()
+			r.finishExecSession(session.ID, model.SessionFailed, logErr.Error())
+			return result, logErr
+		}
 		r.finishExecSession(session.ID, model.SessionFailed, err.Error())
 		return result, err
 	}
@@ -323,13 +344,21 @@ func (r Runner) runCommand(session model.ConnectionSession, server model.Server,
 		result.ExitCode = exitErr.ExitStatus()
 		result.Status = "failed"
 		result.Error = err.Error()
-		interceptor.recordExec(command, decision, "ssh exec command failed", result.execMetadata())
+		if logErr := interceptor.recordExec(command, decision, "ssh exec command failed", result.execMetadata()); logErr != nil {
+			result.Error = logErr.Error()
+			r.finishExecSession(session.ID, model.SessionFailed, logErr.Error())
+			return result, logErr
+		}
 		r.finishExecSession(session.ID, model.SessionClosed, err.Error())
 		return result, nil
 	}
 	result.Status = "failed"
 	result.Error = err.Error()
-	interceptor.recordExec(command, decision, "ssh exec command failed", result.execMetadata())
+	if logErr := interceptor.recordExec(command, decision, "ssh exec command failed", result.execMetadata()); logErr != nil {
+		result.Error = logErr.Error()
+		r.finishExecSession(session.ID, model.SessionFailed, logErr.Error())
+		return result, logErr
+	}
 	r.finishExecSession(session.ID, model.SessionFailed, err.Error())
 	return result, err
 }

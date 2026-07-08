@@ -77,6 +77,10 @@ func (s *Server) handleSSHExec(w http.ResponseWriter, r *http.Request, asset mod
 		Logger:         slog.Default(),
 		KnownHostsPath: filepath.Join(s.cfg.DataDir, "known_hosts"),
 	}.RunCommand(session, platformSSHServer(asset), platformSSHCredential(credential), secret, req.Command, timeout)
+	if errors.Is(err, sshrunner.ErrExecCommandLogPersist) {
+		s.handleExecCommandLogPersistFailure(w, r, session.ID, err)
+		return
+	}
 	if errors.Is(err, sshrunner.ErrCommandBlocked) {
 		_ = s.audit(r, "connection.ssh.exec.denied", session.ID, model.ProtocolSSH, "blocked ssh exec command")
 		writeJSON(w, http.StatusForbidden, result)
@@ -94,4 +98,10 @@ func (s *Server) handleSSHExec(w http.ResponseWriter, r *http.Request, asset mod
 	}
 	_ = s.audit(r, "connection.ssh.exec", session.ID, model.ProtocolSSH, "executed ssh command")
 	writeJSON(w, http.StatusOK, result)
+}
+
+func (s *Server) handleExecCommandLogPersistFailure(w http.ResponseWriter, r *http.Request, targetID string, err error) {
+	detail := err.Error()
+	_ = s.audit(r, "exec_command.log.persist_failed", targetID, model.ProtocolSSH, detail)
+	writeError(w, http.StatusInternalServerError, detail)
 }

@@ -1665,6 +1665,27 @@ func TestSSHExecAccessRunsCommandAndLogs(t *testing.T) {
 		t.Fatalf("unexpected ssh exec result: %#v", execResult)
 	}
 
+	removeExecLogBlocker := blockPlatformItemCreate(t, srv.cfg.Store, "exec_command_logs")
+	execLogFailureRec := assertStatus(t, handler, http.MethodPost, "/api/access/ssh/"+asset.ID+"/exec", map[string]any{
+		"command":         "printf missing-log",
+		"credential_id":   credential.ID,
+		"timeout_seconds": 5,
+	}, userCookie, http.StatusInternalServerError)
+	removeExecLogBlocker()
+	if !strings.Contains(execLogFailureRec.Body.String(), "persist exec command log failed") {
+		t.Fatalf("ssh exec command log failure was not reported: %s", execLogFailureRec.Body.String())
+	}
+	if strings.Contains(execLogFailureRec.Body.String(), "ran: printf missing-log") {
+		t.Fatalf("ssh exec returned command output after command log failure: %s", execLogFailureRec.Body.String())
+	}
+	if !coreAuditLogsContainAction(srv.cfg.Store, "exec_command.log.persist_failed") {
+		t.Fatal("ssh exec command log persistence failure was not written to core audit logs")
+	}
+	execLogsAfterFailureRec := assertStatus(t, handler, http.MethodGet, "/api/admin/audit/exec-command-logs", nil, adminCookie, http.StatusOK)
+	if strings.Contains(execLogsAfterFailureRec.Body.String(), "printf missing-log") {
+		t.Fatalf("ssh exec command log failure still left an exec command log: %s", execLogsAfterFailureRec.Body.String())
+	}
+
 	assertStatus(t, handler, http.MethodPost, "/api/admin/command-filters", map[string]any{
 		"name":      "deny destructive exec",
 		"type":      "deny",
@@ -1763,6 +1784,19 @@ func TestSSHExecAccessRunsCommandAndLogs(t *testing.T) {
 	limitedExecuteRec := assertStatus(t, handler, http.MethodPost, "/api/admin/command-approvals/"+approvalID+"/execute", map[string]any{"timeout_seconds": 5}, limitedCookie, http.StatusForbidden)
 	if !strings.Contains(limitedExecuteRec.Body.String(), "ssh asset access denied") {
 		t.Fatalf("limited command executor denial did not explain asset authorization: %s", limitedExecuteRec.Body.String())
+	}
+	removeApprovedExecLogBlocker := blockPlatformItemCreate(t, srv.cfg.Store, "exec_command_logs")
+	approvedExecLogFailureRec := assertStatus(t, handler, http.MethodPost, "/api/admin/command-approvals/"+approvalID+"/execute", map[string]any{"timeout_seconds": 5}, adminCookie, http.StatusInternalServerError)
+	removeApprovedExecLogBlocker()
+	if !strings.Contains(approvedExecLogFailureRec.Body.String(), "persist exec command log failed") {
+		t.Fatalf("approved ssh exec command log failure was not reported: %s", approvedExecLogFailureRec.Body.String())
+	}
+	if strings.Contains(approvedExecLogFailureRec.Body.String(), "ran: systemctl restart nginx") {
+		t.Fatalf("approved ssh exec returned command output after command log failure: %s", approvedExecLogFailureRec.Body.String())
+	}
+	approvedLogFailureStateRec := assertStatus(t, handler, http.MethodGet, "/api/admin/command-approvals/"+approvalID, nil, adminCookie, http.StatusOK)
+	if !strings.Contains(approvedLogFailureStateRec.Body.String(), `"status":"approved"`) || strings.Contains(approvedLogFailureStateRec.Body.String(), `"execution_status":"success"`) {
+		t.Fatalf("approved command state changed after exec command log failure: %s", approvedLogFailureStateRec.Body.String())
 	}
 	assertStatus(t, handler, http.MethodPatch, "/api/admin/command-filters/"+approvalFilter.ID, map[string]any{"status": "disabled"}, adminCookie, http.StatusOK)
 	approvedExecRec := assertStatus(t, handler, http.MethodPost, "/api/admin/command-approvals/"+approvalID+"/execute", map[string]any{"timeout_seconds": 5}, adminCookie, http.StatusOK)

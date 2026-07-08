@@ -178,6 +178,10 @@ func (s *Server) handleCommandApprovalExecute(w http.ResponseWriter, r *http.Req
 		Logger:         slog.Default(),
 		KnownHostsPath: filepath.Join(s.cfg.DataDir, "known_hosts"),
 	}.RunApprovedCommand(session, platformSSHServer(asset), platformSSHCredential(credential), secret, command, timeout, approval.ID)
+	if errors.Is(runErr, sshrunner.ErrExecCommandLogPersist) {
+		s.handleExecCommandLogPersistFailure(w, r, approval.ID, runErr)
+		return
+	}
 
 	nextMetadata := commandApprovalExecutionMetadata(approval, session, result, s.currentUserID(r))
 	nextStatus := "executed"

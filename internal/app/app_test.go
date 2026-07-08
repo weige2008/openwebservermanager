@@ -11706,12 +11706,32 @@ func TestScheduledTaskRunners(t *testing.T) {
 	}, cookie, http.StatusCreated)
 	var cleanupTask model.PlatformItem
 	decodeResponse(t, cleanupTaskRec, &cleanupTask)
+
+	removeCleanupLogBlocker := blockPlatformItemCreate(t, srv.cfg.Store, "operation_logs")
+	blockedCleanupRec := assertStatus(t, handler, http.MethodPost, "/api/admin/scheduled-tasks/"+cleanupTask.ID+"/run", nil, cookie, http.StatusInternalServerError)
+	removeCleanupLogBlocker()
+	if !strings.Contains(blockedCleanupRec.Body.String(), "persist scheduled task log failed") {
+		t.Fatalf("cleanup task log persistence failure was not reported: %s", blockedCleanupRec.Body.String())
+	}
+	blockedAccessLogsRec := assertStatus(t, handler, http.MethodGet, "/api/admin/audit/access-logs", nil, cookie, http.StatusOK)
+	if !strings.Contains(blockedAccessLogsRec.Body.String(), oldAccess.ID) {
+		t.Fatalf("cleanup task removed access log before scheduled log persisted: %s", blockedAccessLogsRec.Body.String())
+	}
+	blockedSQLLogsRec := assertStatus(t, handler, http.MethodGet, "/api/admin/audit/sql-logs", nil, cookie, http.StatusOK)
+	if !strings.Contains(blockedSQLLogsRec.Body.String(), oldSQL.ID) {
+		t.Fatalf("cleanup task removed sql log before scheduled log persisted: %s", blockedSQLLogsRec.Body.String())
+	}
+
 	cleanupRunRec := assertStatus(t, handler, http.MethodPost, "/api/admin/scheduled-tasks/"+cleanupTask.ID+"/run", nil, cookie, http.StatusAccepted)
 	if !strings.Contains(cleanupRunRec.Body.String(), "deleted_count") {
 		t.Fatal("cleanup task did not report deleted count")
 	}
 	var cleanupLog model.PlatformItem
 	decodeResponse(t, cleanupRunRec, &cleanupLog)
+	cleanupLogs := scheduledTaskLogsForTest(t, srv, cleanupTask.ID)
+	if len(cleanupLogs) != 1 || cleanupLogs[0].ID != cleanupLog.ID || cleanupLogs[0].Status != "success" {
+		t.Fatalf("cleanup task should preserve its own completed scheduled log, got %#v", cleanupLogs)
+	}
 	deleted, _ := cleanupLog.Metadata["deleted"].(map[string]any)
 	if got, ok := metadataInt(deleted["connection_sessions"]); !ok || got != 1 {
 		t.Fatalf("cleanup deleted connection_sessions = %v/%v, want 1 in %#v", got, ok, cleanupLog.Metadata)

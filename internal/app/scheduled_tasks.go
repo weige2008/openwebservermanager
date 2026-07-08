@@ -45,6 +45,9 @@ func (s *Server) runScheduledTask(_ *http.Request, task model.PlatformItem) (str
 }
 
 func (s *Server) executeScheduledTask(r *http.Request, task model.PlatformItem, trigger string) (model.PlatformItem, error) {
+	if normalizeScheduledTaskType(task.Type) == "log-cleanup" {
+		return s.executeLogCleanupScheduledTask(r, task, trigger)
+	}
 	if trigger == "" {
 		trigger = "manual"
 	}
@@ -94,6 +97,103 @@ func (s *Server) executeScheduledTask(r *http.Request, task model.PlatformItem, 
 		}
 		return model.PlatformItem{}, errors.New(detail)
 	}
+	nextMetadata := cloneMetadata(task.Metadata)
+	nextMetadata["last_run_at"] = completed.Format(time.RFC3339Nano)
+	nextMetadata["last_run_status"] = status
+	nextMetadata["last_run_message"] = result
+	nextMetadata["last_run_log_id"] = logItem.ID
+	nextMetadata["last_duration_ms"] = completed.Sub(started).Milliseconds()
+	nextMetadata["last_trigger"] = trigger
+	if runErr != nil {
+		nextMetadata["last_run_error"] = runErr.Error()
+	} else {
+		delete(nextMetadata, "last_run_error")
+	}
+	if nextRun, ok := nextScheduledTaskRunAfter(task, completed); ok {
+		nextMetadata["next_run_at"] = nextRun.Format(time.RFC3339Nano)
+	} else {
+		delete(nextMetadata, "next_run_at")
+	}
+	if _, updateErr := s.cfg.Store.UpdatePlatformItem("scheduled_tasks", task.ID, model.PlatformItemRequest{Metadata: nextMetadata}); updateErr != nil {
+		detail := "persist scheduled task state failed: " + updateErr.Error()
+		_ = s.audit(r, "scheduled_task.state.persist_failed", task.ID, "", detail)
+		if runErr != nil {
+			return logItem, fmt.Errorf("%w; additionally %s", runErr, detail)
+		}
+		return logItem, errors.New(detail)
+	}
+	if runErr != nil {
+		return logItem, runErr
+	}
+	return logItem, nil
+}
+
+func (s *Server) executeLogCleanupScheduledTask(r *http.Request, task model.PlatformItem, trigger string) (model.PlatformItem, error) {
+	if trigger == "" {
+		trigger = "manual"
+	}
+	started := time.Now().UTC()
+	ownerID := "system"
+	if r != nil {
+		ownerID = s.currentUserID(r)
+	}
+	runningMetadata := map[string]any{
+		"task_type": task.Type,
+		"trigger":   trigger,
+		"ran_at":    started,
+	}
+	if trigger == "scheduled" {
+		runningMetadata["owner_id"] = "system"
+	}
+	logItem, logErr := s.cfg.Store.CreatePlatformItem("operation_logs", model.PlatformItemRequest{
+		Name:        task.Name,
+		Type:        "scheduled_task",
+		Status:      "running",
+		TargetID:    task.ID,
+		OwnerID:     ownerID,
+		Description: "running log cleanup",
+		Metadata:    runningMetadata,
+	})
+	if logErr != nil {
+		detail := "persist scheduled task log failed: " + logErr.Error()
+		_ = s.audit(r, "scheduled_task.log.persist_failed", task.ID, "", detail)
+		return model.PlatformItem{}, errors.New(detail)
+	}
+
+	result := "log cleanup completed"
+	metadata, runErr := s.cleanupHistoryLogs(task, logItem.ID)
+	if metadata == nil {
+		metadata = map[string]any{}
+	}
+	completed := time.Now().UTC()
+	status := "success"
+	if runErr != nil {
+		status = "failed"
+		metadata["error"] = runErr.Error()
+		result = runErr.Error()
+	}
+	metadata["task_type"] = task.Type
+	metadata["trigger"] = trigger
+	metadata["ran_at"] = started
+	metadata["completed_at"] = completed
+	metadata["duration_ms"] = completed.Sub(started).Milliseconds()
+	if trigger == "scheduled" {
+		metadata["owner_id"] = "system"
+	}
+	logItem, logErr = s.cfg.Store.UpdatePlatformItem("operation_logs", logItem.ID, model.PlatformItemRequest{
+		Status:      status,
+		Description: result,
+		Metadata:    metadata,
+	})
+	if logErr != nil {
+		detail := "persist scheduled task log failed: " + logErr.Error()
+		_ = s.audit(r, "scheduled_task.log.persist_failed", task.ID, "", detail)
+		if runErr != nil {
+			return logItem, fmt.Errorf("%w; additionally %s", runErr, detail)
+		}
+		return logItem, errors.New(detail)
+	}
+
 	nextMetadata := cloneMetadata(task.Metadata)
 	nextMetadata["last_run_at"] = completed.Format(time.RFC3339Nano)
 	nextMetadata["last_run_status"] = status
@@ -254,9 +354,16 @@ func addBackupFile(archive *zip.Writer, source, name string) error {
 	return err
 }
 
-func (s *Server) cleanupHistoryLogs(task model.PlatformItem) (map[string]any, error) {
+func (s *Server) cleanupHistoryLogs(task model.PlatformItem, preservedOperationLogIDs ...string) (map[string]any, error) {
 	settings := s.retentionSettings()
 	collections := []string{"login_logs", "operation_logs", "file_logs", "access_logs", "sql_logs", "exec_command_logs"}
+	preservedOperationLogs := map[string]bool{}
+	for _, id := range preservedOperationLogIDs {
+		id = strings.TrimSpace(id)
+		if id != "" {
+			preservedOperationLogs[id] = true
+		}
+	}
 	deletedByCollection := map[string]int{}
 	totalDeleted := 0
 	now := time.Now().UTC()
@@ -268,6 +375,9 @@ func (s *Server) cleanupHistoryLogs(task model.PlatformItem) (map[string]any, er
 			return nil, err
 		}
 		for _, item := range items {
+			if collection == "operation_logs" && preservedOperationLogs[item.ID] {
+				continue
+			}
 			if item.CreatedAt.IsZero() || item.CreatedAt.After(cutoff) {
 				continue
 			}

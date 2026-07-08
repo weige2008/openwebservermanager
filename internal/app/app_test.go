@@ -9415,6 +9415,23 @@ func TestCertificateOperationLogPersistenceFailureRollsBackMutations(t *testing.
 	}
 	assertNoCertificateNamed("no-audit-acme")
 
+	removeCorruptCertificate := insertRawPlatformRecord(t, srv.cfg.Store, "certificates", "corrupt-certificate-snapshot", "{")
+	removeACMERollbackBlocker := blockPlatformItemDeletePayloadFragment(t, srv.cfg.Store, "certificates", `"name":"default-snapshot-cleanup"`)
+	defaultSnapshotFailureRec := assertStatus(t, handler, http.MethodPost, "/api/admin/certificates/acme", map[string]any{
+		"name":    "default-snapshot-cleanup",
+		"domain":  "default-snapshot-cleanup.example.test",
+		"default": true,
+	}, adminCookie, http.StatusInternalServerError)
+	removeACMERollbackBlocker()
+	removeCorruptCertificate()
+	deletePlatformRecordsPayloadFragment(t, srv.cfg.Store, "certificates", `"name":"default-snapshot-cleanup"`)
+	if !strings.Contains(defaultSnapshotFailureRec.Body.String(), "failed to remove ACME certificate after default snapshot failure") {
+		t.Fatalf("ACME default snapshot cleanup failure was not reported: %s", defaultSnapshotFailureRec.Body.String())
+	}
+	if !coreAuditLogsContainAction(srv.cfg.Store, "certificate.acme.rollback_failed") {
+		t.Fatal("ACME default snapshot cleanup failure was not written to core audit logs")
+	}
+
 	removeDNSBlocker := blockPlatformItemCreate(t, srv.cfg.Store, "operation_logs")
 	dnsFailureRec := assertStatus(t, handler, http.MethodPost, "/api/admin/certificates/dns-providers", map[string]any{
 		"name":     "no-audit-dns",
@@ -13329,6 +13346,35 @@ func newUnconfiguredTestServer(t *testing.T, configure func(*Config)) *Server {
 func blockSQLWorkOrderStatusUpdate(t *testing.T, st *store.Store, orderID, status string) func() {
 	t.Helper()
 	return blockPlatformItemStatusUpdate(t, st, "sql_work_orders", orderID, status)
+}
+
+func insertRawPlatformRecord(t *testing.T, st *store.Store, collection, id, payload string) func() {
+	t.Helper()
+	db, err := sql.Open("sqlite", st.DatabasePath())
+	if err != nil {
+		t.Fatalf("open store database for raw platform record: %v", err)
+	}
+	now := time.Now().UTC().Format(time.RFC3339Nano)
+	if _, err := db.Exec(`INSERT OR REPLACE INTO platform_records(collection, id, payload, created_at, updated_at) VALUES (?, ?, ?, ?, ?)`, collection, id, payload, now, now); err != nil {
+		_ = db.Close()
+		t.Fatalf("insert raw platform record: %v", err)
+	}
+	return func() {
+		_, _ = db.Exec(`DELETE FROM platform_records WHERE collection = ? AND id = ?`, collection, id)
+		_ = db.Close()
+	}
+}
+
+func deletePlatformRecordsPayloadFragment(t *testing.T, st *store.Store, collection, fragment string) {
+	t.Helper()
+	db, err := sql.Open("sqlite", st.DatabasePath())
+	if err != nil {
+		t.Fatalf("open store database for payload cleanup: %v", err)
+	}
+	defer db.Close()
+	if _, err := db.Exec(`DELETE FROM platform_records WHERE collection = ? AND instr(payload, ?) > 0`, collection, fragment); err != nil {
+		t.Fatalf("delete platform payload cleanup: %v", err)
+	}
 }
 
 func blockPlatformItemCreate(t *testing.T, st *store.Store, collection string) func() {

@@ -3192,7 +3192,11 @@ func (s *Server) handleCertificateACME(w http.ResponseWriter, r *http.Request) {
 	if req.Default {
 		snapshot, err := s.certificateSnapshot()
 		if err != nil {
-			_ = s.cfg.Store.DeletePlatformItem("certificates", item.ID)
+			if rollbackErr := s.cfg.Store.DeletePlatformItem("certificates", item.ID); rollbackErr != nil && !errors.Is(rollbackErr, os.ErrNotExist) {
+				detail := "failed to remove ACME certificate after default snapshot failure: " + rollbackErr.Error()
+				_ = s.audit(r, "certificate.acme.rollback_failed", item.ID, "", detail)
+				err = fmt.Errorf("%w; additionally %s", err, detail)
+			}
 			writeError(w, http.StatusInternalServerError, err.Error())
 			return
 		}

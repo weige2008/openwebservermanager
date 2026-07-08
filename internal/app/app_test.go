@@ -11499,6 +11499,13 @@ func TestBackupOperationLogPersistenceFailures(t *testing.T) {
 	if _, err := os.Stat(filepath.FromSlash(backupPath)); err != nil {
 		t.Fatalf("backup delete removed archive before audit log persisted: %v", err)
 	}
+	restoredBackupRaw, err := os.ReadFile(filepath.FromSlash(backupPath))
+	if err != nil {
+		t.Fatalf("read restored backup archive after delete log failure: %v", err)
+	}
+	if !bytes.Equal(restoredBackupRaw, backupRaw) {
+		t.Fatal("backup delete restored archive with different content after audit log failure")
+	}
 
 	removeDryRunLogBlocker := blockPlatformItemCreate(t, srv.cfg.Store, "operation_logs")
 	dryRunFailureRec := assertMultipartStatus(t, handler, "/api/admin/backups/restore?dry_run=1", nil, backupName, backupRaw, cookie, http.StatusInternalServerError)

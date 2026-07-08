@@ -131,6 +131,16 @@ func (s *Server) handleBackupDelete(w http.ResponseWriter, r *http.Request, name
 		writeError(w, http.StatusBadRequest, err.Error())
 		return
 	}
+	rollback, err := prepareStorageFileRollback(path)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	if err := os.Remove(path); err != nil {
+		rollback.cleanup()
+		writeError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
 	if err := s.createOperationLog(r, model.PlatformItemRequest{
 		Name:        "backup.delete",
 		Type:        "backup",
@@ -139,13 +149,11 @@ func (s *Server) handleBackupDelete(w http.ResponseWriter, r *http.Request, name
 		Description: "deleted backup archive",
 		Metadata:    map[string]any{"backup": name, "size": info.Size(), "client_ip": s.clientIP(r)},
 	}); err != nil {
+		err = rollback.restoreError(err)
 		writeError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
-	if err := os.Remove(path); err != nil {
-		writeError(w, http.StatusInternalServerError, err.Error())
-		return
-	}
+	rollback.cleanup()
 	_ = s.audit(r, "backup.delete", name, "", "deleted backup")
 	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "deleted": name})
 }

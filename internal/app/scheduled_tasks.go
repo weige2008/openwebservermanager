@@ -260,6 +260,10 @@ func normalizeScheduledTaskType(value string) string {
 }
 
 func (s *Server) createBackupSnapshot() (map[string]any, error) {
+	return s.createBackupSnapshotWithRetentionCleanup(s.cleanupExpiredBackups)
+}
+
+func (s *Server) createBackupSnapshotWithRetentionCleanup(cleanup func(time.Time) (backupRetentionResult, error)) (_ map[string]any, err error) {
 	backupDir := filepath.Join(s.cfg.DataDir, "backups")
 	if err := os.MkdirAll(backupDir, 0o770); err != nil {
 		return nil, err
@@ -268,6 +272,13 @@ func (s *Server) createBackupSnapshot() (map[string]any, error) {
 	if err != nil {
 		return nil, err
 	}
+	defer func() {
+		if err == nil {
+			return
+		}
+		_ = output.Close()
+		_ = os.Remove(target)
+	}()
 	archive := zip.NewWriter(output)
 	files := []string{}
 	storePath := s.cfg.Store.Path()
@@ -305,7 +316,7 @@ func (s *Server) createBackupSnapshot() (map[string]any, error) {
 	if err != nil {
 		return nil, err
 	}
-	retention, err := s.cleanupExpiredBackups(time.Now().UTC())
+	retention, err := cleanup(time.Now().UTC())
 	if err != nil {
 		return nil, err
 	}

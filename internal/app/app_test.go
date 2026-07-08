@@ -11444,6 +11444,34 @@ func TestBackupDeleteAndRetention(t *testing.T) {
 	}
 }
 
+func TestCreateBackupSnapshotRemovesArchiveOnPostCreateFailure(t *testing.T) {
+	srv, _ := newTestServer(t, nil)
+	backupDir := filepath.Join(srv.cfg.DataDir, "backups")
+	beforeFailure, err := filepath.Glob(filepath.Join(backupDir, "*.zip"))
+	if err != nil {
+		t.Fatalf("glob backups before snapshot failure: %v", err)
+	}
+	forcedErr := errors.New("forced backup retention failure")
+	cleanupCalls := 0
+	_, err = srv.createBackupSnapshotWithRetentionCleanup(func(time.Time) (backupRetentionResult, error) {
+		cleanupCalls++
+		return backupRetentionResult{}, forcedErr
+	})
+	if !errors.Is(err, forcedErr) {
+		t.Fatalf("create backup snapshot error = %v, want %v", err, forcedErr)
+	}
+	if cleanupCalls != 1 {
+		t.Fatalf("retention cleanup calls = %d, want 1", cleanupCalls)
+	}
+	afterFailure, err := filepath.Glob(filepath.Join(backupDir, "*.zip"))
+	if err != nil {
+		t.Fatalf("glob backups after snapshot failure: %v", err)
+	}
+	if len(afterFailure) != len(beforeFailure) {
+		t.Fatalf("snapshot post-create failure left an archive: before=%v after=%v", beforeFailure, afterFailure)
+	}
+}
+
 func TestBackupOperationLogPersistenceFailures(t *testing.T) {
 	srv, cookie := newTestServer(t, nil)
 	handler := http.Handler(srv)

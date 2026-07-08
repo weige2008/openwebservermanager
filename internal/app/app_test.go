@@ -12357,6 +12357,29 @@ func TestRecordingOperationLogPersistenceFailures(t *testing.T) {
 	if !coreAuditLogsContainAction(srv.cfg.Store, "operation.log.persist_failed") {
 		t.Fatal("recording operation log persistence failure was not written to core audit logs")
 	}
+
+	if _, err := srv.cfg.Store.CloseSession(session.ID, "closed before recording state failure test"); err != nil {
+		t.Fatalf("close recording state failure fixture session: %v", err)
+	}
+	removeStateBlocker := blockPlatformItemSave(t, srv.cfg.Store, "offline_sessions", session.ID)
+	stateFailureRec := assertStatus(t, handler, http.MethodDelete, "/api/admin/audit/offline-sessions/"+session.ID+"/recording", nil, adminCookie, http.StatusInternalServerError)
+	removeStateBlocker()
+	if !strings.Contains(stateFailureRec.Body.String(), "persist recording deletion offline state failed") {
+		t.Fatalf("recording state persistence failure was not reported: %s", stateFailureRec.Body.String())
+	}
+	if !coreAuditLogsContainAction(srv.cfg.Store, "audit.recording.state.persist_failed") {
+		t.Fatal("recording state persistence failure was not written to core audit logs")
+	}
+	if _, err := os.Stat(recordingFile); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("recording file state after metadata failure = %v, want removed", err)
+	}
+	offline, ok, err := srv.cfg.Store.GetPlatformItem("offline_sessions", session.ID)
+	if err != nil || !ok {
+		t.Fatalf("load offline recording fixture after metadata failure: ok=%v err=%v", ok, err)
+	}
+	if firstMetadataString(offline.Metadata, "recording_path") == "" {
+		t.Fatalf("offline recording metadata unexpectedly changed after forced persistence failure: %#v", offline.Metadata)
+	}
 }
 
 func TestRecordingAuditRejectsSymlinkRecordingRoot(t *testing.T) {

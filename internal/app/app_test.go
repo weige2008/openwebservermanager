@@ -11908,6 +11908,36 @@ func TestScheduledTaskRunners(t *testing.T) {
 	if storedHeadlessWebAsset.Status != "active" || firstMetadataString(storedHeadlessWebAsset.Metadata, "last_check_status") != "active" {
 		t.Fatalf("asset status task did not fall back to GET after HEAD rejection: %#v", storedHeadlessWebAsset)
 	}
+	blockedStatusUpstreamHit := false
+	blockedStatusUpstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		blockedStatusUpstreamHit = true
+		_, _ = w.Write([]byte("ok"))
+	}))
+	defer blockedStatusUpstream.Close()
+	blockedStatusWebRec := assertStatus(t, handler, http.MethodPost, "/api/admin/websites", map[string]any{
+		"name":     "blocked status web",
+		"type":     "http",
+		"status":   "enabled",
+		"metadata": map[string]any{"target_url": blockedStatusUpstream.URL},
+	}, cookie, http.StatusCreated)
+	var blockedStatusWeb model.PlatformItem
+	decodeResponse(t, blockedStatusWebRec, &blockedStatusWeb)
+	removeStatusLogBlocker := blockPlatformItemCreate(t, srv.cfg.Store, "operation_logs")
+	blockedStatusRunRec := assertStatus(t, handler, http.MethodPost, "/api/admin/scheduled-tasks/"+statusTask.ID+"/run", nil, cookie, http.StatusInternalServerError)
+	removeStatusLogBlocker()
+	if !strings.Contains(blockedStatusRunRec.Body.String(), "persist scheduled task log failed") {
+		t.Fatalf("asset status scheduled log failure was not reported: %s", blockedStatusRunRec.Body.String())
+	}
+	if blockedStatusUpstreamHit {
+		t.Fatal("asset status task contacted upstream before scheduled task log was persisted")
+	}
+	storedBlockedStatusWeb, ok, err := srv.cfg.Store.GetPlatformItem("web_assets", blockedStatusWeb.ID)
+	if err != nil || !ok {
+		t.Fatalf("load blocked status web asset: ok=%v err=%v", ok, err)
+	}
+	if storedBlockedStatusWeb.Status != "enabled" || storedBlockedStatusWeb.Metadata["last_check_status"] != nil {
+		t.Fatalf("asset status task changed asset before scheduled task log was persisted: %#v", storedBlockedStatusWeb)
+	}
 
 	certRec := assertStatus(t, handler, http.MethodPost, "/api/admin/certificates/self-signed", map[string]any{
 		"name":   "renew-cert",
@@ -11956,6 +11986,36 @@ func TestScheduledTaskRunners(t *testing.T) {
 	}
 	if storedDisabledCert.Status != "disabled" || storedDisabledCert.Metadata["renewed_at"] != nil {
 		t.Fatalf("disabled certificate was changed by renewal task: %#v", storedDisabledCert)
+	}
+	blockedCertRec := assertStatus(t, handler, http.MethodPost, "/api/admin/certificates/self-signed", map[string]any{
+		"name":   "blocked-renew-cert",
+		"domain": "blocked-renew.example.test",
+		"days":   1,
+	}, cookie, http.StatusCreated)
+	var blockedCert model.PlatformItem
+	decodeResponse(t, blockedCertRec, &blockedCert)
+	blockedCert.Metadata["expires_at"] = time.Now().Add(-time.Hour).UTC().Format(time.RFC3339)
+	assertStatus(t, handler, http.MethodPatch, "/api/admin/certificates/"+blockedCert.ID, map[string]any{
+		"name":     blockedCert.Name,
+		"status":   blockedCert.Status,
+		"metadata": blockedCert.Metadata,
+	}, cookie, http.StatusOK)
+	blockedCertBefore, ok, err := srv.cfg.Store.GetPlatformItem("certificates", blockedCert.ID)
+	if err != nil || !ok {
+		t.Fatalf("load blocked certificate before renewal failure: ok=%v err=%v", ok, err)
+	}
+	removeRenewLogBlocker := blockPlatformItemCreate(t, srv.cfg.Store, "operation_logs")
+	blockedRenewRunRec := assertStatus(t, handler, http.MethodPost, "/api/admin/scheduled-tasks/"+renewTask.ID+"/run", nil, cookie, http.StatusInternalServerError)
+	removeRenewLogBlocker()
+	if !strings.Contains(blockedRenewRunRec.Body.String(), "persist scheduled task log failed") {
+		t.Fatalf("certificate renewal scheduled log failure was not reported: %s", blockedRenewRunRec.Body.String())
+	}
+	blockedCertAfter, ok, err := srv.cfg.Store.GetPlatformItem("certificates", blockedCert.ID)
+	if err != nil || !ok {
+		t.Fatalf("load blocked certificate after renewal failure: ok=%v err=%v", ok, err)
+	}
+	if blockedCertAfter.Status != blockedCertBefore.Status || fmt.Sprint(blockedCertAfter.Metadata["expires_at"]) != fmt.Sprint(blockedCertBefore.Metadata["expires_at"]) || blockedCertAfter.Metadata["renewed_at"] != nil {
+		t.Fatalf("certificate renewal changed certificate before scheduled task log was persisted: before=%#v after=%#v", blockedCertBefore, blockedCertAfter)
 	}
 }
 

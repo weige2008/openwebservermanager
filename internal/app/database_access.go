@@ -135,8 +135,34 @@ func (s *Server) handleDatabaseWorkOrderCreate(w http.ResponseWriter, r *http.Re
 		writeError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
+	if err := s.createSQLWorkOrderRequestOperationLog(r, item); err != nil {
+		if deleteErr := s.cfg.Store.DeletePlatformItem("sql_work_orders", item.ID); deleteErr != nil && !errors.Is(deleteErr, os.ErrNotExist) {
+			err = fmt.Errorf("%w; additionally failed to roll back sql work order request: %v", err, deleteErr)
+		}
+		writeError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
 	_ = s.audit(r, "sql_work_order.request", item.ID, model.ProtocolDatabase, "created sql work order")
 	writeJSON(w, http.StatusCreated, item)
+}
+
+func (s *Server) createSQLWorkOrderRequestOperationLog(r *http.Request, item model.PlatformItem) error {
+	return s.createOperationLog(r, model.PlatformItemRequest{
+		Name:        "sql_work_order.request",
+		Type:        "sql_work_orders",
+		Status:      "success",
+		Protocol:    model.ProtocolDatabase,
+		TargetID:    item.ID,
+		OwnerID:     s.currentUserID(r),
+		Description: "created sql work order",
+		Metadata: map[string]any{
+			"collection": "sql_work_orders",
+			"item_id":    item.ID,
+			"asset_id":   item.TargetID,
+			"owner_id":   item.OwnerID,
+			"client_ip":  s.clientIP(r),
+		},
+	})
 }
 
 func (s *Server) executeDatabaseAssetSQL(r *http.Request, asset model.PlatformItem, userID, sqlText string, opts databaseSQLExecutionOptions) (model.PlatformItem, int, error) {

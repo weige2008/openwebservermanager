@@ -3824,6 +3824,23 @@ func TestDatabaseAssetQueryRequiresAuthorizationAndLogs(t *testing.T) {
 		t.Fatal("authorized database asset did not appear in access portal")
 	}
 
+	removeSQLRequestLogBlocker := blockOperationLogName(t, srv.cfg.Store, "sql_work_order.request")
+	blockedSQLRequestRec := assertStatus(t, handler, http.MethodPost, "/api/access/database/"+databaseAsset.ID+"/work-orders", map[string]any{
+		"sql":    "CREATE TABLE blocked_request_table(name TEXT)",
+		"reason": "blocked sql request log",
+	}, userCookie, http.StatusInternalServerError)
+	removeSQLRequestLogBlocker()
+	if !strings.Contains(blockedSQLRequestRec.Body.String(), "persist operation log failed") {
+		t.Fatalf("sql work order request log persistence failure did not explain error: %s", blockedSQLRequestRec.Body.String())
+	}
+	blockedRequestListRec := assertStatus(t, handler, http.MethodGet, "/api/admin/sql-work-orders", nil, adminCookie, http.StatusOK)
+	if strings.Contains(blockedRequestListRec.Body.String(), "blocked sql request log") {
+		t.Fatalf("sql work order request was not rolled back after log failure: %s", blockedRequestListRec.Body.String())
+	}
+	if !coreAuditLogsContainAction(srv.cfg.Store, "operation.log.persist_failed") {
+		t.Fatal("sql work order request operation log failure was not audited")
+	}
+
 	assertStatus(t, handler, http.MethodPost, "/api/access/database/"+databaseAsset.ID+"/query", map[string]any{
 		"sql": "CREATE TABLE servers(id INTEGER PRIMARY KEY, name TEXT)",
 	}, userCookie, http.StatusOK)
@@ -3890,6 +3907,10 @@ func TestDatabaseAssetQueryRequiresAuthorizationAndLogs(t *testing.T) {
 	}
 	if got := firstMetadataString(workOrder.Metadata, "requested_by"); got != user.ID {
 		t.Fatalf("work order requested_by = %q, want %q", got, user.ID)
+	}
+	requestLogsRec := assertStatus(t, handler, http.MethodGet, "/api/admin/audit/operation-logs", nil, adminCookie, http.StatusOK)
+	if !strings.Contains(requestLogsRec.Body.String(), "sql_work_order.request") || !strings.Contains(requestLogsRec.Body.String(), workOrder.ID) {
+		t.Fatalf("sql work order request was not written to operation logs: %s", requestLogsRec.Body.String())
 	}
 	assertStatus(t, handler, http.MethodPost, "/api/admin/sql-work-orders/"+workOrder.ID+"/execute", map[string]any{}, adminCookie, http.StatusConflict)
 	selfApproveRec := assertStatus(t, handler, http.MethodPost, "/api/admin/sql-work-orders/"+workOrder.ID+"/approve", map[string]any{"note": "self approve"}, userCookie, http.StatusForbidden)

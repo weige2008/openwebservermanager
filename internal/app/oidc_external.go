@@ -194,6 +194,7 @@ func (s *Server) handleExternalOIDCCallback(w http.ResponseWriter, r *http.Reque
 		return
 	}
 	if err := s.recordUserLoginState(r, token, session, s.clientIP(r)); err != nil {
+		err = s.restoreExternalUserAfterLoginStateFailure(r, user.UserID, previousUser, hadPreviousUser, err)
 		writeError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
@@ -251,16 +252,24 @@ func (s *Server) externalUserSnapshot(providerType, providerID, subject string) 
 }
 
 func (s *Server) restoreExternalUserAfterLoginLogFailure(r *http.Request, userID string, previous model.PlatformItem, hadPrevious bool, originalErr error) error {
+	return s.restoreExternalUserAfterLoginPersistenceFailure(r, userID, previous, hadPrevious, originalErr, "login log failure")
+}
+
+func (s *Server) restoreExternalUserAfterLoginStateFailure(r *http.Request, userID string, previous model.PlatformItem, hadPrevious bool, originalErr error) error {
+	return s.restoreExternalUserAfterLoginPersistenceFailure(r, userID, previous, hadPrevious, originalErr, "login state failure")
+}
+
+func (s *Server) restoreExternalUserAfterLoginPersistenceFailure(r *http.Request, userID string, previous model.PlatformItem, hadPrevious bool, originalErr error, reason string) error {
 	if hadPrevious {
 		if _, restoreErr := s.cfg.Store.SavePlatformItem("users", previous); restoreErr != nil {
-			detail := "failed to restore external user after login log failure: " + restoreErr.Error()
+			detail := "failed to restore external user after " + reason + ": " + restoreErr.Error()
 			_ = s.audit(r, "auth.external_user.restore_failed", userID, "", detail)
 			return fmt.Errorf("%w; additionally %s", originalErr, detail)
 		}
 		return originalErr
 	}
 	if restoreErr := s.cfg.Store.DeletePlatformItem("users", userID); restoreErr != nil {
-		detail := "failed to remove external user after login log failure: " + restoreErr.Error()
+		detail := "failed to remove external user after " + reason + ": " + restoreErr.Error()
 		_ = s.audit(r, "auth.external_user.restore_failed", userID, "", detail)
 		return fmt.Errorf("%w; additionally %s", originalErr, detail)
 	}

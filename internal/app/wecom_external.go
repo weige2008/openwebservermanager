@@ -196,6 +196,7 @@ func (s *Server) handleExternalWeComCallback(w http.ResponseWriter, r *http.Requ
 		return
 	}
 	if err := s.recordUserLoginState(r, token, session, s.clientIP(r)); err != nil {
+		err = s.restoreExternalUserAfterLoginStateFailure(r, user.UserID, previousUser, hadPreviousUser, err)
 		writeError(w, http.StatusInternalServerError, err.Error())
 		return
 	}

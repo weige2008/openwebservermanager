@@ -785,6 +785,9 @@ func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if err := s.recordUserLoginState(r, token, session, clientIP); err != nil {
+		if loginType == "ldap" {
+			err = s.restoreExternalUserAfterLoginStateFailure(r, admin.UserID, ldapPreviousUser, ldapHadPreviousUser, err)
+		}
 		writeError(w, http.StatusInternalServerError, err.Error())
 		return
 	}

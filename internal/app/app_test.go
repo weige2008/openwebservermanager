@@ -6443,6 +6443,90 @@ func TestExternalOIDCLoginLogFailureRollsBackAutoCreatedUser(t *testing.T) {
 	}
 }
 
+func TestExternalOIDCLoginStateFailureRollsBackAutoCreatedUser(t *testing.T) {
+	handler, adminCookie := newTestHandler(t)
+	srv := handler.(*Server)
+	var tokenEndpointCalls int
+	var stateNonce string
+	provider := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/token":
+			tokenEndpointCalls++
+			writeJSON(w, http.StatusOK, map[string]any{"access_token": "state-rollback-access", "token_type": "Bearer", "expires_in": 300})
+		case "/userinfo":
+			if r.Header.Get("Authorization") != "Bearer state-rollback-access" {
+				http.Error(w, "bad bearer", http.StatusUnauthorized)
+				return
+			}
+			writeJSON(w, http.StatusOK, map[string]any{
+				"sub":                "state-rollback-subject",
+				"preferred_username": "oidc-state-rollback-user",
+				"nonce":              stateNonce,
+			})
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer provider.Close()
+
+	assertStatus(t, handler, http.MethodPost, "/api/admin/system-settings", map[string]any{
+		"name":   "External OIDC state rollback",
+		"type":   "identity",
+		"status": "enabled",
+		"metadata": map[string]any{
+			"oidc_login_enabled":          true,
+			"oidc_provider_id":            "state-rollback-sso",
+			"oidc_provider_name":          "State Rollback SSO",
+			"oidc_authorization_endpoint": provider.URL + "/authorize",
+			"oidc_token_endpoint":         provider.URL + "/token",
+			"oidc_userinfo_endpoint":      provider.URL + "/userinfo",
+			"oidc_client_id":              "openweb-client",
+			"oidc_client_secret":          "openweb-secret",
+			"oidc_scopes":                 []string{"openid", "profile"},
+			"oidc_role":                   "user",
+		},
+	}, adminCookie, http.StatusCreated)
+	state, nonce, err := srv.auth.createExternalOIDCState("state-rollback-sso", "/app/access")
+	if err != nil {
+		t.Fatalf("create external oidc state: %v", err)
+	}
+	stateNonce = nonce
+
+	removeBlocker := blockPlatformCollectionSavePayloadFragment(t, srv.cfg.Store, "users", `"online":true`)
+	callbackRec := assertStatus(t, handler, http.MethodGet, "/api/auth/oidc/callback?state="+url.QueryEscape(state)+"&code=state-rollback-code", nil, nil, http.StatusInternalServerError)
+	removeBlocker()
+	if !strings.Contains(callbackRec.Body.String(), "persist user login state failed") {
+		t.Fatalf("oidc login state failure was not reported: %s", callbackRec.Body.String())
+	}
+	if len(callbackRec.Result().Cookies()) > 0 {
+		t.Fatalf("oidc callback issued cookies after failed login state write: %#v", callbackRec.Result().Cookies())
+	}
+	if tokenEndpointCalls != 1 {
+		t.Fatalf("oidc token endpoint calls = %d, want 1", tokenEndpointCalls)
+	}
+	assertNoAuthSessionForUsername(t, srv, "oidc-state-rollback-user")
+	usersRec := assertStatus(t, handler, http.MethodGet, "/api/admin/users", nil, adminCookie, http.StatusOK)
+	if strings.Contains(usersRec.Body.String(), "oidc-state-rollback-user") || strings.Contains(usersRec.Body.String(), "state-rollback-subject") {
+		t.Fatalf("oidc auto-created user survived failed login state write: %s", usersRec.Body.String())
+	}
+	if !coreAuditLogsContainAction(srv.cfg.Store, "auth.login.state.persist_failed") {
+		t.Fatal("oidc login state persistence failure was not written to core audit logs")
+	}
+
+	state, nonce, err = srv.auth.createExternalOIDCState("state-rollback-sso", "/app/access")
+	if err != nil {
+		t.Fatalf("create external oidc state for retry: %v", err)
+	}
+	stateNonce = nonce
+	retryRec := assertStatus(t, handler, http.MethodGet, "/api/auth/oidc/callback?state="+url.QueryEscape(state)+"&code=state-rollback-code", nil, nil, http.StatusFound)
+	if retryRec.Header().Get("Location") != "/app/access" {
+		t.Fatalf("oidc retry did not redirect to requested next path: %s", retryRec.Header().Get("Location"))
+	}
+	if len(retryRec.Result().Cookies()) == 0 {
+		t.Fatal("oidc retry after login state failure did not set auth cookie")
+	}
+}
+
 func TestExternalOIDCCallbackAutoCreateDisabledIsAudited(t *testing.T) {
 	handler, adminCookie := newTestHandler(t)
 	srv := handler.(*Server)
@@ -7205,6 +7289,77 @@ func TestExternalLDAPLoginLogFailureRollsBackAutoCreatedUser(t *testing.T) {
 	}
 }
 
+func TestExternalLDAPLoginStateFailureRollsBackAutoCreatedUser(t *testing.T) {
+	handler, adminCookie := newTestHandler(t)
+	srv := handler.(*Server)
+	fakeLDAP := &fakeLDAPAuthenticator{
+		users: map[string]fakeLDAPUser{
+			"ldap-state-rollback": {
+				password: "directory-password",
+				claims: externalLDAPClaims{
+					Subject:     "uid=ldap-state-rollback,ou=people,dc=example,dc=test",
+					DN:          "uid=ldap-state-rollback,ou=people,dc=example,dc=test",
+					Username:    "ldap-state-rollback",
+					DisplayName: "LDAP State Rollback",
+					Email:       "ldap-state-rollback@example.test",
+				},
+			},
+		},
+	}
+	srv.ldap = fakeLDAP
+
+	assertStatus(t, handler, http.MethodPost, "/api/admin/system-settings", map[string]any{
+		"name":   "LDAP state rollback identity",
+		"type":   "identity",
+		"status": "enabled",
+		"metadata": map[string]any{
+			"disable_password_login":      true,
+			"ldap_enabled":                true,
+			"ldap_provider_id":            "state-rollback-ldap",
+			"ldap_provider_name":          "State Rollback LDAP",
+			"ldap_url":                    "ldap://directory.example.test:389",
+			"ldap_bind_dn":                "cn=reader,dc=example,dc=test",
+			"ldap_bind_password":          "directory-secret",
+			"ldap_base_dn":                "ou=people,dc=example,dc=test",
+			"ldap_user_filter":            "(uid={username})",
+			"ldap_username_attribute":     "uid",
+			"ldap_display_name_attribute": "cn",
+			"ldap_email_attribute":        "mail",
+			"ldap_role":                   "user",
+			"ldap_auto_create":            true,
+		},
+	}, adminCookie, http.StatusCreated)
+
+	removeBlocker := blockPlatformCollectionSavePayloadFragment(t, srv.cfg.Store, "users", `"online":true`)
+	loginRec := assertStatus(t, handler, http.MethodPost, "/api/auth/login", map[string]any{
+		"username": "ldap-state-rollback",
+		"password": "directory-password",
+	}, nil, http.StatusInternalServerError)
+	removeBlocker()
+	if !strings.Contains(loginRec.Body.String(), "persist user login state failed") {
+		t.Fatalf("ldap login state failure was not reported: %s", loginRec.Body.String())
+	}
+	if cookies := loginRec.Result().Cookies(); len(cookies) != 0 {
+		t.Fatalf("ldap login issued cookies after failed login state write: %#v", cookies)
+	}
+	assertNoAuthSessionForUsername(t, srv, "ldap-state-rollback")
+	usersRec := assertStatus(t, handler, http.MethodGet, "/api/admin/users", nil, adminCookie, http.StatusOK)
+	if strings.Contains(usersRec.Body.String(), "ldap-state-rollback") || strings.Contains(usersRec.Body.String(), "uid=ldap-state-rollback") {
+		t.Fatalf("ldap auto-created user survived failed login state write: %s", usersRec.Body.String())
+	}
+	if !coreAuditLogsContainAction(srv.cfg.Store, "auth.login.state.persist_failed") {
+		t.Fatal("ldap login state persistence failure was not written to core audit logs")
+	}
+
+	retryRec := assertStatus(t, handler, http.MethodPost, "/api/auth/login", map[string]any{
+		"username": "ldap-state-rollback",
+		"password": "directory-password",
+	}, nil, http.StatusOK)
+	if cookies := retryRec.Result().Cookies(); len(cookies) == 0 {
+		t.Fatal("ldap retry after login state failure did not set auth cookie")
+	}
+}
+
 func TestExternalLDAPLoginFailureRedactsSecrets(t *testing.T) {
 	handler, adminCookie := newTestHandler(t)
 	srv := handler.(*Server)
@@ -7953,6 +8108,95 @@ func TestExternalWeComLoginLogFailureRollsBackAutoCreatedUser(t *testing.T) {
 	}
 	if !coreAuditLogsContainAction(srv.cfg.Store, "auth.external_user.restore_failed") {
 		t.Fatal("wecom external user restore failure was not written to core audit logs")
+	}
+}
+
+func TestExternalWeComLoginStateFailureRollsBackAutoCreatedUser(t *testing.T) {
+	handler, adminCookie := newTestHandler(t)
+	srv := handler.(*Server)
+	var tokenEndpointCalls int
+	provider := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/gettoken":
+			tokenEndpointCalls++
+			writeJSON(w, http.StatusOK, map[string]any{"errcode": 0, "access_token": "wecom-state-rollback-access", "expires_in": 7200})
+		case "/getuserinfo":
+			if r.URL.Query().Get("access_token") != "wecom-state-rollback-access" || r.URL.Query().Get("code") != "state-rollback-code" {
+				http.Error(w, "bad userinfo request", http.StatusUnauthorized)
+				return
+			}
+			writeJSON(w, http.StatusOK, map[string]any{"errcode": 0, "UserId": "wecom-state-rollback-user"})
+		case "/userget":
+			if r.URL.Query().Get("access_token") != "wecom-state-rollback-access" || r.URL.Query().Get("userid") != "wecom-state-rollback-user" {
+				http.Error(w, "bad user detail request", http.StatusUnauthorized)
+				return
+			}
+			writeJSON(w, http.StatusOK, map[string]any{
+				"errcode": 0,
+				"userid":  "wecom-state-rollback-user",
+				"name":    "WeCom State Rollback User",
+				"email":   "wecom-state-rollback@example.test",
+			})
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer provider.Close()
+
+	assertStatus(t, handler, http.MethodPost, "/api/admin/system-settings", map[string]any{
+		"name":   "Enterprise WeChat state rollback",
+		"type":   "identity",
+		"status": "enabled",
+		"metadata": map[string]any{
+			"wecom_enabled":              true,
+			"wecom_provider_id":          "state-rollback-wecom",
+			"wecom_provider_name":        "State Rollback WeCom",
+			"wecom_corp_id":              "ww-openweb",
+			"wecom_agent_id":             "100001",
+			"wecom_agent_secret":         "wecom-secret",
+			"wecom_authorize_endpoint":   provider.URL + "/authorize",
+			"wecom_token_endpoint":       provider.URL + "/gettoken",
+			"wecom_userinfo_endpoint":    provider.URL + "/getuserinfo",
+			"wecom_user_detail_endpoint": provider.URL + "/userget",
+			"wecom_role":                 "user",
+		},
+	}, adminCookie, http.StatusCreated)
+	state, err := srv.auth.createExternalWeComState("state-rollback-wecom", "/app/access")
+	if err != nil {
+		t.Fatalf("create external wecom state: %v", err)
+	}
+
+	removeBlocker := blockPlatformCollectionSavePayloadFragment(t, srv.cfg.Store, "users", `"online":true`)
+	callbackRec := assertStatus(t, handler, http.MethodGet, "/api/auth/wecom/callback?state="+url.QueryEscape(state)+"&code=state-rollback-code", nil, nil, http.StatusInternalServerError)
+	removeBlocker()
+	if !strings.Contains(callbackRec.Body.String(), "persist user login state failed") {
+		t.Fatalf("wecom login state failure was not reported: %s", callbackRec.Body.String())
+	}
+	if len(callbackRec.Result().Cookies()) > 0 {
+		t.Fatalf("wecom callback issued cookies after failed login state write: %#v", callbackRec.Result().Cookies())
+	}
+	if tokenEndpointCalls != 1 {
+		t.Fatalf("wecom token endpoint calls = %d, want 1", tokenEndpointCalls)
+	}
+	assertNoAuthSessionForUsername(t, srv, "wecom-state-rollback-user")
+	usersRec := assertStatus(t, handler, http.MethodGet, "/api/admin/users", nil, adminCookie, http.StatusOK)
+	if strings.Contains(usersRec.Body.String(), "wecom-state-rollback-user") || strings.Contains(usersRec.Body.String(), "wecom-state-rollback@example.test") {
+		t.Fatalf("wecom auto-created user survived failed login state write: %s", usersRec.Body.String())
+	}
+	if !coreAuditLogsContainAction(srv.cfg.Store, "auth.login.state.persist_failed") {
+		t.Fatal("wecom login state persistence failure was not written to core audit logs")
+	}
+
+	state, err = srv.auth.createExternalWeComState("state-rollback-wecom", "/app/access")
+	if err != nil {
+		t.Fatalf("create external wecom state for retry: %v", err)
+	}
+	retryRec := assertStatus(t, handler, http.MethodGet, "/api/auth/wecom/callback?state="+url.QueryEscape(state)+"&code=state-rollback-code", nil, nil, http.StatusFound)
+	if retryRec.Header().Get("Location") != "/app/access" {
+		t.Fatalf("wecom retry did not redirect to requested next path: %s", retryRec.Header().Get("Location"))
+	}
+	if len(retryRec.Result().Cookies()) == 0 {
+		t.Fatal("wecom retry after login state failure did not set auth cookie")
 	}
 }
 
@@ -14508,6 +14752,17 @@ func rawPlatformUserByName(t *testing.T, srv *Server, username string) model.Pla
 	}
 	t.Fatalf("user %s not found", username)
 	return model.PlatformItem{}
+}
+
+func assertNoAuthSessionForUsername(t *testing.T, srv *Server, username string) {
+	t.Helper()
+	srv.auth.mu.RLock()
+	defer srv.auth.mu.RUnlock()
+	for token, session := range srv.auth.sessions {
+		if session.Username == username {
+			t.Fatalf("auth session remained for %q under token %q", username, token)
+		}
+	}
 }
 
 func filterPlatformItemsByIDs(items []model.PlatformItem, ids ...string) []model.PlatformItem {

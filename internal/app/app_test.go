@@ -1354,6 +1354,27 @@ func TestPasskeyOperationLogFailureRollsBackMutations(t *testing.T) {
 		t.Fatalf("passkey registration survived failed operation log write: %s", listAfterRegisterFailure.Body.String())
 	}
 
+	restoreFailedOptionsRec := assertStatus(t, handler, http.MethodPost, "/api/auth/passkeys/register/options", map[string]any{}, adminCookie, http.StatusOK)
+	var restoreFailedOptions testPasskeyCreationOptionsResponse
+	decodeResponse(t, restoreFailedOptionsRec, &restoreFailedOptions)
+	restoreFailedPrivateKey, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	if err != nil {
+		t.Fatalf("generate restore-failed passkey key: %v", err)
+	}
+	restoreFailedCredentialID := []byte("register-restore-failed-passkey")
+	restoreFailedPayload := testPasskeyRegistrationPayload(t, restoreFailedOptions, "admin", restoreFailedCredentialID, restoreFailedPrivateKey)
+	removeRegisterLogBlocker := blockPlatformItemCreate(t, srv.cfg.Store, "operation_logs")
+	removeRegisterRollbackBlocker := blockPlatformItemDeletePayloadFragment(t, srv.cfg.Store, "passkeys", `"credential_id":"`+passkeyBase64Encode(restoreFailedCredentialID)+`"`)
+	registerRestoreFailureRec := assertStatus(t, handler, http.MethodPost, "/api/auth/passkeys/register/verify", restoreFailedPayload, adminCookie, http.StatusInternalServerError)
+	removeRegisterRollbackBlocker()
+	removeRegisterLogBlocker()
+	if !strings.Contains(registerRestoreFailureRec.Body.String(), "failed to remove registered passkey after operation log failure") {
+		t.Fatalf("passkey register rollback failure was not reported: %s", registerRestoreFailureRec.Body.String())
+	}
+	if !coreAuditLogsContainAction(srv.cfg.Store, "auth.passkey.restore_failed") {
+		t.Fatal("passkey register rollback failure was not written to core audit logs")
+	}
+
 	_, _, passkey := registerTestPasskeyWithCredentialID(t, handler, adminCookie, "admin", []byte("delete-rollback-passkey-credential"))
 	removeDeleteBlocker := blockPlatformItemCreate(t, srv.cfg.Store, "operation_logs")
 	deleteFailureRec := assertStatus(t, handler, http.MethodDelete, "/api/auth/passkeys/"+passkey.ID, nil, adminCookie, http.StatusInternalServerError)

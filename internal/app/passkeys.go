@@ -331,7 +331,11 @@ func (s *Server) handlePasskeyRegisterVerify(w http.ResponseWriter, r *http.Requ
 	if err := s.createPasskeyOperationLog(r, "auth.passkey.register", "success", item.ID, session.UserID, "registered passkey", map[string]any{
 		"credential_id": credentialID,
 	}); err != nil {
-		_ = s.cfg.Store.DeletePlatformItem("passkeys", item.ID)
+		if rollbackErr := s.cfg.Store.DeletePlatformItem("passkeys", item.ID); rollbackErr != nil {
+			detail := "failed to remove registered passkey after operation log failure: " + rollbackErr.Error()
+			_ = s.audit(r, "auth.passkey.restore_failed", item.ID, "", detail)
+			err = fmt.Errorf("%w; additionally %s", err, detail)
+		}
 		writeError(w, http.StatusInternalServerError, err.Error())
 		return
 	}

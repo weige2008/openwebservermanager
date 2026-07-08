@@ -215,7 +215,8 @@ func (s *Server) handleOIDCToken(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	redirectURI := strings.TrimSpace(r.PostForm.Get("redirect_uri"))
-	code, err := s.oidc.consumeAuthorizationCode(r.PostForm.Get("code"), oidcClientID(client), redirectURI, r.PostForm.Get("code_verifier"))
+	codeValue := r.PostForm.Get("code")
+	code, err := s.oidc.consumeAuthorizationCode(codeValue, oidcClientID(client), redirectURI, r.PostForm.Get("code_verifier"))
 	if err != nil {
 		writeError(w, http.StatusBadRequest, err.Error())
 		return
@@ -230,6 +231,7 @@ func (s *Server) handleOIDCToken(w http.ResponseWriter, r *http.Request) {
 		Description: "issued oidc tokens",
 		Metadata:    map[string]any{"client_ip": s.clientIP(r), "client_id": code.ClientID, "scope": code.Scope},
 	}); err != nil {
+		s.oidc.restoreAuthorizationCode(codeValue, code)
 		writeError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
@@ -483,6 +485,22 @@ func (m *oidcManager) consumeAuthorizationCode(codeValue, clientID, redirectURI,
 		return oidcAuthorizationCode{}, errors.New("code_verifier is invalid")
 	}
 	return code, nil
+}
+
+func (m *oidcManager) restoreAuthorizationCode(codeValue string, code oidcAuthorizationCode) {
+	codeValue = strings.TrimSpace(codeValue)
+	if codeValue == "" {
+		return
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.pruneLocked()
+	if time.Now().UTC().After(code.ExpiresAt) {
+		return
+	}
+	if _, exists := m.codes[codeValue]; !exists {
+		m.codes[codeValue] = code
+	}
 }
 
 func (m *oidcManager) createAccessToken(token oidcAccessToken) (string, error) {

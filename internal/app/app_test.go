@@ -6051,14 +6051,15 @@ func TestOIDCTokenOperationLogPersistenceFailure(t *testing.T) {
 		t.Fatal("blocked token authorize redirect did not include code")
 	}
 
-	removeBlocker := blockPlatformItemCreate(t, srv.cfg.Store, "operation_logs")
-	tokenRec := assertFormStatus(t, handler, "/api/oidc/token", url.Values{
+	tokenForm := url.Values{
 		"grant_type":    {"authorization_code"},
 		"client_id":     {"blocked-token-client"},
 		"code":          {code},
 		"redirect_uri":  {redirectURI},
 		"code_verifier": {codeVerifier},
-	}, nil, nil, http.StatusInternalServerError)
+	}
+	removeBlocker := blockPlatformItemCreate(t, srv.cfg.Store, "operation_logs")
+	tokenRec := assertFormStatus(t, handler, "/api/oidc/token", tokenForm, nil, nil, http.StatusInternalServerError)
 	removeBlocker()
 	body := tokenRec.Body.String()
 	if !strings.Contains(body, "persist operation log failed") {
@@ -6070,6 +6071,13 @@ func TestOIDCTokenOperationLogPersistenceFailure(t *testing.T) {
 	if !coreAuditLogsContainAction(srv.cfg.Store, "operation.log.persist_failed") {
 		t.Fatal("oidc token operation log persistence failure was not written to core audit logs")
 	}
+	retryRec := assertFormStatus(t, handler, "/api/oidc/token", tokenForm, nil, nil, http.StatusOK)
+	var retryPayload map[string]any
+	decodeResponse(t, retryRec, &retryPayload)
+	if retryPayload["access_token"] == "" || retryPayload["id_token"] == "" {
+		t.Fatalf("oidc token retry after operation log failure did not issue tokens: %v", retryPayload)
+	}
+	assertFormStatus(t, handler, "/api/oidc/token", tokenForm, nil, nil, http.StatusBadRequest)
 }
 
 func TestOIDCUserInfoRejectsDisabledClientAndUser(t *testing.T) {

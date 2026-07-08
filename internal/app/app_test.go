@@ -10671,6 +10671,27 @@ func TestScheduledTaskRunners(t *testing.T) {
 	if info, err := os.Stat(filepath.FromSlash(backupPath)); err != nil || info.Size() == 0 {
 		t.Fatalf("backup file missing or empty: %v", err)
 	}
+	backupDir := filepath.Join(srv.cfg.DataDir, "backups")
+	beforeBackupLogFailure, err := filepath.Glob(filepath.Join(backupDir, "*.zip"))
+	if err != nil {
+		t.Fatalf("glob backups before scheduled task log failure: %v", err)
+	}
+	removeBackupTaskLogBlocker := blockPlatformItemCreate(t, srv.cfg.Store, "operation_logs")
+	backupLogFailureRec := assertStatus(t, handler, http.MethodPost, "/api/admin/scheduled-tasks/"+backupTask.ID+"/run", nil, cookie, http.StatusInternalServerError)
+	removeBackupTaskLogBlocker()
+	if !strings.Contains(backupLogFailureRec.Body.String(), "persist scheduled task log failed") {
+		t.Fatalf("scheduled backup task log failure was not reported: %s", backupLogFailureRec.Body.String())
+	}
+	afterBackupLogFailure, err := filepath.Glob(filepath.Join(backupDir, "*.zip"))
+	if err != nil {
+		t.Fatalf("glob backups after scheduled task log failure: %v", err)
+	}
+	if len(afterBackupLogFailure) != len(beforeBackupLogFailure) {
+		t.Fatalf("scheduled backup task left unaudited archive: before=%v after=%v", beforeBackupLogFailure, afterBackupLogFailure)
+	}
+	if !coreAuditLogsContainAction(srv.cfg.Store, "scheduled_task.log.persist_failed") {
+		t.Fatal("scheduled task log persistence failure was not written to core audit logs")
+	}
 
 	disabledTaskRec := assertStatus(t, handler, http.MethodPost, "/api/admin/scheduled-tasks", map[string]any{
 		"name":   "Disabled manual backup",

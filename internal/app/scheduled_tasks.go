@@ -84,10 +84,15 @@ func (s *Server) executeScheduledTask(r *http.Request, task model.PlatformItem, 
 		Metadata:    metadata,
 	})
 	if logErr != nil {
-		if runErr != nil {
-			return model.PlatformItem{}, fmt.Errorf("%w; additionally failed to write scheduled task log: %v", runErr, logErr)
+		detail := "persist scheduled task log failed: " + logErr.Error()
+		_ = s.audit(r, "scheduled_task.log.persist_failed", task.ID, "", detail)
+		if cleanupErr := s.cleanupScheduledTaskArtifactsAfterLogFailure(task, metadata); cleanupErr != nil {
+			detail += "; additionally failed to clean up scheduled task artifacts: " + cleanupErr.Error()
 		}
-		return model.PlatformItem{}, logErr
+		if runErr != nil {
+			return model.PlatformItem{}, fmt.Errorf("%w; additionally %s", runErr, detail)
+		}
+		return model.PlatformItem{}, errors.New(detail)
 	}
 	nextMetadata := cloneMetadata(task.Metadata)
 	nextMetadata["last_run_at"] = completed.Format(time.RFC3339Nano)
@@ -116,6 +121,34 @@ func (s *Server) executeScheduledTask(r *http.Request, task model.PlatformItem, 
 		return logItem, runErr
 	}
 	return logItem, nil
+}
+
+func (s *Server) cleanupScheduledTaskArtifactsAfterLogFailure(task model.PlatformItem, metadata map[string]any) error {
+	if normalizeScheduledTaskType(task.Type) != "backup" {
+		return nil
+	}
+	backupPath := firstMetadataString(metadata, "backup_path")
+	if backupPath == "" {
+		return nil
+	}
+	return s.removeBackupArtifact(backupPath)
+}
+
+func (s *Server) removeBackupArtifact(path string) error {
+	path = filepath.FromSlash(strings.TrimSpace(path))
+	if path == "" {
+		return nil
+	}
+	backupRoot := filepath.Join(s.cfg.DataDir, "backups")
+	if err := ensureChildPath(backupRoot, path); err != nil {
+		return err
+	}
+	if _, err := backupRegularFileInfo(path); errors.Is(err, os.ErrNotExist) {
+		return nil
+	} else if err != nil {
+		return err
+	}
+	return os.Remove(path)
 }
 
 func normalizeScheduledTaskType(value string) string {
@@ -236,7 +269,9 @@ func (s *Server) cleanupHistoryLogs(task model.PlatformItem) (map[string]any, er
 			if item.CreatedAt.IsZero() || item.CreatedAt.After(cutoff) {
 				continue
 			}
-			if err := s.cfg.Store.DeletePlatformItem(collection, item.ID); err != nil {
+			if err := s.cfg.Store.DeletePlatformItem(collection, item.ID); errors.Is(err, os.ErrNotExist) {
+				continue
+			} else if err != nil {
 				return nil, err
 			}
 			deletedByCollection[collection]++

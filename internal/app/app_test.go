@@ -1425,6 +1425,23 @@ func TestPasskeyLoginLogFailureRollsBackUsage(t *testing.T) {
 	if !coreAuditLogsContainAction(srv.cfg.Store, "auth.login.log.persist_failed") {
 		t.Fatal("passkey login log persistence failure was not written to core audit logs")
 	}
+
+	restoreFailureOptions := testPasskeyLoginOptions(t, handler, "admin")
+	restoreFailurePayload := testPasskeyAssertionPayload(t, restoreFailureOptions.ChallengeID, restoreFailureOptions.PublicKey.Challenge, restoreFailureOptions.PublicKey.RPID, credentialID, privateKey, 2, false)
+	removeLoginLogBlocker = blockPlatformItemCreate(t, srv.cfg.Store, "login_logs")
+	removeRestoreBlocker := blockPlatformItemSavePayloadFragment(t, srv.cfg.Store, "passkeys", passkey.ID, `"sign_count":1`)
+	restoreFailureRec := assertStatus(t, handler, http.MethodPost, "/api/auth/passkeys/login/verify", restoreFailurePayload, nil, http.StatusInternalServerError)
+	removeRestoreBlocker()
+	removeLoginLogBlocker()
+	if !strings.Contains(restoreFailureRec.Body.String(), "failed to restore passkey usage after login log failure") {
+		t.Fatalf("passkey usage restore failure was not reported: %s", restoreFailureRec.Body.String())
+	}
+	if len(restoreFailureRec.Result().Cookies()) > 0 {
+		t.Fatalf("passkey login issued cookies after failed usage restore: %#v", restoreFailureRec.Result().Cookies())
+	}
+	if !coreAuditLogsContainAction(srv.cfg.Store, "auth.passkey.restore_failed") {
+		t.Fatal("passkey usage restore failure was not written to core audit logs")
+	}
 }
 
 func TestUserImportCreatesSkipsAndUpdatesLoginUsers(t *testing.T) {

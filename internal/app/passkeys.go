@@ -586,7 +586,11 @@ func (s *Server) handlePasskeyLoginVerify(w http.ResponseWriter, r *http.Request
 			"user_agent":    trimMetadataTextForPasskey(r.UserAgent(), 512),
 		},
 	}); err != nil {
-		_, _ = s.cfg.Store.SavePlatformItem("passkeys", previous)
+		if _, restoreErr := s.cfg.Store.SavePlatformItem("passkeys", previous); restoreErr != nil {
+			detail := "failed to restore passkey usage after login log failure: " + restoreErr.Error()
+			_ = s.audit(r, "auth.passkey.restore_failed", item.ID, "", detail)
+			err = fmt.Errorf("%w; additionally %s", err, detail)
+		}
 		writeError(w, http.StatusInternalServerError, err.Error())
 		return
 	}

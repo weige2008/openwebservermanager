@@ -180,6 +180,32 @@ func (s *Server) executeDatabaseAssetSQL(r *http.Request, asset model.PlatformIt
 	for key, value := range opts.ExtraMetadata {
 		metadata[key] = value
 	}
+	logTargetID := opts.TargetID
+	if logTargetID == "" {
+		logTargetID = asset.ID
+	}
+	logName := strings.TrimSpace(opts.LogName)
+	if logName == "" {
+		logName = asset.Name
+	}
+	logType := strings.TrimSpace(opts.LogType)
+	if logType == "" {
+		logType = "database_access"
+	}
+	metadata["started_at"] = start.UTC()
+	logItem, logErr := s.cfg.Store.CreatePlatformItem("sql_logs", model.PlatformItemRequest{
+		Name:        logName,
+		Type:        logType,
+		Status:      "running",
+		Protocol:    model.ProtocolDatabase,
+		TargetID:    logTargetID,
+		OwnerID:     userID,
+		Description: "running",
+		Metadata:    metadata,
+	})
+	if logErr != nil {
+		return model.PlatformItem{}, http.StatusInternalServerError, s.sqlLogPersistError(r, logTargetID, logErr)
+	}
 	ctx := context.Background()
 	if r != nil {
 		ctx = r.Context()
@@ -215,35 +241,31 @@ func (s *Server) executeDatabaseAssetSQL(r *http.Request, asset model.PlatformIt
 	}
 	metadata["rows_affected"] = rowsAffected
 	metadata["duration_ms"] = time.Since(start).Milliseconds()
-	logTargetID := opts.TargetID
-	if logTargetID == "" {
-		logTargetID = asset.ID
+	metadata["completed_at"] = time.Now().UTC()
+	if status == "failed" {
+		metadata["error"] = detail
 	}
-	logName := strings.TrimSpace(opts.LogName)
-	if logName == "" {
-		logName = asset.Name
-	}
-	logType := strings.TrimSpace(opts.LogType)
-	if logType == "" {
-		logType = "database_access"
-	}
-	logItem, logErr := s.cfg.Store.CreatePlatformItem("sql_logs", model.PlatformItemRequest{
-		Name:        logName,
-		Type:        logType,
+	updatedLogItem, logErr := s.cfg.Store.UpdatePlatformItem("sql_logs", logItem.ID, model.PlatformItemRequest{
 		Status:      status,
 		Protocol:    model.ProtocolDatabase,
-		TargetID:    logTargetID,
-		OwnerID:     userID,
 		Description: detail,
 		Metadata:    metadata,
 	})
 	if logErr != nil {
-		return model.PlatformItem{}, http.StatusInternalServerError, logErr
+		return logItem, http.StatusInternalServerError, s.sqlLogPersistError(r, logItem.ID, logErr)
 	}
 	if status == "failed" {
-		return logItem, http.StatusBadRequest, nil
+		return updatedLogItem, http.StatusBadRequest, nil
 	}
-	return logItem, http.StatusOK, nil
+	return updatedLogItem, http.StatusOK, nil
+}
+
+func (s *Server) sqlLogPersistError(r *http.Request, targetID string, err error) error {
+	detail := "persist sql log failed: " + err.Error()
+	if r != nil {
+		_ = s.audit(r, "sql.log.persist_failed", targetID, model.ProtocolDatabase, detail)
+	}
+	return errors.New(detail)
 }
 
 func databaseSQLTimeoutMS(metadata map[string]any) int {

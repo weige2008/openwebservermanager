@@ -3841,6 +3841,44 @@ func TestDatabaseAssetQueryRequiresAuthorizationAndLogs(t *testing.T) {
 		"sql": "SELECT * FROM missing_table",
 	}, userCookie, http.StatusBadRequest)
 
+	removeSQLLogCreateBlocker := blockPlatformItemCreate(t, srv.cfg.Store, "sql_logs")
+	blockedSQLLogCreateRec := assertStatus(t, handler, http.MethodPost, "/api/access/database/"+databaseAsset.ID+"/query", map[string]any{
+		"sql": "CREATE TABLE missing_log_table(id INTEGER)",
+	}, userCookie, http.StatusInternalServerError)
+	removeSQLLogCreateBlocker()
+	if !strings.Contains(blockedSQLLogCreateRec.Body.String(), "persist sql log failed") {
+		t.Fatalf("sql log create failure response did not explain persistence failure: %s", blockedSQLLogCreateRec.Body.String())
+	}
+	missingLogTableRec := assertStatus(t, handler, http.MethodPost, "/api/access/database/"+databaseAsset.ID+"/query", map[string]any{
+		"sql": "SELECT COUNT(*) AS present FROM sqlite_master WHERE type = 'table' AND name = 'missing_log_table'",
+	}, userCookie, http.StatusOK)
+	if !strings.Contains(missingLogTableRec.Body.String(), `"present":0`) {
+		t.Fatalf("SQL executed even though the initial sql log could not be persisted: %s", missingLogTableRec.Body.String())
+	}
+	if !coreAuditLogsContainAction(srv.cfg.Store, "sql.log.persist_failed") {
+		t.Fatal("sql log create persistence failure was not written to core audit logs")
+	}
+
+	removeSQLLogFinalizeBlocker := blockPlatformItemCollectionStatusUpdate(t, srv.cfg.Store, "sql_logs", "success")
+	blockedSQLLogFinalizeRec := assertStatus(t, handler, http.MethodPost, "/api/access/database/"+databaseAsset.ID+"/query", map[string]any{
+		"sql": "CREATE TABLE finalize_blocked_table(id INTEGER)",
+	}, userCookie, http.StatusInternalServerError)
+	removeSQLLogFinalizeBlocker()
+	if !strings.Contains(blockedSQLLogFinalizeRec.Body.String(), "persist sql log failed") {
+		t.Fatalf("sql log finalize failure response did not explain persistence failure: %s", blockedSQLLogFinalizeRec.Body.String())
+	}
+	finalizedTableRec := assertStatus(t, handler, http.MethodPost, "/api/access/database/"+databaseAsset.ID+"/query", map[string]any{
+		"sql": "SELECT COUNT(*) AS present FROM sqlite_master WHERE type = 'table' AND name = 'finalize_blocked_table'",
+	}, userCookie, http.StatusOK)
+	if !strings.Contains(finalizedTableRec.Body.String(), `"present":1`) {
+		t.Fatalf("SQL did not execute before the final sql log update failure: %s", finalizedTableRec.Body.String())
+	}
+	runningSQLLogsRec := assertStatus(t, handler, http.MethodGet, "/api/admin/audit/sql-logs", nil, adminCookie, http.StatusOK)
+	runningSQLLogsBody := runningSQLLogsRec.Body.String()
+	if !strings.Contains(runningSQLLogsBody, "finalize_blocked_table") || !strings.Contains(runningSQLLogsBody, `"status":"running"`) {
+		t.Fatalf("final sql log update failure did not leave a running audit trace: %s", runningSQLLogsBody)
+	}
+
 	workOrderRec := assertStatus(t, handler, http.MethodPost, "/api/access/database/"+databaseAsset.ID+"/work-orders", map[string]any{
 		"sql":    "CREATE TABLE work_order_hosts(name TEXT)",
 		"reason": "create host review table",

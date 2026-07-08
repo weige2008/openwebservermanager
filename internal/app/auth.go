@@ -179,6 +179,22 @@ func (m *authManager) hasUserSession(userID string) bool {
 	return false
 }
 
+func (m *authManager) hasOtherUserSession(userID, currentToken string) bool {
+	now := time.Now().UTC()
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	for token, session := range m.sessions {
+		if now.After(session.ExpiresAt) {
+			delete(m.sessions, token)
+			continue
+		}
+		if token != currentToken && session.UserID == userID {
+			return true
+		}
+	}
+	return false
+}
+
 func (m *authManager) session(r *http.Request) (string, authSession, bool) {
 	now := time.Now().UTC()
 
@@ -797,10 +813,15 @@ func (s *Server) recordExternalLDAPLoginFailure(r *http.Request, username, provi
 
 func (s *Server) handleLogout(w http.ResponseWriter, r *http.Request) {
 	if token, session, ok := s.authSession(r); ok {
-		s.auth.delete(token)
-		if !s.auth.hasUserSession(session.UserID) {
-			_ = s.cfg.Store.RecordUserLogout(session.UserID)
+		if !s.auth.hasOtherUserSession(session.UserID, token) {
+			if err := s.cfg.Store.RecordUserLogout(session.UserID); err != nil {
+				detail := "persist user logout state failed: " + err.Error()
+				_ = s.audit(r, "auth.logout.state.persist_failed", session.UserID, "", detail)
+				writeError(w, http.StatusInternalServerError, detail)
+				return
+			}
 		}
+		s.auth.delete(token)
 		_ = s.audit(r, "auth.logout", session.UserID, "", "admin signed out")
 	}
 	http.SetCookie(w, s.authCookie(r, "", -1))

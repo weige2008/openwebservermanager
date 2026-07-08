@@ -4987,6 +4987,124 @@ func TestLoginStatePersistenceFailureReturnsServerError(t *testing.T) {
 	}
 }
 
+func TestLogoutStatePersistenceFailureKeepsSession(t *testing.T) {
+	srv, adminCookie := newTestServer(t, nil)
+	handler := http.Handler(srv)
+
+	userRec := assertStatus(t, handler, http.MethodPost, "/api/admin/users", map[string]any{
+		"name":     "logout-state-failure-user",
+		"type":     "local",
+		"status":   "enabled",
+		"password": "password123",
+		"metadata": map[string]any{"role": "user"},
+	}, adminCookie, http.StatusCreated)
+	var user model.PlatformItem
+	decodeResponse(t, userRec, &user)
+
+	loginRec := assertStatus(t, handler, http.MethodPost, "/api/auth/login", map[string]any{"username": user.Name, "password": "password123"}, nil, http.StatusOK)
+	cookies := loginRec.Result().Cookies()
+	if len(cookies) == 0 {
+		t.Fatal("login did not issue cookie")
+	}
+	userCookie := cookies[0]
+	if !srv.auth.hasUserSession(user.ID) {
+		t.Fatal("login did not create in-memory user session")
+	}
+	removeLogoutBlocker := blockPlatformItemSavePayloadFragment(t, srv.cfg.Store, "users", user.ID, `"online":false`)
+	logoutRec := assertStatus(t, handler, http.MethodPost, "/api/auth/logout", nil, userCookie, http.StatusInternalServerError)
+	removeLogoutBlocker()
+	if !strings.Contains(logoutRec.Body.String(), "persist user logout state failed") {
+		t.Fatalf("logout state persistence failure was not reported: %s", logoutRec.Body.String())
+	}
+	if expiredCookies := logoutRec.Result().Cookies(); len(expiredCookies) != 0 {
+		t.Fatalf("logout state persistence failure cleared cookie: %#v", expiredCookies)
+	}
+	if !srv.auth.hasUserSession(user.ID) {
+		t.Fatal("logout state persistence failure deleted in-memory session")
+	}
+	meRec := assertStatus(t, handler, http.MethodGet, "/api/auth/me", nil, userCookie, http.StatusOK)
+	if !strings.Contains(meRec.Body.String(), user.ID) {
+		t.Fatalf("session was not usable after failed logout: %s", meRec.Body.String())
+	}
+	afterFailure, ok, err := srv.cfg.Store.GetPlatformItem("users", user.ID)
+	if err != nil || !ok {
+		t.Fatalf("load user after failed logout: ok=%v err=%v", ok, err)
+	}
+	online, _ := afterFailure.Metadata["online"].(bool)
+	if !online {
+		t.Fatalf("failed logout marked user offline: %#v", afterFailure.Metadata)
+	}
+	if !coreAuditLogsContainAction(srv.cfg.Store, "auth.logout.state.persist_failed") {
+		t.Fatal("logout state persistence failure was not written to core audit logs")
+	}
+
+	successLogoutRec := assertStatus(t, handler, http.MethodPost, "/api/auth/logout", nil, userCookie, http.StatusOK)
+	if len(successLogoutRec.Result().Cookies()) == 0 {
+		t.Fatal("successful logout did not clear cookie")
+	}
+	if srv.auth.hasUserSession(user.ID) {
+		t.Fatal("successful retry logout left in-memory session")
+	}
+	assertStatus(t, handler, http.MethodGet, "/api/auth/me", nil, userCookie, http.StatusUnauthorized)
+	afterSuccess, ok, err := srv.cfg.Store.GetPlatformItem("users", user.ID)
+	if err != nil || !ok {
+		t.Fatalf("load user after successful logout: ok=%v err=%v", ok, err)
+	}
+	online, _ = afterSuccess.Metadata["online"].(bool)
+	if online {
+		t.Fatalf("successful logout did not mark user offline: %#v", afterSuccess.Metadata)
+	}
+}
+
+func TestLogoutKeepsUserOnlineWhenOtherSessionsRemain(t *testing.T) {
+	srv, adminCookie := newTestServer(t, nil)
+	handler := http.Handler(srv)
+
+	userRec := assertStatus(t, handler, http.MethodPost, "/api/admin/users", map[string]any{
+		"name":     "multi-session-user",
+		"type":     "local",
+		"status":   "enabled",
+		"password": "password123",
+		"metadata": map[string]any{"role": "user"},
+	}, adminCookie, http.StatusCreated)
+	var user model.PlatformItem
+	decodeResponse(t, userRec, &user)
+
+	firstLogin := assertStatus(t, handler, http.MethodPost, "/api/auth/login", map[string]any{"username": user.Name, "password": "password123"}, nil, http.StatusOK)
+	secondLogin := assertStatus(t, handler, http.MethodPost, "/api/auth/login", map[string]any{"username": user.Name, "password": "password123"}, nil, http.StatusOK)
+	if len(firstLogin.Result().Cookies()) == 0 || len(secondLogin.Result().Cookies()) == 0 {
+		t.Fatal("multi-session login did not issue cookies")
+	}
+	firstCookie := firstLogin.Result().Cookies()[0]
+	secondCookie := secondLogin.Result().Cookies()[0]
+
+	assertStatus(t, handler, http.MethodPost, "/api/auth/logout", nil, firstCookie, http.StatusOK)
+	assertStatus(t, handler, http.MethodGet, "/api/auth/me", nil, firstCookie, http.StatusUnauthorized)
+	assertStatus(t, handler, http.MethodGet, "/api/auth/me", nil, secondCookie, http.StatusOK)
+	afterFirstLogout, ok, err := srv.cfg.Store.GetPlatformItem("users", user.ID)
+	if err != nil || !ok {
+		t.Fatalf("load user after first logout: ok=%v err=%v", ok, err)
+	}
+	online, _ := afterFirstLogout.Metadata["online"].(bool)
+	if !online {
+		t.Fatalf("first logout marked user offline while another session remained: %#v", afterFirstLogout.Metadata)
+	}
+	if firstMetadataString(afterFirstLogout.Metadata, "last_logout_at") != "" {
+		t.Fatalf("first logout wrote last_logout_at while another session remained: %#v", afterFirstLogout.Metadata)
+	}
+
+	assertStatus(t, handler, http.MethodPost, "/api/auth/logout", nil, secondCookie, http.StatusOK)
+	assertStatus(t, handler, http.MethodGet, "/api/auth/me", nil, secondCookie, http.StatusUnauthorized)
+	afterSecondLogout, ok, err := srv.cfg.Store.GetPlatformItem("users", user.ID)
+	if err != nil || !ok {
+		t.Fatalf("load user after second logout: ok=%v err=%v", ok, err)
+	}
+	online, _ = afterSecondLogout.Metadata["online"].(bool)
+	if online || firstMetadataString(afterSecondLogout.Metadata, "last_logout_at") == "" {
+		t.Fatalf("last logout did not mark user offline with logout time: %#v", afterSecondLogout.Metadata)
+	}
+}
+
 func TestRecordUserLoginAndLogoutMissingUserReturnNotExist(t *testing.T) {
 	srv, _ := newTestServer(t, nil)
 

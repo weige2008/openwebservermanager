@@ -160,7 +160,7 @@ func (s *Server) handleMFACompleteLogin(w http.ResponseWriter, r *http.Request) 
 		Metadata:    map[string]any{"client_ip": challenge.ClientIP, "account": challenge.Username, "method": method},
 	}); err != nil {
 		if mfaMutated {
-			_, _ = s.cfg.Store.SavePlatformItem("users", previous)
+			err = s.restoreMFASnapshotAfterLogFailure(r, challenge.User.UserID, previous, err)
 		}
 		writeError(w, http.StatusInternalServerError, err.Error())
 		return
@@ -253,7 +253,7 @@ func (s *Server) handleMFAEnable(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if err := s.createMFAOperationLog(r, "auth.mfa.enable", session.UserID, "enabled MFA", nil); err != nil {
-		_, _ = s.cfg.Store.SavePlatformItem("users", previous)
+		err = s.restoreMFASnapshotAfterLogFailure(r, session.UserID, previous, err)
 		writeError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
@@ -300,7 +300,7 @@ func (s *Server) handleMFADisable(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if err := s.createMFAOperationLog(r, "auth.mfa.disable", session.UserID, "disabled MFA", nil); err != nil {
-		_, _ = s.cfg.Store.SavePlatformItem("users", previous)
+		err = s.restoreMFASnapshotAfterLogFailure(r, session.UserID, previous, err)
 		writeError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
@@ -355,7 +355,7 @@ func (s *Server) handleMFARegenerateRecoveryCodes(w http.ResponseWriter, r *http
 		return
 	}
 	if err := s.createMFAOperationLog(r, "auth.mfa.recovery_codes.regenerate", session.UserID, "regenerated MFA recovery codes", nil); err != nil {
-		_, _ = s.cfg.Store.SavePlatformItem("users", previous)
+		err = s.restoreMFASnapshotAfterLogFailure(r, session.UserID, previous, err)
 		writeError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
@@ -374,6 +374,15 @@ func (s *Server) userMFASnapshot(userID string) (model.PlatformItem, bool, error
 	}
 	item.Metadata = cloneMetadata(item.Metadata)
 	return item, true, nil
+}
+
+func (s *Server) restoreMFASnapshotAfterLogFailure(r *http.Request, userID string, previous model.PlatformItem, err error) error {
+	if _, restoreErr := s.cfg.Store.SavePlatformItem("users", previous); restoreErr != nil {
+		detail := "failed to restore MFA state: " + restoreErr.Error()
+		_ = s.audit(r, "auth.mfa.restore_failed", userID, "", detail)
+		return fmt.Errorf("%w; additionally %s", err, detail)
+	}
+	return err
 }
 
 func (s *Server) createMFAOperationLog(r *http.Request, name, userID, description string, metadata map[string]any) error {

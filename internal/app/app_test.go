@@ -5207,6 +5207,21 @@ func TestMFAOperationLogFailureRollsBackMutations(t *testing.T) {
 	if !coreAuditLogsContainAction(srv.cfg.Store, "operation.log.persist_failed") {
 		t.Fatal("MFA operation log persistence failure was not written to core audit logs")
 	}
+
+	removeDisableLogBlocker := blockPlatformItemCreate(t, srv.cfg.Store, "operation_logs")
+	removeMFARestoreBlocker := blockPlatformItemSavePayloadFragment(t, srv.cfg.Store, "users", adminUser.ID, `"mfa_enabled":true`)
+	restoreFailureRec := assertStatus(t, handler, http.MethodPost, "/api/auth/mfa/disable", map[string]any{
+		"current_password": "password123",
+		"mfa_code":         totpCode(secret, time.Now().UTC()),
+	}, adminCookie, http.StatusInternalServerError)
+	removeMFARestoreBlocker()
+	removeDisableLogBlocker()
+	if !strings.Contains(restoreFailureRec.Body.String(), "failed to restore MFA state") {
+		t.Fatalf("MFA restore failure was not reported: %s", restoreFailureRec.Body.String())
+	}
+	if !coreAuditLogsContainAction(srv.cfg.Store, "auth.mfa.restore_failed") {
+		t.Fatal("MFA restore failure was not written to core audit logs")
+	}
 }
 
 func TestMFACompleteLoginLogFailureRollsBackMutations(t *testing.T) {
@@ -5316,6 +5331,53 @@ func TestMFACompleteLoginLogFailureRollsBackMutations(t *testing.T) {
 		}
 		if !coreAuditLogsContainAction(srv.cfg.Store, "auth.login.log.persist_failed") {
 			t.Fatal("recovery MFA login log persistence failure was not written to core audit logs")
+		}
+	})
+
+	t.Run("recovery code restore failure", func(t *testing.T) {
+		srv, adminCookie := newTestServer(t, nil)
+		handler := http.Handler(srv)
+		adminUser := rawPlatformUserByName(t, srv, "admin")
+
+		setupRec := assertStatus(t, handler, http.MethodPost, "/api/auth/mfa/setup", nil, adminCookie, http.StatusOK)
+		var setup map[string]any
+		decodeResponse(t, setupRec, &setup)
+		secret, _ := setup["secret"].(string)
+		enableRec := assertStatus(t, handler, http.MethodPost, "/api/auth/mfa/enable", map[string]any{
+			"secret":   secret,
+			"mfa_code": totpCode(secret, time.Now().UTC()),
+		}, adminCookie, http.StatusOK)
+		var enabled map[string]any
+		decodeResponse(t, enableRec, &enabled)
+		recoveryCodes := stringSliceFromAny(enabled["recovery_codes"])
+		if len(recoveryCodes) == 0 {
+			t.Fatalf("MFA enable did not return recovery codes: %s", enableRec.Body.String())
+		}
+
+		loginRec := assertStatus(t, handler, http.MethodPost, "/api/auth/login", map[string]any{"username": "admin", "password": "password123"}, nil, http.StatusAccepted)
+		var challenge map[string]any
+		decodeResponse(t, loginRec, &challenge)
+		token, _ := challenge["mfa_token"].(string)
+		if token == "" {
+			t.Fatalf("MFA login did not return challenge: %v", challenge)
+		}
+
+		removeLoginLogBlocker := blockPlatformItemCreate(t, srv.cfg.Store, "login_logs")
+		removeRestoreBlocker := blockPlatformItemSavePayloadFragment(t, srv.cfg.Store, "users", adminUser.ID, `"mfa_recovery_count":8`)
+		restoreFailureRec := assertStatus(t, handler, http.MethodPost, "/api/auth/mfa/complete-login", map[string]any{
+			"token":         token,
+			"recovery_code": recoveryCodes[0],
+		}, nil, http.StatusInternalServerError)
+		removeRestoreBlocker()
+		removeLoginLogBlocker()
+		if !strings.Contains(restoreFailureRec.Body.String(), "failed to restore MFA state") {
+			t.Fatalf("recovery MFA restore failure was not reported: %s", restoreFailureRec.Body.String())
+		}
+		if len(restoreFailureRec.Result().Cookies()) > 0 {
+			t.Fatalf("recovery MFA completion issued cookies after failed restore: %#v", restoreFailureRec.Result().Cookies())
+		}
+		if !coreAuditLogsContainAction(srv.cfg.Store, "auth.mfa.restore_failed") {
+			t.Fatal("recovery MFA restore failure was not written to core audit logs")
 		}
 	})
 }
@@ -13126,6 +13188,34 @@ END`
 	if _, err := db.Exec(triggerSQL); err != nil {
 		_ = db.Close()
 		t.Fatalf("create platform item save blocker trigger: %v", err)
+	}
+	return func() {
+		_, _ = db.Exec(`DROP TRIGGER IF EXISTS ` + triggerName)
+		_ = db.Close()
+	}
+}
+
+func blockPlatformItemSavePayloadFragment(t *testing.T, st *store.Store, collection, itemID, fragment string) func() {
+	t.Helper()
+	db, err := sql.Open("sqlite", st.DatabasePath())
+	if err != nil {
+		t.Fatalf("open store database for payload save blocker: %v", err)
+	}
+	triggerName := "block_platform_item_save_payload_fragment"
+	if _, err := db.Exec(`DROP TRIGGER IF EXISTS ` + triggerName); err != nil {
+		_ = db.Close()
+		t.Fatalf("drop stale payload save blocker trigger: %v", err)
+	}
+	triggerSQL := `CREATE TRIGGER ` + triggerName + ` BEFORE INSERT ON platform_records
+WHEN NEW.collection = ` + sqliteTestStringLiteral(collection) + `
+  AND NEW.id = ` + sqliteTestStringLiteral(itemID) + `
+  AND instr(NEW.payload, ` + sqliteTestStringLiteral(fragment) + `) > 0
+BEGIN
+  SELECT RAISE(ABORT, 'forced platform item payload save failure');
+END`
+	if _, err := db.Exec(triggerSQL); err != nil {
+		_ = db.Close()
+		t.Fatalf("create platform item payload save blocker trigger: %v", err)
 	}
 	return func() {
 		_, _ = db.Exec(`DROP TRIGGER IF EXISTS ` + triggerName)

@@ -1590,6 +1590,27 @@ func TestUserImportCreatesSkipsAndUpdatesLoginUsers(t *testing.T) {
 		t.Fatalf("user import create operation log failure was not reported: %s", createImportFailureRec.Body.String())
 	}
 	assertStatus(t, handler, http.MethodPost, "/api/auth/login", map[string]any{"username": "rollback-import-user", "password": "password123"}, nil, http.StatusUnauthorized)
+	removePartialImportBlocker := blockPlatformCollectionSavePayloadFragment(t, handler.(*Server).cfg.Store, "users", `"name":"partial-blocked-user"`)
+	partialImportFailureRec := assertStatus(t, handler, http.MethodPost, "/api/admin/users/import", map[string]any{
+		"items": []map[string]any{{
+			"name":     "partial-created-user",
+			"type":     "local",
+			"status":   "enabled",
+			"password": "password123",
+			"metadata": map[string]any{"role": "user"},
+		}, {
+			"name":     "partial-blocked-user",
+			"type":     "local",
+			"status":   "enabled",
+			"password": "password123",
+			"metadata": map[string]any{"role": "user"},
+		}},
+	}, adminCookie, http.StatusInternalServerError)
+	removePartialImportBlocker()
+	if !strings.Contains(partialImportFailureRec.Body.String(), "forced platform collection payload save failure") {
+		t.Fatalf("partial user import failure was not reported: %s", partialImportFailureRec.Body.String())
+	}
+	assertStatus(t, handler, http.MethodPost, "/api/auth/login", map[string]any{"username": "partial-created-user", "password": "password123"}, nil, http.StatusUnauthorized)
 	removeUpdateImportBlocker := blockOperationLogName(t, handler.(*Server).cfg.Store, "users.import")
 	updateImportFailureRec := assertStatus(t, handler, http.MethodPost, "/api/admin/users/import", map[string]any{
 		"update_existing": true,
@@ -3067,6 +3088,39 @@ func TestBulkAuthorizationGrantsAccessAcrossResourceTypes(t *testing.T) {
 
 	loginRec := assertStatus(t, handler, http.MethodPost, "/api/auth/login", map[string]any{"username": "bulk-user", "password": "password123"}, nil, http.StatusOK)
 	userCookie := loginRec.Result().Cookies()[0]
+	partialBulkAssetARec := assertStatus(t, handler, http.MethodPost, "/api/admin/assets", map[string]any{
+		"name":     "partial-bulk-a",
+		"type":     "linux",
+		"status":   "active",
+		"protocol": "ssh",
+		"host":     "10.20.0.21",
+		"port":     22,
+	}, adminCookie, http.StatusCreated)
+	var partialBulkAssetA model.PlatformItem
+	decodeResponse(t, partialBulkAssetARec, &partialBulkAssetA)
+	partialBulkAssetBRec := assertStatus(t, handler, http.MethodPost, "/api/admin/assets", map[string]any{
+		"name":     "partial-bulk-b",
+		"type":     "linux",
+		"status":   "active",
+		"protocol": "ssh",
+		"host":     "10.20.0.22",
+		"port":     22,
+	}, adminCookie, http.StatusCreated)
+	var partialBulkAssetB model.PlatformItem
+	decodeResponse(t, partialBulkAssetBRec, &partialBulkAssetB)
+	removePartialBulkBlocker := blockPlatformCollectionSavePayloadFragment(t, handler.(*Server).cfg.Store, "authorized_assets", `"target_id":"`+partialBulkAssetB.ID+`"`)
+	partialBulkFailureRec := assertStatus(t, handler, http.MethodPost, "/api/admin/authorizations/assets/bulk", map[string]any{
+		"subject_ids": []string{user.ID},
+		"target_ids":  []string{partialBulkAssetA.ID, partialBulkAssetB.ID},
+	}, adminCookie, http.StatusInternalServerError)
+	removePartialBulkBlocker()
+	if !strings.Contains(partialBulkFailureRec.Body.String(), "forced platform collection payload save failure") {
+		t.Fatalf("partial bulk authorization failure was not reported: %s", partialBulkFailureRec.Body.String())
+	}
+	partialBulkAccessRec := assertStatus(t, handler, http.MethodGet, "/api/access/assets", nil, userCookie, http.StatusOK)
+	if strings.Contains(partialBulkAccessRec.Body.String(), partialBulkAssetA.ID) || strings.Contains(partialBulkAccessRec.Body.String(), partialBulkAssetB.ID) {
+		t.Fatalf("partial bulk authorization left unaudited access: %s", partialBulkAccessRec.Body.String())
+	}
 	accessRec := assertStatus(t, handler, http.MethodGet, "/api/access/assets", nil, userCookie, http.StatusOK)
 	accessBody := accessRec.Body.String()
 	var accessPayload struct {
@@ -9364,6 +9418,32 @@ func TestResourceOperationEndpoints(t *testing.T) {
 	assetListAfterCreateFailure := assertStatus(t, handler, http.MethodGet, "/api/admin/assets", nil, cookie, http.StatusOK)
 	if strings.Contains(assetListAfterCreateFailure.Body.String(), "rollback-imported-asset") {
 		t.Fatalf("asset import create survived operation log failure: %s", assetListAfterCreateFailure.Body.String())
+	}
+	removePartialAssetImportBlocker := blockPlatformCollectionSavePayloadFragment(t, server.cfg.Store, "assets", `"name":"partial-blocked-asset"`)
+	partialAssetImportFailureRec := assertStatus(t, handler, http.MethodPost, "/api/admin/assets/import", map[string]any{
+		"items": []map[string]any{{
+			"name":     "partial-created-asset",
+			"type":     "linux",
+			"status":   "active",
+			"protocol": "ssh",
+			"host":     "192.0.2.32",
+			"port":     22,
+		}, {
+			"name":     "partial-blocked-asset",
+			"type":     "linux",
+			"status":   "active",
+			"protocol": "ssh",
+			"host":     "192.0.2.33",
+			"port":     22,
+		}},
+	}, cookie, http.StatusInternalServerError)
+	removePartialAssetImportBlocker()
+	if !strings.Contains(partialAssetImportFailureRec.Body.String(), "forced platform collection payload save failure") {
+		t.Fatalf("partial asset import failure was not reported: %s", partialAssetImportFailureRec.Body.String())
+	}
+	assetListAfterPartialFailure := assertStatus(t, handler, http.MethodGet, "/api/admin/assets", nil, cookie, http.StatusOK)
+	if strings.Contains(assetListAfterPartialFailure.Body.String(), "partial-created-asset") || strings.Contains(assetListAfterPartialFailure.Body.String(), "partial-blocked-asset") {
+		t.Fatalf("partial asset import left unaudited records: %s", assetListAfterPartialFailure.Body.String())
 	}
 	removeAssetImportUpdateBlocker := blockOperationLogName(t, server.cfg.Store, "assets.import")
 	assetImportUpdateFailureRec := assertStatus(t, handler, http.MethodPost, "/api/admin/assets/import", map[string]any{

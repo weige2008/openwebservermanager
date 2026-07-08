@@ -846,6 +846,12 @@ func (s *Server) handleAssetImport(w http.ResponseWriter, r *http.Request) {
 	created := []model.PlatformItem{}
 	updated := []model.PlatformItem{}
 	rollback := platformBulkMutationRollback{Collection: "assets"}
+	rollbackPending := true
+	defer func() {
+		if rollbackPending {
+			_ = s.rollbackPlatformBulkMutation(rollback)
+		}
+	}()
 	skipped := []map[string]string{}
 	for index, itemReq := range req.Items {
 		itemReq.Name = strings.TrimSpace(itemReq.Name)
@@ -891,12 +897,14 @@ func (s *Server) handleAssetImport(w http.ResponseWriter, r *http.Request) {
 		created = append(created, item)
 	}
 	if err := s.createBulkMutationOperationLog(r, "assets.import", "import", "assets", "", "imported assets", len(created), len(updated), len(skipped), len(req.Items)); err != nil {
+		rollbackPending = false
 		if rollbackErr := s.rollbackPlatformBulkMutation(rollback); rollbackErr != nil {
 			err = fmt.Errorf("%w; additionally failed to roll back imported assets: %v", err, rollbackErr)
 		}
 		writeError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
+	rollbackPending = false
 	_ = s.audit(r, "assets.import", "assets", "", "imported assets")
 	items := append([]model.PlatformItem{}, created...)
 	items = append(items, updated...)
@@ -944,6 +952,12 @@ func (s *Server) handleUserImport(w http.ResponseWriter, r *http.Request) {
 	created := []model.PlatformItem{}
 	updated := []model.PlatformItem{}
 	rollback := platformBulkMutationRollback{Collection: "users"}
+	rollbackPending := true
+	defer func() {
+		if rollbackPending {
+			_ = s.rollbackPlatformBulkMutation(rollback)
+		}
+	}()
 	skipped := []map[string]string{}
 	for index, itemReq := range req.Items {
 		itemReq.Name = strings.TrimSpace(itemReq.Name)
@@ -994,19 +1008,21 @@ func (s *Server) handleUserImport(w http.ResponseWriter, r *http.Request) {
 		}
 		item, err := s.cfg.Store.CreatePlatformItem("users", itemReq)
 		if err != nil {
-			writeError(w, http.StatusBadRequest, fmt.Sprintf("import user %q: %v", itemReq.Name, err))
+			writeError(w, userImportCreateErrorStatus(err), fmt.Sprintf("import user %q: %v", itemReq.Name, err))
 			return
 		}
 		rollback.CreatedIDs = append(rollback.CreatedIDs, item.ID)
 		created = append(created, item)
 	}
 	if err := s.createBulkMutationOperationLog(r, "users.import", "import", "users", "", "imported users", len(created), len(updated), len(skipped), len(req.Items)); err != nil {
+		rollbackPending = false
 		if rollbackErr := s.rollbackPlatformBulkMutation(rollback); rollbackErr != nil {
 			err = fmt.Errorf("%w; additionally failed to roll back imported users: %v", err, rollbackErr)
 		}
 		writeError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
+	rollbackPending = false
 	_ = s.audit(r, "users.import", "users", "", "imported users")
 	writeJSON(w, http.StatusCreated, map[string]any{
 		"created": created,
@@ -1019,6 +1035,13 @@ func (s *Server) handleUserImport(w http.ResponseWriter, r *http.Request) {
 			"total":   len(req.Items),
 		},
 	})
+}
+
+func userImportCreateErrorStatus(err error) int {
+	if err != nil && strings.Contains(err.Error(), "create platform record") {
+		return http.StatusInternalServerError
+	}
+	return http.StatusBadRequest
 }
 
 func (s *Server) handleAuthorizationBulk(w http.ResponseWriter, r *http.Request, route string) {
@@ -1080,6 +1103,12 @@ func (s *Server) handleAuthorizationBulk(w http.ResponseWriter, r *http.Request,
 	created := []model.PlatformItem{}
 	updated := []model.PlatformItem{}
 	rollback := platformBulkMutationRollback{Collection: collection}
+	rollbackPending := true
+	defer func() {
+		if rollbackPending {
+			_ = s.rollbackPlatformBulkMutation(rollback)
+		}
+	}()
 	skipped := []map[string]string{}
 	for _, subjectID := range subjects {
 		for _, targetID := range targets {
@@ -1139,12 +1168,14 @@ func (s *Server) handleAuthorizationBulk(w http.ResponseWriter, r *http.Request,
 		}
 	}
 	if err := s.createBulkMutationOperationLog(r, collection+".bulk_create", "bulk_create", collection, protocol, "bulk created authorizations", len(created), len(updated), len(skipped), len(subjects)*len(targets)); err != nil {
+		rollbackPending = false
 		if rollbackErr := s.rollbackPlatformBulkMutation(rollback); rollbackErr != nil {
 			err = fmt.Errorf("%w; additionally failed to roll back bulk authorizations: %v", err, rollbackErr)
 		}
 		writeError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
+	rollbackPending = false
 	_ = s.audit(r, collection+".bulk_create", collection, protocol, "bulk created authorizations")
 	writeJSON(w, http.StatusCreated, map[string]any{
 		"created": created,

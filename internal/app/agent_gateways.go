@@ -1,6 +1,7 @@
 package app
 
 import (
+	"fmt"
 	"log/slog"
 	"net/http"
 	"strings"
@@ -138,9 +139,7 @@ func (s *Server) handleAgentGatewayToken(w http.ResponseWriter, r *http.Request,
 			"token_generation": metadataIntDefault(saved.Metadata["token_generation"], 0),
 		},
 	}); err != nil {
-		if _, restoreErr := s.cfg.Store.SavePlatformItem("agent_gateways", previous); restoreErr != nil {
-			slog.Default().Error("restore agent gateway after token operation log failure", "gateway_id", saved.ID, "error", restoreErr)
-		}
+		err = s.restoreAgentGatewayAfterOperationFailure(r, saved.ID, previous, "token operation log failure", err)
 		writeError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
@@ -218,9 +217,7 @@ func (s *Server) handleAgentGatewayRegister(w http.ResponseWriter, r *http.Reque
 		Description: "agent gateway registered",
 		Metadata:    map[string]any{"client_ip": s.clientIP(r), "gateway_id": saved.ID, "hostname": req.Hostname, "version": req.Version},
 	}); err != nil {
-		if _, restoreErr := s.cfg.Store.SavePlatformItem("agent_gateways", previous); restoreErr != nil {
-			slog.Default().Error("restore agent gateway after operation log failure", "gateway_id", saved.ID, "error", restoreErr)
-		}
+		err = s.restoreAgentGatewayAfterOperationFailure(r, saved.ID, previous, "register operation log failure", err)
 		writeError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
@@ -278,9 +275,7 @@ func (s *Server) handleAgentGatewayHeartbeat(w http.ResponseWriter, r *http.Requ
 			"reason":    "valid heartbeat",
 			"client_ip": s.clientIP(r),
 		}); err != nil {
-			if _, restoreErr := s.cfg.Store.SavePlatformItem("agent_gateways", previous); restoreErr != nil {
-				slog.Default().Error("restore agent gateway after recovered event failure", "gateway_id", saved.ID, "error", restoreErr)
-			}
+			err = s.restoreAgentGatewayAfterOperationFailure(r, saved.ID, previous, "recovered event failure", err)
 			writeError(w, http.StatusInternalServerError, err.Error())
 			return
 		}
@@ -428,6 +423,15 @@ func (s *Server) recordAgentGatewayStatusEvent(name, status string, item model.P
 		Description: strings.TrimPrefix(strings.TrimPrefix(name, "agent.gateway."), "gateway."),
 		Metadata:    metadata,
 	})
+}
+
+func (s *Server) restoreAgentGatewayAfterOperationFailure(r *http.Request, gatewayID string, previous model.PlatformItem, context string, err error) error {
+	if _, restoreErr := s.cfg.Store.SavePlatformItem("agent_gateways", previous); restoreErr != nil {
+		detail := "failed to restore agent gateway after " + context + ": " + restoreErr.Error()
+		_ = s.audit(r, "agent_gateway.restore_failed", gatewayID, "", detail)
+		return fmt.Errorf("%w; additionally %s", err, detail)
+	}
+	return err
 }
 
 func agentHeartbeatTimeout(item model.PlatformItem) time.Duration {

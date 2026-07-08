@@ -8280,6 +8280,32 @@ func TestAgentGatewayOperationLogPersistenceFailures(t *testing.T) {
 		t.Fatal("agent token operation log persistence failure was not written to core audit logs")
 	}
 
+	tokenRestoreGatewayRec := assertStatus(t, handler, http.MethodPost, "/api/admin/agent-gateways", map[string]any{
+		"name":   "token-restore-failure-gateway",
+		"type":   "agent",
+		"status": "offline",
+		"metadata": map[string]any{
+			"heartbeat_timeout_seconds": 30,
+			"token_generation":          0,
+		},
+	}, adminCookie, http.StatusCreated)
+	var tokenRestoreGateway model.PlatformItem
+	decodeResponse(t, tokenRestoreGatewayRec, &tokenRestoreGateway)
+	removeTokenLogBlocker := blockOperationLogName(t, srv.cfg.Store, "agent_gateway.token")
+	removeTokenRestoreBlocker := blockPlatformItemSavePayloadFragment(t, srv.cfg.Store, "agent_gateways", tokenRestoreGateway.ID, `"token_generation":0`)
+	tokenRestoreFailureRec := assertStatus(t, handler, http.MethodPost, "/api/admin/agent-gateways/"+tokenRestoreGateway.ID+"/token", nil, adminCookie, http.StatusInternalServerError)
+	removeTokenRestoreBlocker()
+	removeTokenLogBlocker()
+	if !strings.Contains(tokenRestoreFailureRec.Body.String(), "failed to restore agent gateway after token operation log failure") {
+		t.Fatalf("agent token restore failure was not reported: %s", tokenRestoreFailureRec.Body.String())
+	}
+	if strings.Contains(tokenRestoreFailureRec.Body.String(), "registration_token") || strings.Contains(tokenRestoreFailureRec.Body.String(), `"token":`) {
+		t.Fatalf("agent token restore failure leaked token material: %s", tokenRestoreFailureRec.Body.String())
+	}
+	if !coreAuditLogsContainAction(srv.cfg.Store, "agent_gateway.restore_failed") {
+		t.Fatal("agent token restore failure was not written to core audit logs")
+	}
+
 	tokenRec := assertStatus(t, handler, http.MethodPost, "/api/admin/agent-gateways/"+gateway.ID+"/token", nil, adminCookie, http.StatusOK)
 	var tokenPayload map[string]any
 	decodeResponse(t, tokenRec, &tokenPayload)
@@ -8306,6 +8332,34 @@ func TestAgentGatewayOperationLogPersistenceFailures(t *testing.T) {
 		t.Fatalf("agent register changed gateway state before audit log persisted: %#v", storedGateway)
 	}
 
+	registerRestoreGatewayRec := assertStatus(t, handler, http.MethodPost, "/api/admin/agent-gateways", map[string]any{
+		"name":     "register-restore-failure-gateway",
+		"type":     "agent",
+		"status":   "offline",
+		"metadata": map[string]any{"heartbeat_timeout_seconds": 30},
+	}, adminCookie, http.StatusCreated)
+	var registerRestoreGateway model.PlatformItem
+	decodeResponse(t, registerRestoreGatewayRec, &registerRestoreGateway)
+	registerRestoreTokenRec := assertStatus(t, handler, http.MethodPost, "/api/admin/agent-gateways/"+registerRestoreGateway.ID+"/token", nil, adminCookie, http.StatusOK)
+	var registerRestoreTokenPayload map[string]any
+	decodeResponse(t, registerRestoreTokenRec, &registerRestoreTokenPayload)
+	registerRestoreToken, _ := registerRestoreTokenPayload["registration_token"].(string)
+	removeRegisterLogBlocker := blockOperationLogName(t, srv.cfg.Store, "agent.gateway.register")
+	removeRegisterRestoreBlocker := blockPlatformItemSavePayloadFragment(t, srv.cfg.Store, "agent_gateways", registerRestoreGateway.ID, `"status":"offline"`)
+	registerRestoreFailureRec := assertStatus(t, handler, http.MethodPost, "/api/agent/gateways/register", map[string]any{
+		"registration_token": registerRestoreToken,
+		"hostname":           "register-restore-edge",
+		"version":            "9.9.9",
+	}, nil, http.StatusInternalServerError)
+	removeRegisterRestoreBlocker()
+	removeRegisterLogBlocker()
+	if !strings.Contains(registerRestoreFailureRec.Body.String(), "failed to restore agent gateway after register operation log failure") {
+		t.Fatalf("agent register restore failure was not reported: %s", registerRestoreFailureRec.Body.String())
+	}
+	if !coreAuditLogsContainAction(srv.cfg.Store, "agent_gateway.restore_failed") {
+		t.Fatal("agent register restore failure was not written to core audit logs")
+	}
+
 	assertStatus(t, handler, http.MethodPost, "/api/agent/gateways/register", map[string]any{
 		"registration_token": registrationToken,
 		"hostname":           "blocked-edge-01",
@@ -8319,6 +8373,46 @@ func TestAgentGatewayOperationLogPersistenceFailures(t *testing.T) {
 			"latency_ms":                100,
 		},
 	}, adminCookie, http.StatusOK)
+
+	heartbeatRestoreGatewayRec := assertStatus(t, handler, http.MethodPost, "/api/admin/agent-gateways", map[string]any{
+		"name":     "heartbeat-restore-failure-gateway",
+		"type":     "agent",
+		"status":   "offline",
+		"metadata": map[string]any{"heartbeat_timeout_seconds": 30},
+	}, adminCookie, http.StatusCreated)
+	var heartbeatRestoreGateway model.PlatformItem
+	decodeResponse(t, heartbeatRestoreGatewayRec, &heartbeatRestoreGateway)
+	heartbeatRestoreTokenRec := assertStatus(t, handler, http.MethodPost, "/api/admin/agent-gateways/"+heartbeatRestoreGateway.ID+"/token", nil, adminCookie, http.StatusOK)
+	var heartbeatRestoreTokenPayload map[string]any
+	decodeResponse(t, heartbeatRestoreTokenRec, &heartbeatRestoreTokenPayload)
+	heartbeatRestoreToken, _ := heartbeatRestoreTokenPayload["registration_token"].(string)
+	assertStatus(t, handler, http.MethodPost, "/api/agent/gateways/register", map[string]any{
+		"registration_token": heartbeatRestoreToken,
+		"hostname":           "heartbeat-restore-edge",
+		"version":            "1.0.0",
+	}, nil, http.StatusOK)
+	assertStatus(t, handler, http.MethodPatch, "/api/admin/agent-gateways/"+heartbeatRestoreGateway.ID, map[string]any{
+		"status": "offline",
+		"metadata": map[string]any{
+			"last_heartbeat_at":         time.Now().UTC().Format(time.RFC3339Nano),
+			"heartbeat_timeout_seconds": 30,
+			"latency_ms":                44,
+		},
+	}, adminCookie, http.StatusOK)
+	removeHeartbeatLogBlocker := blockOperationLogName(t, srv.cfg.Store, "agent.gateway.recovered")
+	removeHeartbeatRestoreBlocker := blockPlatformItemSavePayloadFragment(t, srv.cfg.Store, "agent_gateways", heartbeatRestoreGateway.ID, `"status":"offline"`)
+	heartbeatRestoreFailureRec := assertStatus(t, handler, http.MethodPost, "/api/agent/gateways/heartbeat", map[string]any{
+		"registration_token": heartbeatRestoreToken,
+		"latency_ms":         11,
+	}, nil, http.StatusInternalServerError)
+	removeHeartbeatRestoreBlocker()
+	removeHeartbeatLogBlocker()
+	if !strings.Contains(heartbeatRestoreFailureRec.Body.String(), "failed to restore agent gateway after recovered event failure") {
+		t.Fatalf("agent heartbeat restore failure was not reported: %s", heartbeatRestoreFailureRec.Body.String())
+	}
+	if !coreAuditLogsContainAction(srv.cfg.Store, "agent_gateway.restore_failed") {
+		t.Fatal("agent heartbeat restore failure was not written to core audit logs")
+	}
 
 	removeHeartbeatBlocker := blockPlatformItemCreate(t, srv.cfg.Store, "operation_logs")
 	heartbeatFailureRec := assertStatus(t, handler, http.MethodPost, "/api/agent/gateways/heartbeat", map[string]any{

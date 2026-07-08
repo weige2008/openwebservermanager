@@ -10003,6 +10003,31 @@ func TestRDPProxyRuntimeForwardsAllowedTarget(t *testing.T) {
 		t.Fatalf("rdp proxy connection was not audited: %s", logsBody)
 	}
 
+	func() {
+		removeProxyLogBlocker := blockPlatformItemCreate(t, handler.cfg.Store, "operation_logs")
+		defer removeProxyLogBlocker()
+		blockedConn, err := net.DialTimeout("tcp", rdpProxy.Address(), 2*time.Second)
+		if err != nil {
+			t.Fatalf("dial rdp proxy with blocked audit log: %v", err)
+		}
+		if _, err := blockedConn.Write([]byte("audit blocked rdp\n")); err != nil {
+			t.Fatalf("write rdp proxy with blocked audit log: %v", err)
+		}
+		blockedLine, err := bufio.NewReader(blockedConn).ReadString('\n')
+		if err != nil {
+			t.Fatalf("read rdp proxy response with blocked audit log: %v", err)
+		}
+		if err := blockedConn.Close(); err != nil {
+			t.Fatalf("close rdp proxy conn with blocked audit log: %v", err)
+		}
+		if blockedLine != "echo:audit blocked rdp\n" {
+			t.Fatalf("rdp proxy response with blocked audit log = %q", blockedLine)
+		}
+		waitForCondition(t, 2*time.Second, func() bool {
+			return coreAuditLogsContainAction(handler.cfg.Store, "rdp_proxy.log.persist_failed")
+		})
+	}()
+
 	assertStatus(t, handler, http.MethodPost, "/api/admin/proxy-services", map[string]any{
 		"rdp_enabled":           false,
 		"rdp_listen_address":    listenAddress,
@@ -10080,6 +10105,31 @@ func TestDatabaseProxyRuntimeForwardsAllowedTarget(t *testing.T) {
 	if !strings.Contains(logsBody, "database_proxy.connect") || !strings.Contains(logsBody, upstreamAddress) {
 		t.Fatalf("database proxy connection was not audited: %s", logsBody)
 	}
+
+	func() {
+		removeProxyLogBlocker := blockPlatformItemCreate(t, handler.cfg.Store, "operation_logs")
+		defer removeProxyLogBlocker()
+		blockedConn, err := net.DialTimeout("tcp", databaseProxy.Address(), 2*time.Second)
+		if err != nil {
+			t.Fatalf("dial database proxy with blocked audit log: %v", err)
+		}
+		if _, err := blockedConn.Write([]byte("audit blocked database\n")); err != nil {
+			t.Fatalf("write database proxy with blocked audit log: %v", err)
+		}
+		blockedLine, err := bufio.NewReader(blockedConn).ReadString('\n')
+		if err != nil {
+			t.Fatalf("read database proxy response with blocked audit log: %v", err)
+		}
+		if err := blockedConn.Close(); err != nil {
+			t.Fatalf("close database proxy conn with blocked audit log: %v", err)
+		}
+		if blockedLine != "echo:audit blocked database\n" {
+			t.Fatalf("database proxy response with blocked audit log = %q", blockedLine)
+		}
+		waitForCondition(t, 2*time.Second, func() bool {
+			return coreAuditLogsContainAction(handler.cfg.Store, "database_proxy.log.persist_failed")
+		})
+	}()
 
 	assertStatus(t, handler, http.MethodPost, "/api/admin/proxy-services", map[string]any{
 		"database_enabled":           false,

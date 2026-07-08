@@ -192,7 +192,7 @@ func (m *DatabaseProxyManager) auditConnection(status, remote, target string, cl
 	if m.store == nil {
 		return
 	}
-	_, _ = m.store.CreatePlatformItem("operation_logs", model.PlatformItemRequest{
+	if _, err := m.store.CreatePlatformItem("operation_logs", model.PlatformItemRequest{
 		Name:        "database_proxy.connect",
 		Type:        "database_proxy",
 		Status:      status,
@@ -206,7 +206,9 @@ func (m *DatabaseProxyManager) auditConnection(status, remote, target string, cl
 			"duration_ms":            duration.Milliseconds(),
 			"error":                  errorText,
 		},
-	})
+	}); err != nil {
+		auditProxyLogPersistFailure(m.store, "database_proxy.log.persist_failed", model.ProtocolDatabase, target, remote, "persist database proxy connection log failed: "+err.Error())
+	}
 }
 
 func (m *DatabaseProxyManager) setLastError(value string) {

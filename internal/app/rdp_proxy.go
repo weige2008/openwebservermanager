@@ -192,7 +192,7 @@ func (m *RDPProxyManager) auditConnection(status, remote, target string, clientT
 	if m.store == nil {
 		return
 	}
-	_, _ = m.store.CreatePlatformItem("operation_logs", model.PlatformItemRequest{
+	if _, err := m.store.CreatePlatformItem("operation_logs", model.PlatformItemRequest{
 		Name:        "rdp_proxy.connect",
 		Type:        "rdp_proxy",
 		Status:      status,
@@ -207,7 +207,9 @@ func (m *RDPProxyManager) auditConnection(status, remote, target string, clientT
 			"duration_ms":            duration.Milliseconds(),
 			"error":                  errorText,
 		},
-	})
+	}); err != nil {
+		auditProxyLogPersistFailure(m.store, "rdp_proxy.log.persist_failed", model.ProtocolRDP, target, remote, "persist rdp proxy connection log failed: "+err.Error())
+	}
 }
 
 func (m *RDPProxyManager) setLastError(value string) {

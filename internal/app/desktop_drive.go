@@ -267,20 +267,36 @@ func (s *Server) handleDesktopDriveDelete(w http.ResponseWriter, r *http.Request
 	if !s.requireExistingStorageParentDirectory(w, root, target) {
 		return
 	}
-	if _, err := os.Lstat(target); err != nil {
+	info, exists, err := storagePathInfo(target)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	if !exists {
 		writeError(w, http.StatusNotFound, "file not found")
+		return
+	}
+	if !info.IsDir() && !info.Mode().IsRegular() {
+		writeError(w, http.StatusBadRequest, "target is not a regular file")
+		return
+	}
+	rollback, err := prepareStoragePathRollback(target)
+	if err != nil {
+		if errors.Is(err, errStorageSpecialFile) {
+			writeError(w, http.StatusBadRequest, "target is not a regular file")
+			return
+		}
+		writeError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
 	if err := s.recordDesktopDriveFileLog(r, session, "delete", "success", rel, map[string]any{
 		"path": filepath.ToSlash(rel),
 	}); err != nil {
+		err = rollback.restoreError(err)
 		writeError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
-	if err := os.RemoveAll(target); err != nil {
-		writeError(w, http.StatusInternalServerError, err.Error())
-		return
-	}
+	rollback.cleanup()
 	_ = s.audit(r, "connection.drive.delete", session.ID, session.Protocol, "deleted session drive file")
 	writeJSON(w, http.StatusOK, map[string]bool{"ok": true})
 }

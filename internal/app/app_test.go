@@ -13563,6 +13563,10 @@ func TestDesktopSessionDriveFiles(t *testing.T) {
 			t.Fatalf("desktop drive symlink download leaked external content: %s", symlinkDownload.Body.String())
 		}
 		assertMultipartStatus(t, handler, "/api/connections/"+session.ID+"/drive/upload", map[string]string{"path": "reports"}, "linked.txt", []byte("overwrite"), adminCookie, http.StatusBadRequest)
+		assertStatus(t, handler, http.MethodDelete, "/api/connections/"+session.ID+"/drive?path=reports/linked.txt", nil, adminCookie, http.StatusBadRequest)
+		if _, err := os.Lstat(filepath.Join(driveRoot, "linked.txt")); err != nil {
+			t.Fatalf("desktop drive symlink was removed by rejected delete: %v", err)
+		}
 		if data, err := os.ReadFile(externalDrivePath); err != nil || string(data) != externalDriveContent {
 			t.Fatalf("external desktop drive symlink target changed: content=%q err=%v", string(data), err)
 		}
@@ -13577,6 +13581,10 @@ func TestDesktopSessionDriveFiles(t *testing.T) {
 			t.Fatalf("desktop drive symlink nested download leaked external content: %s", nestedSymlinkDownload.Body.String())
 		}
 		assertStatus(t, handler, http.MethodDelete, "/api/connections/"+session.ID+"/drive?path=reports/linked-dir/inside.txt", nil, adminCookie, http.StatusBadRequest)
+		assertStatus(t, handler, http.MethodDelete, "/api/connections/"+session.ID+"/drive?path=reports/linked-dir", nil, adminCookie, http.StatusBadRequest)
+		if _, err := os.Lstat(filepath.Join(driveRoot, "linked-dir")); err != nil {
+			t.Fatalf("desktop drive directory symlink was removed by rejected delete: %v", err)
+		}
 		if data, err := os.ReadFile(externalDriveDirFile); err != nil || string(data) != "external desktop dir file" {
 			t.Fatalf("external desktop drive directory file changed: content=%q err=%v", string(data), err)
 		}
@@ -13665,6 +13673,12 @@ func TestDesktopDriveFileLogPersistenceFailureReturnsServerError(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(driveRoot, "delete.txt"), []byte("desktop delete"), 0o660); err != nil {
 		t.Fatalf("write drive delete file: %v", err)
 	}
+	if err := os.MkdirAll(filepath.Join(driveRoot, "delete-dir"), 0o770); err != nil {
+		t.Fatalf("create drive delete directory: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(driveRoot, "delete-dir", "nested.txt"), []byte("desktop delete dir"), 0o660); err != nil {
+		t.Fatalf("write drive delete directory file: %v", err)
+	}
 	if err := os.WriteFile(filepath.Join(driveRoot, "overwrite.txt"), []byte("desktop old"), 0o660); err != nil {
 		t.Fatalf("write drive overwrite file: %v", err)
 	}
@@ -13711,6 +13725,16 @@ func TestDesktopDriveFileLogPersistenceFailureReturnsServerError(t *testing.T) {
 	}
 	if data, err := os.ReadFile(filepath.Join(driveRoot, "delete.txt")); err != nil || string(data) != "desktop delete" {
 		t.Fatalf("desktop drive delete removed file before file log persisted: data=%q err=%v", string(data), err)
+	}
+
+	removeDeleteDirBlocker := blockPlatformItemCreate(t, srv.cfg.Store, "file_logs")
+	deleteDirRec := assertStatus(t, handler, http.MethodDelete, "/api/connections/"+session.ID+"/drive?path=reports/delete-dir", nil, adminCookie, http.StatusInternalServerError)
+	removeDeleteDirBlocker()
+	if !strings.Contains(deleteDirRec.Body.String(), "persist file log failed") {
+		t.Fatalf("desktop drive directory delete file log persistence failure was not reported: %s", deleteDirRec.Body.String())
+	}
+	if data, err := os.ReadFile(filepath.Join(driveRoot, "delete-dir", "nested.txt")); err != nil || string(data) != "desktop delete dir" {
+		t.Fatalf("desktop drive directory delete did not restore content after file log failure: data=%q err=%v", string(data), err)
 	}
 }
 

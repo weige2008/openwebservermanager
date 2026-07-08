@@ -12564,6 +12564,15 @@ func TestStorageFileLogPersistenceFailureReturnsServerError(t *testing.T) {
 		t.Fatalf("storage delete file log persistence failure was not reported: %s", deleteRec.Body.String())
 	}
 	assertStorageContent("delete-me.txt", "keep me")
+
+	assertStatus(t, handler, http.MethodPost, "/api/admin/storages/"+storage.ID+"/files-write", map[string]any{"path": "delete-usage.txt", "content": "keep usage"}, adminCookie, http.StatusCreated)
+	removeDeleteUsageBlocker := blockPlatformItemSave(t, srv.cfg.Store, "storages", storage.ID)
+	deleteUsageRec := assertStatus(t, handler, http.MethodDelete, "/api/admin/storages/"+storage.ID+"/files?path=delete-usage.txt", nil, adminCookie, http.StatusInternalServerError)
+	removeDeleteUsageBlocker()
+	if !strings.Contains(deleteUsageRec.Body.String(), "forced platform item save failure") {
+		t.Fatalf("storage delete usage persistence failure was not reported: %s", deleteUsageRec.Body.String())
+	}
+	assertStorageContent("delete-usage.txt", "keep usage")
 }
 
 func TestStorageQuotaEnforcedAndUsageUpdated(t *testing.T) {
@@ -12613,6 +12622,38 @@ func TestStorageQuotaEnforcedAndUsageUpdated(t *testing.T) {
 	}
 	if files, ok := metadataInt(saved.Metadata["files"]); !ok || files != 2 {
 		t.Fatalf("saved files = %#v, want 2", saved.Metadata["files"])
+	}
+}
+
+func TestStorageUsageIgnoresInternalRollbackBackups(t *testing.T) {
+	srv, adminCookie := newTestServer(t, nil)
+	handler := http.Handler(srv)
+
+	storageRec := assertStatus(t, handler, http.MethodPost, "/api/admin/storages", map[string]any{
+		"name":   "rollback-usage-drive",
+		"type":   "local",
+		"status": "enabled",
+	}, adminCookie, http.StatusCreated)
+	var storage model.PlatformItem
+	decodeResponse(t, storageRec, &storage)
+
+	assertStatus(t, handler, http.MethodPost, "/api/admin/storages/"+storage.ID+"/files-write", map[string]any{"path": "source.txt", "content": "new"}, adminCookie, http.StatusCreated)
+	assertStatus(t, handler, http.MethodPost, "/api/admin/storages/"+storage.ID+"/files-write", map[string]any{"path": "target.txt", "content": "old-data"}, adminCookie, http.StatusCreated)
+	copyRec := assertStatus(t, handler, http.MethodPost, "/api/admin/storages/"+storage.ID+"/files-copy", map[string]any{"path": "source.txt", "destination": "target.txt", "overwrite": true}, adminCookie, http.StatusCreated)
+	var copyPayload struct {
+		Usage storageUsageInfo `json:"usage"`
+	}
+	decodeResponse(t, copyRec, &copyPayload)
+	if copyPayload.Usage.Bytes != 6 || copyPayload.Usage.Files != 2 {
+		t.Fatalf("copy overwrite usage = %#v, want 6 bytes across 2 files", copyPayload.Usage)
+	}
+
+	saved, ok, err := srv.cfg.Store.GetPlatformItem("storages", storage.ID)
+	if err != nil || !ok {
+		t.Fatalf("get saved storage: ok=%v err=%v", ok, err)
+	}
+	if used, ok := parseStorageByteSize(saved.Metadata["used_bytes"]); !ok || used != 6 {
+		t.Fatalf("saved used_bytes after rollback-backed copy = %#v, want 6", saved.Metadata["used_bytes"])
 	}
 }
 

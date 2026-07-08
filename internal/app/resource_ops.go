@@ -1642,21 +1642,30 @@ func (s *Server) handleStorageDelete(w http.ResponseWriter, r *http.Request, roo
 	if !s.requireStorageTreePermission(w, r, storage.ID, "delete", target, rel) {
 		return
 	}
-	if err := s.recordStorageFileLog(r, storage.ID, "delete", "success", rel, "deleted file", map[string]any{
-		"path": filepath.ToSlash(rel),
-	}); err != nil {
-		writeError(w, http.StatusInternalServerError, err.Error())
-		return
-	}
-	if err := os.RemoveAll(target); err != nil {
+	rollback, err := prepareStoragePathRollback(target)
+	if err != nil {
+		if errors.Is(err, errStorageSpecialFile) {
+			writeError(w, http.StatusBadRequest, "target is not a regular file")
+			return
+		}
 		writeError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
 	usage, err := s.updateStorageUsage(storage.ID, root)
 	if err != nil {
+		err = rollback.restoreError(err)
 		writeError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
+	if err := s.recordStorageFileLog(r, storage.ID, "delete", "success", rel, "deleted file", map[string]any{
+		"path": filepath.ToSlash(rel),
+	}); err != nil {
+		err = rollback.restoreError(err)
+		_, _ = s.updateStorageUsage(storage.ID, root)
+		writeError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	rollback.cleanup()
 	_ = s.audit(r, "storage.files.delete", storage.ID, "", "deleted "+rel)
 	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "usage": usage})
 }
@@ -2058,6 +2067,9 @@ func collectStorageUsage(root string) (storageUsageInfo, error) {
 		if path == root {
 			return nil
 		}
+		if entry.IsDir() && isStorageRollbackDirectory(entry.Name()) {
+			return filepath.SkipDir
+		}
 		info, err := entry.Info()
 		if err != nil {
 			return err
@@ -2075,6 +2087,10 @@ func collectStorageUsage(root string) (storageUsageInfo, error) {
 	}
 	usage.Used = formatStorageBytes(usage.Bytes)
 	return usage, nil
+}
+
+func isStorageRollbackDirectory(name string) bool {
+	return strings.HasPrefix(name, ".openwebservermanager-rollback-")
 }
 
 func (usage storageUsageInfo) withLimit(limitBytes int64, checkedAt string) storageUsageInfo {

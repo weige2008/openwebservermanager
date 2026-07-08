@@ -4248,14 +4248,6 @@ func (s *Server) deleteAuditRecording(w http.ResponseWriter, r *http.Request, id
 		return
 	}
 	if session, exists := s.cfg.Store.GetSession(id); exists {
-		if _, err := s.cfg.Store.UpdateSession(id, func(item *model.ConnectionSession) {
-			item.RecordingPath = ""
-			item.RecordingSize = 0
-			item.Error = "recording deleted"
-		}); err != nil {
-			writeError(w, http.StatusInternalServerError, s.recordingStatePersistError(r, id, session.Protocol, "persist recording deletion session state failed", err).Error())
-			return
-		}
 		if offline, ok, err := s.cfg.Store.GetPlatformItem("offline_sessions", id); err != nil {
 			writeError(w, http.StatusInternalServerError, s.recordingStatePersistError(r, id, session.Protocol, "load recording deletion offline state failed", err).Error())
 			return
@@ -4265,6 +4257,14 @@ func (s *Server) deleteAuditRecording(w http.ResponseWriter, r *http.Request, id
 				writeError(w, http.StatusInternalServerError, s.recordingStatePersistError(r, id, session.Protocol, "persist recording deletion offline state failed", err).Error())
 				return
 			}
+		}
+		if _, err := s.cfg.Store.UpdateSession(id, func(item *model.ConnectionSession) {
+			item.RecordingPath = ""
+			item.RecordingSize = 0
+			item.Error = "recording deleted"
+		}); err != nil {
+			writeError(w, http.StatusInternalServerError, s.recordingStatePersistError(r, id, session.Protocol, "persist recording deletion session state failed", err).Error())
+			return
 		}
 		_ = s.audit(r, "audit.recording.delete", id, session.Protocol, "deleted offline session recording")
 		writeJSON(w, http.StatusOK, map[string]bool{"ok": true})

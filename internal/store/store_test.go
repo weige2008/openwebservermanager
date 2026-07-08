@@ -92,6 +92,109 @@ func TestCoreRecordsSurviveMissingJSON(t *testing.T) {
 	}
 }
 
+func TestCreateSessionPlatformIndexFailureRollsBackCoreState(t *testing.T) {
+	st := newTestStore(t)
+
+	removeBlocker := blockStorePlatformInsert(t, st, "online_sessions")
+	_, err := st.CreateSession(model.ConnectionSession{
+		Protocol:     model.ProtocolSSH,
+		ServerID:     "asset_blocked_online",
+		CredentialID: "credential_blocked_online",
+		UserID:       "user_blocked_online",
+		ClientIP:     "203.0.113.20",
+	})
+	removeBlocker()
+	if err == nil || !strings.Contains(err.Error(), "sync session platform record") {
+		t.Fatalf("CreateSession platform index err = %v, want sync session platform record", err)
+	}
+	_, _, sessions, _ := st.Bootstrap()
+	if len(sessions) != 0 {
+		t.Fatalf("CreateSession left core sessions after platform index failure: %#v", sessions)
+	}
+	if got := platformRecordCount(t, st, "online_sessions"); got != 0 {
+		t.Fatalf("CreateSession left online session records after platform index failure: %d", got)
+	}
+}
+
+func TestCloseSessionPlatformIndexFailureRollsBackCoreState(t *testing.T) {
+	st := newTestStore(t)
+	session, err := st.CreateSession(model.ConnectionSession{
+		Protocol:     model.ProtocolRDP,
+		ServerID:     "asset_close_insert",
+		CredentialID: "credential_close_insert",
+		UserID:       "user_close_insert",
+		ClientIP:     "203.0.113.21",
+	})
+	if err != nil {
+		t.Fatalf("create session: %v", err)
+	}
+
+	removeBlocker := blockStorePlatformInsert(t, st, "offline_sessions")
+	_, err = st.CloseSession(session.ID, "blocked offline index")
+	removeBlocker()
+	if err == nil || !strings.Contains(err.Error(), "sync session platform record") {
+		t.Fatalf("CloseSession platform index err = %v, want sync session platform record", err)
+	}
+	stored, ok := st.GetSession(session.ID)
+	if !ok {
+		t.Fatal("CloseSession platform index failure removed core session")
+	}
+	if stored.Status != model.SessionPending || stored.EndedAt != nil || stored.Error != "" {
+		t.Fatalf("CloseSession platform index failure did not restore core session: %#v", stored)
+	}
+	if !platformRecordExists(t, st, "online_sessions", session.ID) {
+		t.Fatal("CloseSession platform index failure removed online session record")
+	}
+	if platformRecordExists(t, st, "offline_sessions", session.ID) {
+		t.Fatal("CloseSession platform index failure left offline session record")
+	}
+
+	closed, err := st.CloseSession(session.ID, "closed after retry")
+	if err != nil {
+		t.Fatalf("retry close session: %v", err)
+	}
+	if closed.Status != model.SessionClosed || closed.EndedAt == nil || closed.Error != "closed after retry" {
+		t.Fatalf("retry close did not persist closed session: %#v", closed)
+	}
+	if platformRecordExists(t, st, "online_sessions", session.ID) || !platformRecordExists(t, st, "offline_sessions", session.ID) {
+		t.Fatal("retry close did not move session from online to offline platform records")
+	}
+}
+
+func TestCloseSessionStaleOnlineDeleteFailureRollsBackCoreState(t *testing.T) {
+	st := newTestStore(t)
+	session, err := st.CreateSession(model.ConnectionSession{
+		Protocol:     model.ProtocolVNC,
+		ServerID:     "asset_close_delete",
+		CredentialID: "credential_close_delete",
+		UserID:       "user_close_delete",
+		ClientIP:     "203.0.113.22",
+	})
+	if err != nil {
+		t.Fatalf("create session: %v", err)
+	}
+
+	removeBlocker := blockStorePlatformDelete(t, st, "online_sessions", session.ID)
+	_, err = st.CloseSession(session.ID, "blocked online delete")
+	removeBlocker()
+	if err == nil || !strings.Contains(err.Error(), "remove stale session platform record") {
+		t.Fatalf("CloseSession stale online delete err = %v, want remove stale session platform record", err)
+	}
+	stored, ok := st.GetSession(session.ID)
+	if !ok {
+		t.Fatal("CloseSession stale online delete failure removed core session")
+	}
+	if stored.Status != model.SessionPending || stored.EndedAt != nil || stored.Error != "" {
+		t.Fatalf("CloseSession stale online delete failure did not restore core session: %#v", stored)
+	}
+	if !platformRecordExists(t, st, "online_sessions", session.ID) {
+		t.Fatal("CloseSession stale online delete failure removed online session record")
+	}
+	if platformRecordExists(t, st, "offline_sessions", session.ID) {
+		t.Fatal("CloseSession stale online delete failure committed offline session record")
+	}
+}
+
 func TestOpenImportsLegacyJSONStateToCoreRecords(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "openwebservermanager.json")
@@ -258,6 +361,16 @@ func testCipher(t *testing.T) *security.Cipher {
 	return cipher
 }
 
+func newTestStore(t *testing.T) *Store {
+	t.Helper()
+	st, err := Open(filepath.Join(t.TempDir(), "openwebservermanager.json"), testCipher(t))
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	t.Cleanup(func() { _ = st.Close() })
+	return st
+}
+
 func mustPasswordHash(t *testing.T, password string) string {
 	t.Helper()
 	hash, err := bcryptGenerateFromPassword(password)
@@ -287,6 +400,86 @@ func coreRecordCount(t *testing.T, dbPath string) int {
 		t.Fatalf("count core records: %v", err)
 	}
 	return count
+}
+
+func platformRecordCount(t *testing.T, st *Store, collection string) int {
+	t.Helper()
+	db, err := sql.Open("sqlite", st.DatabasePath())
+	if err != nil {
+		t.Fatalf("open sqlite: %v", err)
+	}
+	defer db.Close()
+	var count int
+	if err := db.QueryRow(`SELECT COUNT(*) FROM platform_records WHERE collection = ?`, collection).Scan(&count); err != nil {
+		t.Fatalf("count platform records: %v", err)
+	}
+	return count
+}
+
+func platformRecordExists(t *testing.T, st *Store, collection, id string) bool {
+	t.Helper()
+	_, ok, err := st.GetPlatformItem(collection, id)
+	if err != nil {
+		t.Fatalf("get platform item %s/%s: %v", collection, id, err)
+	}
+	return ok
+}
+
+func blockStorePlatformInsert(t *testing.T, st *Store, collection string) func() {
+	t.Helper()
+	db, err := sql.Open("sqlite", st.DatabasePath())
+	if err != nil {
+		t.Fatalf("open sqlite for platform insert blocker: %v", err)
+	}
+	triggerName := "block_store_platform_insert"
+	if _, err := db.Exec(`DROP TRIGGER IF EXISTS ` + triggerName); err != nil {
+		_ = db.Close()
+		t.Fatalf("drop stale platform insert blocker: %v", err)
+	}
+	triggerSQL := `CREATE TRIGGER ` + triggerName + ` BEFORE INSERT ON platform_records
+WHEN NEW.collection = ` + sqliteTestStringLiteral(collection) + `
+BEGIN
+  SELECT RAISE(ABORT, 'forced platform insert failure');
+END`
+	if _, err := db.Exec(triggerSQL); err != nil {
+		_ = db.Close()
+		t.Fatalf("create platform insert blocker: %v", err)
+	}
+	return func() {
+		_, _ = db.Exec(`DROP TRIGGER IF EXISTS ` + triggerName)
+		_ = db.Close()
+	}
+}
+
+func blockStorePlatformDelete(t *testing.T, st *Store, collection, id string) func() {
+	t.Helper()
+	db, err := sql.Open("sqlite", st.DatabasePath())
+	if err != nil {
+		t.Fatalf("open sqlite for platform delete blocker: %v", err)
+	}
+	triggerName := "block_store_platform_delete"
+	if _, err := db.Exec(`DROP TRIGGER IF EXISTS ` + triggerName); err != nil {
+		_ = db.Close()
+		t.Fatalf("drop stale platform delete blocker: %v", err)
+	}
+	triggerSQL := `CREATE TRIGGER ` + triggerName + ` BEFORE DELETE ON platform_records
+WHEN OLD.collection = ` + sqliteTestStringLiteral(collection) + `
+  AND OLD.id = ` + sqliteTestStringLiteral(id) + `
+BEGIN
+  SELECT RAISE(ABORT, 'forced platform delete failure');
+END`
+	if _, err := db.Exec(triggerSQL); err != nil {
+		_ = db.Close()
+		t.Fatalf("create platform delete blocker: %v", err)
+	}
+	return func() {
+		_, _ = db.Exec(`DROP TRIGGER IF EXISTS ` + triggerName)
+		_ = db.Close()
+	}
+}
+
+func sqliteTestStringLiteral(value string) string {
+	return "'" + strings.ReplaceAll(value, "'", "''") + "'"
 }
 
 func writeCoreRestoreDB(t *testing.T, dbPath string, source state) {

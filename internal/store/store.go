@@ -2897,9 +2897,16 @@ func (s *Store) CreateSession(session model.ConnectionSession) (model.Connection
 	session.LastActivityAt = now
 	s.state.Sessions[session.ID] = session
 	if err := s.saveLocked(); err != nil {
+		delete(s.state.Sessions, session.ID)
 		return model.ConnectionSession{}, err
 	}
-	_, _ = s.createPlatformItem("online_sessions", sessionPlatformItem("online_sessions", session))
+	if err := s.syncSessionPlatformItem(session); err != nil {
+		delete(s.state.Sessions, session.ID)
+		if rollbackErr := s.saveLocked(); rollbackErr != nil {
+			return model.ConnectionSession{}, fmt.Errorf("%w; additionally failed to roll back session state: %v", err, rollbackErr)
+		}
+		return model.ConnectionSession{}, err
+	}
 	return session, nil
 }
 
@@ -2935,19 +2942,20 @@ func (s *Store) UpdateSession(id string, update func(*model.ConnectionSession)) 
 	if !ok {
 		return model.ConnectionSession{}, os.ErrNotExist
 	}
+	previous := session
 	update(&session)
 	session.LastActivityAt = time.Now().UTC()
 	s.state.Sessions[id] = session
 	if err := s.saveLocked(); err != nil {
+		s.state.Sessions[id] = previous
 		return model.ConnectionSession{}, err
 	}
-	collection := "offline_sessions"
-	if session.Status == model.SessionActive || session.Status == model.SessionPending {
-		collection = "online_sessions"
-	}
-	_, _ = s.createPlatformItem(collection, sessionPlatformItem(collection, session))
-	if collection == "offline_sessions" {
-		_ = s.DeletePlatformItem("online_sessions", session.ID)
+	if err := s.syncSessionPlatformItem(session); err != nil {
+		s.state.Sessions[id] = previous
+		if rollbackErr := s.saveLocked(); rollbackErr != nil {
+			return model.ConnectionSession{}, fmt.Errorf("%w; additionally failed to restore session state: %v", err, rollbackErr)
+		}
+		return model.ConnectionSession{}, err
 	}
 	return session, nil
 }
@@ -2964,8 +2972,6 @@ func (s *Store) CloseSession(id, reason string) (model.ConnectionSession, error)
 	if err != nil {
 		return model.ConnectionSession{}, err
 	}
-	_, _ = s.createPlatformItem("offline_sessions", sessionPlatformItem("offline_sessions", session))
-	_ = s.DeletePlatformItem("online_sessions", session.ID)
 	return session, nil
 }
 
@@ -2994,6 +3000,49 @@ func (s *Store) Audit(log model.AuditLog) error {
 		CreatedAt:   log.CreatedAt,
 		UpdatedAt:   log.CreatedAt,
 	})
+	return nil
+}
+
+func sessionPlatformCollection(session model.ConnectionSession) string {
+	if session.Status == model.SessionActive || session.Status == model.SessionPending {
+		return "online_sessions"
+	}
+	return "offline_sessions"
+}
+
+func (s *Store) syncSessionPlatformItem(session model.ConnectionSession) error {
+	collection := sessionPlatformCollection(session)
+	staleCollection := "online_sessions"
+	if collection == "online_sessions" {
+		staleCollection = "offline_sessions"
+	}
+	item := sessionPlatformItem(collection, session)
+	payload, err := json.Marshal(item)
+	if err != nil {
+		return err
+	}
+	tx, err := s.db.Begin()
+	if err != nil {
+		return err
+	}
+	if _, err := tx.Exec(
+		`INSERT OR REPLACE INTO platform_records(collection, id, payload, created_at, updated_at) VALUES (?, ?, ?, ?, ?)`,
+		collection,
+		item.ID,
+		string(payload),
+		item.CreatedAt.Format(time.RFC3339Nano),
+		item.UpdatedAt.Format(time.RFC3339Nano),
+	); err != nil {
+		_ = tx.Rollback()
+		return fmt.Errorf("sync session platform record: %w", err)
+	}
+	if _, err := tx.Exec(`DELETE FROM platform_records WHERE collection = ? AND id = ?`, staleCollection, item.ID); err != nil {
+		_ = tx.Rollback()
+		return fmt.Errorf("remove stale session platform record: %w", err)
+	}
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("commit session platform sync: %w", err)
+	}
 	return nil
 }
 

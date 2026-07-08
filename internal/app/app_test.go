@@ -11829,6 +11829,29 @@ func TestScheduledTaskRunners(t *testing.T) {
 	if !strings.Contains(blockedSQLLogsRec.Body.String(), oldSQL.ID) {
 		t.Fatalf("cleanup task removed sql log before scheduled log persisted: %s", blockedSQLLogsRec.Body.String())
 	}
+	removeCleanupFinalizeBlocker := blockPlatformCollectionSavePayloadFragment(t, srv.cfg.Store, "operation_logs", `"description":"log cleanup completed"`)
+	finalizeCleanupRec := assertStatus(t, handler, http.MethodPost, "/api/admin/scheduled-tasks/"+cleanupTask.ID+"/run", nil, cookie, http.StatusInternalServerError)
+	removeCleanupFinalizeBlocker()
+	if !strings.Contains(finalizeCleanupRec.Body.String(), "persist scheduled task log failed") {
+		t.Fatalf("cleanup task final log persistence failure was not reported: %s", finalizeCleanupRec.Body.String())
+	}
+	finalizeAccessLogsRec := assertStatus(t, handler, http.MethodGet, "/api/admin/audit/access-logs", nil, cookie, http.StatusOK)
+	if !strings.Contains(finalizeAccessLogsRec.Body.String(), oldAccess.ID) {
+		t.Fatalf("cleanup task did not restore access log after final log failure: %s", finalizeAccessLogsRec.Body.String())
+	}
+	finalizeSQLLogsRec := assertStatus(t, handler, http.MethodGet, "/api/admin/audit/sql-logs", nil, cookie, http.StatusOK)
+	if !strings.Contains(finalizeSQLLogsRec.Body.String(), oldSQL.ID) {
+		t.Fatalf("cleanup task did not restore sql log after final log failure: %s", finalizeSQLLogsRec.Body.String())
+	}
+	if _, ok := srv.cfg.Store.GetSession(oldSession.ID); !ok {
+		t.Fatal("cleanup task did not restore expired connection session after final log failure")
+	}
+	if info, err := os.Stat(oldRecordingPath); err != nil || !info.IsDir() {
+		t.Fatalf("cleanup task did not restore expired recording directory after final log failure: info=%#v err=%v", info, err)
+	}
+	if data, err := os.ReadFile(filepath.Join(oldRecordingPath, "recording.guac")); err != nil || string(data) != "expired frames" {
+		t.Fatalf("cleanup task did not restore recording content after final log failure: data=%q err=%v", string(data), err)
+	}
 
 	cleanupRunRec := assertStatus(t, handler, http.MethodPost, "/api/admin/scheduled-tasks/"+cleanupTask.ID+"/run", nil, cookie, http.StatusAccepted)
 	if !strings.Contains(cleanupRunRec.Body.String(), "deleted_count") {

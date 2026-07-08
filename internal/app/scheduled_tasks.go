@@ -329,6 +329,11 @@ func (s *Server) executeLogCleanupScheduledTask(r *http.Request, task model.Plat
 		return model.PlatformItem{}, errors.New(detail)
 	}
 
+	cleanupSnapshot, err := s.logCleanupSnapshot()
+	if err != nil {
+		return logItem, err
+	}
+	defer cleanupSnapshot.cleanup()
 	result := "log cleanup completed"
 	metadata, runErr := s.cleanupHistoryLogs(task, logItem.ID)
 	if metadata == nil {
@@ -357,6 +362,10 @@ func (s *Server) executeLogCleanupScheduledTask(r *http.Request, task model.Plat
 	if logErr != nil {
 		detail := "persist scheduled task log failed: " + logErr.Error()
 		_ = s.audit(r, "scheduled_task.log.persist_failed", task.ID, "", detail)
+		if restoreErr := s.restoreLogCleanupSnapshot(cleanupSnapshot); restoreErr != nil {
+			detail += "; additionally failed to restore log cleanup mutations: " + restoreErr.Error()
+			_ = s.audit(r, "scheduled_task.restore_failed", task.ID, "", detail)
+		}
 		if runErr != nil {
 			return logItem, fmt.Errorf("%w; additionally %s", runErr, detail)
 		}
@@ -392,6 +401,146 @@ func (s *Server) executeLogCleanupScheduledTask(r *http.Request, task model.Plat
 		return logItem, runErr
 	}
 	return logItem, nil
+}
+
+type logCleanupMutationSnapshot struct {
+	PlatformItems []scheduledTaskCollectionSnapshot
+	Sessions      []model.ConnectionSession
+	Recordings    []recordingDirectorySnapshot
+}
+
+type recordingDirectorySnapshot struct {
+	Path       string
+	BackupDir  string
+	BackupPath string
+}
+
+func (s *Server) logCleanupSnapshot() (logCleanupMutationSnapshot, error) {
+	collections := []string{"login_logs", "operation_logs", "file_logs", "access_logs", "sql_logs", "exec_command_logs", "offline_sessions"}
+	platformItems, err := s.platformCollectionsSnapshot(collections)
+	if err != nil {
+		return logCleanupMutationSnapshot{}, err
+	}
+	_, _, sessions, _ := s.cfg.Store.Bootstrap()
+	offlineItems := []model.PlatformItem{}
+	for _, collectionSnapshot := range platformItems {
+		if collectionSnapshot.Collection == "offline_sessions" {
+			offlineItems = collectionSnapshot.Items
+			break
+		}
+	}
+	recordings, err := s.snapshotLogCleanupRecordings(sessions, offlineItems)
+	if err != nil {
+		for _, recording := range recordings {
+			recording.cleanup()
+		}
+		return logCleanupMutationSnapshot{}, err
+	}
+	return logCleanupMutationSnapshot{
+		PlatformItems: platformItems,
+		Sessions:      sessions,
+		Recordings:    recordings,
+	}, nil
+}
+
+func (s *Server) snapshotLogCleanupRecordings(sessions []model.ConnectionSession, offlineItems []model.PlatformItem) ([]recordingDirectorySnapshot, error) {
+	seen := map[string]bool{}
+	paths := []string{}
+	addPath := func(path string) {
+		path = strings.TrimSpace(path)
+		if path == "" || seen[path] {
+			return
+		}
+		seen[path] = true
+		paths = append(paths, path)
+	}
+	for _, session := range sessions {
+		addPath(session.RecordingPath)
+	}
+	for _, item := range offlineItems {
+		addPath(firstMetadataString(item.Metadata, "recording_path"))
+	}
+	result := []recordingDirectorySnapshot{}
+	for _, path := range paths {
+		snapshot, ok, err := s.snapshotRecordingDirectory(path)
+		if err != nil {
+			return result, err
+		}
+		if ok {
+			result = append(result, snapshot)
+		}
+	}
+	return result, nil
+}
+
+func (s *Server) snapshotRecordingDirectory(recordingPath string) (recordingDirectorySnapshot, bool, error) {
+	path, err := s.recordingDirectory(recordingPath)
+	if errors.Is(err, os.ErrNotExist) || errors.Is(err, errStorageSpecialFile) {
+		return recordingDirectorySnapshot{}, false, nil
+	}
+	if err != nil {
+		return recordingDirectorySnapshot{}, false, err
+	}
+	backupDir, err := os.MkdirTemp("", "openwebservermanager-recording-rollback-*")
+	if err != nil {
+		return recordingDirectorySnapshot{}, false, err
+	}
+	backupPath := filepath.Join(backupDir, "recording")
+	if err := copyDirectory(path, backupPath); err != nil {
+		_ = os.RemoveAll(backupDir)
+		return recordingDirectorySnapshot{}, false, err
+	}
+	return recordingDirectorySnapshot{Path: path, BackupDir: backupDir, BackupPath: backupPath}, true, nil
+}
+
+func (s *Server) restoreLogCleanupSnapshot(snapshot logCleanupMutationSnapshot) error {
+	for _, recording := range snapshot.Recordings {
+		if err := s.restoreRecordingDirectorySnapshot(recording); err != nil {
+			return err
+		}
+	}
+	for _, session := range snapshot.Sessions {
+		if _, err := s.cfg.Store.SaveSession(session); err != nil {
+			return err
+		}
+	}
+	for _, collectionSnapshot := range snapshot.PlatformItems {
+		for _, item := range collectionSnapshot.Items {
+			if _, err := s.cfg.Store.SavePlatformItem(collectionSnapshot.Collection, item); err != nil {
+				return err
+			}
+		}
+	}
+	return nil
+}
+
+func (s *Server) restoreRecordingDirectorySnapshot(snapshot recordingDirectorySnapshot) error {
+	if snapshot.Path == "" || snapshot.BackupPath == "" {
+		return nil
+	}
+	root := filepath.Join(s.cfg.DataDir, "recordings")
+	if err := ensureChildPath(root, snapshot.Path); err != nil {
+		return err
+	}
+	if err := os.RemoveAll(snapshot.Path); err != nil {
+		return err
+	}
+	if err := os.MkdirAll(filepath.Dir(snapshot.Path), 0o770); err != nil {
+		return err
+	}
+	return copyDirectory(snapshot.BackupPath, snapshot.Path)
+}
+
+func (snapshot logCleanupMutationSnapshot) cleanup() {
+	for _, recording := range snapshot.Recordings {
+		recording.cleanup()
+	}
+}
+
+func (snapshot recordingDirectorySnapshot) cleanup() {
+	if snapshot.BackupDir != "" {
+		_ = os.RemoveAll(snapshot.BackupDir)
+	}
 }
 
 func (s *Server) cleanupScheduledTaskArtifactsAfterLogFailure(task model.PlatformItem, metadata map[string]any) error {

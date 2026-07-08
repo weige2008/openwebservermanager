@@ -2917,6 +2917,37 @@ func (s *Store) GetSession(id string) (model.ConnectionSession, bool) {
 	return session, ok
 }
 
+func (s *Store) SaveSession(session model.ConnectionSession) (model.ConnectionSession, error) {
+	if strings.TrimSpace(session.ID) == "" {
+		return model.ConnectionSession{}, errors.New("session id is required")
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	previous, existed := s.state.Sessions[session.ID]
+	s.state.Sessions[session.ID] = session
+	if err := s.saveLocked(); err != nil {
+		if existed {
+			s.state.Sessions[session.ID] = previous
+		} else {
+			delete(s.state.Sessions, session.ID)
+		}
+		return model.ConnectionSession{}, err
+	}
+	if err := s.syncSessionPlatformItem(session); err != nil {
+		if existed {
+			s.state.Sessions[session.ID] = previous
+		} else {
+			delete(s.state.Sessions, session.ID)
+		}
+		if rollbackErr := s.saveLocked(); rollbackErr != nil {
+			return model.ConnectionSession{}, fmt.Errorf("%w; additionally failed to restore session state: %v", err, rollbackErr)
+		}
+		return model.ConnectionSession{}, err
+	}
+	return session, nil
+}
+
 func (s *Store) DeleteSession(id string) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()

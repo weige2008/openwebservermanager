@@ -6131,6 +6131,26 @@ func TestExternalOIDCLoginLogFailureRollsBackAutoCreatedUser(t *testing.T) {
 	if !coreAuditLogsContainAction(srv.cfg.Store, "auth.login.log.persist_failed") {
 		t.Fatal("oidc login log persistence failure was not written to core audit logs")
 	}
+
+	state, nonce, err = srv.auth.createExternalOIDCState("rollback-sso", "/app/access")
+	if err != nil {
+		t.Fatalf("create external oidc state for restore failure: %v", err)
+	}
+	stateNonce = nonce
+	removeBlocker = blockPlatformItemCreate(t, srv.cfg.Store, "login_logs")
+	removeRestoreBlocker := blockPlatformItemDeletePayloadFragment(t, srv.cfg.Store, "users", `"external_subject":"rollback-subject"`)
+	restoreFailureRec := assertStatus(t, handler, http.MethodGet, "/api/auth/oidc/callback?state="+url.QueryEscape(state)+"&code=rollback-code", nil, nil, http.StatusInternalServerError)
+	removeRestoreBlocker()
+	removeBlocker()
+	if !strings.Contains(restoreFailureRec.Body.String(), "failed to remove external user after login log failure") {
+		t.Fatalf("oidc external user restore failure was not reported: %s", restoreFailureRec.Body.String())
+	}
+	if len(restoreFailureRec.Result().Cookies()) > 0 {
+		t.Fatalf("oidc callback issued cookies after failed external user restore: %#v", restoreFailureRec.Result().Cookies())
+	}
+	if !coreAuditLogsContainAction(srv.cfg.Store, "auth.external_user.restore_failed") {
+		t.Fatal("oidc external user restore failure was not written to core audit logs")
+	}
 }
 
 func TestExternalOIDCCallbackAutoCreateDisabledIsAudited(t *testing.T) {
@@ -6875,6 +6895,24 @@ func TestExternalLDAPLoginLogFailureRollsBackAutoCreatedUser(t *testing.T) {
 	if !coreAuditLogsContainAction(srv.cfg.Store, "auth.login.log.persist_failed") {
 		t.Fatal("ldap login log persistence failure was not written to core audit logs")
 	}
+
+	removeBlocker = blockPlatformItemCreate(t, srv.cfg.Store, "login_logs")
+	removeRestoreBlocker := blockPlatformItemDeletePayloadFragment(t, srv.cfg.Store, "users", `"external_subject":"uid=ldap-rollback,ou=people,dc=example,dc=test"`)
+	restoreFailureRec := assertStatus(t, handler, http.MethodPost, "/api/auth/login", map[string]any{
+		"username": "ldap-rollback",
+		"password": "directory-password",
+	}, nil, http.StatusInternalServerError)
+	removeRestoreBlocker()
+	removeBlocker()
+	if !strings.Contains(restoreFailureRec.Body.String(), "failed to remove external user after login log failure") {
+		t.Fatalf("ldap external user restore failure was not reported: %s", restoreFailureRec.Body.String())
+	}
+	if cookies := restoreFailureRec.Result().Cookies(); len(cookies) != 0 {
+		t.Fatalf("ldap login issued cookies after failed external user restore: %#v", cookies)
+	}
+	if !coreAuditLogsContainAction(srv.cfg.Store, "auth.external_user.restore_failed") {
+		t.Fatal("ldap external user restore failure was not written to core audit logs")
+	}
 }
 
 func TestExternalLDAPLoginFailureRedactsSecrets(t *testing.T) {
@@ -7606,6 +7644,25 @@ func TestExternalWeComLoginLogFailureRollsBackAutoCreatedUser(t *testing.T) {
 	}
 	if !coreAuditLogsContainAction(srv.cfg.Store, "auth.login.log.persist_failed") {
 		t.Fatal("wecom login log persistence failure was not written to core audit logs")
+	}
+
+	state, err = srv.auth.createExternalWeComState("rollback-wecom", "/app/access")
+	if err != nil {
+		t.Fatalf("create external wecom state for restore failure: %v", err)
+	}
+	removeBlocker = blockPlatformItemCreate(t, srv.cfg.Store, "login_logs")
+	removeRestoreBlocker := blockPlatformItemDeletePayloadFragment(t, srv.cfg.Store, "users", `"external_subject":"wecom-rollback-user"`)
+	restoreFailureRec := assertStatus(t, handler, http.MethodGet, "/api/auth/wecom/callback?state="+url.QueryEscape(state)+"&code=rollback-code", nil, nil, http.StatusInternalServerError)
+	removeRestoreBlocker()
+	removeBlocker()
+	if !strings.Contains(restoreFailureRec.Body.String(), "failed to remove external user after login log failure") {
+		t.Fatalf("wecom external user restore failure was not reported: %s", restoreFailureRec.Body.String())
+	}
+	if len(restoreFailureRec.Result().Cookies()) > 0 {
+		t.Fatalf("wecom callback issued cookies after failed external user restore: %#v", restoreFailureRec.Result().Cookies())
+	}
+	if !coreAuditLogsContainAction(srv.cfg.Store, "auth.external_user.restore_failed") {
+		t.Fatal("wecom external user restore failure was not written to core audit logs")
 	}
 }
 
@@ -13216,6 +13273,33 @@ END`
 	if _, err := db.Exec(triggerSQL); err != nil {
 		_ = db.Close()
 		t.Fatalf("create platform item payload save blocker trigger: %v", err)
+	}
+	return func() {
+		_, _ = db.Exec(`DROP TRIGGER IF EXISTS ` + triggerName)
+		_ = db.Close()
+	}
+}
+
+func blockPlatformItemDeletePayloadFragment(t *testing.T, st *store.Store, collection, fragment string) func() {
+	t.Helper()
+	db, err := sql.Open("sqlite", st.DatabasePath())
+	if err != nil {
+		t.Fatalf("open store database for payload delete blocker: %v", err)
+	}
+	triggerName := "block_platform_item_delete_payload_fragment"
+	if _, err := db.Exec(`DROP TRIGGER IF EXISTS ` + triggerName); err != nil {
+		_ = db.Close()
+		t.Fatalf("drop stale payload delete blocker trigger: %v", err)
+	}
+	triggerSQL := `CREATE TRIGGER ` + triggerName + ` BEFORE DELETE ON platform_records
+WHEN OLD.collection = ` + sqliteTestStringLiteral(collection) + `
+  AND instr(OLD.payload, ` + sqliteTestStringLiteral(fragment) + `) > 0
+BEGIN
+  SELECT RAISE(ABORT, 'forced platform item payload delete failure');
+END`
+	if _, err := db.Exec(triggerSQL); err != nil {
+		_ = db.Close()
+		t.Fatalf("create platform item payload delete blocker trigger: %v", err)
 	}
 	return func() {
 		_, _ = db.Exec(`DROP TRIGGER IF EXISTS ` + triggerName)

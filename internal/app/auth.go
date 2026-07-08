@@ -750,7 +750,7 @@ func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
 		Metadata:    map[string]any{"client_ip": clientIP, "account": username},
 	}); err != nil {
 		if loginType == "ldap" {
-			s.restoreExternalUserAfterLoginLogFailure(admin.UserID, ldapPreviousUser, ldapHadPreviousUser)
+			err = s.restoreExternalUserAfterLoginLogFailure(r, admin.UserID, ldapPreviousUser, ldapHadPreviousUser, err)
 		}
 		writeError(w, http.StatusInternalServerError, err.Error())
 		return

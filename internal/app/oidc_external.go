@@ -184,7 +184,7 @@ func (s *Server) handleExternalOIDCCallback(w http.ResponseWriter, r *http.Reque
 		Description: "signed in with external oidc",
 		Metadata:    map[string]any{"client_ip": s.clientIP(r), "provider_id": provider.ID, "subject": subject},
 	}); err != nil {
-		s.restoreExternalUserAfterLoginLogFailure(user.UserID, previousUser, hadPreviousUser)
+		err = s.restoreExternalUserAfterLoginLogFailure(r, user.UserID, previousUser, hadPreviousUser, err)
 		writeError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
@@ -247,12 +247,21 @@ func (s *Server) externalUserSnapshot(providerType, providerID, subject string) 
 	return model.PlatformItem{}, false, nil
 }
 
-func (s *Server) restoreExternalUserAfterLoginLogFailure(userID string, previous model.PlatformItem, hadPrevious bool) {
+func (s *Server) restoreExternalUserAfterLoginLogFailure(r *http.Request, userID string, previous model.PlatformItem, hadPrevious bool, originalErr error) error {
 	if hadPrevious {
-		_, _ = s.cfg.Store.SavePlatformItem("users", previous)
-		return
+		if _, restoreErr := s.cfg.Store.SavePlatformItem("users", previous); restoreErr != nil {
+			detail := "failed to restore external user after login log failure: " + restoreErr.Error()
+			_ = s.audit(r, "auth.external_user.restore_failed", userID, "", detail)
+			return fmt.Errorf("%w; additionally %s", originalErr, detail)
+		}
+		return originalErr
 	}
-	_ = s.cfg.Store.DeletePlatformItem("users", userID)
+	if restoreErr := s.cfg.Store.DeletePlatformItem("users", userID); restoreErr != nil {
+		detail := "failed to remove external user after login log failure: " + restoreErr.Error()
+		_ = s.audit(r, "auth.external_user.restore_failed", userID, "", detail)
+		return fmt.Errorf("%w; additionally %s", originalErr, detail)
+	}
+	return originalErr
 }
 
 func sanitizedExternalProviderError(err error, secrets ...string) error {

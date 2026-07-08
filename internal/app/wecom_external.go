@@ -186,7 +186,7 @@ func (s *Server) handleExternalWeComCallback(w http.ResponseWriter, r *http.Requ
 		Description: "signed in with enterprise wechat",
 		Metadata:    map[string]any{"client_ip": s.clientIP(r), "provider_id": provider.ID, "subject": claims.Subject},
 	}); err != nil {
-		s.restoreExternalUserAfterLoginLogFailure(user.UserID, previousUser, hadPreviousUser)
+		err = s.restoreExternalUserAfterLoginLogFailure(r, user.UserID, previousUser, hadPreviousUser, err)
 		writeError(w, http.StatusInternalServerError, err.Error())
 		return
 	}

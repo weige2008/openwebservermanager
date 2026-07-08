@@ -171,7 +171,10 @@ func (s *Server) handleMFACompleteLogin(w http.ResponseWriter, r *http.Request) 
 		writeError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
-	_ = s.cfg.Store.RecordUserLogin(session.UserID, challenge.ClientIP, r.UserAgent())
+	if err := s.recordUserLoginState(r, authToken, session, challenge.ClientIP); err != nil {
+		writeError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
 	_ = s.audit(r, "auth.login", session.UserID, "", "signed in with MFA")
 	http.SetCookie(w, s.authCookie(r, authToken, int(authSessionTTL.Seconds())))
 	writeJSON(w, http.StatusOK, map[string]any{"user": s.authUserPayload(session), "recovery_codes": recoveryCodes})

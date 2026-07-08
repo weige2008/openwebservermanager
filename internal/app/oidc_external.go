@@ -193,7 +193,10 @@ func (s *Server) handleExternalOIDCCallback(w http.ResponseWriter, r *http.Reque
 		writeError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
-	_ = s.cfg.Store.RecordUserLogin(session.UserID, s.clientIP(r), r.UserAgent())
+	if err := s.recordUserLoginState(r, token, session, s.clientIP(r)); err != nil {
+		writeError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
 	_ = s.audit(r, "auth.oidc.login", session.UserID, "", "signed in with external oidc provider "+provider.ID)
 	http.SetCookie(w, s.authCookie(r, token, int(authSessionTTL.Seconds())))
 	http.Redirect(w, r, state.Next, http.StatusFound)

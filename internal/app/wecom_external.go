@@ -195,7 +195,10 @@ func (s *Server) handleExternalWeComCallback(w http.ResponseWriter, r *http.Requ
 		writeError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
-	_ = s.cfg.Store.RecordUserLogin(session.UserID, s.clientIP(r), r.UserAgent())
+	if err := s.recordUserLoginState(r, token, session, s.clientIP(r)); err != nil {
+		writeError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
 	_ = s.audit(r, "auth.wecom.login", session.UserID, "", "signed in with enterprise wechat provider "+provider.ID)
 	http.SetCookie(w, s.authCookie(r, token, int(authSessionTTL.Seconds())))
 	http.Redirect(w, r, state.Next, http.StatusFound)

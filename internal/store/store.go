@@ -448,8 +448,15 @@ func (s *Store) UpdateUserPassword(userID, password string) (AdminPublic, error)
 
 func (s *Store) RecordUserLogin(userID, clientIP, userAgent string) error {
 	item, ok, err := s.GetPlatformItem("users", userID)
-	if err != nil || !ok {
+	if err != nil {
 		return err
+	}
+	if !ok {
+		var legacyOK bool
+		item, legacyOK = s.legacyAdminPlatformItem(userID)
+		if !legacyOK {
+			return os.ErrNotExist
+		}
 	}
 	if item.Metadata == nil {
 		item.Metadata = map[string]any{}
@@ -471,8 +478,15 @@ func (s *Store) RecordUserLogin(userID, clientIP, userAgent string) error {
 
 func (s *Store) RecordUserLogout(userID string) error {
 	item, ok, err := s.GetPlatformItem("users", userID)
-	if err != nil || !ok {
+	if err != nil {
 		return err
+	}
+	if !ok {
+		var legacyOK bool
+		item, legacyOK = s.legacyAdminPlatformItem(userID)
+		if !legacyOK {
+			return os.ErrNotExist
+		}
 	}
 	if item.Metadata == nil {
 		item.Metadata = map[string]any{}
@@ -483,6 +497,29 @@ func (s *Store) RecordUserLogout(userID string) error {
 	item.Metadata["last_seen_at"] = now.Format(time.RFC3339Nano)
 	_, err = s.SavePlatformItem("users", item)
 	return err
+}
+
+func (s *Store) legacyAdminPlatformItem(userID string) (model.PlatformItem, bool) {
+	userID = strings.TrimSpace(userID)
+	if userID == "" {
+		return model.PlatformItem{}, false
+	}
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	if s.state.Admin == nil || s.state.Admin.UserID != userID {
+		return model.PlatformItem{}, false
+	}
+	admin := *s.state.Admin
+	return model.PlatformItem{
+		ID:          admin.UserID,
+		Name:        admin.Username,
+		Type:        "local",
+		Status:      "enabled",
+		Description: "首次初始化创建的管理员用户。",
+		Metadata:    map[string]any{"role": "超级管理员"},
+		CreatedAt:   admin.CreatedAt,
+		UpdatedAt:   admin.UpdatedAt,
+	}, true
 }
 
 func (a AdminAuth) Public() AdminPublic {

@@ -575,7 +575,13 @@ func (s *Server) handleSetup(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
-	_ = s.cfg.Store.RecordUserLogin(session.UserID, s.clientIP(r), r.UserAgent())
+	if err := s.recordUserLoginState(r, token, session, s.clientIP(r)); err != nil {
+		if rollbackErr := s.cfg.Store.RollbackSetupAdmin(admin.UserID); rollbackErr != nil {
+			_ = s.audit(r, "auth.setup.rollback_failed", admin.UserID, "", rollbackErr.Error())
+		}
+		writeError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
 	_ = s.audit(r, "auth.setup", session.UserID, "", "admin initialized")
 	http.SetCookie(w, s.authCookie(r, token, int(authSessionTTL.Seconds())))
 	writeJSON(w, http.StatusCreated, map[string]any{"user": s.authUserPayload(session)})
@@ -762,7 +768,10 @@ func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	_ = s.cfg.Store.RecordUserLogin(session.UserID, clientIP, r.UserAgent())
+	if err := s.recordUserLoginState(r, token, session, clientIP); err != nil {
+		writeError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
 	_ = s.audit(r, "auth.login", session.UserID, "", "signed in with "+loginType)
 	http.SetCookie(w, s.authCookie(r, token, int(authSessionTTL.Seconds())))
 	writeJSON(w, http.StatusOK, map[string]any{"user": s.authUserPayload(session)})
@@ -877,6 +886,16 @@ func (s *Server) createPasswordChangeOperationLog(r *http.Request, userID string
 			"client_ip": s.clientIP(r),
 		},
 	})
+}
+
+func (s *Server) recordUserLoginState(r *http.Request, token string, session authSession, clientIP string) error {
+	if err := s.cfg.Store.RecordUserLogin(session.UserID, clientIP, r.UserAgent()); err != nil {
+		s.auth.delete(token)
+		detail := "persist user login state failed: " + err.Error()
+		_ = s.audit(r, "auth.login.state.persist_failed", session.UserID, "", detail)
+		return errors.New(detail)
+	}
+	return nil
 }
 
 func (s *Server) authCookie(r *http.Request, value string, maxAge int) *http.Cookie {

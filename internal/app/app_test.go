@@ -148,6 +148,39 @@ func TestSetupLoginLogFailureRollsBackAdminInitialization(t *testing.T) {
 	}
 }
 
+func TestSetupLoginStatePersistenceFailureRollsBackAdminInitialization(t *testing.T) {
+	srv := newUnconfiguredTestServer(t, nil)
+	handler := http.Handler(srv)
+
+	removeBlocker := blockPlatformCollectionSavePayloadFragment(t, srv.cfg.Store, "users", `"online":true`)
+	failedRec := assertStatus(t, handler, http.MethodPost, "/api/auth/setup", map[string]any{"username": "admin", "password": "password123"}, nil, http.StatusInternalServerError)
+	removeBlocker()
+	if !strings.Contains(failedRec.Body.String(), "persist user login state failed") {
+		t.Fatalf("setup login state persistence failure was not reported: %s", failedRec.Body.String())
+	}
+	if cookies := failedRec.Result().Cookies(); len(cookies) != 0 {
+		t.Fatalf("setup issued cookies even though login state persistence failed: %#v", cookies)
+	}
+	if srv.cfg.Store.AdminConfigured() {
+		t.Fatal("admin remained configured after setup login state persistence failure")
+	}
+	users, err := srv.cfg.Store.ListPlatformItems("users")
+	if err != nil {
+		t.Fatalf("list users after setup login state failure: %v", err)
+	}
+	if len(users) != 0 {
+		t.Fatalf("setup login state failure left users behind: %#v", users)
+	}
+	if !coreAuditLogsContainAction(srv.cfg.Store, "auth.login.state.persist_failed") {
+		t.Fatal("setup login state persistence failure was not written to core audit logs")
+	}
+
+	retryRec := assertStatus(t, handler, http.MethodPost, "/api/auth/setup", map[string]any{"username": "admin", "password": "password123"}, nil, http.StatusCreated)
+	if len(retryRec.Result().Cookies()) == 0 {
+		t.Fatal("setup retry after login state failure did not set auth cookie")
+	}
+}
+
 func TestSetupUserCreateFailureRollsBackAdminInitialization(t *testing.T) {
 	srv := newUnconfiguredTestServer(t, nil)
 	handler := http.Handler(srv)
@@ -4904,6 +4937,99 @@ func TestLoginLogPersistenceFailureReturnsServerError(t *testing.T) {
 	}
 	if metadataIntDefault(afterSuccessFailure.Metadata["login_count"], 0) != metadataIntDefault(beforeSuccessFailure.Metadata["login_count"], 0) {
 		t.Fatalf("successful login updated login_count after login log failure: before=%#v after=%#v", beforeSuccessFailure.Metadata, afterSuccessFailure.Metadata)
+	}
+}
+
+func TestLoginStatePersistenceFailureReturnsServerError(t *testing.T) {
+	srv, adminCookie := newTestServer(t, nil)
+	handler := http.Handler(srv)
+
+	userRec := assertStatus(t, handler, http.MethodPost, "/api/admin/users", map[string]any{
+		"name":     "login-state-failure-user",
+		"type":     "local",
+		"status":   "enabled",
+		"password": "password123",
+		"metadata": map[string]any{"role": "user"},
+	}, adminCookie, http.StatusCreated)
+	var user model.PlatformItem
+	decodeResponse(t, userRec, &user)
+
+	beforeFailure, ok, err := srv.cfg.Store.GetPlatformItem("users", user.ID)
+	if err != nil || !ok {
+		t.Fatalf("load user before failed login: ok=%v err=%v", ok, err)
+	}
+	removeStateBlocker := blockPlatformItemSavePayloadFragment(t, srv.cfg.Store, "users", user.ID, `"login_count":1`)
+	loginRec := assertStatus(t, handler, http.MethodPost, "/api/auth/login", map[string]any{"username": user.Name, "password": "password123"}, nil, http.StatusInternalServerError)
+	removeStateBlocker()
+	if !strings.Contains(loginRec.Body.String(), "persist user login state failed") {
+		t.Fatalf("login state persistence failure was not reported: %s", loginRec.Body.String())
+	}
+	if cookies := loginRec.Result().Cookies(); len(cookies) != 0 {
+		t.Fatalf("login issued cookies even though login state persistence failed: %#v", cookies)
+	}
+	if srv.auth.hasUserSession(user.ID) {
+		t.Fatal("login state persistence failure left an in-memory user session")
+	}
+	afterFailure, ok, err := srv.cfg.Store.GetPlatformItem("users", user.ID)
+	if err != nil || !ok {
+		t.Fatalf("load user after failed login: ok=%v err=%v", ok, err)
+	}
+	for _, key := range []string{"online", "last_login_at", "last_login_ip", "last_seen_at", "last_user_agent"} {
+		if fmt.Sprint(afterFailure.Metadata[key]) != fmt.Sprint(beforeFailure.Metadata[key]) {
+			t.Fatalf("failed login updated %s after state persistence failure: before=%#v after=%#v", key, beforeFailure.Metadata, afterFailure.Metadata)
+		}
+	}
+	if metadataIntDefault(afterFailure.Metadata["login_count"], 0) != metadataIntDefault(beforeFailure.Metadata["login_count"], 0) {
+		t.Fatalf("failed login updated login_count after state persistence failure: before=%#v after=%#v", beforeFailure.Metadata, afterFailure.Metadata)
+	}
+	if !coreAuditLogsContainAction(srv.cfg.Store, "auth.login.state.persist_failed") {
+		t.Fatal("login state persistence failure was not written to core audit logs")
+	}
+}
+
+func TestRecordUserLoginAndLogoutMissingUserReturnNotExist(t *testing.T) {
+	srv, _ := newTestServer(t, nil)
+
+	if err := srv.cfg.Store.RecordUserLogin("missing-user", "", ""); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("RecordUserLogin missing user error = %v, want os.ErrNotExist", err)
+	}
+	if err := srv.cfg.Store.RecordUserLogout("missing-user"); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("RecordUserLogout missing user error = %v, want os.ErrNotExist", err)
+	}
+}
+
+func TestRecordUserLoginMigratesLegacyAdminPlatformUser(t *testing.T) {
+	srv, _ := newTestServer(t, nil)
+	admin, ok := srv.cfg.Store.AdminUser()
+	if !ok {
+		t.Fatal("test server missing legacy admin")
+	}
+	if err := srv.cfg.Store.DeletePlatformItem("users", admin.UserID); err != nil {
+		t.Fatalf("delete admin platform user: %v", err)
+	}
+
+	if err := srv.cfg.Store.RecordUserLogin(admin.UserID, "192.0.2.10", "legacy-admin-test"); err != nil {
+		t.Fatalf("RecordUserLogin legacy admin error: %v", err)
+	}
+	item, ok, err := srv.cfg.Store.GetPlatformItem("users", admin.UserID)
+	if err != nil || !ok {
+		t.Fatalf("load migrated legacy admin platform user: ok=%v err=%v", ok, err)
+	}
+	online, _ := item.Metadata["online"].(bool)
+	if item.Name != admin.Username || firstMetadataString(item.Metadata, "role") == "" || !online {
+		t.Fatalf("legacy admin platform user was not migrated with login state: %#v", item)
+	}
+
+	if err := srv.cfg.Store.RecordUserLogout(admin.UserID); err != nil {
+		t.Fatalf("RecordUserLogout migrated legacy admin error: %v", err)
+	}
+	item, ok, err = srv.cfg.Store.GetPlatformItem("users", admin.UserID)
+	if err != nil || !ok {
+		t.Fatalf("load migrated legacy admin after logout: ok=%v err=%v", ok, err)
+	}
+	online, _ = item.Metadata["online"].(bool)
+	if online {
+		t.Fatalf("legacy admin logout did not mark user offline: %#v", item.Metadata)
 	}
 }
 
@@ -13451,6 +13577,33 @@ END`
 	if _, err := db.Exec(triggerSQL); err != nil {
 		_ = db.Close()
 		t.Fatalf("create platform item payload save blocker trigger: %v", err)
+	}
+	return func() {
+		_, _ = db.Exec(`DROP TRIGGER IF EXISTS ` + triggerName)
+		_ = db.Close()
+	}
+}
+
+func blockPlatformCollectionSavePayloadFragment(t *testing.T, st *store.Store, collection, fragment string) func() {
+	t.Helper()
+	db, err := sql.Open("sqlite", st.DatabasePath())
+	if err != nil {
+		t.Fatalf("open store database for collection payload save blocker: %v", err)
+	}
+	triggerName := "block_platform_collection_save_payload_fragment"
+	if _, err := db.Exec(`DROP TRIGGER IF EXISTS ` + triggerName); err != nil {
+		_ = db.Close()
+		t.Fatalf("drop stale collection payload save blocker trigger: %v", err)
+	}
+	triggerSQL := `CREATE TRIGGER ` + triggerName + ` BEFORE INSERT ON platform_records
+WHEN NEW.collection = ` + sqliteTestStringLiteral(collection) + `
+  AND instr(NEW.payload, ` + sqliteTestStringLiteral(fragment) + `) > 0
+BEGIN
+  SELECT RAISE(ABORT, 'forced platform collection payload save failure');
+END`
+	if _, err := db.Exec(triggerSQL); err != nil {
+		_ = db.Close()
+		t.Fatalf("create platform collection payload save blocker trigger: %v", err)
 	}
 	return func() {
 		_, _ = db.Exec(`DROP TRIGGER IF EXISTS ` + triggerName)

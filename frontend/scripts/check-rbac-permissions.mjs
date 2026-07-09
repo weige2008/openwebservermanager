@@ -59,6 +59,17 @@ try {
     ['proxy services post allows save', true, canUseAPI('custom', ['POST /api/admin/proxy-services'], 'POST', '/api/admin/proxy-services')],
     ['certificate ACME permission does not imply DNS provider read', false, canUseAPI('custom', ['POST /api/admin/certificates/acme'], 'GET', '/api/admin/certificates/dns-providers')],
     ['certificate DNS provider read allows provider list', true, canUseAPI('custom', ['GET /api/admin/certificates/dns-providers'], 'GET', '/api/admin/certificates/dns-providers')],
+    ['certificate collection read does not allow certificate logs', false, canUseAPI('custom', ['GET /api/admin/certificates'], 'GET', '/api/admin/certificates/c1/logs')],
+    ['certificate wildcard read allows certificate logs', true, canUseAPI('custom', ['GET /api/admin/certificates/*'], 'GET', '/api/admin/certificates/c1/logs')],
+    ['certificate upload permission does not allow self signed create', false, canUseAPI('custom', ['POST /api/admin/certificates/upload'], 'POST', '/api/admin/certificates/self-signed')],
+    ['certificate wildcard write allows mTLS update', true, canUseAPI('custom', ['POST /api/admin/certificates/*'], 'POST', '/api/admin/certificates/c1/mtls')],
+    ['agent gateway read does not issue token', false, canUseAPI('custom', ['GET /api/admin/agent-gateways'], 'POST', '/api/admin/agent-gateways/g1/token')],
+    ['agent gateway token permission allows token issue', true, canUseAPI('custom', ['POST /api/admin/agent-gateways/*'], 'POST', '/api/admin/agent-gateways/g1/token')],
+    ['scheduled task read does not allow run', false, canUseAPI('custom', ['GET /api/admin/scheduled-tasks'], 'POST', '/api/admin/scheduled-tasks/t1/run')],
+    ['scheduled task wildcard read allows logs', true, canUseAPI('custom', ['GET /api/admin/scheduled-tasks/*'], 'GET', '/api/admin/scheduled-tasks/t1/logs')],
+    ['scheduled task wildcard write allows run', true, canUseAPI('custom', ['POST /api/admin/scheduled-tasks/*'], 'POST', '/api/admin/scheduled-tasks/t1/run')],
+    ['SQL work order wildcard write allows approve', true, canUseAPI('custom', ['POST /api/admin/sql-work-orders/*'], 'POST', '/api/admin/sql-work-orders/w1/approve')],
+    ['command approval wildcard write allows execute', true, canUseAPI('custom', ['POST /api/admin/command-approvals/*'], 'POST', '/api/admin/command-approvals/a1/execute')],
   ]
 
   const failed = cases.filter(([, expected, actual]) => actual !== expected)

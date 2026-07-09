@@ -1513,26 +1513,26 @@ function ResourceOperationDialog({
   canUsePath: CanUsePath
 }) {
   if (!operation) return null
-  if (operation.type === 'asset-import') return <AssetImportDialog onClose={() => onOpenChange(null)} />
-  if (operation.type === 'user-import') return <UserImportDialog onClose={() => onOpenChange(null)} />
-  if (operation.type === 'bulk-authorize') return <BulkAuthorizeDialog collection={operation.collection} items={operation.items} onClose={() => onOpenChange(null)} />
-  if (operation.type === 'agent-token') return <AgentGatewayTokenDialog item={operation.item} onClose={() => onOpenChange(null)} />
-  if (operation.type === 'certificate-create') return <CertificateCreateDialog onClose={() => onOpenChange(null)} />
-  if (operation.type === 'certificate-upload') return <CertificateUploadDialog onClose={() => onOpenChange(null)} />
+  if (operation.type === 'asset-import') return <AssetImportDialog onClose={() => onOpenChange(null)} canSubmit={canUsePath('POST', '/api/admin/assets/import')} />
+  if (operation.type === 'user-import') return <UserImportDialog onClose={() => onOpenChange(null)} canSubmit={canUsePath('POST', '/api/admin/users/import')} />
+  if (operation.type === 'bulk-authorize') return <BulkAuthorizeDialog collection={operation.collection} items={operation.items} onClose={() => onOpenChange(null)} canSubmit={canUsePath('POST', `/api/admin/authorizations/${authorizationBulkRoute(operation.collection)}/bulk`)} />
+  if (operation.type === 'agent-token') return <AgentGatewayTokenDialog item={operation.item} onClose={() => onOpenChange(null)} canIssueToken={canUsePath('POST', `/api/admin/agent-gateways/${operation.item.id}/token`)} />
+  if (operation.type === 'certificate-create') return <CertificateCreateDialog onClose={() => onOpenChange(null)} canSubmit={canUsePath('POST', '/api/admin/certificates/self-signed')} />
+  if (operation.type === 'certificate-upload') return <CertificateUploadDialog onClose={() => onOpenChange(null)} canUpload={canUsePath('POST', '/api/admin/certificates/upload')} />
   if (operation.type === 'certificate-acme') return <CertificateACMEDialog onClose={() => onOpenChange(null)} canUsePath={canUsePath} />
-  if (operation.type === 'certificate-dns-provider') return <CertificateDNSProviderDialog onClose={() => onOpenChange(null)} />
-  if (operation.type === 'certificate-logs') return <CertificateLogsDialog item={operation.item} onClose={() => onOpenChange(null)} />
-  if (operation.type === 'certificate-mtls') return <CertificateMTLSDialog item={operation.item} onClose={() => onOpenChange(null)} />
+  if (operation.type === 'certificate-dns-provider') return <CertificateDNSProviderDialog onClose={() => onOpenChange(null)} canSave={canUsePath('POST', '/api/admin/certificates/dns-providers')} />
+  if (operation.type === 'certificate-logs') return <CertificateLogsDialog item={operation.item} onClose={() => onOpenChange(null)} canRead={canUsePath('GET', `/api/admin/certificates/${operation.item.id}/logs`)} />
+  if (operation.type === 'certificate-mtls') return <CertificateMTLSDialog item={operation.item} onClose={() => onOpenChange(null)} canSave={canUsePath('POST', `/api/admin/certificates/${operation.item.id}/mtls`)} />
   if (operation.type === 'storage-files') return <StorageFilesDialog item={operation.item} onClose={() => onOpenChange(null)} canUsePath={canUsePath} />
-  if (operation.type === 'task-logs') return <TaskLogsDialog item={operation.item} onClose={() => onOpenChange(null)} />
-  if (operation.type === 'sql-decision') return <SQLWorkOrderDecisionDialog item={operation.item} decision={operation.decision} onClose={() => onOpenChange(null)} />
-  if (operation.type === 'sql-execute') return <SQLExecuteDialog item={operation.item} onClose={() => onOpenChange(null)} requestAccessMFACode={requestAccessMFACode} />
-  if (operation.type === 'command-decision') return <CommandApprovalDecisionDialog item={operation.item} decision={operation.decision} onClose={() => onOpenChange(null)} />
-  if (operation.type === 'command-execute') return <CommandApprovalExecuteDialog item={operation.item} onClose={() => onOpenChange(null)} requestAccessMFACode={requestAccessMFACode} />
+  if (operation.type === 'task-logs') return <TaskLogsDialog item={operation.item} onClose={() => onOpenChange(null)} canRead={canUsePath('GET', `/api/admin/scheduled-tasks/${operation.item.id}/logs`)} />
+  if (operation.type === 'sql-decision') return <SQLWorkOrderDecisionDialog item={operation.item} decision={operation.decision} onClose={() => onOpenChange(null)} canSubmit={canUsePath('POST', `/api/admin/sql-work-orders/${operation.item.id}/${operation.decision}`)} />
+  if (operation.type === 'sql-execute') return <SQLExecuteDialog item={operation.item} onClose={() => onOpenChange(null)} requestAccessMFACode={requestAccessMFACode} canExecute={canUsePath('POST', `/api/admin/sql-work-orders/${operation.item.id}/execute`)} />
+  if (operation.type === 'command-decision') return <CommandApprovalDecisionDialog item={operation.item} decision={operation.decision} onClose={() => onOpenChange(null)} canSubmit={canUsePath('POST', `/api/admin/command-approvals/${operation.item.id}/${operation.decision}`)} />
+  if (operation.type === 'command-execute') return <CommandApprovalExecuteDialog item={operation.item} onClose={() => onOpenChange(null)} requestAccessMFACode={requestAccessMFACode} canExecute={canUsePath('POST', `/api/admin/command-approvals/${operation.item.id}/execute`)} />
   return null
 }
 
-function AssetImportDialog({ onClose }: { onClose: () => void }) {
+function AssetImportDialog({ onClose, canSubmit }: { onClose: () => void; canSubmit: boolean }) {
   const app = useApp()
   const [format, setFormat] = useState<'json' | 'csv'>('json')
   const [content, setContent] = useState(assetImportJSONSample)
@@ -1547,6 +1547,10 @@ function AssetImportDialog({ onClose }: { onClose: () => void }) {
   }
 
   const submit = async () => {
+    if (!canSubmit) {
+      app.showToast(app.t('permissionDenied', 'Permission denied'))
+      return
+    }
     setSaving(true)
     setSummary(null)
     try {
@@ -1598,7 +1602,7 @@ function AssetImportDialog({ onClose }: { onClose: () => void }) {
         {summary ? <ImportSummaryPanel summary={summary} /> : null}
         <div className='flex justify-end gap-2'>
           <Button variant='outline' onClick={onClose}>{summary ? '关闭' : '取消'}</Button>
-          <Button variant='primary' onClick={() => void submit()} disabled={saving}>
+          <Button variant='primary' onClick={() => void submit()} disabled={saving || !canSubmit}>
             <Upload className='size-4' />
             {saving ? '导入中' : summary ? '重新导入' : '导入'}
           </Button>
@@ -1608,7 +1612,7 @@ function AssetImportDialog({ onClose }: { onClose: () => void }) {
   )
 }
 
-function UserImportDialog({ onClose }: { onClose: () => void }) {
+function UserImportDialog({ onClose, canSubmit }: { onClose: () => void; canSubmit: boolean }) {
   const app = useApp()
   const [format, setFormat] = useState<'json' | 'csv'>('json')
   const [content, setContent] = useState(userImportJSONSample)
@@ -1623,6 +1627,10 @@ function UserImportDialog({ onClose }: { onClose: () => void }) {
   }
 
   const submit = async () => {
+    if (!canSubmit) {
+      app.showToast(app.t('permissionDenied', 'Permission denied'))
+      return
+    }
     setSaving(true)
     setSummary(null)
     try {
@@ -1672,7 +1680,7 @@ function UserImportDialog({ onClose }: { onClose: () => void }) {
         {summary ? <ImportSummaryPanel summary={summary} /> : null}
         <div className='flex justify-end gap-2'>
           <Button variant='outline' onClick={onClose}>{summary ? '关闭' : '取消'}</Button>
-          <Button variant='primary' onClick={() => void submit()} disabled={saving}>
+          <Button variant='primary' onClick={() => void submit()} disabled={saving || !canSubmit}>
             <Upload className='size-4' />
             {saving ? '导入中' : summary ? '重新导入' : '导入'}
           </Button>
@@ -1713,7 +1721,7 @@ function ImportSummaryPanel({ summary }: { summary: ImportSummary }) {
   )
 }
 
-function BulkAuthorizeDialog({ collection, items, onClose }: { collection: string; items: PlatformItem[]; onClose: () => void }) {
+function BulkAuthorizeDialog({ collection, items, onClose, canSubmit }: { collection: string; items: PlatformItem[]; onClose: () => void; canSubmit: boolean }) {
   const app = useApp()
   const [subjectIDs, setSubjectIDs] = useState('')
   const [targetIDs, setTargetIDs] = useState(items.map((item) => item.id).join('\n'))
@@ -1726,6 +1734,10 @@ function BulkAuthorizeDialog({ collection, items, onClose }: { collection: strin
   const targetHelp = authorizationTargetHelp(collection)
 
   const submit = async () => {
+    if (!canSubmit) {
+      app.showToast(app.t('permissionDenied', 'Permission denied'))
+      return
+    }
     setSaving(true)
     try {
       const data = await apiRequest<{ summary?: Record<string, number> }>(`/api/admin/authorizations/${route}/bulk`, {
@@ -1788,7 +1800,7 @@ function BulkAuthorizeDialog({ collection, items, onClose }: { collection: strin
         ) : null}
         <div className='flex justify-end gap-2'>
           <Button variant='outline' onClick={onClose}>关闭</Button>
-          <Button variant='primary' onClick={() => void submit()} disabled={saving || !splitLines(subjectIDs).length || !splitLines(targetIDs).length}>
+          <Button variant='primary' onClick={() => void submit()} disabled={saving || !canSubmit || !splitLines(subjectIDs).length || !splitLines(targetIDs).length}>
             <Save className='size-4' />
             {saving ? '授权中' : '生成授权'}
           </Button>
@@ -1827,7 +1839,7 @@ function appendUniqueLine(current: string, value: string) {
   return [...lines, value.trim()].join('\n')
 }
 
-function AgentGatewayTokenDialog({ item, onClose }: { item: PlatformItem; onClose: () => void }) {
+function AgentGatewayTokenDialog({ item, onClose, canIssueToken }: { item: PlatformItem; onClose: () => void; canIssueToken: boolean }) {
   const app = useApp()
   const [loading, setLoading] = useState(true)
   const [token, setToken] = useState('')
@@ -1835,6 +1847,11 @@ function AgentGatewayTokenDialog({ item, onClose }: { item: PlatformItem; onClos
   const [error, setError] = useState('')
 
   useEffect(() => {
+    if (!canIssueToken) {
+      setLoading(false)
+      setError(app.t('permissionDenied', 'Permission denied'))
+      return
+    }
     let alive = true
     const issue = async () => {
       setLoading(true)
@@ -1861,7 +1878,7 @@ function AgentGatewayTokenDialog({ item, onClose }: { item: PlatformItem; onClos
     return () => {
       alive = false
     }
-  }, [app, item.id])
+  }, [app, canIssueToken, item.id])
 
   const server = window.location.origin
   const registerPayload = JSON.stringify({ registration_token: token, hostname: 'gateway-01', version: '1.0.0' }, null, 2)
@@ -1922,7 +1939,7 @@ function AgentGatewayTokenDialog({ item, onClose }: { item: PlatformItem; onClos
   )
 }
 
-function CertificateCreateDialog({ onClose }: { onClose: () => void }) {
+function CertificateCreateDialog({ onClose, canSubmit }: { onClose: () => void; canSubmit: boolean }) {
   const app = useApp()
   const [name, setName] = useState('')
   const [domain, setDomain] = useState('')
@@ -1932,6 +1949,10 @@ function CertificateCreateDialog({ onClose }: { onClose: () => void }) {
   const [saving, setSaving] = useState(false)
 
   const submit = async () => {
+    if (!canSubmit) {
+      app.showToast(app.t('permissionDenied', 'Permission denied'))
+      return
+    }
     setSaving(true)
     try {
       await apiRequest('/api/admin/certificates/self-signed', {
@@ -1966,7 +1987,7 @@ function CertificateCreateDialog({ onClose }: { onClose: () => void }) {
         </div>
         <div className='flex justify-end gap-2'>
           <Button variant='outline' onClick={onClose}>取消</Button>
-          <Button variant='primary' onClick={() => void submit()} disabled={saving || !domain.trim()}>
+          <Button variant='primary' onClick={() => void submit()} disabled={saving || !canSubmit || !domain.trim()}>
             <Save className='size-4' />
             {saving ? '生成中' : '生成'}
           </Button>
@@ -1976,7 +1997,7 @@ function CertificateCreateDialog({ onClose }: { onClose: () => void }) {
   )
 }
 
-function CertificateUploadDialog({ onClose }: { onClose: () => void }) {
+function CertificateUploadDialog({ onClose, canUpload }: { onClose: () => void; canUpload: boolean }) {
   const app = useApp()
   const [name, setName] = useState('')
   const [certificateFile, setCertificateFile] = useState<File | null>(null)
@@ -1985,6 +2006,10 @@ function CertificateUploadDialog({ onClose }: { onClose: () => void }) {
   const [saving, setSaving] = useState(false)
 
   const submit = async () => {
+    if (!canUpload) {
+      app.showToast(app.t('permissionDenied', 'Permission denied'))
+      return
+    }
     if (!certificateFile) return
     setSaving(true)
     try {
@@ -2023,7 +2048,7 @@ function CertificateUploadDialog({ onClose }: { onClose: () => void }) {
         </div>
         <div className='flex justify-end gap-2'>
           <Button variant='outline' onClick={onClose}>取消</Button>
-          <Button variant='primary' onClick={() => void submit()} disabled={saving || !certificateFile}>
+          <Button variant='primary' onClick={() => void submit()} disabled={saving || !canUpload || !certificateFile}>
             <Upload className='size-4' />
             {saving ? '上传中' : '上传'}
           </Button>
@@ -2162,7 +2187,7 @@ function CertificateACMEDialog({ onClose, canUsePath }: { onClose: () => void; c
   )
 }
 
-function CertificateDNSProviderDialog({ onClose }: { onClose: () => void }) {
+function CertificateDNSProviderDialog({ onClose, canSave }: { onClose: () => void; canSave: boolean }) {
   const app = useApp()
   const [name, setName] = useState('')
   const [provider, setProvider] = useState('cloudflare')
@@ -2171,6 +2196,10 @@ function CertificateDNSProviderDialog({ onClose }: { onClose: () => void }) {
   const [saving, setSaving] = useState(false)
 
   const submit = async () => {
+    if (!canSave) {
+      app.showToast(app.t('permissionDenied', 'Permission denied'))
+      return
+    }
     setSaving(true)
     try {
       await apiRequest('/api/admin/certificates/dns-providers', {
@@ -2198,7 +2227,7 @@ function CertificateDNSProviderDialog({ onClose }: { onClose: () => void }) {
         </div>
         <div className='flex justify-end gap-2'>
           <Button variant='outline' onClick={onClose}>取消</Button>
-          <Button variant='primary' onClick={() => void submit()} disabled={saving || !provider.trim()}>
+          <Button variant='primary' onClick={() => void submit()} disabled={saving || !canSave || !provider.trim()}>
             <Save className='size-4' />
             {saving ? '保存中' : '保存'}
           </Button>
@@ -2208,13 +2237,17 @@ function CertificateDNSProviderDialog({ onClose }: { onClose: () => void }) {
   )
 }
 
-function CertificateMTLSDialog({ item, onClose }: { item: PlatformItem; onClose: () => void }) {
+function CertificateMTLSDialog({ item, onClose, canSave }: { item: PlatformItem; onClose: () => void; canSave: boolean }) {
   const app = useApp()
   const [enabled, setEnabled] = useState(metadataBool(item.metadata?.mtls_enabled))
   const [clientCA, setClientCA] = useState('')
   const [saving, setSaving] = useState(false)
 
   const submit = async () => {
+    if (!canSave) {
+      app.showToast(app.t('permissionDenied', 'Permission denied'))
+      return
+    }
     setSaving(true)
     try {
       await apiRequest(`/api/admin/certificates/${item.id}/mtls`, {
@@ -2238,7 +2271,7 @@ function CertificateMTLSDialog({ item, onClose }: { item: PlatformItem; onClose:
         <Field label='Client CA PEM'><Textarea className='min-h-44 font-mono text-xs' value={clientCA} onChange={(event) => setClientCA(event.currentTarget.value)} placeholder='-----BEGIN CERTIFICATE-----' /></Field>
         <div className='flex justify-end gap-2'>
           <Button variant='outline' onClick={onClose}>取消</Button>
-          <Button variant='primary' onClick={() => void submit()} disabled={saving}>
+          <Button variant='primary' onClick={() => void submit()} disabled={saving || !canSave}>
             <Save className='size-4' />
             {saving ? '保存中' : '保存'}
           </Button>
@@ -2248,11 +2281,15 @@ function CertificateMTLSDialog({ item, onClose }: { item: PlatformItem; onClose:
   )
 }
 
-function CertificateLogsDialog({ item, onClose }: { item: PlatformItem; onClose: () => void }) {
+function CertificateLogsDialog({ item, onClose, canRead }: { item: PlatformItem; onClose: () => void; canRead: boolean }) {
   const app = useApp()
   const [logs, setLogs] = useState<PlatformItem[]>([])
 
   const load = async () => {
+    if (!canRead) {
+      setLogs([])
+      return
+    }
     try {
       const data = await apiRequest<{ items: PlatformItem[] }>(`/api/admin/certificates/${item.id}/logs`)
       setLogs(data.items || [])
@@ -2263,15 +2300,17 @@ function CertificateLogsDialog({ item, onClose }: { item: PlatformItem; onClose:
 
   useEffect(() => {
     void load()
-  }, [item.id])
+  }, [canRead, item.id])
 
   return (
     <DialogShell open onOpenChange={(open) => !open && onClose()} title={`${item.name} 证书日志`} description='查看该证书的申请、签发、下载、默认切换和 mTLS 操作日志。'>
       <div className='grid gap-3'>
         <div className='flex justify-end'>
-          <Button variant='outline' onClick={() => void load()}><RefreshCw className='size-4' />刷新</Button>
+          <Button variant='outline' onClick={() => void load()} disabled={!canRead}><RefreshCw className='size-4' />刷新</Button>
         </div>
-        {logs.length ? logs.map((log) => (
+        {!canRead ? (
+          <div className='rounded-xl border border-dashed border-border p-6 text-sm text-muted-foreground'>{app.t('permissionDenied', 'Permission denied')}</div>
+        ) : logs.length ? logs.map((log) => (
           <article key={log.id} className='rounded-xl border border-border bg-background/60 p-3 text-sm'>
             <div className='flex items-center justify-between gap-3'>
               <strong>{log.name}</strong>
@@ -2634,11 +2673,15 @@ function StorageFilesDialog({ item, onClose, canUsePath }: { item: PlatformItem;
   )
 }
 
-function TaskLogsDialog({ item, onClose }: { item: PlatformItem; onClose: () => void }) {
+function TaskLogsDialog({ item, onClose, canRead }: { item: PlatformItem; onClose: () => void; canRead: boolean }) {
   const app = useApp()
   const [logs, setLogs] = useState<PlatformItem[]>([])
 
   const load = async () => {
+    if (!canRead) {
+      setLogs([])
+      return
+    }
     try {
       const data = await apiRequest<{ items: PlatformItem[] }>(`/api/admin/scheduled-tasks/${item.id}/logs`)
       setLogs(data.items || [])
@@ -2649,15 +2692,17 @@ function TaskLogsDialog({ item, onClose }: { item: PlatformItem; onClose: () => 
 
   useEffect(() => {
     void load()
-  }, [item.id])
+  }, [canRead, item.id])
 
   return (
     <DialogShell open onOpenChange={(open) => !open && onClose()} title={`${item.name} 运行日志`} description='查看该定时任务的手动和自动运行记录。'>
       <div className='grid gap-3'>
         <div className='flex justify-end'>
-          <Button variant='outline' onClick={() => void load()}><RefreshCw className='size-4' />刷新</Button>
+          <Button variant='outline' onClick={() => void load()} disabled={!canRead}><RefreshCw className='size-4' />刷新</Button>
         </div>
-        {logs.length ? logs.map((log) => (
+        {!canRead ? (
+          <div className='rounded-xl border border-dashed border-border p-6 text-sm text-muted-foreground'>{app.t('permissionDenied', 'Permission denied')}</div>
+        ) : logs.length ? logs.map((log) => (
           <article key={log.id} className='rounded-xl border border-border bg-background/60 p-3 text-sm'>
             <div className='flex items-center justify-between gap-3'>
               <strong>{log.name}</strong>
@@ -2754,10 +2799,12 @@ function SQLWorkOrderDecisionDialog({
   item,
   decision,
   onClose,
+  canSubmit,
 }: {
   item: PlatformItem
   decision: 'approve' | 'reject'
   onClose: () => void
+  canSubmit: boolean
 }) {
   const app = useApp()
   const [note, setNote] = useState('')
@@ -2765,6 +2812,10 @@ function SQLWorkOrderDecisionDialog({
   const approving = decision === 'approve'
 
   const submit = async () => {
+    if (!canSubmit) {
+      app.showToast(app.t('permissionDenied', 'Permission denied'))
+      return
+    }
     setSaving(true)
     try {
       await apiRequest(`/api/admin/sql-work-orders/${item.id}/${approving ? 'approve' : 'reject'}`, {
@@ -2808,7 +2859,7 @@ function SQLWorkOrderDecisionDialog({
         </Field>
         <div className='flex justify-end gap-2'>
           <Button variant='outline' onClick={onClose}>取消</Button>
-          <Button variant={approving ? 'primary' : 'destructive'} onClick={() => void submit()} disabled={saving}>
+          <Button variant={approving ? 'primary' : 'destructive'} onClick={() => void submit()} disabled={saving || !canSubmit}>
             {saving ? '提交中' : approving ? '批准' : '拒绝'}
           </Button>
         </div>
@@ -2868,10 +2919,12 @@ function CommandApprovalDecisionDialog({
   item,
   decision,
   onClose,
+  canSubmit,
 }: {
   item: PlatformItem
   decision: 'approve' | 'reject'
   onClose: () => void
+  canSubmit: boolean
 }) {
   const app = useApp()
   const [note, setNote] = useState('')
@@ -2879,6 +2932,10 @@ function CommandApprovalDecisionDialog({
   const approving = decision === 'approve'
 
   const submit = async () => {
+    if (!canSubmit) {
+      app.showToast(app.t('permissionDenied', 'Permission denied'))
+      return
+    }
     setSaving(true)
     try {
       await apiRequest(`/api/admin/command-approvals/${item.id}/${approving ? 'approve' : 'reject'}`, {
@@ -2922,7 +2979,7 @@ function CommandApprovalDecisionDialog({
         </Field>
         <div className='flex justify-end gap-2'>
           <Button variant='outline' onClick={onClose}>取消</Button>
-          <Button variant={approving ? 'primary' : 'destructive'} onClick={() => void submit()} disabled={saving}>
+          <Button variant={approving ? 'primary' : 'destructive'} onClick={() => void submit()} disabled={saving || !canSubmit}>
             {saving ? '提交中' : approving ? '批准' : '拒绝'}
           </Button>
         </div>
@@ -2981,10 +3038,12 @@ function CommandApprovalExecuteDialog({
   item,
   onClose,
   requestAccessMFACode,
+  canExecute,
 }: {
   item: PlatformItem
   onClose: () => void
   requestAccessMFACode: RequestAccessMFACode
+  canExecute: boolean
 }) {
   const app = useApp()
   const [timeoutSeconds, setTimeoutSeconds] = useState('30')
@@ -2992,6 +3051,10 @@ function CommandApprovalExecuteDialog({
   const [running, setRunning] = useState(false)
 
   const execute = async () => {
+    if (!canExecute) {
+      app.showToast(app.t('permissionDenied', 'Permission denied'))
+      return
+    }
     setRunning(true)
     try {
       const run = (mfaCode = '') => apiRequest<Record<string, unknown>>(`/api/admin/command-approvals/${item.id}/execute`, {
@@ -3030,7 +3093,7 @@ function CommandApprovalExecuteDialog({
         {result ? <CommandApprovalResultPanel result={result} /> : null}
         <div className='flex justify-end gap-2'>
           <Button variant='outline' onClick={onClose}>关闭</Button>
-          <Button variant='primary' onClick={() => void execute()} disabled={running}>
+          <Button variant='primary' onClick={() => void execute()} disabled={running || !canExecute}>
             <Play className='size-4' />
             {running ? '执行中' : '执行'}
           </Button>
@@ -3063,6 +3126,7 @@ function SQLExecuteDialog({
   item,
   onClose,
   requestAccessMFACode,
+  canExecute = true,
   endpoint,
   workOrderEndpoint,
   initialSQL,
@@ -3073,6 +3137,7 @@ function SQLExecuteDialog({
   item: PlatformItem
   onClose: () => void
   requestAccessMFACode: RequestAccessMFACode
+  canExecute?: boolean
   endpoint?: string
   workOrderEndpoint?: string
   initialSQL?: string
@@ -3088,6 +3153,10 @@ function SQLExecuteDialog({
   const [submittingWorkOrder, setSubmittingWorkOrder] = useState(false)
 
   const execute = async () => {
+    if (!canExecute) {
+      app.showToast(app.t('permissionDenied', 'Permission denied'))
+      return
+    }
     setRunning(true)
     try {
       const executeSQL = (mfaCode = '') => apiRequest<PlatformItem>(endpoint || `/api/admin/sql-work-orders/${item.id}/execute`, {
@@ -3157,7 +3226,7 @@ function SQLExecuteDialog({
               {submittingWorkOrder ? '提交中' : '提交工单'}
             </Button>
           ) : null}
-          <Button variant='primary' onClick={() => void execute()} disabled={running || !sql.trim()}>
+          <Button variant='primary' onClick={() => void execute()} disabled={running || !canExecute || !sql.trim()}>
             <Play className='size-4' />
             {running ? '执行中' : '执行'}
           </Button>

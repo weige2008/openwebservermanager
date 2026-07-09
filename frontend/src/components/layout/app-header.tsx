@@ -4,8 +4,8 @@ import { AnimatePresence, motion, type Variants } from 'motion/react'
 import { useEffect, useState } from 'react'
 
 import { useApp } from '@/app/app-provider'
-import { platformLabel, platformPageByRoute } from '@/lib/platform'
-import { isAdminRole } from '@/lib/rbac'
+import { platformLabel, platformNavGroups, platformPageByRoute } from '@/lib/platform'
+import { canViewPlatformPage, isAdminRole } from '@/lib/rbac'
 import { cn } from '@/lib/utils'
 
 import { Badge } from '../ui/badge'
@@ -69,6 +69,8 @@ export function AppHeader({ sidebarOpen, onToggleSidebar }: { sidebarOpen: boole
   const productName = app.t('productNameShort')
   const [mobileOpen, setMobileOpen] = useState(false)
   const admin = isAdminRole(app.auth?.role)
+  const assetsPage = platformPageByRoute('/app/assets')
+  const canOpenAssets = assetsPage ? canViewPlatformPage(app.auth?.role, assetsPage, app.auth?.menu_permissions) : admin
 
   const handleSidebarButton = () => {
     if (window.matchMedia('(min-width: 768px)').matches) {
@@ -99,7 +101,7 @@ export function AppHeader({ sidebarOpen, onToggleSidebar }: { sidebarOpen: boole
           </div>
           <div className='ms-auto flex min-w-0 items-center gap-1 sm:gap-2'>
             <div className='hidden lg:flex'>
-              {admin ? (
+              {canOpenAssets ? (
                 <Link to={'/app/assets' as never} className={buttonVariants({ variant: 'ghost', size: 'sm' })}>
                   {app.t('assets')}
                 </Link>
@@ -144,8 +146,12 @@ function MobileNavDrawer({
 }) {
   const app = useApp()
   const pathname = useRouterState({ select: (state) => state.location.pathname })
-  const admin = isAdminRole(app.auth?.role)
+  const role = app.auth?.role
+  const admin = isAdminRole(role)
   const visibleConsoleNav = consoleNavItems.filter((item) => item.to !== '/app/servers' || admin)
+  const visiblePlatformGroups = platformNavGroups
+    .map((group) => ({ ...group, items: group.items.filter((item) => canViewPlatformPage(role, item, app.auth?.menu_permissions)) }))
+    .filter((group) => group.items.length > 0)
 
   const close = () => onOpenChange(false)
 
@@ -219,6 +225,41 @@ function MobileNavDrawer({
                 )
               })}
             </motion.nav>
+            {visiblePlatformGroups.map((group) => {
+              const GroupIcon = group.icon
+              return (
+                <div key={group.labelEn} className='mt-4'>
+                  <div className='flex h-8 items-center gap-2 px-3 text-xs font-medium text-muted-foreground'>
+                    <GroupIcon className='size-3.5 shrink-0' />
+                    <span className='truncate'>{platformLabel(group, app.locale)}</span>
+                  </div>
+                  <motion.nav className='grid gap-1 px-2' variants={{ hidden: { opacity: 0 }, visible: { opacity: 1 } }}>
+                    {group.items.map((item) => {
+                      const Icon = item.icon
+                      const active = pathname.startsWith(item.route)
+                      const label = platformLabel(item, app.locale)
+                      return (
+                        <motion.div key={item.route} variants={mobileDrawerAnimation.menuItem as Variants}>
+                          <Link
+                            to={item.route as never}
+                            onClick={close}
+                            className={cn(
+                              'flex h-10 items-center gap-2 rounded-md px-2 text-sm font-medium text-muted-foreground transition-colors hover:bg-sidebar-accent hover:text-sidebar-accent-foreground',
+                              active && 'bg-sidebar-accent text-sidebar-accent-foreground shadow-sm'
+                            )}
+                          >
+                            <span className='grid size-7 place-items-center rounded-md bg-background/70'>
+                              <Icon className='size-4' />
+                            </span>
+                            <span className='truncate'>{label}</span>
+                          </Link>
+                        </motion.div>
+                      )
+                    })}
+                  </motion.nav>
+                </div>
+              )
+            })}
             <div className='mt-4 grid gap-2 px-3'>
               <Button variant='outline' className='justify-start' onClick={() => void app.refresh().then(close)}>
                 <RefreshCw className='size-4' />

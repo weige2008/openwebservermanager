@@ -6,7 +6,8 @@ import { useTranslation } from 'react-i18next'
 import { useApp } from '@/app/app-provider'
 import { DialogShell } from '@/components/ui/dialog'
 import { Input } from '@/components/ui/field'
-import { isAdminRole, isAuditorRole } from '@/lib/rbac'
+import { platformDescription, platformLabel, platformPages } from '@/lib/platform'
+import { canViewPlatformPage, isAdminRole, isAuditorRole } from '@/lib/rbac'
 import { cn, serverProtocol } from '@/lib/utils'
 
 import { Button } from '../ui/button'
@@ -46,10 +47,18 @@ export function CommandSearch() {
     () => {
       const admin = isAdminRole(app.auth?.role)
       const auditor = isAuditorRole(app.auth?.role)
+      const visiblePlatformPages = platformPages.filter((page) => canViewPlatformPage(app.auth?.role, page, app.auth?.menu_permissions))
       const commands: CommandItem[] = [
         { id: 'overview', label: t('overview'), description: t('commandSearch.overviewDescription'), icon: Activity, run: () => navigate({ to: '/app' }) },
         { id: 'access', label: t('accessPortal'), description: t('commandSearch.serversDescription'), icon: MonitorUp, run: () => navigate({ to: '/access' }) },
       ]
+      commands.push(...visiblePlatformPages.map((page) => ({
+        id: `platform:${page.route}`,
+        label: platformLabel(page, app.locale),
+        description: platformDescription(page, app.locale),
+        icon: page.icon,
+        run: () => navigate({ to: page.route as never }),
+      })))
       if (admin) {
         commands.push(
           { id: 'servers', label: t('assets'), description: t('commandSearch.serversDescription'), icon: Server, run: () => navigate({ to: '/app/servers' }) },

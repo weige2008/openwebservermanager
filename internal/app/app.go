@@ -632,7 +632,7 @@ func (s *Server) handleClose(w http.ResponseWriter, r *http.Request) {
 			writeError(w, http.StatusInternalServerError, err.Error())
 			return
 		}
-		closed, err := s.closePlatformOnlineSession(id, "closed by user")
+		closed, err := s.closePlatformOnlineSession(r, id, "closed by user")
 		if err != nil {
 			writeError(w, http.StatusInternalServerError, err.Error())
 			return
@@ -669,7 +669,7 @@ func (s *Server) handleClose(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, session)
 }
 
-func (s *Server) closePlatformOnlineSession(id, reason string) (model.PlatformItem, error) {
+func (s *Server) closePlatformOnlineSession(r *http.Request, id, reason string) (model.PlatformItem, error) {
 	item, ok, err := s.cfg.Store.GetPlatformItem("online_sessions", id)
 	if err != nil {
 		return model.PlatformItem{}, err
@@ -677,12 +677,12 @@ func (s *Server) closePlatformOnlineSession(id, reason string) (model.PlatformIt
 	if !ok {
 		return model.PlatformItem{}, os.ErrNotExist
 	}
+	previousOnline := item
+	previousOnline.Metadata = cloneMetadata(item.Metadata)
 	now := time.Now().UTC()
 	item.Status = string(model.SessionClosed)
 	item.Description = strings.TrimSpace(reason)
-	if item.Metadata == nil {
-		item.Metadata = map[string]any{}
-	}
+	item.Metadata = cloneMetadata(item.Metadata)
 	item.Metadata["ended_at"] = now
 	if reason != "" {
 		item.Metadata["close_reason"] = reason
@@ -691,9 +691,25 @@ func (s *Server) closePlatformOnlineSession(id, reason string) (model.PlatformIt
 		item.Metadata["recording_size"] = size
 	}
 	if err := s.cfg.Store.DeletePlatformItem("online_sessions", id); err != nil && !errors.Is(err, os.ErrNotExist) {
-		return model.PlatformItem{}, err
+		return model.PlatformItem{}, s.platformSessionCloseStateError(r, id, item.Protocol, "delete platform online session failed", err)
 	}
-	return s.cfg.Store.SavePlatformItem("offline_sessions", item)
+	saved, err := s.cfg.Store.SavePlatformItem("offline_sessions", item)
+	if err != nil {
+		stateErr := s.platformSessionCloseStateError(r, id, item.Protocol, "persist platform offline session failed", err)
+		if _, restoreErr := s.cfg.Store.SavePlatformItem("online_sessions", previousOnline); restoreErr != nil {
+			detail := "restore platform online session failed after offline persistence failure: " + restoreErr.Error()
+			_ = s.audit(r, "connection.close.restore_failed", id, item.Protocol, detail)
+			return model.PlatformItem{}, fmt.Errorf("%w; additionally %s", stateErr, detail)
+		}
+		return model.PlatformItem{}, stateErr
+	}
+	return saved, nil
+}
+
+func (s *Server) platformSessionCloseStateError(r *http.Request, id string, protocol model.Protocol, message string, err error) error {
+	detail := message + ": " + err.Error()
+	_ = s.audit(r, "connection.close.state.persist_failed", id, protocol, detail)
+	return errors.New(detail)
 }
 
 func (s *Server) refreshSessionRecordingSize(id string) error {

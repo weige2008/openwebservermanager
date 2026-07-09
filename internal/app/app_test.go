@@ -13165,6 +13165,31 @@ func TestPlatformOnlineSessionCloseEndpoint(t *testing.T) {
 		t.Fatal("platform close operation log failure was not audited")
 	}
 
+	removeOfflineSaveBlocker := blockPlatformItemSave(t, srv.cfg.Store, "offline_sessions", online.ID)
+	stateFailureRec := assertStatus(t, handler, http.MethodPost, "/api/connections/"+online.ID+"/close", nil, userCookie, http.StatusInternalServerError)
+	removeOfflineSaveBlocker()
+	if !strings.Contains(stateFailureRec.Body.String(), "persist platform offline session failed") {
+		t.Fatalf("platform close offline persistence failure was not reported: %s", stateFailureRec.Body.String())
+	}
+	if !coreAuditLogsContainAction(srv.cfg.Store, "connection.close.state.persist_failed") {
+		t.Fatal("platform close state persistence failure was not audited")
+	}
+	restoredOnline, ok, err := srv.cfg.Store.GetPlatformItem("online_sessions", online.ID)
+	if err != nil || !ok {
+		t.Fatalf("platform close did not restore online session after offline persistence failure: ok=%v err=%v", ok, err)
+	}
+	if restoredOnline.Status != online.Status || restoredOnline.Description != online.Description || firstMetadataString(restoredOnline.Metadata, "close_reason") != "" {
+		t.Fatalf("restored platform online session was polluted by failed close: %#v", restoredOnline)
+	}
+	onlineAfterStateFailureRec := assertStatus(t, handler, http.MethodGet, "/api/admin/audit/online-sessions", nil, adminCookie, http.StatusOK)
+	if !strings.Contains(onlineAfterStateFailureRec.Body.String(), online.ID) {
+		t.Fatalf("failed platform close removed session from online index: %s", onlineAfterStateFailureRec.Body.String())
+	}
+	offlineAfterStateFailureRec := assertStatus(t, handler, http.MethodGet, "/api/admin/audit/offline-sessions", nil, adminCookie, http.StatusOK)
+	if strings.Contains(offlineAfterStateFailureRec.Body.String(), online.ID) {
+		t.Fatalf("failed platform close leaked session into offline index: %s", offlineAfterStateFailureRec.Body.String())
+	}
+
 	closeRec := assertStatus(t, handler, http.MethodPost, "/api/connections/"+online.ID+"/close", nil, userCookie, http.StatusOK)
 	var closed model.PlatformItem
 	decodeResponse(t, closeRec, &closed)

@@ -4244,7 +4244,7 @@ func (s *Server) handleAuditSessionDisconnect(w http.ResponseWriter, r *http.Req
 		writeError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
-	offline, err := s.closePlatformOnlineSession(id, "closed by auditor")
+	offline, err := s.closePlatformOnlineSession(r, id, "closed by auditor")
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, err.Error())
 		return

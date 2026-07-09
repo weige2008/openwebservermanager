@@ -4028,6 +4028,21 @@ export function PlatformSettingsPage({ config }: { config: PlatformPageConfig })
   const [saving, setSaving] = useState(false)
   const [testing, setTesting] = useState(false)
   const [testingLLM, setTestingLLM] = useState(false)
+  const role = app.auth?.role
+  const apiPermissions = app.auth?.api_permissions || []
+  const canUsePath: CanUsePath = (method, path) => canUseAPI(role, apiPermissions, method, path)
+  const canReadProxyServices = canUsePath('GET', '/api/admin/proxy-services')
+  const canSaveProxyServicesConfig = canUsePath('POST', '/api/admin/proxy-services')
+  const canCreateSystemSettings = canUsePath('POST', '/api/admin/system-settings')
+  const canSaveSystemSetting = (id?: string) => id ? canUsePath('PATCH', `/api/admin/system-settings/${id}`) : canCreateSystemSettings
+  const canSaveBrandingSettings = canSaveSystemSetting(brandingSetting?.id)
+  const canSaveAccessSettings = canSaveSystemSetting(accessSetting?.id)
+  const canSaveIntegrationSettings = canSaveSystemSetting(integration?.id)
+  const canTestSMTPSettings = canUsePath('POST', '/api/admin/system-settings/smtp/test')
+  const canTestLLMSettings = canUsePath('POST', '/api/admin/system-settings/llm/test')
+  const canRunSMTPTest = canTestSMTPSettings && (canSaveIntegrationSettings || Boolean(integration?.id))
+  const canRunLLMTest = canTestLLMSettings && (canSaveIntegrationSettings || Boolean(integration?.id))
+  const showPermissionDenied = () => app.showToast(app.t('permissionDenied', 'Permission denied'))
 
   useEffect(() => {
     setBrandingForm(brandingFormFromItem(brandingSetting, app.publicConfig))
@@ -4046,6 +4061,10 @@ export function PlatformSettingsPage({ config }: { config: PlatformPageConfig })
   }, [proxySetting?.id, proxySetting?.updated_at])
 
   useEffect(() => {
+    if (!canReadProxyServices) {
+      setProxyStatus({})
+      return
+    }
     let alive = true
     const load = async () => {
       try {
@@ -4061,7 +4080,7 @@ export function PlatformSettingsPage({ config }: { config: PlatformPageConfig })
     return () => {
       alive = false
     }
-  }, [])
+  }, [canReadProxyServices])
 
   const patchAccessForm = (next: Partial<DesktopAccessForm>) => setAccessForm((current) => ({ ...current, ...next }))
   const patchBrandingForm = (next: Partial<BrandingForm>) => setBrandingForm((current) => ({ ...current, ...next }))
@@ -4069,6 +4088,10 @@ export function PlatformSettingsPage({ config }: { config: PlatformPageConfig })
   const patchProxyForm = (next: Partial<ProxyServicesForm>) => setProxyForm((current) => ({ ...current, ...next }))
 
   const saveBrandingSettings = async () => {
+    if (!canSaveBrandingSettings) {
+      showPermissionDenied()
+      return
+    }
     setSavingBranding(true)
     try {
       await apiRequest<PlatformItem>(brandingSetting?.id ? `/api/admin/system-settings/${brandingSetting.id}` : '/api/admin/system-settings', {
@@ -4091,6 +4114,10 @@ export function PlatformSettingsPage({ config }: { config: PlatformPageConfig })
   }
 
   const saveAccessSettings = async () => {
+    if (!canSaveAccessSettings) {
+      showPermissionDenied()
+      return
+    }
     setSavingAccess(true)
     try {
       await apiRequest<PlatformItem>(accessSetting?.id ? `/api/admin/system-settings/${accessSetting.id}` : '/api/admin/system-settings', {
@@ -4113,6 +4140,10 @@ export function PlatformSettingsPage({ config }: { config: PlatformPageConfig })
   }
 
   const saveIntegration = async (silent = false) => {
+    if (!canSaveIntegrationSettings) {
+      if (!silent) showPermissionDenied()
+      return null
+    }
     setSaving(true)
     try {
       const saved = await apiRequest<PlatformItem>(integration?.id ? `/api/admin/system-settings/${integration.id}` : '/api/admin/system-settings', {
@@ -4149,9 +4180,13 @@ export function PlatformSettingsPage({ config }: { config: PlatformPageConfig })
   }
 
   const testSMTP = async () => {
+    if (!canTestSMTPSettings) {
+      showPermissionDenied()
+      return
+    }
     setTesting(true)
     try {
-      const saved = await saveIntegration(true)
+      const saved = canSaveIntegrationSettings ? await saveIntegration(true) : integration
       if (!saved) return
       const result = await apiRequest<{ message?: string }>('/api/admin/system-settings/smtp/test', {
         method: 'POST',
@@ -4171,9 +4206,13 @@ export function PlatformSettingsPage({ config }: { config: PlatformPageConfig })
   }
 
   const testLLM = async () => {
+    if (!canTestLLMSettings) {
+      showPermissionDenied()
+      return
+    }
     setTestingLLM(true)
     try {
-      const saved = await saveIntegration(true)
+      const saved = canSaveIntegrationSettings ? await saveIntegration(true) : integration
       if (!saved) return
       const result = await apiRequest<{ message?: string; response?: string }>('/api/admin/system-settings/llm/test', {
         method: 'POST',
@@ -4192,6 +4231,10 @@ export function PlatformSettingsPage({ config }: { config: PlatformPageConfig })
   }
 
   const saveProxyServices = async () => {
+    if (!canSaveProxyServicesConfig) {
+      showPermissionDenied()
+      return
+    }
     setSavingProxy(true)
     try {
       const result = await apiRequest<{ status?: ProxyServicesStatus; settings?: PlatformItem }>('/api/admin/proxy-services', {
@@ -4273,12 +4316,14 @@ export function PlatformSettingsPage({ config }: { config: PlatformPageConfig })
                   </Field>
                 </div>
               </div>
-              <div className='flex justify-end'>
-                <Button variant='outline' onClick={() => void saveBrandingSettings()} disabled={savingBranding || !brandingForm.siteName.trim()}>
-                  <Save className='size-4' />
-                  {savingBranding ? app.t('saving', 'Saving') : app.t('save', 'Save')}
-                </Button>
-              </div>
+              {canSaveBrandingSettings ? (
+                <div className='flex justify-end'>
+                  <Button variant='outline' onClick={() => void saveBrandingSettings()} disabled={savingBranding || !brandingForm.siteName.trim()}>
+                    <Save className='size-4' />
+                    {savingBranding ? app.t('saving', 'Saving') : app.t('save', 'Save')}
+                  </Button>
+                </div>
+              ) : null}
             </section>
 
             <section className='grid gap-4 rounded-xl border border-border bg-background/60 p-4'>
@@ -4337,14 +4382,17 @@ export function PlatformSettingsPage({ config }: { config: PlatformPageConfig })
                 <CheckboxRow checked={accessForm.watermarkEnabled} onChange={(watermarkEnabled) => patchAccessForm({ watermarkEnabled })} label={app.t('workspaceWatermark', 'Workspace watermark')} />
                 <CheckboxRow checked={accessForm.accessMfaEnabled} onChange={(accessMfaEnabled) => patchAccessForm({ accessMfaEnabled })} label={app.t('accessMFA', 'Require MFA before asset access')} />
               </div>
-              <div className='flex justify-end'>
-                <Button variant='outline' onClick={() => void saveAccessSettings()} disabled={savingAccess}>
-                  <Save className='size-4' />
-                  {savingAccess ? app.t('saving', 'Saving') : app.t('save', 'Save')}
-                </Button>
-              </div>
+              {canSaveAccessSettings ? (
+                <div className='flex justify-end'>
+                  <Button variant='outline' onClick={() => void saveAccessSettings()} disabled={savingAccess}>
+                    <Save className='size-4' />
+                    {savingAccess ? app.t('saving', 'Saving') : app.t('save', 'Save')}
+                  </Button>
+                </div>
+              ) : null}
             </section>
 
+            {(canReadProxyServices || canSaveProxyServicesConfig) ? (
             <section className='grid gap-4 rounded-xl border border-border bg-background/60 p-4'>
               <div className='flex flex-wrap items-start justify-between gap-3'>
                 <div>
@@ -4421,13 +4469,16 @@ export function PlatformSettingsPage({ config }: { config: PlatformPageConfig })
                   label={app.t('clearProxyPrivateKey', 'Clear saved proxy private key on save')}
                 />
               ) : null}
-              <div className='flex justify-end'>
-                <Button variant='outline' onClick={() => void saveProxyServices()} disabled={savingProxy}>
-                  <Save className='size-4' />
-                  {savingProxy ? app.t('saving', 'Saving') : app.t('save', 'Save')}
-                </Button>
-              </div>
+              {canSaveProxyServicesConfig ? (
+                <div className='flex justify-end'>
+                  <Button variant='outline' onClick={() => void saveProxyServices()} disabled={savingProxy}>
+                    <Save className='size-4' />
+                    {savingProxy ? app.t('saving', 'Saving') : app.t('save', 'Save')}
+                  </Button>
+                </div>
+              ) : null}
             </section>
+            ) : null}
 
             <section className='grid gap-4 rounded-xl border border-border bg-background/60 p-4'>
               <div className='flex flex-wrap items-start justify-between gap-3'>
@@ -4489,14 +4540,18 @@ export function PlatformSettingsPage({ config }: { config: PlatformPageConfig })
                 ) : null}
               </div>
               <div className='flex flex-wrap justify-end gap-2'>
-                <Button variant='outline' onClick={() => void saveIntegration()} disabled={saving || testing || !form.host.trim() || !form.from.trim()}>
-                  <Save className='size-4' />
-                  {saving ? app.t('saving', 'Saving') : app.t('save', 'Save')}
-                </Button>
-                <Button variant='primary' onClick={() => void testSMTP()} disabled={saving || testing || !form.host.trim() || !form.from.trim()}>
-                  <Play className='size-4' />
-                  {testing ? app.t('testing', 'Testing') : app.t('sendTestEmail', 'Send test')}
-                </Button>
+                {canSaveIntegrationSettings ? (
+                  <Button variant='outline' onClick={() => void saveIntegration()} disabled={saving || testing || !form.host.trim() || !form.from.trim()}>
+                    <Save className='size-4' />
+                    {saving ? app.t('saving', 'Saving') : app.t('save', 'Save')}
+                  </Button>
+                ) : null}
+                {canRunSMTPTest ? (
+                  <Button variant='primary' onClick={() => void testSMTP()} disabled={saving || testing || !form.host.trim() || !form.from.trim()}>
+                    <Play className='size-4' />
+                    {testing ? app.t('testing', 'Testing') : app.t('sendTestEmail', 'Send test')}
+                  </Button>
+                ) : null}
               </div>
             </section>
 
@@ -4532,14 +4587,18 @@ export function PlatformSettingsPage({ config }: { config: PlatformPageConfig })
                 ) : null}
               </div>
               <div className='flex flex-wrap justify-end gap-2'>
-                <Button variant='outline' onClick={() => void saveIntegration()} disabled={saving || testing || testingLLM}>
-                  <Save className='size-4' />
-                  {saving ? app.t('saving', 'Saving') : app.t('save', 'Save')}
-                </Button>
-                <Button variant='primary' onClick={() => void testLLM()} disabled={saving || testing || testingLLM || !form.llmBaseUrl.trim() || !form.llmModel.trim()}>
-                  <Play className='size-4' />
-                  {testingLLM ? app.t('testing', 'Testing') : app.t('testLLM', 'Test LLM')}
-                </Button>
+                {canSaveIntegrationSettings ? (
+                  <Button variant='outline' onClick={() => void saveIntegration()} disabled={saving || testing || testingLLM}>
+                    <Save className='size-4' />
+                    {saving ? app.t('saving', 'Saving') : app.t('save', 'Save')}
+                  </Button>
+                ) : null}
+                {canRunLLMTest ? (
+                  <Button variant='primary' onClick={() => void testLLM()} disabled={saving || testing || testingLLM || !form.llmBaseUrl.trim() || !form.llmModel.trim()}>
+                    <Play className='size-4' />
+                    {testingLLM ? app.t('testing', 'Testing') : app.t('testLLM', 'Test LLM')}
+                  </Button>
+                ) : null}
               </div>
             </section>
 

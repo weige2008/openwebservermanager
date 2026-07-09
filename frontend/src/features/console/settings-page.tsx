@@ -19,7 +19,7 @@ import {
   type PasskeyCreationPublicKeyOptions,
   type PasskeyOptionsResponse,
 } from '@/lib/passkeys'
-import { isAdminRole } from '@/lib/rbac'
+import { canUseAPI } from '@/lib/rbac'
 import { formatDate } from '@/lib/utils'
 import type { Locale, PlatformItem, Theme, ThemeContentLayout, ThemeFont, ThemePreset, ThemeRadius, ThemeScale, ThemeSidebarStyle } from '@/types'
 
@@ -203,7 +203,23 @@ export function SettingsPage() {
   const activeSessions = app.data.sessions.filter((session) => session.status === 'active').length
   const username = app.auth?.username || 'admin'
   const initials = username.slice(0, 2).toUpperCase()
-  const admin = isAdminRole(app.auth?.role)
+  const role = app.auth?.role
+  const apiPermissions = app.auth?.api_permissions || []
+  const canUsePath = (method: string, path: string) => canUseAPI(role, apiPermissions, method, path)
+  const canReadSystemSettings = canUsePath('GET', '/api/admin/system-settings')
+  const canCreateSystemSettings = canUsePath('POST', '/api/admin/system-settings')
+  const canSaveSystemSetting = (id?: string) => id ? canUsePath('PATCH', `/api/admin/system-settings/${id}`) : canCreateSystemSettings
+  const canTestOIDCSettings = canUsePath('POST', '/api/admin/system-settings/oidc/test')
+  const canTestLDAPSettings = canUsePath('POST', '/api/admin/system-settings/ldap/test')
+  const canTestWeComSettings = canUsePath('POST', '/api/admin/system-settings/wecom/test')
+  const canReadLoginPolicies = canUsePath('GET', '/api/admin/login-policies')
+  const canCreateLoginPolicy = canUsePath('POST', '/api/admin/login-policies')
+  const canPatchLoginPolicy = (id: string) => canUsePath('PATCH', `/api/admin/login-policies/${id}`)
+  const canDeleteLoginPolicy = (id: string) => canUsePath('DELETE', `/api/admin/login-policies/${id}`)
+  const canReadLoginLocks = canUsePath('GET', '/api/admin/login-locked')
+  const canDeleteLoginLock = (id: string) => canUsePath('DELETE', `/api/admin/login-locked/${id}`)
+  const canReadLicense = canUsePath('GET', '/api/admin/license')
+  const canSaveLicense = canUsePath('PUT', '/api/admin/license')
   const [mfaStatus, setMFAStatus] = useState<MFAStatus | null>(null)
   const [mfaSetup, setMFASetup] = useState<MFASetup | null>(null)
   const [mfaCode, setMFACode] = useState('')
@@ -242,6 +258,7 @@ export function SettingsPage() {
   const [licenseInfo, setLicenseInfo] = useState<LocalLicenseInfo | null>(null)
   const [licenseForm, setLicenseForm] = useState<LocalLicenseFormState>(() => defaultLocalLicenseForm())
   const [licenseBusy, setLicenseBusy] = useState(false)
+  const showPermissionDenied = () => app.showToast(t('permissionDenied', { defaultValue: 'Permission denied' }))
 
   const loadMFAStatus = async () => {
     setMFAStatus(await apiRequest<MFAStatus>('/api/auth/mfa/status'))
@@ -279,13 +296,19 @@ export function SettingsPage() {
   useEffect(() => {
     void loadMFAStatus().catch(() => undefined)
     void loadPasskeys().catch(() => undefined)
-    if (admin) {
+    if (canReadSystemSettings) {
       void loadLoginSecurity().catch(() => undefined)
+    }
+    if (canReadLoginPolicies) {
       void loadLoginPolicies().catch(() => undefined)
+    }
+    if (canReadLoginLocks) {
       void loadLoginLocks().catch(() => undefined)
+    }
+    if (canReadLicense) {
       void loadLocalLicense().catch(() => undefined)
     }
-  }, [admin])
+  }, [canReadSystemSettings, canReadLoginPolicies, canReadLoginLocks, canReadLicense])
 
   useEffect(() => {
     setLoginSecurity((current) => ({
@@ -446,6 +469,10 @@ export function SettingsPage() {
   }
 
   const updateLoginSecurity = async (next: Partial<LoginSecurityState>) => {
+    if (!canReadSystemSettings) {
+      showPermissionDenied()
+      return
+    }
     setLoginSecurityBusy(true)
     try {
       const merged = {
@@ -458,6 +485,10 @@ export function SettingsPage() {
       const result = await apiRequest<{ items: PlatformItem[] }>('/api/admin/system-settings')
       const current = loginSecurityFromSettings(result.items, app.captchaRequired, app.passwordLoginDisabled)
       const target = current.setting
+      if (!canSaveSystemSetting(target?.id)) {
+        showPermissionDenied()
+        return
+      }
       const metadata = {
         ...(target?.metadata ?? {}),
         captcha_enabled: merged.captchaEnabled,
@@ -497,6 +528,10 @@ export function SettingsPage() {
   }
 
   const createLoginPolicy = async () => {
+    if (!canCreateLoginPolicy) {
+      showPermissionDenied()
+      return
+    }
     const cidr = loginPolicyForm.cidr.trim()
     if (!cidr) {
       app.showToast(t('settingsPage.loginPolicyCidrRequired', { defaultValue: 'IP or CIDR is required.' }))
@@ -533,6 +568,10 @@ export function SettingsPage() {
   }
 
   const toggleLoginPolicy = async (policy: PlatformItem) => {
+    if (!canPatchLoginPolicy(policy.id)) {
+      showPermissionDenied()
+      return
+    }
     setLoginPolicyBusy(true)
     try {
       await apiRequest<PlatformItem>(`/api/admin/login-policies/${policy.id}`, {
@@ -562,6 +601,10 @@ export function SettingsPage() {
   }
 
   const deleteLoginPolicy = async (policy: PlatformItem) => {
+    if (!canDeleteLoginPolicy(policy.id)) {
+      showPermissionDenied()
+      return
+    }
     setLoginPolicyBusy(true)
     try {
       await apiRequest(`/api/admin/login-policies/${policy.id}`, { method: 'DELETE' })
@@ -575,6 +618,10 @@ export function SettingsPage() {
   }
 
   const unlockLoginLock = async (lock: PlatformItem) => {
+    if (!canDeleteLoginLock(lock.id)) {
+      showPermissionDenied()
+      return
+    }
     setLoginLockBusy(true)
     try {
       await apiRequest(`/api/admin/login-locked/${lock.id}`, { method: 'DELETE' })
@@ -592,6 +639,10 @@ export function SettingsPage() {
   const patchWeCom = (next: Partial<WeComSettingsState>) => setWeComSettings((current) => ({ ...current, ...next }))
 
   const saveOIDCSettings = async () => {
+    if (!canSaveSystemSetting(oidcSettings.setting?.id)) {
+      showPermissionDenied()
+      return
+    }
     setOIDCBusy(true)
     try {
       const target = oidcSettings.setting
@@ -647,6 +698,10 @@ export function SettingsPage() {
   }
 
   const testOIDCSettings = async () => {
+    if (!canTestOIDCSettings) {
+      showPermissionDenied()
+      return
+    }
     setOIDCTestBusy(true)
     try {
       await apiRequest('/api/admin/system-settings/oidc/test', {
@@ -662,6 +717,10 @@ export function SettingsPage() {
   }
 
   const saveLDAPSettings = async () => {
+    if (!canSaveSystemSetting(ldapSettings.setting?.id)) {
+      showPermissionDenied()
+      return
+    }
     setLDAPBusy(true)
     try {
       const target = ldapSettings.setting
@@ -717,6 +776,10 @@ export function SettingsPage() {
   }
 
   const testLDAPSettings = async () => {
+    if (!canTestLDAPSettings) {
+      showPermissionDenied()
+      return
+    }
     setLDAPTestBusy(true)
     try {
       await apiRequest('/api/admin/system-settings/ldap/test', {
@@ -737,6 +800,10 @@ export function SettingsPage() {
   }
 
   const saveWeComSettings = async () => {
+    if (!canSaveSystemSetting(wecomSettings.setting?.id)) {
+      showPermissionDenied()
+      return
+    }
     setWeComBusy(true)
     try {
       const target = wecomSettings.setting
@@ -787,6 +854,10 @@ export function SettingsPage() {
   }
 
   const testWeComSettings = async () => {
+    if (!canTestWeComSettings) {
+      showPermissionDenied()
+      return
+    }
     setWeComTestBusy(true)
     try {
       await apiRequest('/api/admin/system-settings/wecom/test', {
@@ -804,6 +875,10 @@ export function SettingsPage() {
   const patchLicenseForm = (next: Partial<LocalLicenseFormState>) => setLicenseForm((current) => ({ ...current, ...next }))
 
   const saveLocalLicense = async () => {
+    if (!canSaveLicense) {
+      showPermissionDenied()
+      return
+    }
     setLicenseBusy(true)
     try {
       const result = await apiRequest<LocalLicenseInfo>('/api/admin/license', {
@@ -827,6 +902,12 @@ export function SettingsPage() {
       setLicenseBusy(false)
     }
   }
+
+  const canSaveLoginSecurity = canSaveSystemSetting(loginSecurity.setting?.id)
+  const canSaveOIDCSettings = canSaveSystemSetting(oidcSettings.setting?.id)
+  const canSaveLDAPSettings = canSaveSystemSetting(ldapSettings.setting?.id)
+  const canSaveWeComSettings = canSaveSystemSetting(wecomSettings.setting?.id)
+  const canShowLoginAccessSection = canReadSystemSettings || canReadLoginPolicies || canReadLoginLocks || canReadLicense
 
   return (
     <CardStaggerContainer className='grid gap-4'>
@@ -936,7 +1017,7 @@ export function SettingsPage() {
         </div>
       </CardStaggerItem>
 
-      {admin ? (
+      {canReadSystemSettings ? (
       <CardStaggerItem className='grid gap-4 rounded-xl border border-border bg-card p-5 shadow-sm lg:grid-cols-[0.85fr_1.15fr]'>
         <div className='flex min-w-0 items-start gap-3'>
           <span className='grid size-12 shrink-0 place-items-center rounded-full bg-primary text-primary-foreground'>
@@ -1029,20 +1110,24 @@ export function SettingsPage() {
               <p className='mt-1 text-xs leading-5 text-muted-foreground'>{t('settingsPage.oidcTestDescription', { defaultValue: 'Validate the saved authorization endpoint, client ID, redirect URI, and scopes by starting a no-redirect OIDC authorization request.' })}</p>
             </div>
             <div className='flex justify-end'>
-              <Button
-                variant='outline'
-                onClick={() => void testOIDCSettings()}
-                disabled={oidcTestBusy || !oidcSettings.setting?.id}
-              >
-                {oidcTestBusy ? t('testing') : t('settingsPage.testOIDC', { defaultValue: 'Test OIDC' })}
-              </Button>
+              {canTestOIDCSettings ? (
+                <Button
+                  variant='outline'
+                  onClick={() => void testOIDCSettings()}
+                  disabled={oidcTestBusy || !oidcSettings.setting?.id}
+                >
+                  {oidcTestBusy ? t('testing') : t('settingsPage.testOIDC', { defaultValue: 'Test OIDC' })}
+                </Button>
+              ) : null}
             </div>
           </div>
-          <div className='flex justify-end'>
-            <Button variant='primary' onClick={() => void saveOIDCSettings()} disabled={oidcBusy || (oidcSettings.enabled && (!oidcSettings.authorizationEndpoint.trim() || !oidcSettings.tokenEndpoint.trim() || !oidcSettings.clientID.trim()))}>
-              {oidcBusy ? t('saving') : t('save')}
-            </Button>
-          </div>
+          {canSaveOIDCSettings ? (
+            <div className='flex justify-end'>
+              <Button variant='primary' onClick={() => void saveOIDCSettings()} disabled={oidcBusy || (oidcSettings.enabled && (!oidcSettings.authorizationEndpoint.trim() || !oidcSettings.tokenEndpoint.trim() || !oidcSettings.clientID.trim()))}>
+                {oidcBusy ? t('saving') : t('save')}
+              </Button>
+            </div>
+          ) : null}
         </div>
       </CardStaggerItem>
       ) : null}
@@ -1168,8 +1253,9 @@ export function SettingsPage() {
         </div>
       </CardStaggerItem>
 
-      {admin ? (
+      {canShowLoginAccessSection ? (
       <>
+      {canReadSystemSettings ? (
       <CardStaggerItem className='grid gap-4 rounded-xl border border-border bg-card p-5 shadow-sm lg:grid-cols-[0.85fr_1.15fr]'>
         <div className='flex min-w-0 items-start gap-3'>
           <span className='grid size-12 shrink-0 place-items-center rounded-full bg-primary text-primary-foreground'>
@@ -1200,39 +1286,45 @@ export function SettingsPage() {
               <div className='text-sm font-medium'>{t('settingsPage.loginCaptchaTitle')}</div>
               <p className='mt-1 text-xs leading-5 text-muted-foreground'>{t('settingsPage.loginCaptchaDescription')}</p>
             </div>
-            <Button
-              variant={loginSecurity.captchaEnabled ? 'outline' : 'primary'}
-              onClick={() => void updateLoginSecurity({ captchaEnabled: !loginSecurity.captchaEnabled })}
-              disabled={loginSecurityBusy}
-            >
-              {loginSecurity.captchaEnabled ? t('settingsPage.disableCaptcha') : t('settingsPage.enableCaptcha')}
-            </Button>
+            {canSaveLoginSecurity ? (
+              <Button
+                variant={loginSecurity.captchaEnabled ? 'outline' : 'primary'}
+                onClick={() => void updateLoginSecurity({ captchaEnabled: !loginSecurity.captchaEnabled })}
+                disabled={loginSecurityBusy}
+              >
+                {loginSecurity.captchaEnabled ? t('settingsPage.disableCaptcha') : t('settingsPage.enableCaptcha')}
+              </Button>
+            ) : null}
           </div>
           <div className='flex flex-wrap items-center justify-between gap-3 rounded-lg border border-border bg-background/70 p-3'>
             <div className='min-w-0'>
               <div className='text-sm font-medium'>{t('settingsPage.passwordLoginTitle')}</div>
               <p className='mt-1 text-xs leading-5 text-muted-foreground'>{t('settingsPage.passwordLoginDescription')}</p>
             </div>
-            <Button
-              variant={loginSecurity.passwordLoginDisabled ? 'primary' : 'destructive'}
-              onClick={() => void updateLoginSecurity({ passwordLoginDisabled: !loginSecurity.passwordLoginDisabled })}
-              disabled={loginSecurityBusy}
-            >
-              {loginSecurity.passwordLoginDisabled ? t('settingsPage.enablePasswordLogin') : t('settingsPage.disablePasswordLogin')}
-            </Button>
+            {canSaveLoginSecurity ? (
+              <Button
+                variant={loginSecurity.passwordLoginDisabled ? 'primary' : 'destructive'}
+                onClick={() => void updateLoginSecurity({ passwordLoginDisabled: !loginSecurity.passwordLoginDisabled })}
+                disabled={loginSecurityBusy}
+              >
+                {loginSecurity.passwordLoginDisabled ? t('settingsPage.enablePasswordLogin') : t('settingsPage.disablePasswordLogin')}
+              </Button>
+            ) : null}
           </div>
           <div className='flex flex-wrap items-center justify-between gap-3 rounded-lg border border-border bg-background/70 p-3'>
             <div className='min-w-0'>
               <div className='text-sm font-medium'>{t('settingsPage.forceMFATitle')}</div>
               <p className='mt-1 text-xs leading-5 text-muted-foreground'>{t('settingsPage.forceMFADescription')}</p>
             </div>
-            <Button
-              variant={loginSecurity.forceMFARequired ? 'outline' : 'primary'}
-              onClick={() => void updateLoginSecurity({ forceMFARequired: !loginSecurity.forceMFARequired })}
-              disabled={loginSecurityBusy}
-            >
-              {loginSecurity.forceMFARequired ? t('settingsPage.disableForceMFA') : t('settingsPage.enableForceMFA')}
-            </Button>
+            {canSaveLoginSecurity ? (
+              <Button
+                variant={loginSecurity.forceMFARequired ? 'outline' : 'primary'}
+                onClick={() => void updateLoginSecurity({ forceMFARequired: !loginSecurity.forceMFARequired })}
+                disabled={loginSecurityBusy}
+              >
+                {loginSecurity.forceMFARequired ? t('settingsPage.disableForceMFA') : t('settingsPage.enableForceMFA')}
+              </Button>
+            ) : null}
           </div>
           <div className='grid gap-3 rounded-lg border border-border bg-background/70 p-3'>
             <div>
@@ -1283,19 +1375,23 @@ export function SettingsPage() {
                 />
               </Field>
             </div>
-            <div className='flex justify-end'>
-              <Button
-                variant='primary'
-                onClick={() => void updateLoginSecurity({})}
-                disabled={loginSecurityBusy}
-              >
-                {t('settingsPage.saveLoginSecurityPolicy')}
-              </Button>
-            </div>
+            {canSaveLoginSecurity ? (
+              <div className='flex justify-end'>
+                <Button
+                  variant='primary'
+                  onClick={() => void updateLoginSecurity({})}
+                  disabled={loginSecurityBusy}
+                >
+                  {t('settingsPage.saveLoginSecurityPolicy')}
+                </Button>
+              </div>
+            ) : null}
           </div>
         </div>
       </CardStaggerItem>
+      ) : null}
 
+      {(canReadLoginPolicies || canReadLoginLocks) ? (
       <CardStaggerItem className='grid gap-4 rounded-xl border border-border bg-card p-5 shadow-sm lg:grid-cols-[0.85fr_1.15fr]'>
         <div className='flex min-w-0 items-start gap-3'>
           <span className='grid size-12 shrink-0 place-items-center rounded-full bg-primary text-primary-foreground'>
@@ -1312,85 +1408,98 @@ export function SettingsPage() {
           </div>
         </div>
         <div className='grid gap-3'>
-          <div className='grid gap-3 rounded-lg border border-border bg-background/70 p-3'>
-            <div className='grid gap-3 sm:grid-cols-[1fr_0.7fr]'>
-              <Field label={t('settingsPage.loginPolicyName')}>
-                <Input
-                  value={loginPolicyForm.name}
-                  onChange={(event) => setLoginPolicyForm((current) => ({ ...current, name: event.currentTarget.value }))}
-                  placeholder={t('settingsPage.loginPolicyNamePlaceholder')}
-                />
-              </Field>
-              <Field label={t('settingsPage.loginPolicyAction')}>
-                <Select
-                  value={loginPolicyForm.action}
-                  onChange={(event) => setLoginPolicyForm((current) => ({ ...current, action: event.currentTarget.value === 'allow' ? 'allow' : 'deny' }))}
-                >
-                  <option value='deny'>{t('settingsPage.loginPolicyDeny')}</option>
-                  <option value='allow'>{t('settingsPage.loginPolicyAllow')}</option>
-                </Select>
-              </Field>
-            </div>
-            <div className='grid gap-3 sm:grid-cols-[0.7fr_1fr_auto] sm:items-end'>
-              <Field label={t('settingsPage.loginPolicyAccount')}>
-                <Input
-                  value={loginPolicyForm.account}
-                  onChange={(event) => setLoginPolicyForm((current) => ({ ...current, account: event.currentTarget.value }))}
-                  placeholder='*'
-                />
-              </Field>
-              <Field label={t('settingsPage.loginPolicyCIDR')}>
-                <Input
-                  value={loginPolicyForm.cidr}
-                  onChange={(event) => setLoginPolicyForm((current) => ({ ...current, cidr: event.currentTarget.value }))}
-                  placeholder='192.0.2.0/24'
-                />
-              </Field>
-              <Button variant='primary' onClick={() => void createLoginPolicy()} disabled={loginPolicyBusy || !loginPolicyForm.cidr.trim()}>
-                {t('settingsPage.createLoginPolicy')}
-              </Button>
-            </div>
-          </div>
-          <div className='overflow-hidden rounded-lg border border-border bg-background/70'>
-            {loginPolicies.length === 0 ? (
-              <div className='p-4 text-sm text-muted-foreground'>{t('settingsPage.loginPoliciesEmpty')}</div>
-            ) : (
-              <div className='divide-y divide-border'>
-                {loginPolicies.map((policy) => {
-                  const action = loginPolicyAction(policy)
-                  const enabled = platformItemEnabled(policy)
-                  return (
-                    <div key={policy.id} className='grid gap-3 p-3 sm:grid-cols-[1fr_auto] sm:items-center'>
-                      <div className='min-w-0'>
-                        <div className='flex flex-wrap items-center gap-2'>
-                          <span className='truncate text-sm font-medium'>{policy.name}</span>
-                          <Badge tone={action === 'allow' ? 'success' : 'danger'}>
-                            {action === 'allow' ? t('settingsPage.loginPolicyAllow') : t('settingsPage.loginPolicyDeny')}
-                          </Badge>
-                          <Badge tone={enabled ? 'success' : 'neutral'}>
-                            {enabled ? t('settingsPage.loginPolicyEnabled') : t('settingsPage.loginPolicyDisabled')}
-                          </Badge>
-                        </div>
-                        <div className='mt-1 flex flex-wrap gap-x-4 gap-y-1 text-xs text-muted-foreground'>
-                          <span>{t('settingsPage.loginPolicyAccount')}: {loginPolicyAccount(policy)}</span>
-                          <span>{t('settingsPage.loginPolicyCIDR')}: {loginPolicyCIDR(policy)}</span>
-                        </div>
-                      </div>
-                      <div className='flex flex-wrap gap-2 sm:justify-end'>
-                        <Button variant='outline' size='sm' onClick={() => void toggleLoginPolicy(policy)} disabled={loginPolicyBusy}>
-                          {enabled ? t('settingsPage.disableLoginPolicy') : t('settingsPage.enableLoginPolicy')}
-                        </Button>
-                        <Button variant='destructive' size='sm' onClick={() => void deleteLoginPolicy(policy)} disabled={loginPolicyBusy}>
-                          <Trash2 className='size-4' />
-                          {t('settingsPage.deleteLoginPolicy')}
-                        </Button>
-                      </div>
-                    </div>
-                  )
-                })}
+          {canCreateLoginPolicy ? (
+            <div className='grid gap-3 rounded-lg border border-border bg-background/70 p-3'>
+              <div className='grid gap-3 sm:grid-cols-[1fr_0.7fr]'>
+                <Field label={t('settingsPage.loginPolicyName')}>
+                  <Input
+                    value={loginPolicyForm.name}
+                    onChange={(event) => setLoginPolicyForm((current) => ({ ...current, name: event.currentTarget.value }))}
+                    placeholder={t('settingsPage.loginPolicyNamePlaceholder')}
+                  />
+                </Field>
+                <Field label={t('settingsPage.loginPolicyAction')}>
+                  <Select
+                    value={loginPolicyForm.action}
+                    onChange={(event) => setLoginPolicyForm((current) => ({ ...current, action: event.currentTarget.value === 'allow' ? 'allow' : 'deny' }))}
+                  >
+                    <option value='deny'>{t('settingsPage.loginPolicyDeny')}</option>
+                    <option value='allow'>{t('settingsPage.loginPolicyAllow')}</option>
+                  </Select>
+                </Field>
               </div>
-            )}
-          </div>
+              <div className='grid gap-3 sm:grid-cols-[0.7fr_1fr_auto] sm:items-end'>
+                <Field label={t('settingsPage.loginPolicyAccount')}>
+                  <Input
+                    value={loginPolicyForm.account}
+                    onChange={(event) => setLoginPolicyForm((current) => ({ ...current, account: event.currentTarget.value }))}
+                    placeholder='*'
+                  />
+                </Field>
+                <Field label={t('settingsPage.loginPolicyCIDR')}>
+                  <Input
+                    value={loginPolicyForm.cidr}
+                    onChange={(event) => setLoginPolicyForm((current) => ({ ...current, cidr: event.currentTarget.value }))}
+                    placeholder='192.0.2.0/24'
+                  />
+                </Field>
+                <Button variant='primary' onClick={() => void createLoginPolicy()} disabled={loginPolicyBusy || !loginPolicyForm.cidr.trim()}>
+                  {t('settingsPage.createLoginPolicy')}
+                </Button>
+              </div>
+            </div>
+          ) : null}
+          {canReadLoginPolicies ? (
+            <div className='overflow-hidden rounded-lg border border-border bg-background/70'>
+              {loginPolicies.length === 0 ? (
+                <div className='p-4 text-sm text-muted-foreground'>{t('settingsPage.loginPoliciesEmpty')}</div>
+              ) : (
+                <div className='divide-y divide-border'>
+                  {loginPolicies.map((policy) => {
+                    const action = loginPolicyAction(policy)
+                    const enabled = platformItemEnabled(policy)
+                    const canPatchPolicy = canPatchLoginPolicy(policy.id)
+                    const canRemovePolicy = canDeleteLoginPolicy(policy.id)
+                    return (
+                      <div key={policy.id} className='grid gap-3 p-3 sm:grid-cols-[1fr_auto] sm:items-center'>
+                        <div className='min-w-0'>
+                          <div className='flex flex-wrap items-center gap-2'>
+                            <span className='truncate text-sm font-medium'>{policy.name}</span>
+                            <Badge tone={action === 'allow' ? 'success' : 'danger'}>
+                              {action === 'allow' ? t('settingsPage.loginPolicyAllow') : t('settingsPage.loginPolicyDeny')}
+                            </Badge>
+                            <Badge tone={enabled ? 'success' : 'neutral'}>
+                              {enabled ? t('settingsPage.loginPolicyEnabled') : t('settingsPage.loginPolicyDisabled')}
+                            </Badge>
+                          </div>
+                          <div className='mt-1 flex flex-wrap gap-x-4 gap-y-1 text-xs text-muted-foreground'>
+                            <span>{t('settingsPage.loginPolicyAccount')}: {loginPolicyAccount(policy)}</span>
+                            <span>{t('settingsPage.loginPolicyCIDR')}: {loginPolicyCIDR(policy)}</span>
+                          </div>
+                        </div>
+                        {(canPatchPolicy || canRemovePolicy) ? (
+                          <div className='flex flex-wrap gap-2 sm:justify-end'>
+                            {canPatchPolicy ? (
+                              <Button variant='outline' size='sm' onClick={() => void toggleLoginPolicy(policy)} disabled={loginPolicyBusy}>
+                                {enabled ? t('settingsPage.disableLoginPolicy') : t('settingsPage.enableLoginPolicy')}
+                              </Button>
+                            ) : null}
+                            {canRemovePolicy ? (
+                              <Button variant='destructive' size='sm' onClick={() => void deleteLoginPolicy(policy)} disabled={loginPolicyBusy}>
+                                <Trash2 className='size-4' />
+                                {t('settingsPage.deleteLoginPolicy')}
+                              </Button>
+                            ) : null}
+                          </div>
+                        ) : null}
+                      </div>
+                    )
+                  })}
+                </div>
+              )}
+            </div>
+          ) : null}
+          {canReadLoginLocks ? (
           <div className='grid gap-3 rounded-lg border border-border bg-background/70 p-3'>
             <div className='flex flex-wrap items-center justify-between gap-2'>
               <div>
@@ -1418,19 +1527,24 @@ export function SettingsPage() {
                         <span>{t('settingsPage.loginLockFailureCount')}: {loginLockFailureCount(lock)}</span>
                       </div>
                     </div>
-                    <div className='flex justify-end'>
-                      <Button variant='outline' size='sm' onClick={() => void unlockLoginLock(lock)} disabled={loginLockBusy}>
-                        {t('settingsPage.unlockLoginLock')}
-                      </Button>
-                    </div>
+                    {canDeleteLoginLock(lock.id) ? (
+                      <div className='flex justify-end'>
+                        <Button variant='outline' size='sm' onClick={() => void unlockLoginLock(lock)} disabled={loginLockBusy}>
+                          {t('settingsPage.unlockLoginLock')}
+                        </Button>
+                      </div>
+                    ) : null}
                   </div>
                 ))}
               </div>
             )}
           </div>
+          ) : null}
         </div>
       </CardStaggerItem>
+      ) : null}
 
+      {canReadSystemSettings ? (
       <CardStaggerItem className='grid gap-4 rounded-xl border border-border bg-card p-5 shadow-sm lg:grid-cols-[0.85fr_1.15fr]'>
         <div className='flex min-w-0 items-start gap-3'>
           <span className='grid size-12 shrink-0 place-items-center rounded-full bg-primary text-primary-foreground'>
@@ -1531,23 +1645,29 @@ export function SettingsPage() {
               </Field>
             </div>
             <div className='flex justify-end'>
-              <Button
-                variant='outline'
-                onClick={() => void testLDAPSettings()}
-                disabled={ldapTestBusy || !ldapSettings.setting?.id || !ldapTestUsername.trim() || !ldapTestPassword}
-              >
-                {ldapTestBusy ? t('testing') : t('settingsPage.testLDAP', { defaultValue: 'Test LDAP' })}
-              </Button>
+              {canTestLDAPSettings ? (
+                <Button
+                  variant='outline'
+                  onClick={() => void testLDAPSettings()}
+                  disabled={ldapTestBusy || !ldapSettings.setting?.id || !ldapTestUsername.trim() || !ldapTestPassword}
+                >
+                  {ldapTestBusy ? t('testing') : t('settingsPage.testLDAP', { defaultValue: 'Test LDAP' })}
+                </Button>
+              ) : null}
             </div>
           </div>
-          <div className='flex justify-end'>
-            <Button variant='primary' onClick={() => void saveLDAPSettings()} disabled={ldapBusy || (ldapSettings.enabled && (!ldapSettings.url.trim() || !ldapSettings.baseDN.trim()))}>
-              {ldapBusy ? t('saving') : t('save')}
-            </Button>
-          </div>
+          {canSaveLDAPSettings ? (
+            <div className='flex justify-end'>
+              <Button variant='primary' onClick={() => void saveLDAPSettings()} disabled={ldapBusy || (ldapSettings.enabled && (!ldapSettings.url.trim() || !ldapSettings.baseDN.trim()))}>
+                {ldapBusy ? t('saving') : t('save')}
+              </Button>
+            </div>
+          ) : null}
         </div>
       </CardStaggerItem>
+      ) : null}
 
+      {canReadSystemSettings ? (
       <CardStaggerItem className='grid gap-4 rounded-xl border border-border bg-card p-5 shadow-sm lg:grid-cols-[0.85fr_1.15fr]'>
         <div className='flex min-w-0 items-start gap-3'>
           <span className='grid size-12 shrink-0 place-items-center rounded-full bg-primary text-primary-foreground'>
@@ -1625,23 +1745,29 @@ export function SettingsPage() {
               <p className='mt-1 text-xs leading-5 text-muted-foreground'>{t('settingsPage.wecomTestDescription', { defaultValue: 'Validate the saved Corp ID and agent secret by requesting a WeCom access token. Tokens and secrets are never shown.' })}</p>
             </div>
             <div className='flex justify-end'>
-              <Button
-                variant='outline'
-                onClick={() => void testWeComSettings()}
-                disabled={wecomTestBusy || !wecomSettings.setting?.id}
-              >
-                {wecomTestBusy ? t('testing') : t('settingsPage.testWeCom', { defaultValue: 'Test WeCom' })}
-              </Button>
+              {canTestWeComSettings ? (
+                <Button
+                  variant='outline'
+                  onClick={() => void testWeComSettings()}
+                  disabled={wecomTestBusy || !wecomSettings.setting?.id}
+                >
+                  {wecomTestBusy ? t('testing') : t('settingsPage.testWeCom', { defaultValue: 'Test WeCom' })}
+                </Button>
+              ) : null}
             </div>
           </div>
-          <div className='flex justify-end'>
-            <Button variant='primary' onClick={() => void saveWeComSettings()} disabled={wecomBusy || (wecomSettings.enabled && (!wecomSettings.corpID.trim() || !wecomSettings.agentSecret.trim() && !wecomSettings.agentSecretSet))}>
-              {wecomBusy ? t('saving') : t('save')}
-            </Button>
-          </div>
+          {canSaveWeComSettings ? (
+            <div className='flex justify-end'>
+              <Button variant='primary' onClick={() => void saveWeComSettings()} disabled={wecomBusy || (wecomSettings.enabled && (!wecomSettings.corpID.trim() || !wecomSettings.agentSecret.trim() && !wecomSettings.agentSecretSet))}>
+                {wecomBusy ? t('saving') : t('save')}
+              </Button>
+            </div>
+          ) : null}
         </div>
       </CardStaggerItem>
+      ) : null}
 
+      {canReadLicense ? (
       <CardStaggerItem className='grid gap-4 rounded-xl border border-border bg-card p-5 shadow-sm lg:grid-cols-[0.85fr_1.15fr]'>
         <div className='flex min-w-0 items-start gap-3'>
           <span className='grid size-12 shrink-0 place-items-center rounded-full bg-primary text-primary-foreground'>
@@ -1708,13 +1834,16 @@ export function SettingsPage() {
           <Field label={t('settingsPage.licenseNotes', { defaultValue: 'Notes' })}>
             <Textarea value={licenseForm.notes} onChange={(event) => patchLicenseForm({ notes: event.currentTarget.value })} placeholder={t('settingsPage.licenseNotesPlaceholder', { defaultValue: 'Local deployment, approval, or procurement notes.' })} />
           </Field>
-          <div className='flex justify-end'>
-            <Button variant='primary' onClick={() => void saveLocalLicense()} disabled={licenseBusy}>
-              {licenseBusy ? t('saving') : t('save')}
-            </Button>
-          </div>
+          {canSaveLicense ? (
+            <div className='flex justify-end'>
+              <Button variant='primary' onClick={() => void saveLocalLicense()} disabled={licenseBusy}>
+                {licenseBusy ? t('saving') : t('save')}
+              </Button>
+            </div>
+          ) : null}
         </div>
       </CardStaggerItem>
+      ) : null}
       </>
       ) : null}
 

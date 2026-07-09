@@ -44,6 +44,19 @@ try {
     ['monitoring read allows custom GET permission', true, canUseAPI('custom', ['GET /api/system/monitoring'], 'GET', '/api/system/monitoring')],
     ['access stats allows audit read', true, canUseAPI('custom', ['audit:read'], 'GET', '/api/admin/audit/access-stats')],
     ['access stats rejects non-audit collection read', false, canUseAPI('custom', ['GET /api/admin/access-stats'], 'GET', '/api/admin/audit/access-stats')],
+    ['system settings read allows setting detail', true, canUseAPI('custom', ['GET /api/admin/system-settings'], 'GET', '/api/admin/system-settings/s1')],
+    ['system settings read does not allow OIDC test', false, canUseAPI('custom', ['GET /api/admin/system-settings'], 'POST', '/api/admin/system-settings/oidc/test')],
+    ['system settings create does not allow existing setting patch', false, canUseAPI('custom', ['POST /api/admin/system-settings'], 'PATCH', '/api/admin/system-settings/s1')],
+    ['system settings wildcard patch allows existing setting update', true, canUseAPI('custom', ['PATCH /api/admin/system-settings/*'], 'PATCH', '/api/admin/system-settings/s1')],
+    ['SMTP test requires its explicit API permission', true, canUseAPI('custom', ['POST /api/admin/system-settings/smtp/test'], 'POST', '/api/admin/system-settings/smtp/test')],
+    ['login policies read allows detail only', true, canUseAPI('custom', ['GET /api/admin/login-policies'], 'GET', '/api/admin/login-policies/p1')],
+    ['login policies read rejects toggle', false, canUseAPI('custom', ['GET /api/admin/login-policies'], 'PATCH', '/api/admin/login-policies/p1')],
+    ['login lock read rejects unlock', false, canUseAPI('custom', ['GET /api/admin/login-locked'], 'DELETE', '/api/admin/login-locked/l1')],
+    ['login lock wildcard delete allows unlock', true, canUseAPI('custom', ['DELETE /api/admin/login-locked/*'], 'DELETE', '/api/admin/login-locked/l1')],
+    ['license read does not allow update', false, canUseAPI('custom', ['GET /api/admin/license'], 'PUT', '/api/admin/license')],
+    ['license put allows local license save', true, canUseAPI('custom', ['PUT /api/admin/license'], 'PUT', '/api/admin/license')],
+    ['proxy services read does not allow save', false, canUseAPI('custom', ['GET /api/admin/proxy-services'], 'POST', '/api/admin/proxy-services')],
+    ['proxy services post allows save', true, canUseAPI('custom', ['POST /api/admin/proxy-services'], 'POST', '/api/admin/proxy-services')],
   ]
 
   const failed = cases.filter(([, expected, actual]) => actual !== expected)

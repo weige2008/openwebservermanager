@@ -19,6 +19,7 @@ import {
   type PasskeyCreationPublicKeyOptions,
   type PasskeyOptionsResponse,
 } from '@/lib/passkeys'
+import { isAdminRole } from '@/lib/rbac'
 import { formatDate } from '@/lib/utils'
 import type { Locale, PlatformItem, Theme, ThemeContentLayout, ThemeFont, ThemePreset, ThemeRadius, ThemeScale, ThemeSidebarStyle } from '@/types'
 
@@ -202,6 +203,7 @@ export function SettingsPage() {
   const activeSessions = app.data.sessions.filter((session) => session.status === 'active').length
   const username = app.auth?.username || 'admin'
   const initials = username.slice(0, 2).toUpperCase()
+  const admin = isAdminRole(app.auth?.role)
   const [mfaStatus, setMFAStatus] = useState<MFAStatus | null>(null)
   const [mfaSetup, setMFASetup] = useState<MFASetup | null>(null)
   const [mfaCode, setMFACode] = useState('')
@@ -277,11 +279,13 @@ export function SettingsPage() {
   useEffect(() => {
     void loadMFAStatus().catch(() => undefined)
     void loadPasskeys().catch(() => undefined)
-    void loadLoginSecurity().catch(() => undefined)
-    void loadLoginPolicies().catch(() => undefined)
-    void loadLoginLocks().catch(() => undefined)
-    void loadLocalLicense().catch(() => undefined)
-  }, [])
+    if (admin) {
+      void loadLoginSecurity().catch(() => undefined)
+      void loadLoginPolicies().catch(() => undefined)
+      void loadLoginLocks().catch(() => undefined)
+      void loadLocalLicense().catch(() => undefined)
+    }
+  }, [admin])
 
   useEffect(() => {
     setLoginSecurity((current) => ({
@@ -932,6 +936,7 @@ export function SettingsPage() {
         </div>
       </CardStaggerItem>
 
+      {admin ? (
       <CardStaggerItem className='grid gap-4 rounded-xl border border-border bg-card p-5 shadow-sm lg:grid-cols-[0.85fr_1.15fr]'>
         <div className='flex min-w-0 items-start gap-3'>
           <span className='grid size-12 shrink-0 place-items-center rounded-full bg-primary text-primary-foreground'>
@@ -1040,6 +1045,7 @@ export function SettingsPage() {
           </div>
         </div>
       </CardStaggerItem>
+      ) : null}
 
       <CardStaggerItem className='grid gap-4 rounded-xl border border-border bg-card p-5 shadow-sm lg:grid-cols-[0.85fr_1.15fr]'>
         <div className='flex min-w-0 items-start gap-3'>
@@ -1162,6 +1168,8 @@ export function SettingsPage() {
         </div>
       </CardStaggerItem>
 
+      {admin ? (
+      <>
       <CardStaggerItem className='grid gap-4 rounded-xl border border-border bg-card p-5 shadow-sm lg:grid-cols-[0.85fr_1.15fr]'>
         <div className='flex min-w-0 items-start gap-3'>
           <span className='grid size-12 shrink-0 place-items-center rounded-full bg-primary text-primary-foreground'>
@@ -1707,6 +1715,8 @@ export function SettingsPage() {
           </div>
         </div>
       </CardStaggerItem>
+      </>
+      ) : null}
 
       <CardStaggerItem className='grid gap-4 rounded-xl border border-border bg-card p-5 shadow-sm lg:grid-cols-[1.1fr_0.9fr]'>
         <div className='lg:col-span-2'>

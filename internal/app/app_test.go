@@ -9944,6 +9944,24 @@ func TestCertificateOperationLogPersistenceFailureRollsBackMutations(t *testing.
 		t.Fatalf("default certificate change was not rolled back: A=%#v B=%#v", storedA.Metadata, storedB.Metadata)
 	}
 
+	removeDefaultStateBlocker := blockPlatformItemSaveMissingPayloadFragment(t, srv.cfg.Store, "certificates", certA.ID, `"default":true`)
+	defaultStateFailureRec := assertStatus(t, handler, http.MethodPost, "/api/admin/certificates/"+certB.ID+"/default", map[string]any{}, adminCookie, http.StatusInternalServerError)
+	removeDefaultStateBlocker()
+	if !strings.Contains(defaultStateFailureRec.Body.String(), "forced platform item missing payload fragment save failure") {
+		t.Fatalf("default certificate state failure was not reported: %s", defaultStateFailureRec.Body.String())
+	}
+	storedAAfterStateFailure, ok, err := srv.cfg.Store.GetPlatformItem("certificates", certA.ID)
+	if err != nil || !ok {
+		t.Fatalf("load certificate A after failed default state save: ok=%v err=%v", ok, err)
+	}
+	storedBAfterStateFailure, ok, err := srv.cfg.Store.GetPlatformItem("certificates", certB.ID)
+	if err != nil || !ok {
+		t.Fatalf("load certificate B after failed default state save: ok=%v err=%v", ok, err)
+	}
+	if storedAAfterStateFailure.Metadata["default"] != true || storedBAfterStateFailure.Metadata["default"] == true {
+		t.Fatalf("default certificate state failure was not rolled back: A=%#v B=%#v", storedAAfterStateFailure.Metadata, storedBAfterStateFailure.Metadata)
+	}
+
 	clientCAPEM, _, err := makeSelfSignedCertificate(certificateRequest{Domain: "blocked-mtls-ca.example.test", Days: 365})
 	if err != nil {
 		t.Fatalf("make blocked mTLS client CA: %v", err)
@@ -14376,6 +14394,34 @@ END`
 	if _, err := db.Exec(triggerSQL); err != nil {
 		_ = db.Close()
 		t.Fatalf("create platform item payload fragments save blocker trigger: %v", err)
+	}
+	return func() {
+		_, _ = db.Exec(`DROP TRIGGER IF EXISTS ` + triggerName)
+		_ = db.Close()
+	}
+}
+
+func blockPlatformItemSaveMissingPayloadFragment(t *testing.T, st *store.Store, collection, itemID, fragment string) func() {
+	t.Helper()
+	db, err := sql.Open("sqlite", st.DatabasePath())
+	if err != nil {
+		t.Fatalf("open store database for missing payload fragment save blocker: %v", err)
+	}
+	triggerName := "block_platform_item_save_missing_payload_fragment"
+	if _, err := db.Exec(`DROP TRIGGER IF EXISTS ` + triggerName); err != nil {
+		_ = db.Close()
+		t.Fatalf("drop stale missing payload fragment save blocker trigger: %v", err)
+	}
+	triggerSQL := `CREATE TRIGGER ` + triggerName + ` BEFORE INSERT ON platform_records
+WHEN NEW.collection = ` + sqliteTestStringLiteral(collection) + `
+  AND NEW.id = ` + sqliteTestStringLiteral(itemID) + `
+  AND instr(NEW.payload, ` + sqliteTestStringLiteral(fragment) + `) = 0
+BEGIN
+  SELECT RAISE(ABORT, 'forced platform item missing payload fragment save failure');
+END`
+	if _, err := db.Exec(triggerSQL); err != nil {
+		_ = db.Close()
+		t.Fatalf("create platform item missing payload fragment save blocker trigger: %v", err)
 	}
 	return func() {
 		_, _ = db.Exec(`DROP TRIGGER IF EXISTS ` + triggerName)

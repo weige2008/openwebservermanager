@@ -3672,6 +3672,7 @@ func (s *Server) handleCertificateDefault(w http.ResponseWriter, r *http.Request
 			writeError(w, http.StatusBadRequest, err.Error())
 			return
 		}
+		err = restoreCertificateSnapshotError(err, s.restoreCertificateSnapshot(snapshot))
 		writeError(w, http.StatusInternalServerError, err.Error())
 		return
 	}

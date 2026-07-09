@@ -16,6 +16,7 @@ import { Field, Input, Select, Textarea } from '@/components/ui/field'
 import { ApiError, apiRequest } from '@/lib/api'
 import { copyText } from '@/lib/clipboard'
 import { platformDescription, platformLabel, platformPages, type PlatformPageConfig } from '@/lib/platform'
+import { canUseAPI } from '@/lib/rbac'
 import { cn, formatDate } from '@/lib/utils'
 import type { ConnectionSession, PlatformItem, Protocol, PublicConfig } from '@/types'
 
@@ -107,6 +108,8 @@ type ResourceOperation =
   | { type: 'sql-decision'; item: PlatformItem; decision: 'approve' | 'reject' }
   | { type: 'command-execute'; item: PlatformItem }
   | { type: 'command-decision'; item: PlatformItem; decision: 'approve' | 'reject' }
+
+type CanUsePath = (method: string, path: string) => boolean
 
 interface StorageEntry {
   name: string
@@ -319,6 +322,15 @@ export function PlatformTablePage({ config }: { config: PlatformPageConfig }) {
   const description = platformDescription(config, app.locale)
   const Icon = config.icon
   const rows = app.data.platform?.[config.collection] || []
+  const apiPath = config.apiPath || `/api/admin/${config.collection}`
+  const role = app.auth?.role
+  const apiPermissions = app.auth?.api_permissions || []
+  const canUsePath: CanUsePath = (method, path) => canUseAPI(role, apiPermissions, method, path)
+  const canCreate = canUsePath('POST', apiPath)
+  const canEditPath = (path: string) => canUsePath('PATCH', path)
+  const canDeletePath = (path: string) => canUsePath('DELETE', path)
+  const canEditItem = (item: PlatformItem) => canEditPath(`${apiPath}/${item.id}`)
+  const canDeleteItem = (item: PlatformItem) => canDeletePath(`${apiPath}/${item.id}`)
   const [formOpen, setFormOpen] = useState(false)
   const [saving, setSaving] = useState(false)
   const [editing, setEditing] = useState<PlatformItem | null>(null)
@@ -333,8 +345,10 @@ export function PlatformTablePage({ config }: { config: PlatformPageConfig }) {
     const ids = new Set(selectedIDs)
     return rows.filter((item) => ids.has(item.id))
   }, [rows, selectedIDs])
-  const canBulkAuthorize = ['assets', 'web_assets', 'database_assets'].includes(config.collection)
-  const canBulkDelete = Boolean(config.apiPath && !config.apiPath.startsWith('/api/admin/audit/'))
+  const canBulkAuthorize = ['assets', 'web_assets', 'database_assets'].includes(config.collection) &&
+    canUsePath('POST', `/api/admin/authorizations/${authorizationBulkRoute(config.collection)}/bulk`)
+  const canBulkDelete = Boolean(config.apiPath && !config.apiPath.startsWith('/api/admin/audit/')) &&
+    canDeletePath(`${apiPath}/__selected__`)
   const selectionEnabled = canBulkAuthorize || canBulkDelete
 
   useEffect(() => {
@@ -615,20 +629,24 @@ export function PlatformTablePage({ config }: { config: PlatformPageConfig }) {
         header: '',
         cell: ({ row }) => (
           <div className='flex justify-end gap-1.5'>
-            <ResourceRowActions config={config} item={row.original} onOperation={setOperation} />
-            <Button size='sm' variant='outline' onClick={() => startEdit(row.original)}>
-              <Pencil className='size-3.5' />
-              {app.t('edit', '编辑')}
-            </Button>
-            <Button size='sm' variant='destructive' onClick={() => void remove(row.original)}>
-              <Trash2 className='size-3.5' />
-              {app.t('delete', '删除')}
-            </Button>
+            <ResourceRowActions config={config} item={row.original} onOperation={setOperation} canUsePath={canUsePath} />
+            {canEditItem(row.original) ? (
+              <Button size='sm' variant='outline' onClick={() => startEdit(row.original)}>
+                <Pencil className='size-3.5' />
+                {app.t('edit', '编辑')}
+              </Button>
+            ) : null}
+            {canDeleteItem(row.original) ? (
+              <Button size='sm' variant='destructive' onClick={() => void remove(row.original)}>
+                <Trash2 className='size-3.5' />
+                {app.t('delete', '删除')}
+              </Button>
+            ) : null}
           </div>
         ),
       },
     ],
-    [app, config]
+    [apiPath, apiPermissions, app, config, role]
   )
 
   const save = async () => {
@@ -743,15 +761,17 @@ export function PlatformTablePage({ config }: { config: PlatformPageConfig }) {
               <CardDescription>{description}</CardDescription>
             </div>
             <div className='flex flex-wrap justify-end gap-2 max-sm:justify-start'>
-              <ResourceHeaderActions config={config} rows={rows} onOperation={setOperation} />
+              <ResourceHeaderActions config={config} rows={rows} onOperation={setOperation} canUsePath={canUsePath} />
               <Button variant='outline' onClick={() => void app.refresh()}>
                 <RefreshCw className='size-4' />
                 {app.t('refresh', '刷新')}
               </Button>
-              <Button variant='primary' onClick={startCreate}>
-                <Plus className='size-4' />
-                {app.t('new', '新建')}
-              </Button>
+              {canCreate ? (
+                <Button variant='primary' onClick={startCreate}>
+                  <Plus className='size-4' />
+                  {app.t('new', '新建')}
+                </Button>
+              ) : null}
             </div>
           </CardHeader>
           <CardContent>
@@ -779,6 +799,8 @@ export function PlatformTablePage({ config }: { config: PlatformPageConfig }) {
                 items={rows}
                 onEdit={startEdit}
                 onDelete={(item) => void remove(item)}
+                canEdit={canEditItem}
+                canDelete={canDeleteItem}
               />
             ) : config.collection === 'asset_groups' && assetGroupView === 'tree' ? (
               <AssetGroupTreeView
@@ -786,6 +808,8 @@ export function PlatformTablePage({ config }: { config: PlatformPageConfig }) {
                 assets={app.data.platform?.assets || []}
                 onEdit={startEdit}
                 onDelete={(item) => void remove(item)}
+                canEdit={canEditItem}
+                canDelete={canDeleteItem}
               />
             ) : (
               <DataTable
@@ -829,7 +853,19 @@ export function PlatformTablePage({ config }: { config: PlatformPageConfig }) {
   )
 }
 
-function DepartmentTreeView({ items, onEdit, onDelete }: { items: PlatformItem[]; onEdit: (item: PlatformItem) => void; onDelete: (item: PlatformItem) => void }) {
+function DepartmentTreeView({
+  items,
+  onEdit,
+  onDelete,
+  canEdit,
+  canDelete,
+}: {
+  items: PlatformItem[]
+  onEdit: (item: PlatformItem) => void
+  onDelete: (item: PlatformItem) => void
+  canEdit: (item: PlatformItem) => boolean
+  canDelete: (item: PlatformItem) => boolean
+}) {
   const app = useApp()
   const tree = useMemo(() => buildDepartmentTree(items), [items])
 
@@ -851,14 +887,28 @@ function DepartmentTreeView({ items, onEdit, onDelete }: { items: PlatformItem[]
       </div>
       <div className='divide-y divide-border'>
         {tree.map((node) => (
-          <DepartmentTreeBranch key={node.item.id} node={node} depth={0} onEdit={onEdit} onDelete={onDelete} />
+          <DepartmentTreeBranch key={node.item.id} node={node} depth={0} onEdit={onEdit} onDelete={onDelete} canEdit={canEdit} canDelete={canDelete} />
         ))}
       </div>
     </div>
   )
 }
 
-function DepartmentTreeBranch({ node, depth, onEdit, onDelete }: { node: DepartmentTreeNode; depth: number; onEdit: (item: PlatformItem) => void; onDelete: (item: PlatformItem) => void }) {
+function DepartmentTreeBranch({
+  node,
+  depth,
+  onEdit,
+  onDelete,
+  canEdit,
+  canDelete,
+}: {
+  node: DepartmentTreeNode
+  depth: number
+  onEdit: (item: PlatformItem) => void
+  onDelete: (item: PlatformItem) => void
+  canEdit: (item: PlatformItem) => boolean
+  canDelete: (item: PlatformItem) => boolean
+}) {
   const app = useApp()
   const item = node.item
   const directMembers = metadataNumber(item.metadata?.member_count)
@@ -884,20 +934,24 @@ function DepartmentTreeBranch({ node, depth, onEdit, onDelete }: { node: Departm
           </div>
         </div>
         <div className='flex flex-wrap justify-end gap-1.5'>
-          <Button size='sm' variant='outline' onClick={() => onEdit(item)}>
-            <Pencil className='size-3.5' />
-            {app.t('edit', '编辑')}
-          </Button>
-          <Button size='sm' variant='destructive' onClick={() => onDelete(item)}>
-            <Trash2 className='size-3.5' />
-            {app.t('delete', '删除')}
-          </Button>
+          {canEdit(item) ? (
+            <Button size='sm' variant='outline' onClick={() => onEdit(item)}>
+              <Pencil className='size-3.5' />
+              {app.t('edit', '编辑')}
+            </Button>
+          ) : null}
+          {canDelete(item) ? (
+            <Button size='sm' variant='destructive' onClick={() => onDelete(item)}>
+              <Trash2 className='size-3.5' />
+              {app.t('delete', '删除')}
+            </Button>
+          ) : null}
         </div>
       </div>
       {node.children.length ? (
         <div className='border-t border-border/60'>
           {node.children.map((child) => (
-            <DepartmentTreeBranch key={child.item.id} node={child} depth={depth + 1} onEdit={onEdit} onDelete={onDelete} />
+            <DepartmentTreeBranch key={child.item.id} node={child} depth={depth + 1} onEdit={onEdit} onDelete={onDelete} canEdit={canEdit} canDelete={canDelete} />
           ))}
         </div>
       ) : null}
@@ -905,7 +959,21 @@ function DepartmentTreeBranch({ node, depth, onEdit, onDelete }: { node: Departm
   )
 }
 
-function AssetGroupTreeView({ groups, assets, onEdit, onDelete }: { groups: PlatformItem[]; assets: PlatformItem[]; onEdit: (item: PlatformItem) => void; onDelete: (item: PlatformItem) => void }) {
+function AssetGroupTreeView({
+  groups,
+  assets,
+  onEdit,
+  onDelete,
+  canEdit,
+  canDelete,
+}: {
+  groups: PlatformItem[]
+  assets: PlatformItem[]
+  onEdit: (item: PlatformItem) => void
+  onDelete: (item: PlatformItem) => void
+  canEdit: (item: PlatformItem) => boolean
+  canDelete: (item: PlatformItem) => boolean
+}) {
   const app = useApp()
   const tree = useMemo(() => buildAssetGroupTree(groups, assets), [groups, assets])
 
@@ -928,14 +996,28 @@ function AssetGroupTreeView({ groups, assets, onEdit, onDelete }: { groups: Plat
       </div>
       <div className='divide-y divide-border'>
         {tree.map((node) => (
-          <AssetGroupTreeBranch key={node.item.id} node={node} depth={0} onEdit={onEdit} onDelete={onDelete} />
+          <AssetGroupTreeBranch key={node.item.id} node={node} depth={0} onEdit={onEdit} onDelete={onDelete} canEdit={canEdit} canDelete={canDelete} />
         ))}
       </div>
     </div>
   )
 }
 
-function AssetGroupTreeBranch({ node, depth, onEdit, onDelete }: { node: AssetGroupTreeNode; depth: number; onEdit: (item: PlatformItem) => void; onDelete: (item: PlatformItem) => void }) {
+function AssetGroupTreeBranch({
+  node,
+  depth,
+  onEdit,
+  onDelete,
+  canEdit,
+  canDelete,
+}: {
+  node: AssetGroupTreeNode
+  depth: number
+  onEdit: (item: PlatformItem) => void
+  onDelete: (item: PlatformItem) => void
+  canEdit: (item: PlatformItem) => boolean
+  canDelete: (item: PlatformItem) => boolean
+}) {
   const app = useApp()
   const item = node.item
   const [expanded, setExpanded] = useState(() => !metadataBool(item.metadata?.collapsed))
@@ -976,20 +1058,24 @@ function AssetGroupTreeBranch({ node, depth, onEdit, onDelete }: { node: AssetGr
           </div>
         </div>
         <div className='flex flex-wrap justify-end gap-1.5'>
-          <Button size='sm' variant='outline' onClick={() => onEdit(item)}>
-            <Pencil className='size-3.5' />
-            {app.t('edit', '编辑')}
-          </Button>
-          <Button size='sm' variant='destructive' onClick={() => onDelete(item)}>
-            <Trash2 className='size-3.5' />
-            {app.t('delete', '删除')}
-          </Button>
+          {canEdit(item) ? (
+            <Button size='sm' variant='outline' onClick={() => onEdit(item)}>
+              <Pencil className='size-3.5' />
+              {app.t('edit', '编辑')}
+            </Button>
+          ) : null}
+          {canDelete(item) ? (
+            <Button size='sm' variant='destructive' onClick={() => onDelete(item)}>
+              <Trash2 className='size-3.5' />
+              {app.t('delete', '删除')}
+            </Button>
+          ) : null}
         </div>
       </div>
       {hasChildren && expanded ? (
         <div className='border-t border-border/60'>
           {node.children.map((child) => (
-            <AssetGroupTreeBranch key={child.item.id} node={child} depth={depth + 1} onEdit={onEdit} onDelete={onDelete} />
+            <AssetGroupTreeBranch key={child.item.id} node={child} depth={depth + 1} onEdit={onEdit} onDelete={onDelete} canEdit={canEdit} canDelete={canDelete} />
           ))}
         </div>
       ) : null}
@@ -997,8 +1083,21 @@ function AssetGroupTreeBranch({ node, depth, onEdit, onDelete }: { node: AssetGr
   )
 }
 
-function ResourceHeaderActions({ config, rows, onOperation }: { config: PlatformPageConfig; rows: PlatformItem[]; onOperation: (operation: ResourceOperation) => void }) {
+function ResourceHeaderActions({
+  config,
+  rows,
+  onOperation,
+  canUsePath,
+}: {
+  config: PlatformPageConfig
+  rows: PlatformItem[]
+  onOperation: (operation: ResourceOperation) => void
+  canUsePath: CanUsePath
+}) {
   const app = useApp()
+  const canExport = Boolean(config.apiPath && canUsePath('GET', `${config.apiPath}/export`))
+  const canBulkAuthorize = ['assets', 'web_assets', 'database_assets'].includes(config.collection) &&
+    canUsePath('POST', `/api/admin/authorizations/${authorizationBulkRoute(config.collection)}/bulk`)
 
   const exportTable = async (format: 'json' | 'csv') => {
     if (!config.apiPath) return
@@ -1011,7 +1110,7 @@ function ResourceHeaderActions({ config, rows, onOperation }: { config: Platform
     }
   }
 
-  const exportButtons = config.apiPath ? (
+  const exportButtons = canExport ? (
     <>
       <Button variant='outline' onClick={() => void exportTable('json')}>
         <Download className='size-4' />
@@ -1031,15 +1130,19 @@ function ResourceHeaderActions({ config, rows, onOperation }: { config: Platform
   if (config.collection === 'assets') {
     return (
       <>
-        <Button variant='outline' onClick={() => onOperation({ type: 'bulk-authorize', collection: config.collection, items: rows })}>
-          <Save className='size-4' />
-          批量授权
-        </Button>
+        {canBulkAuthorize ? (
+          <Button variant='outline' onClick={() => onOperation({ type: 'bulk-authorize', collection: config.collection, items: rows })}>
+            <Save className='size-4' />
+            批量授权
+          </Button>
+        ) : null}
         {exportButtons}
-        <Button variant='outline' onClick={() => onOperation({ type: 'asset-import' })}>
-          <Upload className='size-4' />
-          导入
-        </Button>
+        {canUsePath('POST', '/api/admin/assets/import') ? (
+          <Button variant='outline' onClick={() => onOperation({ type: 'asset-import' })}>
+            <Upload className='size-4' />
+            导入
+          </Button>
+        ) : null}
       </>
     )
   }
@@ -1047,10 +1150,12 @@ function ResourceHeaderActions({ config, rows, onOperation }: { config: Platform
   if (config.collection === 'web_assets' || config.collection === 'database_assets') {
     return (
       <>
-        <Button variant='outline' onClick={() => onOperation({ type: 'bulk-authorize', collection: config.collection, items: rows })}>
-          <Save className='size-4' />
-          批量授权
-        </Button>
+        {canBulkAuthorize ? (
+          <Button variant='outline' onClick={() => onOperation({ type: 'bulk-authorize', collection: config.collection, items: rows })}>
+            <Save className='size-4' />
+            批量授权
+          </Button>
+        ) : null}
         {exportButtons}
       </>
     )
@@ -1060,10 +1165,12 @@ function ResourceHeaderActions({ config, rows, onOperation }: { config: Platform
     return (
       <>
         {exportButtons}
-        <Button variant='outline' onClick={() => onOperation({ type: 'user-import' })}>
-          <Upload className='size-4' />
-          导入
-        </Button>
+        {canUsePath('POST', '/api/admin/users/import') ? (
+          <Button variant='outline' onClick={() => onOperation({ type: 'user-import' })}>
+            <Upload className='size-4' />
+            导入
+          </Button>
+        ) : null}
       </>
     )
   }
@@ -1072,22 +1179,30 @@ function ResourceHeaderActions({ config, rows, onOperation }: { config: Platform
     return (
       <>
         {exportButtons}
-        <Button variant='outline' onClick={() => onOperation({ type: 'certificate-acme' })}>
-          <Play className='size-4' />
-          ACME
-        </Button>
-        <Button variant='outline' onClick={() => onOperation({ type: 'certificate-dns-provider' })}>
-          <Save className='size-4' />
-          DNS provider
-        </Button>
-        <Button variant='outline' onClick={() => onOperation({ type: 'certificate-upload' })}>
-          <Upload className='size-4' />
-          上传证书
-        </Button>
-        <Button variant='outline' onClick={() => onOperation({ type: 'certificate-create' })}>
-          <Plus className='size-4' />
-          自签证书
-        </Button>
+        {canUsePath('POST', '/api/admin/certificates/acme') ? (
+          <Button variant='outline' onClick={() => onOperation({ type: 'certificate-acme' })}>
+            <Play className='size-4' />
+            ACME
+          </Button>
+        ) : null}
+        {canUsePath('POST', '/api/admin/certificates/dns-providers') ? (
+          <Button variant='outline' onClick={() => onOperation({ type: 'certificate-dns-provider' })}>
+            <Save className='size-4' />
+            DNS provider
+          </Button>
+        ) : null}
+        {canUsePath('POST', '/api/admin/certificates/upload') ? (
+          <Button variant='outline' onClick={() => onOperation({ type: 'certificate-upload' })}>
+            <Upload className='size-4' />
+            上传证书
+          </Button>
+        ) : null}
+        {canUsePath('POST', '/api/admin/certificates/self-signed') ? (
+          <Button variant='outline' onClick={() => onOperation({ type: 'certificate-create' })}>
+            <Plus className='size-4' />
+            自签证书
+          </Button>
+        ) : null}
       </>
     )
   }
@@ -1095,7 +1210,17 @@ function ResourceHeaderActions({ config, rows, onOperation }: { config: Platform
   return exportButtons
 }
 
-function ResourceRowActions({ config, item, onOperation }: { config: PlatformPageConfig; item: PlatformItem; onOperation: (operation: ResourceOperation) => void }) {
+function ResourceRowActions({
+  config,
+  item,
+  onOperation,
+  canUsePath,
+}: {
+  config: PlatformPageConfig
+  item: PlatformItem
+  onOperation: (operation: ResourceOperation) => void
+  canUsePath: CanUsePath
+}) {
   const app = useApp()
   const { confirm, confirmDialog } = useConfirmDialog()
 
@@ -1182,6 +1307,7 @@ function ResourceRowActions({ config, item, onOperation }: { config: PlatformPag
   }
 
   if (config.collection === 'online_sessions') {
+    if (!canUsePath('POST', `/api/admin/audit/online-sessions/${item.id}/disconnect`)) return null
     return (
       <>
         <Button size='sm' variant='destructive' onClick={() => void disconnectSession()}>
@@ -1194,22 +1320,31 @@ function ResourceRowActions({ config, item, onOperation }: { config: PlatformPag
   }
 
   if (config.collection === 'offline_sessions' && itemHasRecording(item)) {
+    const recordingPath = `/api/admin/audit/offline-sessions/${item.id}/recording`
+    const canDownloadRecording = canUsePath('GET', recordingPath)
+    const canDeleteRecording = canUsePath('DELETE', recordingPath)
+    if (!canDownloadRecording && !canDeleteRecording) return null
     return (
       <>
-        <Button size='sm' variant='outline' onClick={() => void downloadRecording()}>
-          <Download className='size-3.5' />
-          下载录屏
-        </Button>
-        <Button size='sm' variant='destructive' onClick={() => void deleteRecording()}>
-          <Trash2 className='size-3.5' />
-          删除录屏
-        </Button>
-        {confirmDialog}
+        {canDownloadRecording ? (
+          <Button size='sm' variant='outline' onClick={() => void downloadRecording()}>
+            <Download className='size-3.5' />
+            下载录屏
+          </Button>
+        ) : null}
+        {canDeleteRecording ? (
+          <Button size='sm' variant='destructive' onClick={() => void deleteRecording()}>
+            <Trash2 className='size-3.5' />
+            删除录屏
+          </Button>
+        ) : null}
+        {canDeleteRecording ? confirmDialog : null}
       </>
     )
   }
 
   if (config.collection === 'storages') {
+    if (!canUsePath('GET', `/api/admin/storages/${item.id}/files`)) return null
     return (
       <Button size='sm' variant='outline' onClick={() => onOperation({ type: 'storage-files', item })}>
         <FileSearch className='size-3.5' />
@@ -1219,33 +1354,51 @@ function ResourceRowActions({ config, item, onOperation }: { config: PlatformPag
   }
 
   if (config.collection === 'certificates') {
+    const certificatePath = `/api/admin/certificates/${item.id}`
+    const canDownload = canUsePath('GET', `${certificatePath}/download`)
+    const canDownloadBundle = canUsePath('GET', `${certificatePath}/bundle`)
+    const canSetDefault = canUsePath('POST', `${certificatePath}/default`)
+    const canEditMTLS = canUsePath('POST', `${certificatePath}/mtls`)
+    const canViewLogs = canUsePath('GET', `${certificatePath}/logs`)
+    if (!canDownload && !canDownloadBundle && !canSetDefault && !canEditMTLS && !canViewLogs) return null
     return (
       <>
-        <Button size='sm' variant='outline' onClick={() => void downloadCertificate()}>
-          <FileDown className='size-3.5' />
-          下载
-        </Button>
-        <Button size='sm' variant='outline' onClick={() => void downloadCertificateBundle()}>
-          <Download className='size-3.5' />
-          {app.t('bundle', 'Bundle')}
-        </Button>
-        <Button size='sm' variant='outline' onClick={() => void setDefaultCertificate()}>
-          <Save className='size-3.5' />
-          默认
-        </Button>
-        <Button size='sm' variant='outline' onClick={() => onOperation({ type: 'certificate-mtls', item })}>
-          <ShieldCheck className='size-3.5' />
-          mTLS
-        </Button>
-        <Button size='sm' variant='outline' onClick={() => onOperation({ type: 'certificate-logs', item })}>
-          <FileSearch className='size-3.5' />
-          日志
-        </Button>
+        {canDownload ? (
+          <Button size='sm' variant='outline' onClick={() => void downloadCertificate()}>
+            <FileDown className='size-3.5' />
+            下载
+          </Button>
+        ) : null}
+        {canDownloadBundle ? (
+          <Button size='sm' variant='outline' onClick={() => void downloadCertificateBundle()}>
+            <Download className='size-3.5' />
+            {app.t('bundle', 'Bundle')}
+          </Button>
+        ) : null}
+        {canSetDefault ? (
+          <Button size='sm' variant='outline' onClick={() => void setDefaultCertificate()}>
+            <Save className='size-3.5' />
+            默认
+          </Button>
+        ) : null}
+        {canEditMTLS ? (
+          <Button size='sm' variant='outline' onClick={() => onOperation({ type: 'certificate-mtls', item })}>
+            <ShieldCheck className='size-3.5' />
+            mTLS
+          </Button>
+        ) : null}
+        {canViewLogs ? (
+          <Button size='sm' variant='outline' onClick={() => onOperation({ type: 'certificate-logs', item })}>
+            <FileSearch className='size-3.5' />
+            日志
+          </Button>
+        ) : null}
       </>
     )
   }
 
   if (config.collection === 'agent_gateways') {
+    if (!canUsePath('POST', `/api/admin/agent-gateways/${item.id}/token`)) return null
     return (
       <Button size='sm' variant='outline' onClick={() => onOperation({ type: 'agent-token', item })}>
         <Copy className='size-3.5' />
@@ -1255,37 +1408,54 @@ function ResourceRowActions({ config, item, onOperation }: { config: PlatformPag
   }
 
   if (config.collection === 'scheduled_tasks') {
+    const taskPath = `/api/admin/scheduled-tasks/${item.id}`
+    const canRunTask = canUsePath('POST', `${taskPath}/run`)
+    const canViewTaskLogs = canUsePath('GET', `${taskPath}/logs`)
+    if (!canRunTask && !canViewTaskLogs) return null
     return (
       <>
-        <Button size='sm' variant='outline' onClick={() => void runTask()}>
-          <Play className='size-3.5' />
-          运行
-        </Button>
-        <Button size='sm' variant='outline' onClick={() => onOperation({ type: 'task-logs', item })}>
-          <FileSearch className='size-3.5' />
-          日志
-        </Button>
+        {canRunTask ? (
+          <Button size='sm' variant='outline' onClick={() => void runTask()}>
+            <Play className='size-3.5' />
+            运行
+          </Button>
+        ) : null}
+        {canViewTaskLogs ? (
+          <Button size='sm' variant='outline' onClick={() => onOperation({ type: 'task-logs', item })}>
+            <FileSearch className='size-3.5' />
+            日志
+          </Button>
+        ) : null}
       </>
     )
   }
 
   if (config.collection === 'sql_work_orders') {
     const status = (item.status || '').toLowerCase()
+    const orderPath = `/api/admin/sql-work-orders/${item.id}`
     if (status === 'pending' || status === 'submitted' || status === 'requested') {
+      const canApprove = canUsePath('POST', `${orderPath}/approve`)
+      const canReject = canUsePath('POST', `${orderPath}/reject`)
+      if (!canApprove && !canReject) return null
       return (
         <>
-          <Button size='sm' variant='outline' onClick={() => onOperation({ type: 'sql-decision', item, decision: 'approve' })}>
-            <Save className='size-3.5' />
-            批准
-          </Button>
-          <Button size='sm' variant='destructive' onClick={() => onOperation({ type: 'sql-decision', item, decision: 'reject' })}>
-            <Trash2 className='size-3.5' />
-            拒绝
-          </Button>
+          {canApprove ? (
+            <Button size='sm' variant='outline' onClick={() => onOperation({ type: 'sql-decision', item, decision: 'approve' })}>
+              <Save className='size-3.5' />
+              批准
+            </Button>
+          ) : null}
+          {canReject ? (
+            <Button size='sm' variant='destructive' onClick={() => onOperation({ type: 'sql-decision', item, decision: 'reject' })}>
+              <Trash2 className='size-3.5' />
+              拒绝
+            </Button>
+          ) : null}
         </>
       )
     }
     if (status !== 'approved') return null
+    if (!canUsePath('POST', `${orderPath}/execute`)) return null
     return (
       <Button size='sm' variant='outline' onClick={() => onOperation({ type: 'sql-execute', item })}>
         <Play className='size-3.5' />
@@ -1296,21 +1466,30 @@ function ResourceRowActions({ config, item, onOperation }: { config: PlatformPag
 
   if (config.collection === 'command_approvals') {
     const status = (item.status || '').toLowerCase()
+    const approvalPath = `/api/admin/command-approvals/${item.id}`
     if (status === 'pending' || status === 'submitted' || status === 'requested') {
+      const canApprove = canUsePath('POST', `${approvalPath}/approve`)
+      const canReject = canUsePath('POST', `${approvalPath}/reject`)
+      if (!canApprove && !canReject) return null
       return (
         <>
-          <Button size='sm' variant='outline' onClick={() => onOperation({ type: 'command-decision', item, decision: 'approve' })}>
-            <Save className='size-3.5' />
-            批准
-          </Button>
-          <Button size='sm' variant='destructive' onClick={() => onOperation({ type: 'command-decision', item, decision: 'reject' })}>
-            <Trash2 className='size-3.5' />
-            拒绝
-          </Button>
+          {canApprove ? (
+            <Button size='sm' variant='outline' onClick={() => onOperation({ type: 'command-decision', item, decision: 'approve' })}>
+              <Save className='size-3.5' />
+              批准
+            </Button>
+          ) : null}
+          {canReject ? (
+            <Button size='sm' variant='destructive' onClick={() => onOperation({ type: 'command-decision', item, decision: 'reject' })}>
+              <Trash2 className='size-3.5' />
+              拒绝
+            </Button>
+          ) : null}
         </>
       )
     }
     if (status !== 'approved') return null
+    if (!canUsePath('POST', `${approvalPath}/execute`)) return null
     return (
       <Button size='sm' variant='outline' onClick={() => onOperation({ type: 'command-execute', item })}>
         <Play className='size-3.5' />

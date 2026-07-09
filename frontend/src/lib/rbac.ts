@@ -20,6 +20,15 @@ export function isAuditorRole(role?: string) {
   return normalizeRole(role) === 'auditor'
 }
 
+export function canUseAPI(role: string | undefined, apiPermissions: string[] = [], method: string, path: string) {
+  const normalizedMethod = method.trim().toUpperCase()
+  const normalizedPath = trimRightSlash(path)
+  if (isAdminRole(role)) return true
+  if (isAuditorRole(role)) return auditorCanUseAPI(normalizedMethod, normalizedPath)
+  if (normalizeRole(role) !== 'custom') return false
+  return apiPermissions.some((permission) => permissionMatchesAPI(permission, normalizedMethod, normalizedPath))
+}
+
 export function canViewPlatformPage(role: string | undefined, page: PlatformPageConfig, menuPermissions: string[] = []) {
   if (isAdminRole(role)) return true
   if (isAuditorRole(role)) {
@@ -56,4 +65,52 @@ export function menuPermissionAllows(menuPermissions: string[], page: PlatformPa
     }
     return false
   })
+}
+
+function auditorCanUseAPI(method: string, path: string) {
+  if (method !== 'GET') return false
+  return path === '/api/system/monitoring' ||
+    path === '/api/bootstrap' ||
+    path === '/api/audit' ||
+    path.startsWith('/api/admin/audit/')
+}
+
+function permissionMatchesAPI(permission: string, method: string, path: string) {
+  const value = permission.trim()
+  if (!value) return false
+  if (value === 'admin:*' || value === '* /api/*' || value === '*') return true
+  if (value === 'audit:read' && method === 'GET' && path.startsWith('/api/admin/audit/')) return true
+  const parts = value.split(/\s+/)
+  if (parts.length === 1) {
+    return pathMatches(parts[0], path) || (method === 'GET' && collectionDetailPathMatches(parts[0], path))
+  }
+  if (parts[0] !== '*' && parts[0].toUpperCase() !== method) return false
+  return pathMatches(parts[1], path) || (method === 'GET' && collectionDetailPathMatches(parts[1], path))
+}
+
+function pathMatches(pattern: string, path: string) {
+  const normalizedPattern = trimRightSlash(pattern)
+  const normalizedPath = trimRightSlash(path)
+  if (normalizedPattern === normalizedPath) return true
+  if (normalizedPattern.endsWith('/*')) {
+    return normalizedPath.startsWith(`${normalizedPattern.slice(0, -2)}/`)
+  }
+  if (normalizedPattern.endsWith('*')) {
+    return normalizedPath.startsWith(normalizedPattern.slice(0, -1))
+  }
+  return false
+}
+
+function collectionDetailPathMatches(pattern: string, path: string) {
+  const normalizedPattern = trimRightSlash(pattern)
+  const normalizedPath = trimRightSlash(path)
+  if (!normalizedPattern || normalizedPattern.includes('*') || normalizedPattern === normalizedPath) return false
+  const prefix = `${normalizedPattern}/`
+  if (!normalizedPath.startsWith(prefix)) return false
+  const tail = normalizedPath.slice(prefix.length)
+  return Boolean(tail) && !tail.includes('/')
+}
+
+function trimRightSlash(value: string) {
+  return value.replace(/\/+$/, '') || '/'
 }

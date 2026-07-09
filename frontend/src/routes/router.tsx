@@ -26,7 +26,7 @@ import { HomePage } from '@/features/home/home-page'
 import { ModalHost } from '@/features/modals/modal-host'
 import { WorkspaceView } from '@/features/workspace/workspace-view'
 import { platformPages, type PlatformPageConfig } from '@/lib/platform'
-import { canViewPlatformPage, isAdminRole } from '@/lib/rbac'
+import { canViewPlatformPage, isAdminRole, isAuditorRole } from '@/lib/rbac'
 
 function RootLayout() {
   const app = useApp()
@@ -68,6 +68,13 @@ function RoleGate({ children, adminOnly, page }: { children: ReactNode; adminOnl
   const role = app.auth?.role
   if (adminOnly && !isAdminRole(role)) return <Navigate to='/access' replace />
   if (page && !canViewPlatformPage(role, page, app.auth?.menu_permissions)) return <Navigate to='/access' replace />
+  return children
+}
+
+function AuditGate({ children }: { children: ReactNode }) {
+  const app = useApp()
+  const role = app.auth?.role
+  if (!isAdminRole(role) && !isAuditorRole(role)) return <Navigate to='/access' replace />
   return children
 }
 
@@ -138,13 +145,13 @@ const appAccessRoute = createRoute({
 const sessionsRoute = createRoute({
   getParentRoute: () => rootRoute,
   path: '/app/sessions',
-  component: () => <ConsoleGate><SessionsPage /></ConsoleGate>,
+  component: () => <ConsoleGate><RoleGate adminOnly><SessionsPage /></RoleGate></ConsoleGate>,
 })
 
 const auditRoute = createRoute({
   getParentRoute: () => rootRoute,
   path: '/app/audit',
-  component: () => <ConsoleGate><AuditPage /></ConsoleGate>,
+  component: () => <ConsoleGate><AuditGate><AuditPage /></AuditGate></ConsoleGate>,
 })
 
 const settingsRoute = createRoute({

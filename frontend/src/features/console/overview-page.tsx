@@ -14,7 +14,8 @@ import { Button } from '@/components/ui/button'
 import { buttonVariants } from '@/components/ui/button'
 import { Card, CardHeader, CardTitle } from '@/components/ui/card'
 import { serverProtocol } from '@/lib/utils'
-import { platformHomeStats, platformLabel } from '@/lib/platform'
+import { platformHomeStats, platformLabel, platformPageByRoute } from '@/lib/platform'
+import { canViewPlatformPage, isAdminRole } from '@/lib/rbac'
 
 import { SessionsTable } from './sessions-table'
 
@@ -52,6 +53,12 @@ export function OverviewPage() {
   const sshSessions = app.data.sessions.filter((item) => item.protocol === 'ssh').length
   const rdpSessions = app.data.sessions.filter((item) => item.protocol === 'rdp').length
   const platform = app.data.platform || {}
+  const admin = isAdminRole(app.auth?.role)
+  const assetsPage = platformPageByRoute('/app/assets')
+  const onlineSessionsPage = platformPageByRoute('/app/online-sessions')
+  const canManageAssets = assetsPage ? canViewPlatformPage(app.auth?.role, assetsPage, app.auth?.menu_permissions) : admin
+  const canViewOnlineSessions = onlineSessionsPage ? canViewPlatformPage(app.auth?.role, onlineSessionsPage, app.auth?.menu_permissions) : admin
+  const sessionsTarget = admin ? '/app/sessions' : canViewOnlineSessions ? '/app/online-sessions' : ''
 
   return (
     <div className='flex flex-col gap-4'>
@@ -66,8 +73,10 @@ export function OverviewPage() {
                 <p className='mt-1 max-w-2xl text-sm text-muted-foreground'>{t('overviewPage.description')}</p>
               </div>
               <div className='flex flex-wrap gap-2'>
-                <Link to='/app/servers' className={buttonVariants({ variant: 'outline' })}>{t('overviewPage.manageAssets')}</Link>
-                <Link to='/app/servers' className={buttonVariants({ variant: 'primary' })}>{t('overviewPage.openServers')}</Link>
+                {canManageAssets ? (
+                  <Link to={'/app/assets' as never} className={buttonVariants({ variant: 'outline' })}>{t('overviewPage.manageAssets')}</Link>
+                ) : null}
+                <Link to='/access' className={buttonVariants({ variant: 'primary' })}>{t('accessPortal')}</Link>
               </div>
             </div>
 
@@ -112,7 +121,9 @@ export function OverviewPage() {
             <div>
               <CardTitle>{t('overviewPage.recentSessions')}</CardTitle>
             </div>
-            <Link to='/app/sessions' className={buttonVariants({ variant: 'ghost' })}>{t('overviewPage.viewAll')}</Link>
+            {sessionsTarget ? (
+              <Link to={sessionsTarget as never} className={buttonVariants({ variant: 'ghost' })}>{t('overviewPage.viewAll')}</Link>
+            ) : null}
           </CardHeader>
           <SessionsTable sessions={app.data.sessions.slice(-6).reverse()} />
           </Card>
@@ -123,7 +134,11 @@ export function OverviewPage() {
             <div>
               <CardTitle>{t('overviewPage.quickAssets')}</CardTitle>
             </div>
-                <Link to={'/app/assets' as never} className={buttonVariants({ variant: 'ghost' })}>{t('overviewPage.manage')}</Link>
+                {canManageAssets ? (
+                  <Link to={'/app/assets' as never} className={buttonVariants({ variant: 'ghost' })}>{t('overviewPage.manage')}</Link>
+                ) : (
+                  <Link to='/access' className={buttonVariants({ variant: 'ghost' })}>{t('accessPortal')}</Link>
+                )}
           </CardHeader>
           {app.data.servers.length ? (
             <div className='grid'>

@@ -5231,6 +5231,15 @@ function BackupsPage({ config }: { config: PlatformPageConfig }) {
   const description = platformDescription(config, app.locale)
   const Icon = config.icon
   const { confirm, confirmDialog } = useConfirmDialog()
+  const apiPath = config.apiPath || '/api/admin/backups'
+  const role = app.auth?.role
+  const apiPermissions = app.auth?.api_permissions || []
+  const canUsePath: CanUsePath = (method, path) => canUseAPI(role, apiPermissions, method, path)
+  const canListBackups = canUsePath('GET', apiPath)
+  const canCreateBackup = canUsePath('POST', apiPath)
+  const canRestoreBackup = canUsePath('POST', `${apiPath}/restore`)
+  const canDownloadBackup = (item: BackupInfo) => canUsePath('GET', `${apiPath}/${encodeURIComponent(item.name)}/download`)
+  const canDeleteBackup = (item: BackupInfo) => canUsePath('DELETE', `${apiPath}/${encodeURIComponent(item.name)}`)
   const [items, setItems] = useState<BackupInfo[]>([])
   const [loading, setLoading] = useState(false)
   const [creating, setCreating] = useState(false)
@@ -5239,9 +5248,10 @@ function BackupsPage({ config }: { config: PlatformPageConfig }) {
   const [validation, setValidation] = useState<Record<string, unknown> | null>(null)
 
   const load = async () => {
+    if (!canListBackups) return
     setLoading(true)
     try {
-      const data = await apiRequest<{ items: BackupInfo[] }>(config.apiPath || '/api/admin/backups')
+      const data = await apiRequest<{ items: BackupInfo[] }>(apiPath)
       setItems(data.items || [])
     } catch (error) {
       app.handleApiError(error)
@@ -5252,12 +5262,13 @@ function BackupsPage({ config }: { config: PlatformPageConfig }) {
 
   useEffect(() => {
     void load()
-  }, [config.apiPath])
+  }, [apiPath, canListBackups])
 
   const createBackup = async () => {
+    if (!canCreateBackup) return
     setCreating(true)
     try {
-      await apiRequest(config.apiPath || '/api/admin/backups', { method: 'POST', body: '{}' })
+      await apiRequest(apiPath, { method: 'POST', body: '{}' })
       await load()
       app.showToast('备份已创建')
     } catch (error) {
@@ -5268,7 +5279,7 @@ function BackupsPage({ config }: { config: PlatformPageConfig }) {
   }
 
   const validateUpload = async () => {
-    if (!uploadFile) return
+    if (!canRestoreBackup || !uploadFile) return
     setRestoring(true)
     try {
       setValidation(await submitBackupFile(uploadFile, true))
@@ -5282,7 +5293,7 @@ function BackupsPage({ config }: { config: PlatformPageConfig }) {
   }
 
   const restoreUpload = async () => {
-    if (!uploadFile) return
+    if (!canRestoreBackup || !uploadFile) return
     const confirmed = await confirm({
       title: '恢复备份并覆盖当前数据?',
       description: '恢复会覆盖当前系统数据，并在恢复前自动创建一份当前备份。恢复完成后需要重新登录。',
@@ -5304,6 +5315,7 @@ function BackupsPage({ config }: { config: PlatformPageConfig }) {
   }
 
   const deleteBackup = async (item: BackupInfo) => {
+    if (!canDeleteBackup(item)) return
     const confirmed = await confirm({
       title: `删除备份 ${item.name}?`,
       description: '备份文件删除后不可恢复。',
@@ -5312,7 +5324,7 @@ function BackupsPage({ config }: { config: PlatformPageConfig }) {
     })
     if (!confirmed) return
     try {
-      await apiRequest(`/api/admin/backups/${encodeURIComponent(item.name)}`, { method: 'DELETE' })
+      await apiRequest(`${apiPath}/${encodeURIComponent(item.name)}`, { method: 'DELETE' })
       await load()
       app.showToast('备份已删除')
     } catch (error) {
@@ -5333,42 +5345,52 @@ function BackupsPage({ config }: { config: PlatformPageConfig }) {
               <CardDescription>{description}</CardDescription>
             </div>
             <div className='flex flex-wrap justify-end gap-2 max-sm:justify-start'>
-              <Button variant='outline' onClick={() => void load()} disabled={loading}>
-                <RefreshCw className={cn('size-4', loading && 'animate-spin')} />
-                刷新
-              </Button>
-              <Button variant='primary' onClick={() => void createBackup()} disabled={creating}>
-                <Save className='size-4' />
-                {creating ? '备份中' : '立即备份'}
-              </Button>
+              {canListBackups ? (
+                <Button variant='outline' onClick={() => void load()} disabled={loading}>
+                  <RefreshCw className={cn('size-4', loading && 'animate-spin')} />
+                  刷新
+                </Button>
+              ) : null}
+              {canCreateBackup ? (
+                <Button variant='primary' onClick={() => void createBackup()} disabled={creating}>
+                  <Save className='size-4' />
+                  {creating ? '备份中' : '立即备份'}
+                </Button>
+              ) : null}
             </div>
           </CardHeader>
           <CardContent className='grid gap-5'>
-            <section className='grid gap-3 rounded-xl border border-border bg-background/60 p-4'>
-              <div>
-                <h3 className='text-sm font-semibold'>上传恢复</h3>
-                <p className='mt-1 text-xs leading-5 text-muted-foreground'>上传系统生成的备份 zip。执行恢复前会自动创建一份当前数据备份，恢复后需要重新登录。</p>
-              </div>
-              <div className='grid gap-3 md:grid-cols-[minmax(0,1fr)_auto_auto]'>
-                <Input type='file' accept='.zip,application/zip' onChange={(event) => {
-                  setUploadFile(event.currentTarget.files?.[0] || null)
-                  setValidation(null)
-                }} />
-                <Button variant='outline' onClick={() => void validateUpload()} disabled={!uploadFile || restoring}>
-                  <FileSearch className='size-4' />
-                  校验
-                </Button>
-                <Button variant='destructive' onClick={() => void restoreUpload()} disabled={!uploadFile || restoring}>
-                  <Upload className='size-4' />
-                  {restoring ? '处理中' : '恢复'}
-                </Button>
-              </div>
-              {validation ? (
-                <pre className='max-h-56 overflow-auto rounded-lg bg-muted p-3 text-xs'>{JSON.stringify(validation, null, 2)}</pre>
-              ) : null}
-            </section>
-            <div className='grid gap-3'>
-              {items.length ? items.map((item) => (
+            {canRestoreBackup ? (
+              <section className='grid gap-3 rounded-xl border border-border bg-background/60 p-4'>
+                <div>
+                  <h3 className='text-sm font-semibold'>上传恢复</h3>
+                  <p className='mt-1 text-xs leading-5 text-muted-foreground'>上传系统生成的备份 zip。执行恢复前会自动创建一份当前数据备份，恢复后需要重新登录。</p>
+                </div>
+                <div className='grid gap-3 md:grid-cols-[minmax(0,1fr)_auto_auto]'>
+                  <Input type='file' accept='.zip,application/zip' onChange={(event) => {
+                    setUploadFile(event.currentTarget.files?.[0] || null)
+                    setValidation(null)
+                  }} />
+                  <Button variant='outline' onClick={() => void validateUpload()} disabled={!uploadFile || restoring}>
+                    <FileSearch className='size-4' />
+                    校验
+                  </Button>
+                  <Button variant='destructive' onClick={() => void restoreUpload()} disabled={!uploadFile || restoring}>
+                    <Upload className='size-4' />
+                    {restoring ? '处理中' : '恢复'}
+                  </Button>
+                </div>
+                {validation ? (
+                  <pre className='max-h-56 overflow-auto rounded-lg bg-muted p-3 text-xs'>{JSON.stringify(validation, null, 2)}</pre>
+                ) : null}
+              </section>
+            ) : null}
+            {canListBackups ? (
+              <div className='grid gap-3'>
+                {items.length ? items.map((item) => {
+                  const canDownload = canDownloadBackup(item)
+                  const canDelete = canDeleteBackup(item)
+                  return (
                 <article key={item.name} className='grid gap-3 rounded-xl border border-border bg-background/60 p-4 md:grid-cols-[minmax(0,1fr)_auto] md:items-center'>
                   <div className='min-w-0'>
                     <div className='flex flex-wrap items-center gap-2'>
@@ -5378,20 +5400,28 @@ function BackupsPage({ config }: { config: PlatformPageConfig }) {
                     <p className='mt-1 text-xs text-muted-foreground'>{formatDate(item.modified_at)} · {(item.files || []).join(', ') || 'manifest only'}</p>
                   </div>
                   <div className='flex flex-wrap justify-end gap-2 md:flex-nowrap'>
-                    <Button variant='outline' onClick={() => void downloadResponse(`/api/admin/backups/${encodeURIComponent(item.name)}/download`, item.name)}>
-                      <Download className='size-4' />
-                      下载
-                    </Button>
-                    <Button variant='destructive' onClick={() => void deleteBackup(item)}>
-                      <Trash2 className='size-4' />
-                      删除
-                    </Button>
+                    {canDownload ? (
+                      <Button variant='outline' onClick={() => void downloadResponse(`${apiPath}/${encodeURIComponent(item.name)}/download`, item.name)}>
+                        <Download className='size-4' />
+                        下载
+                      </Button>
+                    ) : null}
+                    {canDelete ? (
+                      <Button variant='destructive' onClick={() => void deleteBackup(item)}>
+                        <Trash2 className='size-4' />
+                        删除
+                      </Button>
+                    ) : null}
                   </div>
                 </article>
-              )) : (
-                <div className='rounded-xl border border-dashed border-border p-6 text-sm text-muted-foreground'>暂无备份。点击“立即备份”生成第一份快照。</div>
-              )}
-            </div>
+                  )
+                }) : (
+                  <div className='rounded-xl border border-dashed border-border p-6 text-sm text-muted-foreground'>暂无备份。点击“立即备份”生成第一份快照。</div>
+                )}
+              </div>
+            ) : (
+              <div className='rounded-xl border border-dashed border-border p-6 text-sm text-muted-foreground'>当前账号没有查看备份列表的 API 权限。</div>
+            )}
           </CardContent>
         </Card>
       </CardStaggerItem>

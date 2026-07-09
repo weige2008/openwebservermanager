@@ -32,6 +32,12 @@ try {
     ['storage wildcard read does not allow upload', false, canUseAPI('custom', ['GET /api/admin/storages/*'], 'POST', '/api/admin/storages/s1/files-upload')],
     ['storage wildcard write allows upload', true, canUseAPI('custom', ['POST /api/admin/storages/*'], 'POST', '/api/admin/storages/s1/files-upload')],
     ['method wildcard allows storage delete', true, canUseAPI('custom', ['* /api/admin/storages/*'], 'DELETE', '/api/admin/storages/s1/files')],
+    ['backup list permission allows list only', true, canUseAPI('custom', ['GET /api/admin/backups'], 'GET', '/api/admin/backups')],
+    ['backup list permission does not allow download', false, canUseAPI('custom', ['GET /api/admin/backups'], 'GET', '/api/admin/backups/openweb.zip/download')],
+    ['backup wildcard read allows download', true, canUseAPI('custom', ['GET /api/admin/backups/*'], 'GET', '/api/admin/backups/openweb.zip/download')],
+    ['backup create permission does not allow restore', false, canUseAPI('custom', ['POST /api/admin/backups'], 'POST', '/api/admin/backups/restore')],
+    ['backup restore permission allows restore', true, canUseAPI('custom', ['POST /api/admin/backups/restore'], 'POST', '/api/admin/backups/restore')],
+    ['backup delete wildcard allows delete', true, canUseAPI('custom', ['DELETE /api/admin/backups/*'], 'DELETE', '/api/admin/backups/openweb.zip')],
   ]
 
   const failed = cases.filter(([, expected, actual]) => actual !== expected)

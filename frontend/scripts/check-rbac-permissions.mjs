@@ -57,6 +57,8 @@ try {
     ['license put allows local license save', true, canUseAPI('custom', ['PUT /api/admin/license'], 'PUT', '/api/admin/license')],
     ['proxy services read does not allow save', false, canUseAPI('custom', ['GET /api/admin/proxy-services'], 'POST', '/api/admin/proxy-services')],
     ['proxy services post allows save', true, canUseAPI('custom', ['POST /api/admin/proxy-services'], 'POST', '/api/admin/proxy-services')],
+    ['certificate ACME permission does not imply DNS provider read', false, canUseAPI('custom', ['POST /api/admin/certificates/acme'], 'GET', '/api/admin/certificates/dns-providers')],
+    ['certificate DNS provider read allows provider list', true, canUseAPI('custom', ['GET /api/admin/certificates/dns-providers'], 'GET', '/api/admin/certificates/dns-providers')],
   ]
 
   const failed = cases.filter(([, expected, actual]) => actual !== expected)

@@ -1519,7 +1519,7 @@ function ResourceOperationDialog({
   if (operation.type === 'agent-token') return <AgentGatewayTokenDialog item={operation.item} onClose={() => onOpenChange(null)} />
   if (operation.type === 'certificate-create') return <CertificateCreateDialog onClose={() => onOpenChange(null)} />
   if (operation.type === 'certificate-upload') return <CertificateUploadDialog onClose={() => onOpenChange(null)} />
-  if (operation.type === 'certificate-acme') return <CertificateACMEDialog onClose={() => onOpenChange(null)} />
+  if (operation.type === 'certificate-acme') return <CertificateACMEDialog onClose={() => onOpenChange(null)} canUsePath={canUsePath} />
   if (operation.type === 'certificate-dns-provider') return <CertificateDNSProviderDialog onClose={() => onOpenChange(null)} />
   if (operation.type === 'certificate-logs') return <CertificateLogsDialog item={operation.item} onClose={() => onOpenChange(null)} />
   if (operation.type === 'certificate-mtls') return <CertificateMTLSDialog item={operation.item} onClose={() => onOpenChange(null)} />
@@ -2033,8 +2033,10 @@ function CertificateUploadDialog({ onClose }: { onClose: () => void }) {
   )
 }
 
-function CertificateACMEDialog({ onClose }: { onClose: () => void }) {
+function CertificateACMEDialog({ onClose, canUsePath }: { onClose: () => void; canUsePath: CanUsePath }) {
   const app = useApp()
+  const canIssueACME = canUsePath('POST', '/api/admin/certificates/acme')
+  const canReadDNSProviders = canUsePath('GET', '/api/admin/certificates/dns-providers')
   const [providers, setProviders] = useState<PlatformItem[]>([])
   const [name, setName] = useState('')
   const [domain, setDomain] = useState('')
@@ -2050,6 +2052,11 @@ function CertificateACMEDialog({ onClose }: { onClose: () => void }) {
   const [issued, setIssued] = useState<PlatformItem | null>(null)
 
   useEffect(() => {
+    if (!canReadDNSProviders) {
+      setProviders([])
+      setDNSProviderID('')
+      return
+    }
     let alive = true
     const load = async () => {
       try {
@@ -2063,9 +2070,13 @@ function CertificateACMEDialog({ onClose }: { onClose: () => void }) {
     return () => {
       alive = false
     }
-  }, [])
+  }, [canReadDNSProviders])
 
   const submit = async () => {
+    if (!canIssueACME) {
+      app.showToast(app.t('permissionDenied', 'Permission denied'))
+      return
+    }
     setSaving(true)
     try {
       const item = await apiRequest<PlatformItem>('/api/admin/certificates/acme', {
@@ -2116,6 +2127,11 @@ function CertificateACMEDialog({ onClose }: { onClose: () => void }) {
                 <option key={provider.id} value={provider.id}>{provider.name}</option>
               ))}
             </Select>
+            {!canReadDNSProviders ? (
+              <p className='mt-1 text-xs leading-5 text-muted-foreground'>
+                {app.t('dnsProviderReadPermissionRequired', 'DNS provider list requires read permission. HTTP-01 and ACME requests without a saved provider can still be submitted.')}
+              </p>
+            ) : null}
           </Field>
         </div>
         <div className='grid gap-2 sm:grid-cols-2'>
@@ -2136,7 +2152,7 @@ function CertificateACMEDialog({ onClose }: { onClose: () => void }) {
         ) : null}
         <div className='flex justify-end gap-2'>
           <Button variant='outline' onClick={onClose}>关闭</Button>
-          <Button variant='primary' onClick={() => void submit()} disabled={saving || !domain.trim()}>
+          <Button variant='primary' onClick={() => void submit()} disabled={saving || !domain.trim() || !canIssueACME}>
             <Save className='size-4' />
             {saving ? '签发中' : '签发'}
           </Button>

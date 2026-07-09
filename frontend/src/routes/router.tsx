@@ -67,7 +67,7 @@ function RoleGate({ children, adminOnly, page }: { children: ReactNode; adminOnl
   const app = useApp()
   const role = app.auth?.role
   if (adminOnly && !isAdminRole(role)) return <Navigate to='/access' replace />
-  if (page && !canViewPlatformPage(role, page)) return <Navigate to='/access' replace />
+  if (page && !canViewPlatformPage(role, page, app.auth?.menu_permissions)) return <Navigate to='/access' replace />
   return children
 }
 

@@ -846,7 +846,7 @@ export function PlatformTablePage({ config }: { config: PlatformPageConfig }) {
         onChange={(next) => setForm((current) => ({ ...current, ...next }))}
         onSave={() => void save()}
       />
-      <ResourceOperationDialog operation={operation} onOpenChange={setOperation} requestAccessMFACode={requestAccessMFACode} />
+      <ResourceOperationDialog operation={operation} onOpenChange={setOperation} requestAccessMFACode={requestAccessMFACode} canUsePath={canUsePath} />
       {accessMFADialog}
       {confirmDialog}
     </CardStaggerContainer>
@@ -1505,10 +1505,12 @@ function ResourceOperationDialog({
   operation,
   onOpenChange,
   requestAccessMFACode,
+  canUsePath,
 }: {
   operation: ResourceOperation | null
   onOpenChange: (operation: ResourceOperation | null) => void
   requestAccessMFACode: RequestAccessMFACode
+  canUsePath: CanUsePath
 }) {
   if (!operation) return null
   if (operation.type === 'asset-import') return <AssetImportDialog onClose={() => onOpenChange(null)} />
@@ -1521,7 +1523,7 @@ function ResourceOperationDialog({
   if (operation.type === 'certificate-dns-provider') return <CertificateDNSProviderDialog onClose={() => onOpenChange(null)} />
   if (operation.type === 'certificate-logs') return <CertificateLogsDialog item={operation.item} onClose={() => onOpenChange(null)} />
   if (operation.type === 'certificate-mtls') return <CertificateMTLSDialog item={operation.item} onClose={() => onOpenChange(null)} />
-  if (operation.type === 'storage-files') return <StorageFilesDialog item={operation.item} onClose={() => onOpenChange(null)} />
+  if (operation.type === 'storage-files') return <StorageFilesDialog item={operation.item} onClose={() => onOpenChange(null)} canUsePath={canUsePath} />
   if (operation.type === 'task-logs') return <TaskLogsDialog item={operation.item} onClose={() => onOpenChange(null)} />
   if (operation.type === 'sql-decision') return <SQLWorkOrderDecisionDialog item={operation.item} decision={operation.decision} onClose={() => onOpenChange(null)} />
   if (operation.type === 'sql-execute') return <SQLExecuteDialog item={operation.item} onClose={() => onOpenChange(null)} requestAccessMFACode={requestAccessMFACode} />
@@ -2270,9 +2272,19 @@ function CertificateLogsDialog({ item, onClose }: { item: PlatformItem; onClose:
   )
 }
 
-function StorageFilesDialog({ item, onClose }: { item: PlatformItem; onClose: () => void }) {
+function StorageFilesDialog({ item, onClose, canUsePath }: { item: PlatformItem; onClose: () => void; canUsePath: CanUsePath }) {
   const app = useApp()
   const { confirm, confirmDialog } = useConfirmDialog()
+  const storageAPIPath = `/api/admin/storages/${item.id}`
+  const canListFiles = canUsePath('GET', `${storageAPIPath}/files`)
+  const canDeleteFiles = canUsePath('DELETE', `${storageAPIPath}/files`)
+  const canDownloadFiles = canUsePath('GET', `${storageAPIPath}/files-download`)
+  const canUploadFiles = canUsePath('POST', `${storageAPIPath}/files-upload`)
+  const canWriteFiles = canUsePath('POST', `${storageAPIPath}/files-write`)
+  const canCreateFolders = canUsePath('POST', `${storageAPIPath}/files-mkdir`)
+  const canCopyFiles = canUsePath('POST', `${storageAPIPath}/files-copy`)
+  const canRenameFiles = canUsePath('POST', `${storageAPIPath}/files-rename`)
+  const canEditTextFiles = canDownloadFiles && canWriteFiles
   const [path, setPath] = useState('.')
   const [entries, setEntries] = useState<StorageEntry[]>([])
   const [usage, setUsage] = useState<StorageUsage | null>(null)
@@ -2292,9 +2304,10 @@ function StorageFilesDialog({ item, onClose }: { item: PlatformItem; onClose: ()
   const [uploadInputKey, setUploadInputKey] = useState(0)
 
   const load = async (target = path) => {
+    if (!canListFiles) return
     setLoading(true)
     try {
-      const data = await apiRequest<{ path: string; entries: StorageEntry[]; usage?: StorageUsage }>(`/api/admin/storages/${item.id}/files?path=${encodeURIComponent(target)}`)
+      const data = await apiRequest<{ path: string; entries: StorageEntry[]; usage?: StorageUsage }>(`${storageAPIPath}/files?path=${encodeURIComponent(target)}`)
       setPath(data.path || '.')
       setEntries(sortStorageEntries(data.entries || []))
       setUsage(data.usage || null)
@@ -2310,8 +2323,9 @@ function StorageFilesDialog({ item, onClose }: { item: PlatformItem; onClose: ()
   }, [item.id])
 
   const createFolder = async () => {
+    if (!canCreateFolders) return
     try {
-      await apiRequest(`/api/admin/storages/${item.id}/files-mkdir`, {
+      await apiRequest(`${storageAPIPath}/files-mkdir`, {
         method: 'POST',
         body: JSON.stringify({ path: resolveStoragePath(path, folderName) }),
       })
@@ -2325,8 +2339,9 @@ function StorageFilesDialog({ item, onClose }: { item: PlatformItem; onClose: ()
   }
 
   const writeFile = async () => {
+    if (!canWriteFiles) return
     try {
-      await apiRequest(`/api/admin/storages/${item.id}/files-write`, {
+      await apiRequest(`${storageAPIPath}/files-write`, {
         method: 'POST',
         body: JSON.stringify({ path: resolveStoragePath(path, filePath), content: fileContent }),
       })
@@ -2342,12 +2357,12 @@ function StorageFilesDialog({ item, onClose }: { item: PlatformItem; onClose: ()
   }
 
   const uploadSelectedFile = async () => {
-    if (!uploadFileItem) return
+    if (!canUploadFiles || !uploadFileItem) return
     try {
       const form = new FormData()
       form.set('path', path === '.' ? '' : path)
       form.set('file', uploadFileItem)
-      const response = await fetch(`/api/admin/storages/${item.id}/files-upload`, {
+      const response = await fetch(`${storageAPIPath}/files-upload`, {
         method: 'POST',
         credentials: 'same-origin',
         body: form,
@@ -2367,6 +2382,7 @@ function StorageFilesDialog({ item, onClose }: { item: PlatformItem; onClose: ()
   }
 
   const deleteEntry = async (entry: StorageEntry) => {
+    if (!canDeleteFiles) return
     const confirmed = await confirm({
       title: `删除 ${entry.path}?`,
       description: '文件或目录删除后不可恢复。',
@@ -2375,7 +2391,7 @@ function StorageFilesDialog({ item, onClose }: { item: PlatformItem; onClose: ()
     })
     if (!confirmed) return
     try {
-      await apiRequest(`/api/admin/storages/${item.id}/files?path=${encodeURIComponent(entry.path)}`, { method: 'DELETE' })
+      await apiRequest(`${storageAPIPath}/files?path=${encodeURIComponent(entry.path)}`, { method: 'DELETE' })
       await load()
       await app.refresh(true)
       app.showToast('文件已删除')
@@ -2385,8 +2401,9 @@ function StorageFilesDialog({ item, onClose }: { item: PlatformItem; onClose: ()
   }
 
   const downloadEntry = async (entry: StorageEntry) => {
+    if (!canDownloadFiles) return
     try {
-      await downloadResponse(`/api/admin/storages/${item.id}/files-download?path=${encodeURIComponent(entry.path)}`, entry.name)
+      await downloadResponse(`${storageAPIPath}/files-download?path=${encodeURIComponent(entry.path)}`, entry.name)
       app.showToast('文件已下载')
     } catch (error) {
       app.handleApiError(error)
@@ -2394,8 +2411,9 @@ function StorageFilesDialog({ item, onClose }: { item: PlatformItem; onClose: ()
   }
 
   const copyEntry = async () => {
+    if (!canCopyFiles) return
     try {
-      await apiRequest(`/api/admin/storages/${item.id}/files-copy`, {
+      await apiRequest(`${storageAPIPath}/files-copy`, {
         method: 'POST',
         body: JSON.stringify({
           path: resolveStoragePath(path, copySource),
@@ -2415,8 +2433,9 @@ function StorageFilesDialog({ item, onClose }: { item: PlatformItem; onClose: ()
   }
 
   const renameEntry = async () => {
+    if (!canRenameFiles) return
     try {
-      await apiRequest(`/api/admin/storages/${item.id}/files-rename`, {
+      await apiRequest(`${storageAPIPath}/files-rename`, {
         method: 'POST',
         body: JSON.stringify({
           path: resolveStoragePath(path, renameSource),
@@ -2436,21 +2455,24 @@ function StorageFilesDialog({ item, onClose }: { item: PlatformItem; onClose: ()
   }
 
   const prefillCopyEntry = (entry: StorageEntry) => {
+    if (!canCopyFiles) return
     setCopySource(rootStoragePath(entry.path))
     setCopyDestination(rootStoragePath(siblingStoragePath(entry.path, copiedStorageName(entry.name, entry.is_dir))))
     setCopyOverwrite(false)
   }
 
   const prefillRenameEntry = (entry: StorageEntry) => {
+    if (!canRenameFiles) return
     setRenameSource(rootStoragePath(entry.path))
     setRenameDestination(rootStoragePath(siblingStoragePath(entry.path, renamedStorageName(entry.name, entry.is_dir))))
     setRenameOverwrite(false)
   }
 
   const editTextEntry = async (entry: StorageEntry) => {
+    if (!canEditTextFiles) return
     setTextLoadingPath(entry.path)
     try {
-      const text = await fetchStorageText(`/api/admin/storages/${item.id}/files-download?path=${encodeURIComponent(entry.path)}`)
+      const text = await fetchStorageText(`${storageAPIPath}/files-download?path=${encodeURIComponent(entry.path)}`)
       setFilePath(rootStoragePath(entry.path))
       setFileContent(text)
       setEditingFilePath(entry.path)
@@ -2502,65 +2524,95 @@ function StorageFilesDialog({ item, onClose }: { item: PlatformItem; onClose: ()
               <div className='flex flex-wrap justify-end gap-1.5'>
                 {!entry.is_dir ? (
                   <>
-                    <Button size='sm' variant='outline' onClick={() => void downloadEntry(entry)}><Download className='size-3.5' />下载</Button>
-                    <Button size='sm' variant='outline' onClick={() => void editTextEntry(entry)} disabled={textLoadingPath === entry.path}><Pencil className='size-3.5' />编辑</Button>
+                    {canDownloadFiles ? (
+                      <Button size='sm' variant='outline' onClick={() => void downloadEntry(entry)}><Download className='size-3.5' />下载</Button>
+                    ) : null}
+                    {canEditTextFiles ? (
+                      <Button size='sm' variant='outline' onClick={() => void editTextEntry(entry)} disabled={textLoadingPath === entry.path}><Pencil className='size-3.5' />编辑</Button>
+                    ) : null}
                   </>
                 ) : null}
-                <Button size='sm' variant='outline' onClick={() => prefillCopyEntry(entry)}><Copy className='size-3.5' />复制</Button>
-                <Button size='sm' variant='outline' onClick={() => prefillRenameEntry(entry)}><MoveRight className='size-3.5' />重命名</Button>
-                <Button size='sm' variant='destructive' onClick={() => void deleteEntry(entry)}><Trash2 className='size-3.5' />删除</Button>
+                {canCopyFiles ? (
+                  <Button size='sm' variant='outline' onClick={() => prefillCopyEntry(entry)}><Copy className='size-3.5' />复制</Button>
+                ) : null}
+                {canRenameFiles ? (
+                  <Button size='sm' variant='outline' onClick={() => prefillRenameEntry(entry)}><MoveRight className='size-3.5' />重命名</Button>
+                ) : null}
+                {canDeleteFiles ? (
+                  <Button size='sm' variant='destructive' onClick={() => void deleteEntry(entry)}><Trash2 className='size-3.5' />删除</Button>
+                ) : null}
               </div>
             </div>
           )) : (
             <div className='rounded-lg border border-dashed border-border p-6 text-sm text-muted-foreground'>{loading ? '加载中' : '当前目录为空'}</div>
           )}
         </div>
-        <div className='grid gap-3 sm:grid-cols-[minmax(0,1fr)_auto]'>
-          <Input placeholder='新目录名' value={folderName} onChange={(event) => setFolderName(event.currentTarget.value)} />
-          <Button variant='outline' onClick={() => void createFolder()} disabled={!folderName.trim()}><FolderPlus className='size-4' />创建目录</Button>
-        </div>
-        <div className='grid gap-3 rounded-xl border border-border bg-background/60 p-3 sm:grid-cols-[minmax(0,1fr)_auto]'>
-          <Input key={uploadInputKey} type='file' onChange={(event) => setUploadFileItem(event.currentTarget.files?.[0] || null)} />
-          <Button variant='outline' onClick={() => void uploadSelectedFile()} disabled={!uploadFileItem}>
-            <Upload className='size-4' />
-            上传
-          </Button>
-        </div>
-        <div className='grid gap-3 rounded-xl border border-border bg-background/60 p-3'>
-          <div className='grid gap-3 sm:grid-cols-[minmax(0,1fr)_minmax(0,1fr)_auto]'>
-            <Input placeholder='复制源，当前目录相对路径或 /docs/a.txt' value={copySource} onChange={(event) => setCopySource(event.currentTarget.value)} />
-            <Input placeholder='复制到，当前目录相对路径或 /docs/b.txt' value={copyDestination} onChange={(event) => setCopyDestination(event.currentTarget.value)} />
-            <Button variant='outline' onClick={() => void copyEntry()} disabled={!copySource.trim() || !copyDestination.trim()}>
-              <Copy className='size-4' />
-              复制
+        {canCreateFolders ? (
+          <div className='grid gap-3 sm:grid-cols-[minmax(0,1fr)_auto]'>
+            <Input placeholder='新目录名' value={folderName} onChange={(event) => setFolderName(event.currentTarget.value)} />
+            <Button variant='outline' onClick={() => void createFolder()} disabled={!folderName.trim()}><FolderPlus className='size-4' />创建目录</Button>
+          </div>
+        ) : null}
+        {canUploadFiles ? (
+          <div className='grid gap-3 rounded-xl border border-border bg-background/60 p-3 sm:grid-cols-[minmax(0,1fr)_auto]'>
+            <Input key={uploadInputKey} type='file' onChange={(event) => setUploadFileItem(event.currentTarget.files?.[0] || null)} />
+            <Button variant='outline' onClick={() => void uploadSelectedFile()} disabled={!uploadFileItem}>
+              <Upload className='size-4' />
+              上传
             </Button>
           </div>
-          <CheckboxRow checked={copyOverwrite} onChange={setCopyOverwrite} label='复制时覆盖已存在的目标' />
-          <div className='grid gap-3 sm:grid-cols-[minmax(0,1fr)_minmax(0,1fr)_auto]'>
-            <Input placeholder='重命名源，当前目录相对路径或 /docs/b.txt' value={renameSource} onChange={(event) => setRenameSource(event.currentTarget.value)} />
-            <Input placeholder='改为，当前目录相对路径或 /docs/c.txt' value={renameDestination} onChange={(event) => setRenameDestination(event.currentTarget.value)} />
-            <Button variant='outline' onClick={() => void renameEntry()} disabled={!renameSource.trim() || !renameDestination.trim()}>
-              <MoveRight className='size-4' />
-              重命名
-            </Button>
+        ) : null}
+        {canCopyFiles || canRenameFiles ? (
+          <div className='grid gap-3 rounded-xl border border-border bg-background/60 p-3'>
+            {canCopyFiles ? (
+              <>
+                <div className='grid gap-3 sm:grid-cols-[minmax(0,1fr)_minmax(0,1fr)_auto]'>
+                  <Input placeholder='复制源，当前目录相对路径或 /docs/a.txt' value={copySource} onChange={(event) => setCopySource(event.currentTarget.value)} />
+                  <Input placeholder='复制到，当前目录相对路径或 /docs/b.txt' value={copyDestination} onChange={(event) => setCopyDestination(event.currentTarget.value)} />
+                  <Button variant='outline' onClick={() => void copyEntry()} disabled={!copySource.trim() || !copyDestination.trim()}>
+                    <Copy className='size-4' />
+                    复制
+                  </Button>
+                </div>
+                <CheckboxRow checked={copyOverwrite} onChange={setCopyOverwrite} label='复制时覆盖已存在的目标' />
+              </>
+            ) : null}
+            {canRenameFiles ? (
+              <>
+                <div className='grid gap-3 sm:grid-cols-[minmax(0,1fr)_minmax(0,1fr)_auto]'>
+                  <Input placeholder='重命名源，当前目录相对路径或 /docs/b.txt' value={renameSource} onChange={(event) => setRenameSource(event.currentTarget.value)} />
+                  <Input placeholder='改为，当前目录相对路径或 /docs/c.txt' value={renameDestination} onChange={(event) => setRenameDestination(event.currentTarget.value)} />
+                  <Button variant='outline' onClick={() => void renameEntry()} disabled={!renameSource.trim() || !renameDestination.trim()}>
+                    <MoveRight className='size-4' />
+                    重命名
+                  </Button>
+                </div>
+                <CheckboxRow checked={renameOverwrite} onChange={setRenameOverwrite} label='重命名时覆盖已存在的目标' />
+              </>
+            ) : null}
           </div>
-          <CheckboxRow checked={renameOverwrite} onChange={setRenameOverwrite} label='重命名时覆盖已存在的目标' />
-        </div>
-        <div className='grid gap-3'>
-          {editingFilePath ? (
-            <div className='flex flex-wrap items-center justify-between gap-2 rounded-lg border border-border bg-muted/30 px-3 py-2 text-xs text-muted-foreground'>
-              <span className='truncate'>正在编辑 /{editingFilePath}</span>
-              <Button size='sm' variant='outline' onClick={() => { setEditingFilePath(''); setFilePath(''); setFileContent('') }}>清空编辑</Button>
+        ) : null}
+        {canWriteFiles ? (
+          <div className='grid gap-3'>
+            {editingFilePath ? (
+              <div className='flex flex-wrap items-center justify-between gap-2 rounded-lg border border-border bg-muted/30 px-3 py-2 text-xs text-muted-foreground'>
+                <span className='truncate'>正在编辑 /{editingFilePath}</span>
+                <Button size='sm' variant='outline' onClick={() => { setEditingFilePath(''); setFilePath(''); setFileContent('') }}>清空编辑</Button>
+              </div>
+            ) : null}
+            <Input placeholder='文件名，当前目录相对路径或 /notes/readme.txt' value={filePath} onChange={(event) => setFilePath(event.currentTarget.value)} />
+            <Textarea placeholder='文件内容' value={fileContent} onChange={(event) => setFileContent(event.currentTarget.value)} />
+            <div className='flex justify-end gap-2'>
+              <Button variant='outline' onClick={onClose}>关闭</Button>
+              <Button variant='primary' onClick={() => void writeFile()} disabled={!filePath.trim()}><Save className='size-4' />写入文件</Button>
             </div>
-          ) : null}
-          <Input placeholder='文件名，当前目录相对路径或 /notes/readme.txt' value={filePath} onChange={(event) => setFilePath(event.currentTarget.value)} />
-          <Textarea placeholder='文件内容' value={fileContent} onChange={(event) => setFileContent(event.currentTarget.value)} />
-          <div className='flex justify-end gap-2'>
-            <Button variant='outline' onClick={onClose}>关闭</Button>
-            <Button variant='primary' onClick={() => void writeFile()} disabled={!filePath.trim()}><Save className='size-4' />写入文件</Button>
           </div>
-        </div>
-        {confirmDialog}
+        ) : (
+          <div className='flex justify-end'>
+            <Button variant='outline' onClick={onClose}>关闭</Button>
+          </div>
+        )}
+        {canDeleteFiles ? confirmDialog : null}
       </div>
     </DialogShell>
   )

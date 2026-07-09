@@ -5051,15 +5051,20 @@ function AccessSection({
 
 function ToolsPage({ config }: { config: PlatformPageConfig }) {
   const app = useApp()
+  const apiPath = config.apiPath || '/api/tools/ping'
+  const role = app.auth?.role
+  const apiPermissions = app.auth?.api_permissions || []
+  const canRunTool = canUseAPI(role, apiPermissions, 'POST', apiPath)
   const [target, setTarget] = useState('')
   const [mode, setMode] = useState<'icmp' | 'tcp'>('icmp')
   const [count, setCount] = useState('4')
   const [loading, setLoading] = useState(false)
   const [result, setResult] = useState<PingToolResponse | null>(null)
   const run = async () => {
+    if (!canRunTool) return
     setLoading(true)
     try {
-      const data = await apiRequest<PingToolResponse>(config.apiPath || '/api/tools/ping', {
+      const data = await apiRequest<PingToolResponse>(apiPath, {
         method: 'POST',
         body: JSON.stringify({ target, count: Number(count) || 4, mode }),
       })
@@ -5079,18 +5084,22 @@ function ToolsPage({ config }: { config: PlatformPageConfig }) {
         </div>
       </CardHeader>
       <CardContent className='grid gap-4'>
-        <div className='grid gap-3 md:grid-cols-[minmax(0,1fr)_10rem_7rem_auto]'>
-          <Input placeholder={mode === 'tcp' ? 'host:port' : 'IP / domain'} value={target} onChange={(event) => setTarget(event.currentTarget.value)} />
-          <Select value={mode} onChange={(event) => setMode(event.currentTarget.value as 'icmp' | 'tcp')}>
-            <option value='icmp'>Ping</option>
-            <option value='tcp'>TCP Ping</option>
-          </Select>
-          <Input type='number' min={1} max={10} value={count} onChange={(event) => setCount(event.currentTarget.value)} aria-label='count' />
-          <Button variant='primary' onClick={() => void run()} disabled={!target.trim() || loading}>
-            <Play className={cn('size-4', loading && 'animate-pulse')} />
-            {loading ? '检测中' : '开始检测'}
-          </Button>
-        </div>
+        {canRunTool ? (
+          <div className='grid gap-3 md:grid-cols-[minmax(0,1fr)_10rem_7rem_auto]'>
+            <Input placeholder={mode === 'tcp' ? 'host:port' : 'IP / domain'} value={target} onChange={(event) => setTarget(event.currentTarget.value)} />
+            <Select value={mode} onChange={(event) => setMode(event.currentTarget.value as 'icmp' | 'tcp')}>
+              <option value='icmp'>Ping</option>
+              <option value='tcp'>TCP Ping</option>
+            </Select>
+            <Input type='number' min={1} max={10} value={count} onChange={(event) => setCount(event.currentTarget.value)} aria-label='count' />
+            <Button variant='primary' onClick={() => void run()} disabled={!target.trim() || loading}>
+              <Play className={cn('size-4', loading && 'animate-pulse')} />
+              {loading ? '检测中' : '开始检测'}
+            </Button>
+          </div>
+        ) : (
+          <div className='rounded-xl border border-dashed border-border p-6 text-sm text-muted-foreground'>当前账号没有执行诊断工具的 API 权限。</div>
+        )}
         {result ? (
           <div className='grid gap-3'>
             <div className='flex flex-wrap items-center gap-2 text-sm'>
@@ -5123,14 +5132,29 @@ function ToolsPage({ config }: { config: PlatformPageConfig }) {
 
 function MonitoringPage({ config }: { config: PlatformPageConfig }) {
   const app = useApp()
+  const apiPath = config.apiPath || '/api/system/monitoring'
+  const role = app.auth?.role
+  const apiPermissions = app.auth?.api_permissions || []
+  const canReadMonitoring = canUseAPI(role, apiPermissions, 'GET', apiPath)
   const [monitor, setMonitor] = useState<Record<string, unknown> | null>(null)
+  const [loading, setLoading] = useState(false)
   const load = async () => {
+    if (!canReadMonitoring) return
+    setLoading(true)
     try {
-      setMonitor(await apiRequest<Record<string, unknown>>(config.apiPath || '/api/system/monitoring'))
+      setMonitor(await apiRequest<Record<string, unknown>>(apiPath))
     } catch (error) {
       app.handleApiError(error)
+    } finally {
+      setLoading(false)
     }
   }
+
+  useEffect(() => {
+    if (!canReadMonitoring) return
+    void load()
+  }, [apiPath, canReadMonitoring])
+
   const stats = monitor || {
     users: app.data.platform?.users?.length || 0,
     assets: app.data.platform?.assets?.length || 0,
@@ -5188,22 +5212,33 @@ function MonitoringPage({ config }: { config: PlatformPageConfig }) {
           <CardTitle>系统监控</CardTitle>
           <CardDescription>集中查看服务、网关、会话、存储和告警的运行状态。</CardDescription>
         </div>
-        <Button variant='outline' onClick={() => void load()}><RefreshCw className='size-4' />刷新</Button>
+        {canReadMonitoring ? (
+          <Button variant='outline' onClick={() => void load()} disabled={loading}>
+            <RefreshCw className={cn('size-4', loading && 'animate-spin')} />
+            刷新
+          </Button>
+        ) : null}
       </CardHeader>
       <CardContent className='grid gap-5'>
-        <div className='grid gap-3 md:grid-cols-3 xl:grid-cols-4'>
-          {metricCards.map(([label, value, tone]) => (
-            <div key={label} className='rounded-xl border border-border bg-background/60 p-4'>
-              <div className='text-xs font-medium text-muted-foreground'>{label}</div>
-              <div className={cn('mt-2 truncate font-mono text-xl font-semibold', tone === 'success' && 'text-success')}>{value}</div>
+        {canReadMonitoring ? (
+          <>
+            <div className='grid gap-3 md:grid-cols-3 xl:grid-cols-4'>
+              {metricCards.map(([label, value, tone]) => (
+                <div key={label} className='rounded-xl border border-border bg-background/60 p-4'>
+                  <div className='text-xs font-medium text-muted-foreground'>{label}</div>
+                  <div className={cn('mt-2 truncate font-mono text-xl font-semibold', tone === 'success' && 'text-success')}>{value}</div>
+                </div>
+              ))}
             </div>
-          ))}
-        </div>
-        <div className='grid gap-3 lg:grid-cols-3'>
-          <MonitoringPanel title='Runtime / Database' rows={runtimeRows} />
-          <MonitoringPanel title='Gateways' rows={gatewayRows} />
-          <MonitoringPanel title='Storage' rows={storageRows} />
-        </div>
+            <div className='grid gap-3 lg:grid-cols-3'>
+              <MonitoringPanel title='Runtime / Database' rows={runtimeRows} />
+              <MonitoringPanel title='Gateways' rows={gatewayRows} />
+              <MonitoringPanel title='Storage' rows={storageRows} />
+            </div>
+          </>
+        ) : (
+          <div className='rounded-xl border border-dashed border-border p-6 text-sm text-muted-foreground'>当前账号没有读取系统监控的 API 权限。</div>
+        )}
       </CardContent>
     </Card>
   )
@@ -5451,13 +5486,18 @@ function AccessStatsPage({ config }: { config: PlatformPageConfig }) {
   const label = platformLabel(config, app.locale)
   const description = platformDescription(config, app.locale)
   const Icon = config.icon
+  const apiPath = config.apiPath || '/api/admin/audit/access-stats'
+  const role = app.auth?.role
+  const apiPermissions = app.auth?.api_permissions || []
+  const canReadStats = canUseAPI(role, apiPermissions, 'GET', apiPath)
   const [items, setItems] = useState<PlatformItem[]>([])
   const [loading, setLoading] = useState(false)
 
   const load = async () => {
+    if (!canReadStats) return
     setLoading(true)
     try {
-      const data = await apiRequest<{ items: PlatformItem[] }>(config.apiPath || '/api/admin/audit/access-stats')
+      const data = await apiRequest<{ items: PlatformItem[] }>(apiPath)
       setItems(data.items || [])
     } catch (error) {
       app.handleApiError(error)
@@ -5468,7 +5508,7 @@ function AccessStatsPage({ config }: { config: PlatformPageConfig }) {
 
   useEffect(() => {
     void load()
-  }, [config.apiPath])
+  }, [apiPath, canReadStats])
 
   const summary = items.find((item) => item.type === 'summary')
   const summaryMetadata = summary?.metadata || {}
@@ -5503,25 +5543,33 @@ function AccessStatsPage({ config }: { config: PlatformPageConfig }) {
               </CardTitle>
               <CardDescription>{description}</CardDescription>
             </div>
-            <Button variant='outline' onClick={() => void load()} disabled={loading}>
-              <RefreshCw className={cn('size-4', loading && 'animate-spin')} />
-              {app.t('refresh', 'Refresh')}
-            </Button>
+            {canReadStats ? (
+              <Button variant='outline' onClick={() => void load()} disabled={loading}>
+                <RefreshCw className={cn('size-4', loading && 'animate-spin')} />
+                {app.t('refresh', 'Refresh')}
+              </Button>
+            ) : null}
           </CardHeader>
           <CardContent className='grid gap-5'>
-            <div className='grid gap-3 sm:grid-cols-2 xl:grid-cols-4'>
-              {metrics.map((metric) => (
-                <div key={metric.label} className='rounded-xl border border-border bg-background/60 p-4'>
-                  <div className='text-xs font-medium text-muted-foreground'>{metric.label}</div>
-                  <div className='mt-2 truncate font-mono text-xl font-semibold'>{metric.value}</div>
+            {canReadStats ? (
+              <>
+                <div className='grid gap-3 sm:grid-cols-2 xl:grid-cols-4'>
+                  {metrics.map((metric) => (
+                    <div key={metric.label} className='rounded-xl border border-border bg-background/60 p-4'>
+                      <div className='text-xs font-medium text-muted-foreground'>{metric.label}</div>
+                      <div className='mt-2 truncate font-mono text-xl font-semibold'>{metric.value}</div>
+                    </div>
+                  ))}
                 </div>
-              ))}
-            </div>
-            <div className='grid gap-3 lg:grid-cols-2'>
-              {sections.map((section) => (
-                <AccessStatsRank key={section.type} title={section.title} item={items.find((entry) => entry.type === section.type)} emptyLabel={emptyStatsLabel} />
-              ))}
-            </div>
+                <div className='grid gap-3 lg:grid-cols-2'>
+                  {sections.map((section) => (
+                    <AccessStatsRank key={section.type} title={section.title} item={items.find((entry) => entry.type === section.type)} emptyLabel={emptyStatsLabel} />
+                  ))}
+                </div>
+              </>
+            ) : (
+              <div className='rounded-xl border border-dashed border-border p-6 text-sm text-muted-foreground'>当前账号没有读取访问统计的 API 权限。</div>
+            )}
           </CardContent>
         </Card>
       </CardStaggerItem>

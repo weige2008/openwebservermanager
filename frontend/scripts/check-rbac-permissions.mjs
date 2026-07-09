@@ -38,6 +38,12 @@ try {
     ['backup create permission does not allow restore', false, canUseAPI('custom', ['POST /api/admin/backups'], 'POST', '/api/admin/backups/restore')],
     ['backup restore permission allows restore', true, canUseAPI('custom', ['POST /api/admin/backups/restore'], 'POST', '/api/admin/backups/restore')],
     ['backup delete wildcard allows delete', true, canUseAPI('custom', ['DELETE /api/admin/backups/*'], 'DELETE', '/api/admin/backups/openweb.zip')],
+    ['tool runner requires POST permission', true, canUseAPI('custom', ['POST /api/tools/ping'], 'POST', '/api/tools/ping')],
+    ['tool runner rejects GET permission', false, canUseAPI('custom', ['GET /api/tools/ping'], 'POST', '/api/tools/ping')],
+    ['monitoring read allows auditor', true, canUseAPI('auditor', [], 'GET', '/api/system/monitoring')],
+    ['monitoring read allows custom GET permission', true, canUseAPI('custom', ['GET /api/system/monitoring'], 'GET', '/api/system/monitoring')],
+    ['access stats allows audit read', true, canUseAPI('custom', ['audit:read'], 'GET', '/api/admin/audit/access-stats')],
+    ['access stats rejects non-audit collection read', false, canUseAPI('custom', ['GET /api/admin/access-stats'], 'GET', '/api/admin/audit/access-stats')],
   ]
 
   const failed = cases.filter(([, expected, actual]) => actual !== expected)

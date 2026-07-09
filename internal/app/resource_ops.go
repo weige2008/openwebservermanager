@@ -4290,18 +4290,40 @@ func (s *Server) deleteAuditRecording(w http.ResponseWriter, r *http.Request, id
 		writeError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
-	if err := os.RemoveAll(recording.path); err != nil {
+	rollback, err := prepareStoragePathRollback(recording.path)
+	if err != nil {
 		writeError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
+	restoreRecordingError := func(err error) error {
+		if restoreErr := rollback.restore(); restoreErr != nil {
+			return fmt.Errorf("%w; additionally failed to restore recording: %v", err, restoreErr)
+		}
+		return err
+	}
+	restoreRecordingStateError := func(err error, offline model.PlatformItem, restoreOffline bool) error {
+		if restoreOffline {
+			if _, restoreErr := s.cfg.Store.SavePlatformItem("offline_sessions", offline); restoreErr != nil {
+				err = fmt.Errorf("%w; additionally failed to restore offline session metadata: %v", err, restoreErr)
+			}
+		}
+		return restoreRecordingError(err)
+	}
 	if session, exists := s.cfg.Store.GetSession(id); exists {
+		var previousOffline model.PlatformItem
+		restoreOffline := false
 		if offline, ok, err := s.cfg.Store.GetPlatformItem("offline_sessions", id); err != nil {
-			writeError(w, http.StatusInternalServerError, s.recordingStatePersistError(r, id, session.Protocol, "load recording deletion offline state failed", err).Error())
+			err = restoreRecordingError(s.recordingStatePersistError(r, id, session.Protocol, "load recording deletion offline state failed", err))
+			writeError(w, http.StatusInternalServerError, err.Error())
 			return
 		} else if ok {
+			previousOffline = offline
+			previousOffline.Metadata = cloneMetadata(offline.Metadata)
+			restoreOffline = true
 			clearRecordingMetadata(&offline)
 			if _, err := s.cfg.Store.SavePlatformItem("offline_sessions", offline); err != nil {
-				writeError(w, http.StatusInternalServerError, s.recordingStatePersistError(r, id, session.Protocol, "persist recording deletion offline state failed", err).Error())
+				err = restoreRecordingError(s.recordingStatePersistError(r, id, session.Protocol, "persist recording deletion offline state failed", err))
+				writeError(w, http.StatusInternalServerError, err.Error())
 				return
 			}
 		}
@@ -4310,25 +4332,32 @@ func (s *Server) deleteAuditRecording(w http.ResponseWriter, r *http.Request, id
 			item.RecordingSize = 0
 			item.Error = "recording deleted"
 		}); err != nil {
-			writeError(w, http.StatusInternalServerError, s.recordingStatePersistError(r, id, session.Protocol, "persist recording deletion session state failed", err).Error())
+			err = restoreRecordingStateError(s.recordingStatePersistError(r, id, session.Protocol, "persist recording deletion session state failed", err), previousOffline, restoreOffline)
+			writeError(w, http.StatusInternalServerError, err.Error())
 			return
 		}
+		rollback.cleanup()
 		_ = s.audit(r, "audit.recording.delete", id, session.Protocol, "deleted offline session recording")
 		writeJSON(w, http.StatusOK, map[string]bool{"ok": true})
 		return
 	}
 	item, ok, err := s.cfg.Store.GetPlatformItem("offline_sessions", id)
 	if err != nil {
+		err = restoreRecordingError(err)
 		writeError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
 	if ok {
+		previousItem := item
+		previousItem.Metadata = cloneMetadata(item.Metadata)
 		clearRecordingMetadata(&item)
 		if _, err := s.cfg.Store.SavePlatformItem("offline_sessions", item); err != nil {
-			writeError(w, http.StatusInternalServerError, s.recordingStatePersistError(r, id, recording.protocol, "persist recording deletion offline state failed", err).Error())
+			err = restoreRecordingStateError(s.recordingStatePersistError(r, id, recording.protocol, "persist recording deletion offline state failed", err), previousItem, true)
+			writeError(w, http.StatusInternalServerError, err.Error())
 			return
 		}
 	}
+	rollback.cleanup()
 	_ = s.audit(r, "audit.recording.delete", id, recording.protocol, "deleted platform offline session recording")
 	writeJSON(w, http.StatusOK, map[string]bool{"ok": true})
 }

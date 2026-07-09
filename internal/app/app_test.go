@@ -13474,8 +13474,8 @@ func TestRecordingOperationLogPersistenceFailures(t *testing.T) {
 	if !coreAuditLogsContainAction(srv.cfg.Store, "audit.recording.state.persist_failed") {
 		t.Fatal("recording state persistence failure was not written to core audit logs")
 	}
-	if _, err := os.Stat(recordingFile); !errors.Is(err, os.ErrNotExist) {
-		t.Fatalf("recording file state after metadata failure = %v, want removed", err)
+	if data, err := os.ReadFile(recordingFile); err != nil || string(data) != "audit frames" {
+		t.Fatalf("recording file was not restored after metadata failure: data=%q err=%v", string(data), err)
 	}
 	offline, ok, err := srv.cfg.Store.GetPlatformItem("offline_sessions", session.ID)
 	if err != nil || !ok {
@@ -13483,6 +13483,27 @@ func TestRecordingOperationLogPersistenceFailures(t *testing.T) {
 	}
 	if firstMetadataString(offline.Metadata, "recording_path") == "" {
 		t.Fatalf("offline recording metadata unexpectedly changed after forced persistence failure: %#v", offline.Metadata)
+	}
+
+	removeSessionStateBlocker := blockPlatformItemSavePayloadFragments(t, srv.cfg.Store, "offline_sessions", session.ID, `"description":"recording deleted"`, `"recording_path":""`)
+	sessionStateFailureRec := assertStatus(t, handler, http.MethodDelete, "/api/admin/audit/offline-sessions/"+session.ID+"/recording", nil, adminCookie, http.StatusInternalServerError)
+	removeSessionStateBlocker()
+	if !strings.Contains(sessionStateFailureRec.Body.String(), "persist recording deletion session state failed") {
+		t.Fatalf("recording session state persistence failure was not reported: %s", sessionStateFailureRec.Body.String())
+	}
+	if data, err := os.ReadFile(recordingFile); err != nil || string(data) != "audit frames" {
+		t.Fatalf("recording file was not restored after session state failure: data=%q err=%v", string(data), err)
+	}
+	storedSessionAfterFailure, ok := srv.cfg.Store.GetSession(session.ID)
+	if !ok || storedSessionAfterFailure.RecordingPath == "" || storedSessionAfterFailure.RecordingSize != 0 {
+		t.Fatalf("recording session metadata was not restored after forced persistence failure: ok=%v session=%#v", ok, storedSessionAfterFailure)
+	}
+	offlineAfterSessionFailure, ok, err := srv.cfg.Store.GetPlatformItem("offline_sessions", session.ID)
+	if err != nil || !ok {
+		t.Fatalf("load offline recording fixture after session state failure: ok=%v err=%v", ok, err)
+	}
+	if firstMetadataString(offlineAfterSessionFailure.Metadata, "recording_path") == "" {
+		t.Fatalf("offline recording metadata was not restored after session state failure: %#v", offlineAfterSessionFailure.Metadata)
 	}
 }
 
@@ -14294,6 +14315,42 @@ END`
 	if _, err := db.Exec(triggerSQL); err != nil {
 		_ = db.Close()
 		t.Fatalf("create platform item payload save blocker trigger: %v", err)
+	}
+	return func() {
+		_, _ = db.Exec(`DROP TRIGGER IF EXISTS ` + triggerName)
+		_ = db.Close()
+	}
+}
+
+func blockPlatformItemSavePayloadFragments(t *testing.T, st *store.Store, collection, itemID string, fragments ...string) func() {
+	t.Helper()
+	if len(fragments) == 0 {
+		t.Fatal("at least one payload fragment is required")
+	}
+	db, err := sql.Open("sqlite", st.DatabasePath())
+	if err != nil {
+		t.Fatalf("open store database for payload save blocker: %v", err)
+	}
+	triggerName := "block_platform_item_save_payload_fragments"
+	if _, err := db.Exec(`DROP TRIGGER IF EXISTS ` + triggerName); err != nil {
+		_ = db.Close()
+		t.Fatalf("drop stale payload fragments blocker trigger: %v", err)
+	}
+	conditions := []string{
+		"NEW.collection = " + sqliteTestStringLiteral(collection),
+		"NEW.id = " + sqliteTestStringLiteral(itemID),
+	}
+	for _, fragment := range fragments {
+		conditions = append(conditions, "instr(NEW.payload, "+sqliteTestStringLiteral(fragment)+") > 0")
+	}
+	triggerSQL := `CREATE TRIGGER ` + triggerName + ` BEFORE INSERT ON platform_records
+WHEN ` + strings.Join(conditions, "\n  AND ") + `
+BEGIN
+  SELECT RAISE(ABORT, 'forced platform item payload fragments save failure');
+END`
+	if _, err := db.Exec(triggerSQL); err != nil {
+		_ = db.Close()
+		t.Fatalf("create platform item payload fragments save blocker trigger: %v", err)
 	}
 	return func() {
 		_, _ = db.Exec(`DROP TRIGGER IF EXISTS ` + triggerName)

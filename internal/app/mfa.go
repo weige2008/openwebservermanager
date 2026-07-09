@@ -172,6 +172,9 @@ func (s *Server) handleMFACompleteLogin(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 	if err := s.recordUserLoginState(r, authToken, session, challenge.ClientIP); err != nil {
+		if mfaMutated {
+			err = s.restoreMFASnapshotAfterLogFailure(r, challenge.User.UserID, previous, err)
+		}
 		writeError(w, http.StatusInternalServerError, err.Error())
 		return
 	}

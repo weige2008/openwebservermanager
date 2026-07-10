@@ -84,6 +84,12 @@ func (s *Server) handleDesktopTunnel(w http.ResponseWriter, r *http.Request, pro
 		writeError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
+	cfg, closeRelay, err := s.prepareDesktopAgentRelay(r.Context(), cfg)
+	if err != nil {
+		writeError(w, http.StatusBadGateway, err.Error())
+		return
+	}
+	defer closeRelay()
 	conn, err := ws.Upgrade(w, r)
 	if err != nil {
 		writeError(w, http.StatusBadRequest, err.Error())

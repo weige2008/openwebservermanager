@@ -75,6 +75,16 @@ $env:OPENWEBSERVERMANAGER_MASTER_KEY = "replace-with-a-long-random-secret"
 .\openwebservermanager.exe
 ```
 
+## Agent ゲートウェイ
+
+管理コンソールで Agent ゲートウェイを作成し、一度だけ表示される登録トークンを発行します。対象のプライベートネットワークへ到達できるノードで実行します。
+
+```bash
+OPENWEBSERVERMANAGER_AGENT_TOKEN='gateway_id.registration_secret' ./openwebservermanager-agent -server https://manager.example.com -name edge-office-1
+```
+
+Agent に必要なのは管理サーバーへの外向き通信だけです。資産のゲートウェイグループに割り当てると、SSH/SFTP は認証・監査された双方向 TCP ストリームを使用し、ゲートウェイ停止時に暗黙の直接接続へ戻りません。`/api/agent/` のリバースプロキシでは要求・応答バッファを無効化し、長いタイムアウトを設定してください。
+
 ## guacd
 
 RDP には `guacd` が必要です。

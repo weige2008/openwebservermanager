@@ -12,6 +12,7 @@ Deployment guide: [English](DEPLOYMENT.en.md) | [简体中文](../../DEPLOYMENT.
 - Frontend stack aligned with NewAPI-style conventions: Rsbuild, React 19, TypeScript, Tailwind CSS v4, TanStack Router, TanStack Query, TanStack Table, Base UI, i18next, and Zustand.
 - First-run administrator setup and authenticated console.
 - SSH: WebSocket to SSH PTY bridge with password, private key, and private key passphrase authentication, plus policy-controlled SFTP browsing, upload, download, deletion, and audit logs.
+- Agent gateway: remote nodes connect outbound to the manager and relay private SSH/SFTP traffic through authenticated, audited bidirectional TCP streams; routed sessions never silently fall back to direct access.
 - RDP: Guacamole WebSocket tunnel to `guacd`; credentials stay server-side.
 - Local JSON store with AES-GCM encrypted credential fields.
 - RDP recording index and recording ZIP download for authenticated administrators.
@@ -82,4 +83,4 @@ git tag v1.0.11
 git push origin v1.0.11
 ```
 
-Release archives include the binary, Chinese default docs, translated docs, `VERSION`, and `runtime/`.
+Release archives include the `openwebservermanager` and `openwebservermanager-agent` binaries, Chinese default docs, translated docs, `VERSION`, and `runtime/`.

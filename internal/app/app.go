@@ -17,6 +17,7 @@ import (
 	"strings"
 	"time"
 
+	"openwebservermanager/internal/agentrelay"
 	"openwebservermanager/internal/guac"
 	"openwebservermanager/internal/model"
 	sshrunner "openwebservermanager/internal/ssh"
@@ -36,6 +37,7 @@ type Config struct {
 	Public            PublicConfig
 	TrustProxyHeaders bool
 	LDAPAuthenticator ldapAuthenticator
+	AgentRelay        *agentrelay.Manager
 }
 
 type sshGatewayRuntime interface {
@@ -90,6 +92,7 @@ type Server struct {
 	oidc              *oidcManager
 	ldap              ldapAuthenticator
 	activeConnections activeConnectionRegistry
+	agentRelay        *agentrelay.Manager
 	started           time.Time
 }
 
@@ -106,14 +109,19 @@ func NewServer(cfg Config) *Server {
 	if ldapAuth == nil {
 		ldapAuth = realLDAPAuthenticator{}
 	}
+	relay := cfg.AgentRelay
+	if relay == nil {
+		relay = agentrelay.NewManager(cfg.Store)
+	}
 	return &Server{
-		cfg:      cfg,
-		static:   http.FileServer(http.FS(sub)),
-		staticFS: sub,
-		auth:     newAuthManager(),
-		oidc:     newOIDCManager(),
-		ldap:     ldapAuth,
-		started:  time.Now().UTC(),
+		cfg:        cfg,
+		static:     http.FileServer(http.FS(sub)),
+		staticFS:   sub,
+		auth:       newAuthManager(),
+		oidc:       newOIDCManager(),
+		ldap:       ldapAuth,
+		agentRelay: relay,
+		started:    time.Now().UTC(),
 	}
 }
 
@@ -498,7 +506,7 @@ func (s *Server) handleSSHWebSocket(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	_ = s.audit(r, "connection.ssh.open", session.ID, model.ProtocolSSH, "opened ssh websocket")
-	sshrunner.Runner{Store: s.cfg.Store, Logger: slog.Default(), KnownHostsPath: filepath.Join(s.cfg.DataDir, "known_hosts")}.Run(conn, session, server, credential, secret, term, cols, rows)
+	sshrunner.Runner{Store: s.cfg.Store, Logger: slog.Default(), KnownHostsPath: filepath.Join(s.cfg.DataDir, "known_hosts"), DialContext: s.sshSessionDialContext(session)}.Run(conn, session, server, credential, secret, term, cols, rows)
 }
 
 func (s *Server) handleCreateRDP(w http.ResponseWriter, r *http.Request) {

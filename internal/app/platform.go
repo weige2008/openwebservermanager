@@ -567,12 +567,28 @@ func (s *Server) handleWebAssetProxy(w http.ResponseWriter, r *http.Request, ass
 	targetQuery := target.RawQuery
 	proxyBasePath := webAssetProxyBasePath(r.URL.Path, proxyPath)
 	proxy := &httputil.ReverseProxy{}
-	if transport, err := s.webAssetProxyTransport(asset, target); err != nil {
+	roundTripper, err := s.webAssetProxyTransport(asset, target)
+	if err != nil {
 		writeError(w, http.StatusBadRequest, err.Error())
 		return
-	} else if transport != nil {
-		proxy.Transport = transport
 	}
+	transport := http.DefaultTransport.(*http.Transport).Clone()
+	if roundTripper != nil {
+		configured, ok := roundTripper.(*http.Transport)
+		if !ok {
+			writeError(w, http.StatusInternalServerError, "web asset transport is not configurable")
+			return
+		}
+		transport = configured
+	}
+	if dialContext, dialErr := s.agentGatewayDialContext(gatewayRoute, asset.ID, userID, model.ProtocolHTTP); dialErr != nil {
+		writeError(w, http.StatusBadGateway, dialErr.Error())
+		return
+	} else if dialContext != nil {
+		transport.DialContext = dialContext
+	}
+	defer transport.CloseIdleConnections()
+	proxy.Transport = transport
 	proxy.ErrorHandler = func(rw http.ResponseWriter, req *http.Request, proxyErr error) {
 		writeError(rw, http.StatusBadGateway, proxyErr.Error())
 	}

@@ -39,6 +39,7 @@ import (
 	"testing/fstest"
 	"time"
 
+	"openwebservermanager/internal/agentrelay"
 	"openwebservermanager/internal/guac"
 	"openwebservermanager/internal/model"
 	"openwebservermanager/internal/security"
@@ -9399,10 +9400,10 @@ func TestGatewayGroupStatusResolvesMembers(t *testing.T) {
 	if manualStatus == nil {
 		t.Fatalf("manual gateway group missing from status payload: %s", statusRec.Body.String())
 	}
-	if len(manualStatus.Members) != 3 || manualStatus.Online != 2 || manualStatus.Offline != 1 || manualStatus.SelectedGatewayID != sshGateway.ID {
+	if len(manualStatus.Members) != 2 || manualStatus.Online != 1 || manualStatus.Offline != 1 || manualStatus.SelectedGatewayID != onlineAgent.ID {
 		t.Fatalf("manual gateway group status = %#v", manualStatus)
 	}
-	if manualStatus.Members[0].ID != offlineAgent.ID || manualStatus.Members[1].ID != sshGateway.ID || manualStatus.Members[2].ID != onlineAgent.ID {
+	if manualStatus.Members[0].ID != offlineAgent.ID || manualStatus.Members[1].ID != onlineAgent.ID {
 		t.Fatalf("manual gateway group did not preserve configured order: %#v", manualStatus.Members)
 	}
 
@@ -9421,7 +9422,7 @@ func TestGatewayGroupStatusResolvesMembers(t *testing.T) {
 
 	listRec := assertStatus(t, handler, http.MethodGet, "/api/admin/gateway-groups", nil, adminCookie, http.StatusOK)
 	listBody := listRec.Body.String()
-	for _, want := range []string{"member_count", "online_count", "offline_count", "selected_gateway_id", sshGateway.ID, onlineAgent.ID} {
+	for _, want := range []string{"member_count", "online_count", "offline_count", "selected_gateway_id", onlineAgent.ID} {
 		if !strings.Contains(listBody, want) {
 			t.Fatalf("gateway group list missing %q: %s", want, listBody)
 		}
@@ -10190,7 +10191,7 @@ func TestResourceOperationEndpoints(t *testing.T) {
 	ctx, cancel := context.WithCancel(canceledReq.Context())
 	cancel()
 	canceledReq = canceledReq.WithContext(ctx)
-	canceledLog, statusCode, err := server.executeDatabaseAssetSQL(canceledReq, databaseAsset, "admin", "SELECT 1 AS canceled", databaseSQLExecutionOptions{
+	canceledLog, statusCode, err := server.executeDatabaseAssetSQL(canceledReq, databaseAsset, "admin", "SELECT 1 AS canceled", gatewayRouteDecision{}, databaseSQLExecutionOptions{
 		Source:  "test",
 		LogType: "database_timeout",
 	})
@@ -13987,6 +13988,366 @@ func TestRecordingAuditRejectsSymlinkRecordingRoot(t *testing.T) {
 	}
 }
 
+func TestSSHSessionFilesThroughAgentRelay(t *testing.T) {
+	remoteRoot := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(remoteRoot, "reports"), 0o770); err != nil {
+		t.Fatalf("create relay sftp directory: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(remoteRoot, "reports", "relay.txt"), []byte("through agent relay"), 0o660); err != nil {
+		t.Fatalf("write relay sftp fixture: %v", err)
+	}
+	targetAddr, closeTarget := startFakeSFTPServer(t, remoteRoot, "root", "target-secret")
+	defer closeTarget()
+	host, portText, err := net.SplitHostPort(targetAddr)
+	if err != nil {
+		t.Fatalf("split relay sftp target: %v", err)
+	}
+	port, err := strconv.Atoi(portText)
+	if err != nil {
+		t.Fatalf("parse relay sftp port: %v", err)
+	}
+	webUpstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("X-Agent-Relay", "web")
+		_, _ = w.Write([]byte("web through agent relay"))
+	}))
+	defer webUpstream.Close()
+	webUpstreamURL, err := url.Parse(webUpstream.URL)
+	if err != nil {
+		t.Fatalf("parse relay web upstream: %v", err)
+	}
+	databaseListener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("listen relay database target: %v", err)
+	}
+	databaseAccepted := make(chan struct{}, 1)
+	databaseDone := make(chan struct{})
+	go func() {
+		defer close(databaseDone)
+		conn, acceptErr := databaseListener.Accept()
+		if acceptErr != nil {
+			return
+		}
+		databaseAccepted <- struct{}{}
+		_ = conn.Close()
+	}()
+	defer func() {
+		_ = databaseListener.Close()
+		<-databaseDone
+	}()
+
+	srv, adminCookie := newTestServer(t, nil)
+	gatewayRec := assertStatus(t, srv, http.MethodPost, "/api/admin/agent-gateways", map[string]any{
+		"name":   "relay-agent",
+		"type":   "agent",
+		"status": "offline",
+	}, adminCookie, http.StatusCreated)
+	var gateway model.PlatformItem
+	decodeResponse(t, gatewayRec, &gateway)
+	tokenRec := assertStatus(t, srv, http.MethodPost, "/api/admin/agent-gateways/"+gateway.ID+"/token", map[string]any{}, adminCookie, http.StatusOK)
+	var tokenPayload struct {
+		RegistrationToken string `json:"registration_token"`
+	}
+	decodeResponse(t, tokenRec, &tokenPayload)
+	if tokenPayload.RegistrationToken == "" {
+		t.Fatal("agent registration token was not returned")
+	}
+	assertStatus(t, srv, http.MethodPost, "/api/agent/gateways/claim", map[string]any{
+		"registration_token": gateway.ID + ".invalid-token",
+	}, nil, http.StatusUnauthorized)
+	assertStatusWithHeaders(t, srv, http.MethodPost, "/api/agent/gateways/claim", nil, nil, map[string]string{
+		"Authorization": "Basic " + tokenPayload.RegistrationToken,
+	}, http.StatusUnauthorized)
+
+	httpServer := httptest.NewServer(srv)
+	defer httpServer.Close()
+	directDialer := &net.Dialer{Timeout: 3 * time.Second}
+	agent, err := agentrelay.NewClient(agentrelay.ClientConfig{
+		ServerURL:         httpServer.URL,
+		RegistrationToken: tokenPayload.RegistrationToken,
+		Name:              "relay-test-agent",
+		Version:           "test",
+		Capabilities:      []string{"tcp", "ssh", "rdp", "vnc", "http", "database"},
+		Workers:           1,
+		HeartbeatInterval: 50 * time.Millisecond,
+		DialContext: func(ctx context.Context, network, address string) (net.Conn, error) {
+			switch address {
+			case "relay-web.invalid:80":
+				address = webUpstreamURL.Host
+			case "relay-database.invalid:3306":
+				address = databaseListener.Addr().String()
+			}
+			return directDialer.DialContext(ctx, network, address)
+		},
+	})
+	if err != nil {
+		t.Fatalf("create relay test agent: %v", err)
+	}
+	agentCtx, cancelAgent := context.WithCancel(context.Background())
+	agentDone := make(chan error, 1)
+	go func() { agentDone <- agent.Run(agentCtx) }()
+	defer func() {
+		cancelAgent()
+		select {
+		case err := <-agentDone:
+			if err != nil {
+				t.Errorf("relay test agent stopped with error: %v", err)
+			}
+		case <-time.After(3 * time.Second):
+			t.Error("relay test agent did not stop")
+		}
+	}()
+	waitForCondition(t, 3*time.Second, func() bool {
+		item, ok, loadErr := srv.cfg.Store.GetPlatformItem("agent_gateways", gateway.ID)
+		return loadErr == nil && ok && strings.EqualFold(item.Status, "online")
+	})
+
+	groupRec := assertStatus(t, srv, http.MethodPost, "/api/admin/gateway-groups", map[string]any{
+		"name":   "relay-group",
+		"type":   "manual",
+		"status": "enabled",
+		"metadata": map[string]any{
+			"gateway_ids": []string{gateway.ID},
+		},
+	}, adminCookie, http.StatusCreated)
+	var group model.PlatformItem
+	decodeResponse(t, groupRec, &group)
+	assetRec := assertStatus(t, srv, http.MethodPost, "/api/admin/assets", map[string]any{
+		"name":     "relay-sftp-target",
+		"type":     "linux",
+		"status":   "active",
+		"protocol": "ssh",
+		"host":     host,
+		"port":     port,
+		"metadata": map[string]any{"gateway_group_id": group.ID},
+	}, adminCookie, http.StatusCreated)
+	var asset model.PlatformItem
+	decodeResponse(t, assetRec, &asset)
+	credentialRec := assertStatus(t, srv, http.MethodPost, "/api/admin/credentials", map[string]any{
+		"name":      "relay-sftp-root",
+		"type":      "ssh_password",
+		"status":    "encrypted",
+		"username":  "root",
+		"password":  "target-secret",
+		"target_id": asset.ID,
+	}, adminCookie, http.StatusCreated)
+	var credential model.PlatformItem
+	decodeResponse(t, credentialRec, &credential)
+	sessionRec := assertStatus(t, srv, http.MethodPost, "/api/access/ssh/"+asset.ID, map[string]any{
+		"credential_id": credential.ID,
+		"cols":          100,
+		"rows":          30,
+	}, adminCookie, http.StatusAccepted)
+	var session model.ConnectionSession
+	decodeResponse(t, sessionRec, &session)
+	if session.GatewayID != gateway.ID || session.GatewayCollection != "agent_gateways" {
+		t.Fatalf("relay session route = %#v", session)
+	}
+
+	listRec := assertStatus(t, srv, http.MethodGet, "/api/connections/"+session.ID+"/sftp", nil, adminCookie, http.StatusOK)
+	if !strings.Contains(listRec.Body.String(), "reports") {
+		t.Fatalf("agent relay sftp listing = %s", listRec.Body.String())
+	}
+	reportsPath := path.Join(strings.TrimSpace(responseJSONField(t, listRec, "path")), "reports")
+	reportsRec := assertStatus(t, srv, http.MethodGet, "/api/connections/"+session.ID+"/sftp?path="+url.QueryEscape(reportsPath), nil, adminCookie, http.StatusOK)
+	if !strings.Contains(reportsRec.Body.String(), "relay.txt") {
+		t.Fatalf("agent relay reports listing = %s", reportsRec.Body.String())
+	}
+
+	echoAddr, received, closeEcho := startEchoTCPServerWithDeadline(t, 20*time.Second)
+	defer closeEcho()
+	echoHost, echoPortText, err := net.SplitHostPort(echoAddr)
+	if err != nil {
+		t.Fatalf("split desktop relay target: %v", err)
+	}
+	echoPort, err := strconv.Atoi(echoPortText)
+	if err != nil {
+		t.Fatalf("parse desktop relay target port: %v", err)
+	}
+	desktopSession, err := srv.cfg.Store.CreateSession(model.ConnectionSession{
+		Protocol:          model.ProtocolRDP,
+		ServerID:          "desktop-relay-target",
+		CredentialID:      "desktop-relay-credential",
+		UserID:            "admin",
+		GatewayGroupID:    group.ID,
+		GatewayID:         gateway.ID,
+		GatewayName:       gateway.Name,
+		GatewayCollection: "agent_gateways",
+	})
+	if err != nil {
+		t.Fatalf("create desktop relay session: %v", err)
+	}
+	desktopCfg, closeDesktopRelay, err := srv.prepareDesktopAgentRelay(agentCtx, guac.DesktopConfig{
+		Protocol: model.ProtocolRDP,
+		Session:  desktopSession,
+		Host:     echoHost,
+		Port:     echoPort,
+	})
+	if err != nil {
+		t.Fatalf("prepare desktop agent relay: %v", err)
+	}
+	desktopConn, err := net.DialTimeout("tcp", net.JoinHostPort(desktopCfg.Host, strconv.Itoa(desktopCfg.Port)), 3*time.Second)
+	if err != nil {
+		closeDesktopRelay()
+		t.Fatalf("dial desktop agent relay: %v", err)
+	}
+	if _, err := desktopConn.Write([]byte("desktop relay\n")); err != nil {
+		_ = desktopConn.Close()
+		closeDesktopRelay()
+		t.Fatalf("write desktop agent relay: %v", err)
+	}
+	desktopReply, err := bufio.NewReader(desktopConn).ReadString('\n')
+	_ = desktopConn.Close()
+	closeDesktopRelay()
+	if err != nil {
+		t.Fatalf("read desktop agent relay: %v", err)
+	}
+	if desktopReply != "echo:desktop relay\n" {
+		t.Fatalf("desktop relay response = %q", desktopReply)
+	}
+	select {
+	case got := <-received:
+		if got != "desktop relay\n" {
+			t.Fatalf("desktop relay target received %q", got)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("desktop relay target did not receive payload")
+	}
+	webRec := assertStatus(t, srv, http.MethodPost, "/api/admin/websites", map[string]any{
+		"name":     "relay web target",
+		"type":     "http",
+		"status":   "enabled",
+		"protocol": "http",
+		"metadata": map[string]any{
+			"target_url":       "http://relay-web.invalid",
+			"gateway_group_id": group.ID,
+		},
+	}, adminCookie, http.StatusCreated)
+	var webAsset model.PlatformItem
+	decodeResponse(t, webRec, &webAsset)
+	webProxyRec := assertStatus(t, srv, http.MethodGet, "/api/access/http/"+webAsset.ID+"/proxy/health", nil, adminCookie, http.StatusOK)
+	if webProxyRec.Body.String() != "web through agent relay" || webProxyRec.Header().Get("X-Agent-Relay") != "web" {
+		t.Fatalf("agent relay web response = %q header=%q", webProxyRec.Body.String(), webProxyRec.Header().Get("X-Agent-Relay"))
+	}
+	databaseRec := assertStatus(t, srv, http.MethodPost, "/api/admin/database-assets", map[string]any{
+		"name":     "relay database target",
+		"type":     "mysql",
+		"status":   "enabled",
+		"protocol": "database",
+		"host":     "relay-database.invalid",
+		"port":     3306,
+		"username": "relay_user",
+		"metadata": map[string]any{
+			"database":         "relay_db",
+			"gateway_group_id": group.ID,
+			"query_timeout_ms": 2000,
+		},
+	}, adminCookie, http.StatusCreated)
+	var databaseAsset model.PlatformItem
+	decodeResponse(t, databaseRec, &databaseAsset)
+	databaseQueryRec := assertStatus(t, srv, http.MethodPost, "/api/access/database/"+databaseAsset.ID+"/query", map[string]any{
+		"sql": "SELECT 1",
+	}, adminCookie, http.StatusBadRequest)
+	if !strings.Contains(databaseQueryRec.Body.String(), "failed") {
+		t.Fatalf("agent relay database failure response = %s", databaseQueryRec.Body.String())
+	}
+	select {
+	case <-databaseAccepted:
+	case <-time.After(2 * time.Second):
+		t.Fatal("database target was not reached through the agent relay")
+	}
+	operationLogs := assertStatus(t, srv, http.MethodGet, "/api/admin/audit/operation-logs", nil, adminCookie, http.StatusOK)
+	for _, want := range []string{"agent.relay", "agent_relay", gateway.ID, session.ID, desktopSession.ID, webAsset.ID, databaseAsset.ID, targetAddr, echoAddr, "relay-web.invalid:80", "relay-database.invalid:3306"} {
+		if !strings.Contains(operationLogs.Body.String(), want) {
+			t.Fatalf("agent relay operation log missing %q: %s", want, operationLogs.Body.String())
+		}
+	}
+}
+
+func TestDatabaseAgentRelayKeepsSQLiteLocal(t *testing.T) {
+	srv, _ := newTestServer(t, nil)
+	db, err := srv.openDatabaseAssetConnection(databaseAssetConnection{
+		Driver: "sqlite",
+		DSN:    filepath.Join(t.TempDir(), "local.db"),
+	}, gatewayRouteDecision{
+		GatewayGroupID:    "group-1",
+		GatewayID:         "agent-1",
+		GatewayCollection: "agent_gateways",
+	}, "database-1", "admin")
+	if err != nil {
+		t.Fatalf("open local sqlite database with gateway metadata: %v", err)
+	}
+	defer db.Close()
+	if err := db.Ping(); err != nil {
+		t.Fatalf("ping local sqlite database with gateway metadata: %v", err)
+	}
+}
+
+func TestDesktopAgentRelayCloseWhileRemoteDialIsPending(t *testing.T) {
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("listen desktop relay: %v", err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	relay := &desktopAgentRelay{listener: listener, cancel: cancel}
+	dialStarted := make(chan struct{})
+	serveDone := make(chan struct{})
+	go func() {
+		defer close(serveDone)
+		relay.serve(ctx, func(ctx context.Context) (net.Conn, error) {
+			close(dialStarted)
+			<-ctx.Done()
+			return nil, ctx.Err()
+		}, nil)
+	}()
+	local, err := net.DialTimeout("tcp", listener.Addr().String(), time.Second)
+	if err != nil {
+		relay.Close()
+		t.Fatalf("dial desktop relay listener: %v", err)
+	}
+	defer local.Close()
+	select {
+	case <-dialStarted:
+	case <-time.After(time.Second):
+		relay.Close()
+		t.Fatal("desktop relay did not begin remote dial")
+	}
+	relay.Close()
+	_ = local.SetReadDeadline(time.Now().Add(time.Second))
+	if _, err := local.Read(make([]byte, 1)); err == nil {
+		t.Fatal("desktop relay local connection stayed open after close")
+	}
+	select {
+	case <-serveDone:
+	case <-time.After(time.Second):
+		t.Fatal("desktop relay serve did not stop after close")
+	}
+}
+
+func TestSSHSessionDialContextRejectsNonAgentGateway(t *testing.T) {
+	srv, _ := newTestServer(t, nil)
+	dialContext := srv.sshSessionDialContext(model.ConnectionSession{
+		ID:                "session-native-gateway",
+		GatewayGroupID:    "group-1",
+		GatewayID:         "native-ssh-gateway",
+		GatewayCollection: "ssh_gateways",
+	})
+	if dialContext == nil {
+		t.Fatal("routed SSH session did not create a guarded dialer")
+	}
+	_, err := dialContext(context.Background(), "tcp", "127.0.0.1:22")
+	if err == nil || !strings.Contains(err.Error(), "does not provide an agent relay data plane") {
+		t.Fatalf("non-agent gateway dial error = %v", err)
+	}
+}
+
+func responseJSONField(t *testing.T, rec *httptest.ResponseRecorder, key string) string {
+	t.Helper()
+	var payload map[string]any
+	decodeResponse(t, rec, &payload)
+	value, _ := payload[key].(string)
+	return value
+}
+
 func TestSSHSessionFiles(t *testing.T) {
 	remoteRoot := t.TempDir()
 	reportsRoot := filepath.Join(remoteRoot, "reports")
@@ -15360,6 +15721,10 @@ func startAppTestTCPListener(t *testing.T) (net.Listener, func()) {
 }
 
 func startEchoTCPServer(t *testing.T) (string, <-chan string, func()) {
+	return startEchoTCPServerWithDeadline(t, 2*time.Second)
+}
+
+func startEchoTCPServerWithDeadline(t *testing.T, connectionDeadline time.Duration) (string, <-chan string, func()) {
 	t.Helper()
 	listener, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
@@ -15376,7 +15741,7 @@ func startEchoTCPServer(t *testing.T) (string, <-chan string, func()) {
 			}
 			go func(conn net.Conn) {
 				defer conn.Close()
-				_ = conn.SetDeadline(time.Now().Add(2 * time.Second))
+				_ = conn.SetDeadline(time.Now().Add(connectionDeadline))
 				line, err := bufio.NewReader(conn).ReadString('\n')
 				if err != nil {
 					return

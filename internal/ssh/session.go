@@ -2,6 +2,7 @@ package sshsession
 
 import (
 	"bytes"
+	"context"
 	"encoding/base64"
 	"errors"
 	"fmt"
@@ -58,7 +59,10 @@ type Runner struct {
 	Store          *store.Store
 	Logger         *slog.Logger
 	KnownHostsPath string
+	DialContext    DialContextFunc
 }
+
+type DialContextFunc func(context.Context, string, string) (net.Conn, error)
 
 func (r Runner) Run(conn *ws.Conn, session model.ConnectionSession, server model.Server, credential model.Credential, secret store.CredentialSecret, term string, cols, rows int) {
 	defer conn.Close()
@@ -73,7 +77,7 @@ func (r Runner) Run(conn *ws.Conn, session model.ConnectionSession, server model
 		term = "xterm-256color"
 	}
 
-	client, err := dial(server, credential, secret, r.KnownHostsPath)
+	client, err := dial(server, credential, secret, r.KnownHostsPath, r.DialContext)
 	if err != nil {
 		r.fail(conn, session.ID, err)
 		return
@@ -274,7 +278,7 @@ func (r Runner) runCommand(session model.ConnectionSession, server model.Server,
 	_, _ = r.Store.UpdateSession(session.ID, func(item *model.ConnectionSession) {
 		item.Status = model.SessionActive
 	})
-	client, err := dial(server, credential, secret, r.KnownHostsPath)
+	client, err := dial(server, credential, secret, r.KnownHostsPath, r.DialContext)
 	if err != nil {
 		result.Status = "failed"
 		result.Error = err.Error()
@@ -413,7 +417,7 @@ func (r Runner) fail(conn *ws.Conn, sessionID string, err error) {
 	_ = conn.SendJSON(Message{Type: "error", Data: err.Error()})
 }
 
-func dial(server model.Server, credential model.Credential, secret store.CredentialSecret, knownHostsPath string) (*ssh.Client, error) {
+func dial(server model.Server, credential model.Credential, secret store.CredentialSecret, knownHostsPath string, dialContext DialContextFunc) (*ssh.Client, error) {
 	auth, err := authMethods(credential, secret)
 	if err != nil {
 		return nil, err
@@ -429,7 +433,24 @@ func dial(server model.Server, credential model.Credential, secret store.Credent
 		HostKeyCallback: hostKeyCallback,
 		Timeout:         15 * time.Second,
 	}
-	return ssh.Dial("tcp", addr, config)
+	if dialContext == nil {
+		var dialer net.Dialer
+		dialContext = func(ctx context.Context, network, address string) (net.Conn, error) {
+			return dialer.DialContext(ctx, network, address)
+		}
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), config.Timeout)
+	defer cancel()
+	conn, err := dialContext(ctx, "tcp", addr)
+	if err != nil {
+		return nil, err
+	}
+	clientConn, channels, requests, err := ssh.NewClientConn(conn, addr, config)
+	if err != nil {
+		_ = conn.Close()
+		return nil, err
+	}
+	return ssh.NewClient(clientConn, channels, requests), nil
 }
 
 func authMethods(credential model.Credential, secret store.CredentialSecret) ([]ssh.AuthMethod, error) {

@@ -110,8 +110,8 @@ func (s *Server) sshFileTarget(w http.ResponseWriter, r *http.Request, sessionID
 	return session, server, credential, secret, true
 }
 
-func (s *Server) openSSHFileClient(server model.Server, credential model.Credential, secret store.CredentialSecret) (*sshrunner.FileClient, error) {
-	return sshrunner.OpenFileClient(server, credential, secret, filepath.Join(s.cfg.DataDir, "known_hosts"))
+func (s *Server) openSSHFileClient(session model.ConnectionSession, server model.Server, credential model.Credential, secret store.CredentialSecret) (*sshrunner.FileClient, error) {
+	return sshrunner.OpenFileClient(server, credential, secret, filepath.Join(s.cfg.DataDir, "known_hosts"), s.sshSessionDialContext(session))
 }
 
 func (s *Server) handleSSHFileList(w http.ResponseWriter, r *http.Request, session model.ConnectionSession, server model.Server, credential model.Credential, secret store.CredentialSecret) {
@@ -123,7 +123,7 @@ func (s *Server) handleSSHFileList(w http.ResponseWriter, r *http.Request, sessi
 	if !s.requireSSHFilePermission(w, r, session, "list", remotePath) {
 		return
 	}
-	client, err := s.openSSHFileClient(server, credential, secret)
+	client, err := s.openSSHFileClient(session, server, credential, secret)
 	if err != nil {
 		writeError(w, http.StatusBadGateway, err.Error())
 		return
@@ -176,7 +176,7 @@ func (s *Server) handleSSHFileDownload(w http.ResponseWriter, r *http.Request, s
 	if !s.requireSSHFilePermission(w, r, session, "download", remotePath) {
 		return
 	}
-	client, err := s.openSSHFileClient(server, credential, secret)
+	client, err := s.openSSHFileClient(session, server, credential, secret)
 	if err != nil {
 		writeError(w, http.StatusBadGateway, err.Error())
 		return
@@ -235,7 +235,7 @@ func (s *Server) handleSSHFileUpload(w http.ResponseWriter, r *http.Request, ses
 		return
 	}
 	target := path.Join(directory, fileName)
-	client, err := s.openSSHFileClient(server, credential, secret)
+	client, err := s.openSSHFileClient(session, server, credential, secret)
 	if err != nil {
 		writeError(w, http.StatusBadGateway, err.Error())
 		return
@@ -338,7 +338,7 @@ func (s *Server) handleSSHFileDelete(w http.ResponseWriter, r *http.Request, ses
 	if !s.requireSSHFilePermission(w, r, session, "delete", remotePath) {
 		return
 	}
-	client, err := s.openSSHFileClient(server, credential, secret)
+	client, err := s.openSSHFileClient(session, server, credential, secret)
 	if err != nil {
 		writeError(w, http.StatusBadGateway, err.Error())
 		return

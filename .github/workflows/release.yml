@@ -98,6 +98,10 @@ jobs:
             -ldflags "-s -w -X main.version=${version} -X main.commit=${GITHUB_SHA}" \
             -o "${stage}/openwebservermanager${{ matrix.ext }}" \
             ./cmd/openwebservermanager
+          go build -trimpath \
+            -ldflags "-s -w -X main.version=${version} -X main.commit=${GITHUB_SHA}" \
+            -o "${stage}/openwebservermanager-agent${{ matrix.ext }}" \
+            ./cmd/openwebservermanager-agent
           cp README.md DEPLOYMENT.md VERSION "${stage}/"
           cp -R docs "${stage}/docs"
           cp -R runtime "${stage}/runtime"
@@ -150,7 +154,7 @@ jobs:
           cat > RELEASE_NOTES.md <<EOF
           openwebservermanager ${version}
 
-          - Cross-platform openwebservermanager binaries for Linux, Windows, and macOS.
+          - Cross-platform openwebservermanager manager and Agent binaries for Linux, Windows, and macOS.
           - Bundled static web frontend.
           - Runtime guacd directory placeholder is included; place native guacd builds under runtime/guacd/<platform>/ when needed.
           EOF

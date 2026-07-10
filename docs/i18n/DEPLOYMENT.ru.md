@@ -66,6 +66,16 @@ OPENWEBSERVERMANAGER_MASTER_KEY=replace-with-a-long-random-secret \
 ./openwebservermanager
 ```
 
+## Agent gateway
+
+Создайте Agent gateway в консоли и выпустите одноразово отображаемый регистрационный токен. На узле с доступом к целевой приватной сети выполните:
+
+```bash
+OPENWEBSERVERMANAGER_AGENT_TOKEN='gateway_id.registration_secret' ./openwebservermanager-agent -server https://manager.example.com -name edge-office-1
+```
+
+Agent требует только исходящего доступа к серверу управления. После назначения через группу шлюзов SSH/SFTP передается по аутентифицированным двунаправленным TCP-потокам с аудитом; при недоступности шлюза скрытого перехода на прямое соединение нет. Для `/api/agent/` обратный прокси должен отключить буферизацию запросов и ответов и увеличить тайм-ауты.
+
 ## guacd
 
 Для RDP нужен `guacd`:

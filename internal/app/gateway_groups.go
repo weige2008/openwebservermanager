@@ -267,11 +267,6 @@ func (s *Server) gatewayGroupGatewayCandidates() []gatewayGroupMember {
 			result = append(result, gatewayGroupMemberFromItem("agent_gateways", item))
 		}
 	}
-	if items, err := s.cfg.Store.ListPlatformItems("ssh_gateways"); err == nil {
-		for _, item := range items {
-			result = append(result, gatewayGroupMemberFromItem("ssh_gateways", item))
-		}
-	}
 	return result
 }
 

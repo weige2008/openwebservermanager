@@ -4037,7 +4037,11 @@ func (s *Server) handleSQLWorkOrderExecute(w http.ResponseWriter, r *http.Reques
 	if !ok {
 		return
 	}
-	logItem, statusCode, err := s.executeDatabaseAssetSQL(r, asset, userID, sqlText, databaseSQLExecutionOptions{
+	gatewayRoute, ok := s.requireAssetGatewayRoute(w, asset)
+	if !ok {
+		return
+	}
+	logItem, statusCode, err := s.executeDatabaseAssetSQL(r, asset, userID, sqlText, gatewayRoute, databaseSQLExecutionOptions{
 		Source:      "sql_work_order",
 		LogType:     "work_order",
 		LogName:     order.Name,

@@ -12,6 +12,7 @@ openwebservermanager は、サーバー資産、暗号化された接続アカ�
 - NewAPI 新 UI の方針に合わせた frontend: Rsbuild、React 19、TypeScript、Tailwind CSS v4、TanStack Router、TanStack Query、TanStack Table、Base UI、i18next、Zustand。
 - 初回起動時の管理者作成と認証済みコンソール。
 - SSH: WebSocket から SSH PTY へのブリッジ。パスワード、秘密鍵、passphrase に加え、認可ポリシーで制御される SFTP の参照、アップロード、ダウンロード、削除、監査ログに対応。
+- Agent ゲートウェイ: リモートノードから管理サーバーへ外向き接続し、認証・監査された双方向 TCP ストリームでプライベート SSH/SFTP を中継します。ルーティング済みセッションが暗黙に直接接続へ戻ることはありません。
 - RDP: Guacamole WebSocket tunnel で `guacd` に接続。認証情報はサーバー側に保持。
 - AES-GCM で機密フィールドを暗号化するローカル JSON ストア。
 - RDP 録画インデックスと管理者向け ZIP ダウンロード。

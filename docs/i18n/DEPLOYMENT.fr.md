@@ -79,6 +79,16 @@ proxy_set_header Connection "upgrade";
 
 N’activez `OPENWEBSERVERMANAGER_TRUST_PROXY_HEADERS=1` que si le proxy est fiable.
 
+## Passerelle Agent
+
+Créez une passerelle Agent dans la console et générez son jeton d'enregistrement affiché une seule fois. Sur un nœud ayant accès au réseau privé cible :
+
+```bash
+OPENWEBSERVERMANAGER_AGENT_TOKEN='gateway_id.registration_secret' ./openwebservermanager-agent -server https://manager.example.com -name edge-office-1
+```
+
+L'Agent n'a besoin que d'un accès sortant au gestionnaire. Affectez-le à l'actif via un groupe de passerelles : SSH/SFTP passera alors par des flux TCP bidirectionnels authentifiés et audités, sans repli silencieux vers un accès direct. Pour `/api/agent/`, le reverse proxy doit désactiver les buffers de requête/réponse et autoriser des délais longs.
+
 ## guacd
 
 RDP nécessite `guacd` :

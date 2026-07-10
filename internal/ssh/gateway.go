@@ -623,7 +623,7 @@ func (g *Gateway) proxySSHSession(channel ssh.Channel, session model.ConnectionS
 		Type:     model.CredentialType(credential.Type),
 		Username: credential.Username,
 	}
-	client, err := dial(server, legacyCredential, secret, g.cfg.KnownHostsPath)
+	client, err := dial(server, legacyCredential, secret, g.cfg.KnownHostsPath, nil)
 	if err != nil {
 		return nil, err
 	}

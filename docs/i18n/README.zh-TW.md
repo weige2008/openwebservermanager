@@ -12,6 +12,7 @@ openwebservermanager 是一個自託管的網頁端伺服器管理控制台，�
 - 前端技術棧對齊 NewAPI 新版 UI：Rsbuild、React 19、TypeScript、Tailwind CSS v4、TanStack Router、TanStack Query、TanStack Table、Base UI、i18next、Zustand。
 - 首次啟動建立管理員密碼，登入後才可查看資產、帳號、工作階段與稽核資料。
 - SSH：WebSocket 到 SSH PTY 橋接，支援密碼、私鑰與 passphrase，並提供受授權策略控制的 SFTP 檔案瀏覽、上傳、下載、刪除與稽核日誌。
+- Agent 閘道：遠端節點主動連線管理端，透過已驗證且可稽核的雙向 TCP 中繼存取內網 SSH/SFTP 資產；已設定閘道的工作階段不會靜默改為直連。
 - RDP：透過 Guacamole WebSocket tunnel 連線 `guacd`，真實憑證只在服務端使用。
 - 本機 JSON 資料存放，憑證敏感欄位使用 AES-GCM 加密。
 - RDP 錄影索引與管理員下載入口。

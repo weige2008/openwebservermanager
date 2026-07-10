@@ -170,6 +170,32 @@ server {
 OPENWEBSERVERMANAGER_TRUST_PROXY_HEADERS=1
 ```
 
+## Agent 网关
+
+在管理后台的“安全网关”中创建 Agent 网关并生成一次性显示的注册令牌，然后在能够访问目标内网资产的节点运行：
+
+```bash
+OPENWEBSERVERMANAGER_AGENT_TOKEN='gateway_id.registration_secret' \
+./openwebservermanager-agent -server https://manager.example.com -name edge-office-1
+```
+
+也可以使用 `OPENWEBSERVERMANAGER_AGENT_SERVER`、`OPENWEBSERVERMANAGER_AGENT_TOKEN`、`OPENWEBSERVERMANAGER_AGENT_NAME` 和 `OPENWEBSERVERMANAGER_AGENT_WORKERS` 环境变量。Agent 只需要主动访问管理端，不需要开放入站端口；注册令牌应按密码管理，不要写入日志或公开脚本。
+
+为资产选择包含该 Agent 的网关分组后，SSH/SFTP 会通过经过鉴权和审计的双向 TCP 中继访问目标。网关不可用时连接会失败，不会静默回退为管理端直连。
+
+如果管理端位于 Nginx 后面，`/api/agent/` 还需要禁用请求和响应缓冲，并放宽长连接超时：
+
+```nginx
+location /api/agent/ {
+  proxy_pass http://127.0.0.1:23876;
+  proxy_http_version 1.1;
+  proxy_buffering off;
+  proxy_request_buffering off;
+  proxy_read_timeout 1h;
+  proxy_send_timeout 1h;
+}
+```
+
 ## guacd 配置
 
 RDP 需要 guacd。推荐优先使用系统服务：

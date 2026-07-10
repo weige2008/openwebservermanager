@@ -17,7 +17,8 @@ import (
 	"openwebservermanager/internal/model"
 
 	"github.com/go-sql-driver/mysql"
-	_ "github.com/jackc/pgx/v5/stdlib"
+	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/stdlib"
 )
 
 const defaultDatabaseSQLTimeoutMS = 30000
@@ -72,7 +73,7 @@ func (s *Server) handleDatabaseAssetQuery(w http.ResponseWriter, r *http.Request
 	if !ok {
 		return
 	}
-	logItem, statusCode, err := s.executeDatabaseAssetSQL(r, asset, userID, sqlText, databaseSQLExecutionOptions{
+	logItem, statusCode, err := s.executeDatabaseAssetSQL(r, asset, userID, sqlText, gatewayRoute, databaseSQLExecutionOptions{
 		Source:        "access_portal",
 		LogType:       "database_access",
 		ExtraMetadata: gatewayRouteMetadata(gatewayRoute),
@@ -165,14 +166,14 @@ func (s *Server) createSQLWorkOrderRequestOperationLog(r *http.Request, item mod
 	})
 }
 
-func (s *Server) executeDatabaseAssetSQL(r *http.Request, asset model.PlatformItem, userID, sqlText string, opts databaseSQLExecutionOptions) (model.PlatformItem, int, error) {
+func (s *Server) executeDatabaseAssetSQL(r *http.Request, asset model.PlatformItem, userID, sqlText string, gatewayRoute gatewayRouteDecision, opts databaseSQLExecutionOptions) (model.PlatformItem, int, error) {
 	connection, err := s.databaseAssetConnection(asset)
 	if err != nil {
 		return model.PlatformItem{}, http.StatusBadRequest, err
 	}
-	db, err := sql.Open(connection.Driver, connection.DSN)
+	db, err := s.openDatabaseAssetConnection(connection, gatewayRoute, asset.ID, userID)
 	if err != nil {
-		return model.PlatformItem{}, http.StatusInternalServerError, err
+		return model.PlatformItem{}, http.StatusBadGateway, err
 	}
 	defer db.Close()
 
@@ -284,6 +285,43 @@ func (s *Server) executeDatabaseAssetSQL(r *http.Request, asset model.PlatformIt
 		return updatedLogItem, http.StatusBadRequest, nil
 	}
 	return updatedLogItem, http.StatusOK, nil
+}
+
+func (s *Server) openDatabaseAssetConnection(connection databaseAssetConnection, gatewayRoute gatewayRouteDecision, assetID, userID string) (*sql.DB, error) {
+	if connection.Driver == "sqlite" {
+		return sql.Open(connection.Driver, connection.DSN)
+	}
+	dialContext, err := s.agentGatewayDialContext(gatewayRoute, assetID, userID, model.ProtocolDatabase)
+	if err != nil {
+		return nil, err
+	}
+	if dialContext == nil {
+		return sql.Open(connection.Driver, connection.DSN)
+	}
+	switch connection.Driver {
+	case "mysql":
+		cfg, err := mysql.ParseDSN(connection.DSN)
+		if err != nil {
+			return nil, err
+		}
+		cfg.DialFunc = dialContext
+		connector, err := mysql.NewConnector(cfg)
+		if err != nil {
+			return nil, err
+		}
+		return sql.OpenDB(connector), nil
+	case "pgx":
+		cfg, err := pgx.ParseConfig(connection.DSN)
+		if err != nil {
+			return nil, err
+		}
+		cfg.DialFunc = func(ctx context.Context, network, address string) (net.Conn, error) {
+			return dialContext(ctx, network, address)
+		}
+		return stdlib.OpenDB(*cfg), nil
+	default:
+		return nil, fmt.Errorf("database driver %s does not support agent gateway dialing", connection.Driver)
+	}
 }
 
 func (s *Server) sqlLogPersistError(r *http.Request, targetID string, err error) error {

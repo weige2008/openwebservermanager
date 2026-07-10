@@ -22,8 +22,8 @@ type FileClient struct {
 	ssh    io.Closer
 }
 
-func OpenFileClient(server model.Server, credential model.Credential, secret store.CredentialSecret, knownHostsPath string) (*FileClient, error) {
-	sshClient, err := dial(server, credential, secret, knownHostsPath)
+func OpenFileClient(server model.Server, credential model.Credential, secret store.CredentialSecret, knownHostsPath string, dialContext DialContextFunc) (*FileClient, error) {
+	sshClient, err := dial(server, credential, secret, knownHostsPath, dialContext)
 	if err != nil {
 		return nil, err
 	}

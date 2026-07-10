@@ -45,6 +45,7 @@ VERSION=`$(cat VERSION 2>/dev/null || echo dev)
 COMMIT="$commit"
 go mod tidy
 go build -trimpath -ldflags "-s -w -X main.version=`$VERSION -X main.commit=`$COMMIT" -o "`$REMOTE_ROOT/bin/openwebservermanager" ./cmd/openwebservermanager
+go build -trimpath -ldflags "-s -w -X main.version=`$VERSION -X main.commit=`$COMMIT" -o "`$REMOTE_ROOT/bin/openwebservermanager-agent" ./cmd/openwebservermanager-agent
 
 sudo chmod 0750 "`$REMOTE_ROOT" || true
 sudo chmod 2770 "`$REMOTE_ROOT/data" "`$REMOTE_ROOT/data/recordings" "`$REMOTE_ROOT/data/drives" || true

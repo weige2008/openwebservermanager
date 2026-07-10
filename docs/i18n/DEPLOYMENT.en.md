@@ -101,6 +101,19 @@ location / {
 
 Set `OPENWEBSERVERMANAGER_TRUST_PROXY_HEADERS=1` only when the proxy is trusted.
 
+## Agent Gateway
+
+Create an Agent gateway in the administration console and issue its one-time registration token. On a node that can reach the private target network, run:
+
+```bash
+OPENWEBSERVERMANAGER_AGENT_TOKEN='gateway_id.registration_secret' \
+./openwebservermanager-agent -server https://manager.example.com -name edge-office-1
+```
+
+The same values can be supplied through `OPENWEBSERVERMANAGER_AGENT_SERVER`, `OPENWEBSERVERMANAGER_AGENT_TOKEN`, `OPENWEBSERVERMANAGER_AGENT_NAME`, and `OPENWEBSERVERMANAGER_AGENT_WORKERS`. The Agent only needs outbound access to the manager. Treat the registration token as a password.
+
+Assign the Agent through a gateway group on the asset. SSH/SFTP traffic then uses authenticated and audited bidirectional TCP streams. If the gateway is unavailable, the connection fails instead of silently falling back to direct access. Reverse proxies must disable request/response buffering for `/api/agent/` and allow long read/write timeouts.
+
 ## guacd
 
 RDP requires `guacd`.

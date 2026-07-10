@@ -76,6 +76,7 @@ func (s *Server) handleSSHExec(w http.ResponseWriter, r *http.Request, asset mod
 		Store:          s.cfg.Store,
 		Logger:         slog.Default(),
 		KnownHostsPath: filepath.Join(s.cfg.DataDir, "known_hosts"),
+		DialContext:    s.sshSessionDialContext(session),
 	}.RunCommand(session, platformSSHServer(asset), platformSSHCredential(credential), secret, req.Command, timeout)
 	if errors.Is(err, sshrunner.ErrExecCommandLogPersist) {
 		s.handleExecCommandLogPersistFailure(w, r, session.ID, err)

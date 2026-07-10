@@ -75,6 +75,16 @@ $env:OPENWEBSERVERMANAGER_MASTER_KEY = "replace-with-a-long-random-secret"
 .\openwebservermanager.exe
 ```
 
+## Cổng Agent
+
+Tạo cổng Agent trong bảng điều khiển và cấp mã đăng ký chỉ hiển thị một lần. Trên nút có thể truy cập mạng nội bộ đích, chạy:
+
+```bash
+OPENWEBSERVERMANAGER_AGENT_TOKEN='gateway_id.registration_secret' ./openwebservermanager-agent -server https://manager.example.com -name edge-office-1
+```
+
+Agent chỉ cần kết nối đi ra tới máy chủ quản lý. Khi được gán qua nhóm cổng của tài sản, SSH/SFTP dùng luồng TCP hai chiều đã xác thực và kiểm toán; nếu cổng không khả dụng, kết nối sẽ thất bại thay vì âm thầm chuyển sang trực tiếp. Reverse proxy cho `/api/agent/` phải tắt bộ đệm yêu cầu/phản hồi và tăng thời gian chờ.
+
 ## guacd
 
 RDP cần `guacd`:

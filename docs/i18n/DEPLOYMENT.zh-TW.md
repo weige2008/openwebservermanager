@@ -75,6 +75,16 @@ $env:OPENWEBSERVERMANAGER_MASTER_KEY = "replace-with-a-long-random-secret"
 .\openwebservermanager.exe
 ```
 
+## Agent 閘道
+
+在管理後台建立 Agent 閘道並產生只顯示一次的註冊令牌，然後在可存取目標內網的節點執行：
+
+```bash
+OPENWEBSERVERMANAGER_AGENT_TOKEN='gateway_id.registration_secret' ./openwebservermanager-agent -server https://manager.example.com -name edge-office-1
+```
+
+Agent 只需主動連線管理端，不必開放入站連接埠。將 Agent 加入資產使用的閘道群組後，SSH/SFTP 會透過已驗證且可稽核的雙向 TCP 中繼；閘道不可用時不會靜默改為直連。反向代理應對 `/api/agent/` 關閉請求與回應緩衝並延長讀寫逾時。
+
 ## guacd
 
 RDP 需要 `guacd`：

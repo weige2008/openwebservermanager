@@ -27,6 +27,7 @@ openwebservermanager 是一个自托管的网页端服务器管理控制台，�
 - 前端技术栈对齐 NewAPI 新版 UI 方案：Rsbuild、React 19、TypeScript、Tailwind CSS v4、TanStack Router、TanStack Query、TanStack Table、Base UI、i18next、Zustand。
 - 首次启动创建管理员密码，登录后才能查看服务器资产、连接账号、会话和审计数据。
 - SSH：WebSocket 到 SSH PTY 桥接，支持密码、私钥和私钥 passphrase，并提供受授权策略控制的 SFTP 文件浏览、上传、下载、删除与审计日志。
+- Agent 网关：远端节点主动连接管理端，通过经过鉴权和审计的双向 TCP 中继访问内网 SSH/SFTP 资产，带网关的会话不会静默回退为直连。
 - RDP：通过 Guacamole WebSocket tunnel 连接 `guacd`，真实凭据只在服务端使用。
 - 本地 JSON 数据存储，凭据敏感字段使用 AES-GCM 加密。
 - RDP 会话录屏索引与管理员下载入口。
@@ -135,4 +136,4 @@ git push origin v1.0.11
 - `darwin-amd64`
 - `darwin-arm64`
 
-发布包包含 `openwebservermanager` 二进制、默认中文文档、多语言文档、`VERSION` 和 `runtime/` 目录。
+发布包包含 `openwebservermanager`、`openwebservermanager-agent` 二进制、默认中文文档、多语言文档、`VERSION` 和 `runtime/` 目录。

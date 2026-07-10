@@ -1855,6 +1855,14 @@ function appendUniqueLine(current: string, value: string) {
   return [...lines, value.trim()].join('\n')
 }
 
+function quotePOSIXShell(value: string) {
+  return `'${value.replaceAll("'", "'\"'\"'")}'`
+}
+
+function quotePowerShell(value: string) {
+  return `'${value.replaceAll("'", "''")}'`
+}
+
 function AgentGatewayTokenDialog({ item, onClose, canIssueToken }: { item: PlatformItem; onClose: () => void; canIssueToken: boolean }) {
   const app = useApp()
   const [loading, setLoading] = useState(true)
@@ -1897,8 +1905,9 @@ function AgentGatewayTokenDialog({ item, onClose, canIssueToken }: { item: Platf
   }, [app, canIssueToken, item.id])
 
   const server = window.location.origin
-  const registerPayload = JSON.stringify({ registration_token: token, hostname: 'gateway-01', version: '1.0.0' }, null, 2)
-  const heartbeatPayload = JSON.stringify({ registration_token: token, latency_ms: 12, cpu_percent: 8.5, memory_used_bytes: 268435456, memory_total_bytes: 1073741824 }, null, 2)
+  const agentName = item.name || 'gateway-01'
+  const linuxCommand = `OPENWEBSERVERMANAGER_AGENT_TOKEN=${quotePOSIXShell(token)} ./openwebservermanager-agent --server ${quotePOSIXShell(server)} --name ${quotePOSIXShell(agentName)}`
+  const windowsCommand = `$env:OPENWEBSERVERMANAGER_AGENT_TOKEN = ${quotePowerShell(token)}; .\\openwebservermanager-agent.exe --server ${quotePowerShell(server)} --name ${quotePowerShell(agentName)}`
 
   const copy = async (value: string, message = '已复制') => {
     try {
@@ -1930,14 +1939,21 @@ function AgentGatewayTokenDialog({ item, onClose, canIssueToken }: { item: Platf
             </Field>
             <Field label={app.t('expiresAt', 'Expires at')}><Input readOnly value={formatDate(expiresAt)} /></Field>
             <div className='grid gap-3'>
-              <div className='rounded-lg border border-border bg-background/70 p-3'>
-                <div className='mb-2 text-xs font-medium text-muted-foreground'>注册请求</div>
-                <pre className='overflow-auto rounded-md bg-muted p-3 text-xs'>{`curl -X POST ${server}/api/agent/gateways/register \\\n  -H "Content-Type: application/json" \\\n  -d '${registerPayload}'`}</pre>
-              </div>
-              <div className='rounded-lg border border-border bg-background/70 p-3'>
-                <div className='mb-2 text-xs font-medium text-muted-foreground'>心跳请求</div>
-                <pre className='overflow-auto rounded-md bg-muted p-3 text-xs'>{`curl -X POST ${server}/api/agent/gateways/heartbeat \\\n  -H "Content-Type: application/json" \\\n  -d '${heartbeatPayload}'`}</pre>
-              </div>
+              {[
+                [app.t('agentLinuxCommand', 'Linux / macOS'), linuxCommand],
+                [app.t('agentWindowsCommand', 'Windows PowerShell'), windowsCommand],
+              ].map(([label, command]) => (
+                <div key={label} className='rounded-lg border border-border bg-background/70 p-3'>
+                  <div className='mb-2 flex items-center justify-between gap-2'>
+                    <span className='text-xs font-medium text-muted-foreground'>{label}</span>
+                    <Button size='sm' variant='ghost' onClick={() => void copy(command, app.t('agentCommandCopied', 'Agent command copied'))}>
+                      <Copy className='size-3.5' />
+                      {app.t('copyCommand', 'Copy command')}
+                    </Button>
+                  </div>
+                  <pre className='overflow-auto rounded-md bg-muted p-3 text-xs'>{command}</pre>
+                </div>
+              ))}
             </div>
           </>
         )}

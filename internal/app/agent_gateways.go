@@ -1,12 +1,16 @@
 package app
 
 import (
+	"context"
+	"errors"
 	"fmt"
+	"io"
 	"log/slog"
 	"net/http"
 	"strings"
 	"time"
 
+	"openwebservermanager/internal/agentrelay"
 	"openwebservermanager/internal/model"
 
 	"golang.org/x/crypto/bcrypt"
@@ -57,9 +61,115 @@ func (s *Server) handleAgentAPI(w http.ResponseWriter, r *http.Request) {
 		s.handleAgentGatewayRegister(w, r)
 	case r.Method == http.MethodPost && (r.URL.Path == "/api/agent/gateways/heartbeat" || r.URL.Path == "/api/agent/heartbeat"):
 		s.handleAgentGatewayHeartbeat(w, r)
+	case r.Method == http.MethodPost && r.URL.Path == "/api/agent/gateways/claim":
+		s.handleAgentRelayClaim(w, r)
+	case strings.HasPrefix(r.URL.Path, "/api/agent/tunnels/"):
+		s.handleAgentRelayTunnel(w, r)
 	default:
 		writeError(w, http.StatusNotFound, "agent endpoint not found")
 	}
+}
+
+func (s *Server) handleAgentRelayClaim(w http.ResponseWriter, r *http.Request) {
+	var auth agentGatewayAuthRequest
+	if r.ContentLength != 0 && !decodeJSON(w, r, &auth) {
+		return
+	}
+	item, ok := s.agentGatewayFromAuth(w, r, auth)
+	if !ok {
+		return
+	}
+	ctx, cancel := context.WithTimeout(r.Context(), 25*time.Second)
+	defer cancel()
+	claim, err := s.agentRelay.Claim(ctx, item.ID)
+	if errors.Is(err, agentrelay.ErrClaimTimeout) {
+		w.WriteHeader(http.StatusNoContent)
+		return
+	}
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	writeJSON(w, http.StatusOK, claim)
+}
+
+func (s *Server) handleAgentRelayTunnel(w http.ResponseWriter, r *http.Request) {
+	parts := splitPath(strings.TrimPrefix(strings.Trim(r.URL.Path, "/"), "api/agent/tunnels/"))
+	if len(parts) != 2 || strings.TrimSpace(parts[0]) == "" {
+		writeError(w, http.StatusNotFound, "agent relay endpoint not found")
+		return
+	}
+	item, ok := s.agentGatewayFromAuth(w, r, agentGatewayAuthRequest{})
+	if !ok {
+		return
+	}
+	tunnelID, action := parts[0], parts[1]
+	switch {
+	case action == "ready" && r.Method == http.MethodPost:
+		if err := s.agentRelay.Ready(r.Context(), item.ID, tunnelID); err != nil {
+			s.writeAgentRelayError(w, err)
+			return
+		}
+		writeJSON(w, http.StatusOK, map[string]bool{"ok": true})
+	case action == "fail" && r.Method == http.MethodPost:
+		var req agentrelay.FailureRequest
+		if !decodeJSON(w, r, &req) {
+			return
+		}
+		if err := s.agentRelay.Fail(item.ID, tunnelID, errors.New(strings.TrimSpace(req.Error))); err != nil {
+			s.writeAgentRelayError(w, err)
+			return
+		}
+		writeJSON(w, http.StatusOK, map[string]bool{"ok": true})
+	case action == "up" && r.Method == http.MethodPost:
+		if err := s.agentRelay.CopyUp(r.Context(), item.ID, tunnelID, http.MaxBytesReader(w, r.Body, 1<<40)); err != nil && !errors.Is(err, context.Canceled) {
+			s.writeAgentRelayError(w, err)
+			return
+		}
+		writeJSON(w, http.StatusOK, map[string]bool{"ok": true})
+	case action == "down" && r.Method == http.MethodGet:
+		started := false
+		destination := io.Writer(w)
+		if flusher, ok := w.(http.Flusher); ok {
+			destination = agentRelayFlushWriter{writer: w, flusher: flusher}
+		}
+		err := s.agentRelay.CopyDown(r.Context(), item.ID, tunnelID, func() {
+			started = true
+			w.Header().Set("Content-Type", "application/octet-stream")
+			w.WriteHeader(http.StatusOK)
+			if flusher, ok := w.(http.Flusher); ok {
+				flusher.Flush()
+			}
+		}, destination)
+		if err != nil && !started && !errors.Is(err, context.Canceled) {
+			s.writeAgentRelayError(w, err)
+		}
+	default:
+		writeError(w, http.StatusMethodNotAllowed, "method not allowed")
+	}
+}
+
+type agentRelayFlushWriter struct {
+	writer  io.Writer
+	flusher http.Flusher
+}
+
+func (w agentRelayFlushWriter) Write(payload []byte) (int, error) {
+	written, err := w.writer.Write(payload)
+	w.flusher.Flush()
+	return written, err
+}
+
+func (s *Server) writeAgentRelayError(w http.ResponseWriter, err error) {
+	if errors.Is(err, agentrelay.ErrTunnelNotFound) {
+		writeError(w, http.StatusNotFound, err.Error())
+		return
+	}
+	if errors.Is(err, context.Canceled) || errors.Is(err, io.EOF) {
+		writeError(w, http.StatusConflict, "agent relay stream closed")
+		return
+	}
+	writeError(w, http.StatusBadGateway, err.Error())
 }
 
 func (s *Server) handleAgentGatewayToken(w http.ResponseWriter, r *http.Request, id string) {
@@ -344,8 +454,9 @@ func (s *Server) agentGatewayFromAuth(w http.ResponseWriter, r *http.Request, au
 func normalizeAgentGatewayAuth(r *http.Request, auth agentGatewayAuthRequest) (string, string) {
 	gatewayID := strings.TrimSpace(auth.GatewayID)
 	token := strings.TrimSpace(firstNonEmpty(auth.RegistrationToken, auth.Token))
-	if bearer := strings.TrimSpace(strings.TrimPrefix(r.Header.Get("Authorization"), "Bearer ")); token == "" && bearer != "" {
-		token = bearer
+	authorization := strings.TrimSpace(r.Header.Get("Authorization"))
+	if token == "" && len(authorization) > len("Bearer ") && strings.EqualFold(authorization[:len("Bearer ")], "Bearer ") {
+		token = strings.TrimSpace(authorization[len("Bearer "):])
 	}
 	if headerID := strings.TrimSpace(r.Header.Get("X-Gateway-ID")); gatewayID == "" && headerID != "" {
 		gatewayID = headerID

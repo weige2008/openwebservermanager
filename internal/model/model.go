@@ -98,6 +98,7 @@ type ConnectionSession struct {
 	Status              SessionStatus `json:"status"`
 	ClientIP            string        `json:"client_ip"`
 	Error               string        `json:"error,omitempty"`
+	ReconnectFrom       string        `json:"reconnect_from,omitempty"`
 	RecordingPath       string        `json:"recording_path,omitempty"`
 	RecordingSize       int64         `json:"recording_size,omitempty"`
 	GatewayGroupID      string        `json:"gateway_group_id,omitempty"`
@@ -134,11 +135,14 @@ type AuditLog struct {
 }
 
 type SSHCreateRequest struct {
-	ServerID     string `json:"server_id"`
-	CredentialID string `json:"credential_id"`
-	Cols         int    `json:"cols"`
-	Rows         int    `json:"rows"`
-	Term         string `json:"term"`
+	ServerID      string `json:"server_id"`
+	CredentialID  string `json:"credential_id"`
+	Cols          int    `json:"cols"`
+	Rows          int    `json:"rows"`
+	Term          string `json:"term"`
+	MFACode       string `json:"mfa_code"`
+	RecoveryCode  string `json:"recovery_code"`
+	ReconnectFrom string `json:"reconnect_from"`
 }
 
 type RDPCreateRequest struct {
@@ -148,6 +152,9 @@ type RDPCreateRequest struct {
 	Height           int    `json:"height"`
 	DPI              int    `json:"dpi"`
 	RecordingEnabled bool   `json:"recording_enabled"`
+	MFACode          string `json:"mfa_code"`
+	RecoveryCode     string `json:"recovery_code"`
+	ReconnectFrom    string `json:"reconnect_from"`
 }
 
 type VNCCreateRequest struct {
@@ -157,4 +164,7 @@ type VNCCreateRequest struct {
 	Height           int    `json:"height"`
 	DPI              int    `json:"dpi"`
 	RecordingEnabled bool   `json:"recording_enabled"`
+	MFACode          string `json:"mfa_code"`
+	RecoveryCode     string `json:"recovery_code"`
+	ReconnectFrom    string `json:"reconnect_from"`
 }

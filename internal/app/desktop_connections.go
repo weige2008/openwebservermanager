@@ -23,16 +23,18 @@ type desktopCreateRequest struct {
 	RecordingEnabled bool   `json:"recording_enabled"`
 	MFACode          string `json:"mfa_code"`
 	RecoveryCode     string `json:"recovery_code"`
+	ReconnectFrom    string `json:"reconnect_from"`
 }
 
 type sshAccessCreateRequest struct {
-	AssetID      string `json:"asset_id"`
-	CredentialID string `json:"credential_id"`
-	Cols         int    `json:"cols"`
-	Rows         int    `json:"rows"`
-	Term         string `json:"term"`
-	MFACode      string `json:"mfa_code"`
-	RecoveryCode string `json:"recovery_code"`
+	AssetID       string `json:"asset_id"`
+	CredentialID  string `json:"credential_id"`
+	Cols          int    `json:"cols"`
+	Rows          int    `json:"rows"`
+	Term          string `json:"term"`
+	MFACode       string `json:"mfa_code"`
+	RecoveryCode  string `json:"recovery_code"`
+	ReconnectFrom string `json:"reconnect_from"`
 }
 
 func (s *Server) handleCreateVNC(w http.ResponseWriter, r *http.Request) {
@@ -47,6 +49,7 @@ func (s *Server) handleCreateVNC(w http.ResponseWriter, r *http.Request) {
 		Height:           req.Height,
 		DPI:              req.DPI,
 		RecordingEnabled: req.RecordingEnabled,
+		ReconnectFrom:    req.ReconnectFrom,
 	}, http.StatusCreated)
 }
 
@@ -229,6 +232,9 @@ func (s *Server) createPlatformDesktopSession(w http.ResponseWriter, r *http.Req
 		writeError(w, http.StatusForbidden, "asset access denied")
 		return
 	}
+	if !s.requireAccessMFA(w, r, accessMFAInput{MFACode: req.MFACode, RecoveryCode: req.RecoveryCode}) {
+		return
+	}
 	credential, secret, ok, err := s.resolvePlatformDesktopCredential(asset, protocol, req.CredentialID)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, err.Error())
@@ -240,6 +246,9 @@ func (s *Server) createPlatformDesktopSession(w http.ResponseWriter, r *http.Req
 	}
 	if !desktopSecretPresent(protocol, secret) {
 		writeError(w, http.StatusBadRequest, "credential secret is missing")
+		return
+	}
+	if !s.validateReconnectSource(w, r, req.ReconnectFrom, protocol, asset.ID, credential.ID) {
 		return
 	}
 	gatewayRoute, ok := s.requireAssetGatewayRoute(w, asset)
@@ -256,6 +265,7 @@ func (s *Server) createPlatformDesktopSession(w http.ResponseWriter, r *http.Req
 		CredentialID:        credential.ID,
 		UserID:              s.currentUserID(r),
 		ClientIP:            s.clientIP(r),
+		ReconnectFrom:       strings.TrimSpace(req.ReconnectFrom),
 		Width:               req.Width,
 		Height:              req.Height,
 		DPI:                 req.DPI,
@@ -294,12 +304,12 @@ func (s *Server) createPlatformDesktopSession(w http.ResponseWriter, r *http.Req
 		}
 		session = updated
 	}
-	if err := s.createConnectionSessionCreateOperationLog(r, session, "created "+string(protocol)+" session"); err != nil {
+	if err := s.createConnectionSessionCreateOperationLog(r, session, connectionSessionCreateDescription(session)); err != nil {
 		err = rollbackCreatedConnectionSessionError(s.rollbackCreatedConnectionSession(session.ID, session.RecordingPath), err)
 		writeError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
-	_ = s.audit(r, "connection."+string(protocol)+".create", session.ID, protocol, "created "+string(protocol)+" session")
+	_ = s.audit(r, connectionSessionCreateAction(session), session.ID, protocol, connectionSessionCreateDescription(session))
 	writeJSON(w, statusCode, session)
 }
 
@@ -324,6 +334,9 @@ func (s *Server) createPlatformSSHSession(w http.ResponseWriter, r *http.Request
 		writeError(w, http.StatusForbidden, "asset access denied")
 		return
 	}
+	if !s.requireAccessMFA(w, r, accessMFAInput{MFACode: req.MFACode, RecoveryCode: req.RecoveryCode}) {
+		return
+	}
 	credential, secret, ok, err := s.resolvePlatformCredential(asset, model.ProtocolSSH, req.CredentialID)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, err.Error())
@@ -337,6 +350,9 @@ func (s *Server) createPlatformSSHSession(w http.ResponseWriter, r *http.Request
 		writeError(w, http.StatusBadRequest, "credential secret is missing")
 		return
 	}
+	if !s.validateReconnectSource(w, r, req.ReconnectFrom, model.ProtocolSSH, asset.ID, credential.ID) {
+		return
+	}
 	gatewayRoute, ok := s.requireAssetGatewayRoute(w, asset)
 	if !ok {
 		return
@@ -344,13 +360,14 @@ func (s *Server) createPlatformSSHSession(w http.ResponseWriter, r *http.Request
 	req.Cols = clampInt(req.Cols, 40, 300, 120)
 	req.Rows = clampInt(req.Rows, 10, 120, 32)
 	sessionRequest := model.ConnectionSession{
-		Protocol:     model.ProtocolSSH,
-		ServerID:     asset.ID,
-		CredentialID: credential.ID,
-		UserID:       s.currentUserID(r),
-		ClientIP:     s.clientIP(r),
-		Width:        req.Cols,
-		Height:       req.Rows,
+		Protocol:      model.ProtocolSSH,
+		ServerID:      asset.ID,
+		CredentialID:  credential.ID,
+		UserID:        s.currentUserID(r),
+		ClientIP:      s.clientIP(r),
+		ReconnectFrom: strings.TrimSpace(req.ReconnectFrom),
+		Width:         req.Cols,
+		Height:        req.Rows,
 	}
 	applyGatewayRouteSession(&sessionRequest, gatewayRoute)
 	session, err := s.cfg.Store.CreateSession(sessionRequest)
@@ -358,12 +375,12 @@ func (s *Server) createPlatformSSHSession(w http.ResponseWriter, r *http.Request
 		writeError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
-	if err := s.createConnectionSessionCreateOperationLog(r, session, "created ssh session"); err != nil {
+	if err := s.createConnectionSessionCreateOperationLog(r, session, connectionSessionCreateDescription(session)); err != nil {
 		err = rollbackCreatedConnectionSessionError(s.cfg.Store.DeleteSession(session.ID), err)
 		writeError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
-	_ = s.audit(r, "connection.ssh.create", session.ID, model.ProtocolSSH, "created ssh session")
+	_ = s.audit(r, connectionSessionCreateAction(session), session.ID, model.ProtocolSSH, connectionSessionCreateDescription(session))
 	writeJSON(w, statusCode, session)
 }
 

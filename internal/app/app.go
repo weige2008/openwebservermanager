@@ -428,28 +428,35 @@ func (s *Server) handleCreateSSH(w http.ResponseWriter, r *http.Request) {
 	if !s.requireAssetAuthorization(w, r, model.ProtocolSSH, server.ID) {
 		return
 	}
+	if !s.requireAccessMFA(w, r, accessMFAInput{MFACode: req.MFACode, RecoveryCode: req.RecoveryCode}) {
+		return
+	}
+	if !s.validateReconnectSource(w, r, req.ReconnectFrom, model.ProtocolSSH, server.ID, credential.ID) {
+		return
+	}
 	req.Cols = clampInt(req.Cols, 40, 300, 120)
 	req.Rows = clampInt(req.Rows, 10, 120, 32)
 
 	session, err := s.cfg.Store.CreateSession(model.ConnectionSession{
-		Protocol:     model.ProtocolSSH,
-		ServerID:     server.ID,
-		CredentialID: credential.ID,
-		UserID:       s.currentUserID(r),
-		ClientIP:     s.clientIP(r),
-		Width:        req.Cols,
-		Height:       req.Rows,
+		Protocol:      model.ProtocolSSH,
+		ServerID:      server.ID,
+		CredentialID:  credential.ID,
+		UserID:        s.currentUserID(r),
+		ClientIP:      s.clientIP(r),
+		ReconnectFrom: strings.TrimSpace(req.ReconnectFrom),
+		Width:         req.Cols,
+		Height:        req.Rows,
 	})
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
-	if err := s.createConnectionSessionCreateOperationLog(r, session, "created ssh session"); err != nil {
+	if err := s.createConnectionSessionCreateOperationLog(r, session, connectionSessionCreateDescription(session)); err != nil {
 		err = rollbackCreatedConnectionSessionError(s.cfg.Store.DeleteSession(session.ID), err)
 		writeError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
-	_ = s.audit(r, "connection.ssh.create", session.ID, model.ProtocolSSH, "created ssh session")
+	_ = s.audit(r, connectionSessionCreateAction(session), session.ID, model.ProtocolSSH, connectionSessionCreateDescription(session))
 	writeJSON(w, http.StatusCreated, session)
 }
 
@@ -523,6 +530,12 @@ func (s *Server) handleCreateRDP(w http.ResponseWriter, r *http.Request) {
 	if !s.requireAssetAuthorization(w, r, model.ProtocolRDP, server.ID) {
 		return
 	}
+	if !s.requireAccessMFA(w, r, accessMFAInput{MFACode: req.MFACode, RecoveryCode: req.RecoveryCode}) {
+		return
+	}
+	if !s.validateReconnectSource(w, r, req.ReconnectFrom, model.ProtocolRDP, server.ID, credential.ID) {
+		return
+	}
 	policy := s.desktopAccessPolicy(model.ProtocolRDP)
 	req.Width = clampInt(req.Width, 640, 7680, policy.Width)
 	req.Height = clampInt(req.Height, 480, 4320, policy.Height)
@@ -534,6 +547,7 @@ func (s *Server) handleCreateRDP(w http.ResponseWriter, r *http.Request) {
 		CredentialID:        credential.ID,
 		UserID:              s.currentUserID(r),
 		ClientIP:            s.clientIP(r),
+		ReconnectFrom:       strings.TrimSpace(req.ReconnectFrom),
 		Width:               req.Width,
 		Height:              req.Height,
 		DPI:                 req.DPI,
@@ -570,12 +584,12 @@ func (s *Server) handleCreateRDP(w http.ResponseWriter, r *http.Request) {
 		}
 		session = updated
 	}
-	if err := s.createConnectionSessionCreateOperationLog(r, session, "created rdp session"); err != nil {
+	if err := s.createConnectionSessionCreateOperationLog(r, session, connectionSessionCreateDescription(session)); err != nil {
 		err = rollbackCreatedConnectionSessionError(s.rollbackCreatedConnectionSession(session.ID, session.RecordingPath), err)
 		writeError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
-	_ = s.audit(r, "connection.rdp.create", session.ID, model.ProtocolRDP, "created rdp session")
+	_ = s.audit(r, connectionSessionCreateAction(session), session.ID, model.ProtocolRDP, connectionSessionCreateDescription(session))
 	writeJSON(w, http.StatusCreated, session)
 }
 
@@ -917,23 +931,28 @@ func (s *Server) createSessionLifecycleOperationLog(r *http.Request, name, statu
 }
 
 func (s *Server) createConnectionSessionCreateOperationLog(r *http.Request, session model.ConnectionSession, description string) error {
+	name := connectionSessionCreateAction(session)
+	metadata := map[string]any{
+		"session_id":    session.ID,
+		"server_id":     session.ServerID,
+		"credential_id": session.CredentialID,
+		"client_ip":     s.clientIP(r),
+		"width":         session.Width,
+		"height":        session.Height,
+		"dpi":           session.DPI,
+	}
+	if session.ReconnectFrom != "" {
+		metadata["reconnect_from"] = session.ReconnectFrom
+	}
 	return s.createOperationLog(r, model.PlatformItemRequest{
-		Name:        "connection." + string(session.Protocol) + ".create",
+		Name:        name,
 		Type:        "connection_session",
 		Status:      "success",
 		Protocol:    session.Protocol,
 		TargetID:    session.ID,
 		OwnerID:     s.currentUserID(r),
 		Description: description,
-		Metadata: map[string]any{
-			"session_id":    session.ID,
-			"server_id":     session.ServerID,
-			"credential_id": session.CredentialID,
-			"client_ip":     s.clientIP(r),
-			"width":         session.Width,
-			"height":        session.Height,
-			"dpi":           session.DPI,
-		},
+		Metadata:    metadata,
 	})
 }
 
@@ -1183,6 +1202,48 @@ func sessionStatusOpen(status model.SessionStatus) bool {
 func (s *Server) sessionStillOpen(id string) bool {
 	session, ok := s.cfg.Store.GetSession(id)
 	return ok && sessionStatusOpen(session.Status)
+}
+
+func (s *Server) validateReconnectSource(w http.ResponseWriter, r *http.Request, sourceID string, protocol model.Protocol, assetID, credentialID string) bool {
+	sourceID = strings.TrimSpace(sourceID)
+	if sourceID == "" {
+		return true
+	}
+	source, ok := s.cfg.Store.GetSession(sourceID)
+	if !ok {
+		writeError(w, http.StatusNotFound, "reconnect source session not found")
+		return false
+	}
+	if !s.canControlSession(r, source) {
+		_ = s.audit(r, "connection."+string(protocol)+".reconnect.denied", sourceID, protocol, "reconnect source session access denied")
+		writeError(w, http.StatusForbidden, "reconnect source session access denied")
+		return false
+	}
+	if sessionStatusOpen(source.Status) {
+		writeError(w, http.StatusConflict, "reconnect source session is still active")
+		return false
+	}
+	if source.Protocol != protocol || source.ServerID != strings.TrimSpace(assetID) || (credentialID != "" && source.CredentialID != strings.TrimSpace(credentialID)) {
+		_ = s.audit(r, "connection."+string(protocol)+".reconnect.denied", sourceID, protocol, "reconnect source session does not match target")
+		writeError(w, http.StatusBadRequest, "reconnect source session does not match target")
+		return false
+	}
+	return true
+}
+
+func connectionSessionCreateAction(session model.ConnectionSession) string {
+	action := "create"
+	if session.ReconnectFrom != "" {
+		action = "reconnect"
+	}
+	return "connection." + string(session.Protocol) + "." + action
+}
+
+func connectionSessionCreateDescription(session model.ConnectionSession) string {
+	if session.ReconnectFrom != "" {
+		return "reconnected " + string(session.Protocol) + " session from " + session.ReconnectFrom
+	}
+	return "created " + string(session.Protocol) + " session"
 }
 
 func validateServer(server model.Server) error {

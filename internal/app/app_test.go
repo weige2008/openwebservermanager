@@ -1043,12 +1043,20 @@ func TestAccessMFARequiredForPortalConnections(t *testing.T) {
 	handler, adminCookie := newTestHandler(t)
 	srv := handler.(*Server)
 
+	assertStatus(t, handler, http.MethodPost, "/api/admin/roles", map[string]any{
+		"name":   "mfa-connection-operator",
+		"type":   "custom",
+		"status": "enabled",
+		"metadata": map[string]any{
+			"api_permissions": []string{"POST /api/connections/ssh"},
+		},
+	}, adminCookie, http.StatusCreated)
 	userRec := assertStatus(t, handler, http.MethodPost, "/api/admin/users", map[string]any{
 		"name":     "mfa-operator",
 		"type":     "local",
 		"status":   "enabled",
 		"password": "password123",
-		"metadata": map[string]any{"role": "user"},
+		"metadata": map[string]any{"role": "mfa-connection-operator"},
 	}, adminCookie, http.StatusCreated)
 	var user model.PlatformItem
 	decodeResponse(t, userRec, &user)
@@ -1079,6 +1087,29 @@ func TestAccessMFARequiredForPortalConnections(t *testing.T) {
 		"name":      "mfa-operator linux",
 		"owner_id":  user.ID,
 		"target_id": asset.ID,
+		"status":    "enabled",
+	}, adminCookie, http.StatusCreated)
+	legacyServerRec := assertStatus(t, handler, http.MethodPost, "/api/servers", map[string]any{
+		"name":     "mfa-legacy-linux",
+		"host":     "127.0.0.1",
+		"os":       "linux",
+		"ssh_port": 22,
+	}, adminCookie, http.StatusCreated)
+	var legacyServer model.Server
+	decodeResponse(t, legacyServerRec, &legacyServer)
+	legacyCredentialRec := assertStatus(t, handler, http.MethodPost, "/api/credentials", map[string]any{
+		"name":      "mfa-legacy-root",
+		"server_id": legacyServer.ID,
+		"type":      "ssh_password",
+		"username":  "root",
+		"password":  "target-secret",
+	}, adminCookie, http.StatusCreated)
+	var legacyCredential model.CredentialPublic
+	decodeResponse(t, legacyCredentialRec, &legacyCredential)
+	assertStatus(t, handler, http.MethodPost, "/api/admin/authorizations/assets", map[string]any{
+		"name":      "mfa-operator legacy linux",
+		"owner_id":  user.ID,
+		"target_id": legacyServer.ID,
 		"status":    "enabled",
 	}, adminCookie, http.StatusCreated)
 
@@ -1158,6 +1189,40 @@ func TestAccessMFARequiredForPortalConnections(t *testing.T) {
 		"cols": 100,
 		"rows": 24,
 	}, userCookie, http.StatusAccepted)
+	assertStatus(t, handler, http.MethodPost, "/api/connections/"+session.ID+"/close", nil, userCookie, http.StatusOK)
+	reconnectCookie := loginWithMFA()
+	reconnectMissingRec := assertStatus(t, handler, http.MethodPost, "/api/access/ssh/"+asset.ID, map[string]any{
+		"cols":           120,
+		"rows":           32,
+		"reconnect_from": session.ID,
+	}, reconnectCookie, http.StatusPreconditionRequired)
+	if !strings.Contains(reconnectMissingRec.Body.String(), `"mfa_required":true`) {
+		t.Fatalf("reconnect did not require access MFA: %s", reconnectMissingRec.Body.String())
+	}
+	reconnectRec := assertStatus(t, handler, http.MethodPost, "/api/access/ssh/"+asset.ID, map[string]any{
+		"cols":           120,
+		"rows":           32,
+		"mfa_code":       totpCode(secret, time.Now().UTC()),
+		"reconnect_from": session.ID,
+	}, reconnectCookie, http.StatusAccepted)
+	var reconnected model.ConnectionSession
+	decodeResponse(t, reconnectRec, &reconnected)
+	if reconnected.ReconnectFrom != session.ID || reconnected.ID == session.ID {
+		t.Fatalf("MFA reconnect session = %#v", reconnected)
+	}
+	legacyCookie := loginWithMFA()
+	legacyMissingRec := assertStatus(t, handler, http.MethodPost, "/api/connections/ssh", map[string]any{
+		"server_id":     legacyServer.ID,
+		"credential_id": legacyCredential.ID,
+	}, legacyCookie, http.StatusPreconditionRequired)
+	if !strings.Contains(legacyMissingRec.Body.String(), `"mfa_required":true`) {
+		t.Fatalf("legacy connection API bypassed access MFA: %s", legacyMissingRec.Body.String())
+	}
+	assertStatus(t, handler, http.MethodPost, "/api/connections/ssh", map[string]any{
+		"server_id":     legacyServer.ID,
+		"credential_id": legacyCredential.ID,
+		"mfa_code":      totpCode(secret, time.Now().UTC()),
+	}, legacyCookie, http.StatusCreated)
 
 	databaseCookie := loginWithMFA()
 	assertStatus(t, handler, http.MethodPost, "/api/access/database/"+databaseAsset.ID+"/query", map[string]any{
@@ -2778,10 +2843,28 @@ func TestConnectionAPIsRequireAssetAuthorization(t *testing.T) {
 		"target_id": linuxServer.ID,
 		"status":    "enabled",
 	}, adminCookie, http.StatusCreated)
-	assertStatus(t, handler, http.MethodPost, "/api/connections/ssh", map[string]any{
+	sshSessionRec := assertStatus(t, handler, http.MethodPost, "/api/connections/ssh", map[string]any{
 		"server_id":     linuxServer.ID,
 		"credential_id": sshCredential.ID,
 	}, userCookie, http.StatusCreated)
+	var sshSession model.ConnectionSession
+	decodeResponse(t, sshSessionRec, &sshSession)
+	assertStatus(t, handler, http.MethodPost, "/api/connections/ssh", map[string]any{
+		"server_id":      linuxServer.ID,
+		"credential_id":  sshCredential.ID,
+		"reconnect_from": sshSession.ID,
+	}, userCookie, http.StatusConflict)
+	assertStatus(t, handler, http.MethodPost, "/api/connections/"+sshSession.ID+"/close", nil, userCookie, http.StatusOK)
+	removeReconnectLogBlocker := blockOperationLogName(t, handler.(*Server).cfg.Store, "connection.ssh.reconnect")
+	blockedReconnectRec := assertStatus(t, handler, http.MethodPost, "/api/connections/ssh", map[string]any{
+		"server_id":      linuxServer.ID,
+		"credential_id":  sshCredential.ID,
+		"reconnect_from": sshSession.ID,
+	}, userCookie, http.StatusInternalServerError)
+	removeReconnectLogBlocker()
+	if !strings.Contains(blockedReconnectRec.Body.String(), "persist operation log failed") {
+		t.Fatalf("reconnect operation log failure was not reported: %s", blockedReconnectRec.Body.String())
+	}
 
 	assertStatus(t, handler, http.MethodPost, "/api/admin/authorizations/assets", map[string]any{
 		"name":      "connection-user rdp-target",
@@ -2793,6 +2876,57 @@ func TestConnectionAPIsRequireAssetAuthorization(t *testing.T) {
 		"server_id":     windowsServer.ID,
 		"credential_id": rdpCredential.ID,
 	}, userCookie, http.StatusCreated)
+	assertStatus(t, handler, http.MethodPost, "/api/connections/rdp", map[string]any{
+		"server_id":      windowsServer.ID,
+		"credential_id":  rdpCredential.ID,
+		"reconnect_from": sshSession.ID,
+	}, userCookie, http.StatusBadRequest)
+	reconnectRec := assertStatus(t, handler, http.MethodPost, "/api/connections/ssh", map[string]any{
+		"server_id":      linuxServer.ID,
+		"credential_id":  sshCredential.ID,
+		"reconnect_from": sshSession.ID,
+	}, userCookie, http.StatusCreated)
+	var reconnected model.ConnectionSession
+	decodeResponse(t, reconnectRec, &reconnected)
+	if reconnected.ID == sshSession.ID || reconnected.ReconnectFrom != sshSession.ID || reconnected.Status != model.SessionPending {
+		t.Fatalf("reconnected SSH session = %#v", reconnected)
+	}
+	_, _, sessions, _ := handler.(*Server).cfg.Store.Bootstrap()
+	for _, candidate := range sessions {
+		if candidate.ReconnectFrom == sshSession.ID && candidate.ID != reconnected.ID {
+			t.Fatalf("failed reconnect left orphan session %#v", candidate)
+		}
+	}
+
+	otherUserRec := assertStatus(t, handler, http.MethodPost, "/api/admin/users", map[string]any{
+		"name":     "connection-other-user",
+		"type":     "local",
+		"status":   "enabled",
+		"password": "password123",
+		"metadata": map[string]any{"role": "connection-operator"},
+	}, adminCookie, http.StatusCreated)
+	var otherUser model.PlatformItem
+	decodeResponse(t, otherUserRec, &otherUser)
+	assertStatus(t, handler, http.MethodPost, "/api/admin/authorizations/assets", map[string]any{
+		"name":      "connection-other-user ssh-target",
+		"owner_id":  otherUser.ID,
+		"target_id": linuxServer.ID,
+		"status":    "enabled",
+	}, adminCookie, http.StatusCreated)
+	otherLoginRec := assertStatus(t, handler, http.MethodPost, "/api/auth/login", map[string]any{"username": "connection-other-user", "password": "password123"}, nil, http.StatusOK)
+	otherCookie := otherLoginRec.Result().Cookies()[0]
+	assertStatus(t, handler, http.MethodPost, "/api/connections/ssh", map[string]any{
+		"server_id":      linuxServer.ID,
+		"credential_id":  sshCredential.ID,
+		"reconnect_from": sshSession.ID,
+	}, otherCookie, http.StatusForbidden)
+
+	operationLogs := assertStatus(t, handler, http.MethodGet, "/api/admin/audit/operation-logs", nil, adminCookie, http.StatusOK)
+	for _, want := range []string{"connection.ssh.reconnect", `"reconnect_from":"` + sshSession.ID + `"`, "connection.ssh.reconnect.denied"} {
+		if !strings.Contains(operationLogs.Body.String(), want) {
+			t.Fatalf("reconnect operation log missing %q: %s", want, operationLogs.Body.String())
+		}
+	}
 }
 
 func TestAccessAuthorizationSupportsDepartmentsGroupsAndExpiry(t *testing.T) {

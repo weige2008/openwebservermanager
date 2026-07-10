@@ -2,9 +2,10 @@ import type { ColumnDef } from '@tanstack/react-table'
 import { useQuery } from '@tanstack/react-query'
 import { Link } from '@tanstack/react-router'
 import { ArrowUpRight, ChevronDown, ChevronRight, Copy, Download, FileDown, FileSearch, FolderPlus, MoveRight, Pencil, Play, Plus, RefreshCw, Save, ShieldCheck, TerminalSquare, Trash2, Upload } from 'lucide-react'
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
+import { useEffect, useMemo, useState } from 'react'
 
 import { useApp } from '@/app/app-provider'
+import { isAccessMFARequiredError, useAccessMFADialog, type RequestAccessMFACode } from '@/features/access/access-mfa'
 import { DataTable } from '@/components/data-table/data-table'
 import { CardStaggerContainer, CardStaggerItem } from '@/components/page-transition'
 import { Badge } from '@/components/ui/badge'
@@ -304,8 +305,6 @@ interface PingToolResponse {
     failed?: number
   }
 }
-
-type RequestAccessMFACode = () => Promise<string>
 
 export function PlatformPage({ config }: { config: PlatformPageConfig }) {
   if (config.kind === 'tools') return <ToolsPage config={config} />
@@ -4968,79 +4967,6 @@ function integrationMetadataFromForm(form: SMTPIntegrationForm, existing?: Recor
   if (form.llmApiKey.trim()) metadata.llm_api_key = form.llmApiKey.trim()
   if (form.llmApiKeyClear) metadata.llm_api_key_clear = true
   return metadata
-}
-
-function isAccessMFARequiredError(error: unknown) {
-  if (!(error instanceof ApiError) || error.status !== 428) return false
-  const data = recordValue(error.data)
-  return data.mfa_required === true && (metadataText(data.mfa_scope) === '' || metadataText(data.mfa_scope) === 'access')
-}
-
-function useAccessMFADialog() {
-  const app = useApp()
-  const resolverRef = useRef<((code: string) => void) | null>(null)
-  const [open, setOpen] = useState(false)
-  const [code, setCode] = useState('')
-
-  const resolveCode = useCallback((value: string) => {
-    const resolver = resolverRef.current
-    resolverRef.current = null
-    setOpen(false)
-    setCode('')
-    resolver?.(value.trim())
-  }, [])
-
-  const requestAccessMFACode = useCallback<RequestAccessMFACode>(() => {
-    if (resolverRef.current) resolverRef.current('')
-    return new Promise((resolve) => {
-      resolverRef.current = resolve
-      setCode('')
-      setOpen(true)
-    })
-  }, [])
-
-  const accessMFADialog = (
-    <DialogShell
-      open={open}
-      onOpenChange={(nextOpen) => {
-        if (!nextOpen) resolveCode('')
-      }}
-      compact
-      title={app.t('accessMFATitle', 'Access MFA verification')}
-      description={app.t('accessMFADescription', 'Enter a current authenticator code or a recovery code before opening the asset session.')}
-    >
-      <form
-        className='grid gap-4'
-        onSubmit={(event) => {
-          event.preventDefault()
-          if (!code.trim()) return
-          resolveCode(code)
-        }}
-      >
-        <Field label={app.t('accessMFACodeLabel', 'MFA code')}>
-          <Input
-            autoFocus
-            autoComplete='one-time-code'
-            inputMode='text'
-            value={code}
-            onChange={(event) => setCode(event.currentTarget.value)}
-            placeholder={app.t('accessMFACodePlaceholder', '123456 or recovery code')}
-          />
-        </Field>
-        <div className='flex justify-end gap-2'>
-          <Button type='button' variant='outline' onClick={() => resolveCode('')}>
-            {app.t('cancel', 'Cancel')}
-          </Button>
-          <Button type='submit' variant='primary' disabled={!code.trim()}>
-            <ShieldCheck className='size-4' />
-            {app.t('verify', 'Verify')}
-          </Button>
-        </div>
-      </form>
-    </DialogShell>
-  )
-
-  return { requestAccessMFACode, accessMFADialog }
 }
 
 async function ensureAccessMFA(path: string, requestAccessMFACode: RequestAccessMFACode) {

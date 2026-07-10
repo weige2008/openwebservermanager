@@ -499,9 +499,6 @@ func (s *Server) handleAccessAction(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		req.AssetID = assetID
-		if !s.requireAccessMFA(w, r, accessMFAInput{MFACode: req.MFACode, RecoveryCode: req.RecoveryCode}) {
-			return
-		}
 		s.createPlatformSSHSession(w, r, req, http.StatusAccepted)
 		return
 	}
@@ -515,9 +512,6 @@ func (s *Server) handleAccessAction(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		req.AssetID = assetID
-		if !s.requireAccessMFA(w, r, accessMFAInput{MFACode: req.MFACode, RecoveryCode: req.RecoveryCode}) {
-			return
-		}
 		s.createPlatformDesktopSession(w, r, protocol, req, http.StatusAccepted)
 		return
 	}

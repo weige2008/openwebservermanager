@@ -66,6 +66,7 @@ export interface ConnectionSession {
   status: SessionStatus
   client_ip?: string
   error?: string
+  reconnect_from?: string
   recording_path?: string
   recording_size?: number
   width?: number

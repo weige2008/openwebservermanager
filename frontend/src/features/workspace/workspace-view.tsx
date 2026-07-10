@@ -10,6 +10,7 @@ import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
 import { DialogShell } from '@/components/ui/dialog'
 import { Field, Select, Textarea } from '@/components/ui/field'
+import { isAccessMFARequiredError, useAccessMFADialog } from '@/features/access/access-mfa'
 import { ApiError, apiRequest } from '@/lib/api'
 import { base64ToText, textToBase64 } from '@/lib/codec'
 import { formatDate, statusLabel } from '@/lib/utils'
@@ -38,6 +39,7 @@ export function WorkspaceView() {
   const workspace = app.workspace
   const [status, setStatus] = useState(workspace?.status || 'connecting')
   const [closing, setClosing] = useState(false)
+  const [reconnecting, setReconnecting] = useState(false)
   const [selectedSnippetID, setSelectedSnippetID] = useState('')
   const sshMessages = useMemo(
     () => ({
@@ -91,6 +93,7 @@ export function WorkspaceView() {
     enabled: workspace?.type === 'ssh',
     staleTime: 10_000,
   })
+  const { requestAccessMFACode, accessMFADialog } = useAccessMFADialog()
 
   if (!workspace) return null
 
@@ -128,6 +131,50 @@ export function WorkspaceView() {
     }
   }
 
+  const reconnect = async () => {
+    if (reconnecting) return
+    setReconnecting(true)
+    try {
+      const protocol = workspace.type
+      const asset = app.data.platform?.assets?.find((item) => item.id === workspace.session.server_id)
+      const dimensions = protocol === 'ssh'
+        ? { cols: workspace.session.width || 120, rows: workspace.session.height || 32, term: 'xterm-256color' }
+        : {
+          width: Math.max(1024, window.innerWidth),
+          height: Math.max(680, window.innerHeight - 52),
+          dpi: workspace.session.dpi || 96,
+          recording_enabled: Boolean(workspace.session.recording_path),
+        }
+      const payload = {
+        ...dimensions,
+        credential_id: workspace.session.credential_id,
+        reconnect_from: workspace.session.id,
+        ...(asset ? {} : { server_id: workspace.session.server_id }),
+      }
+      const endpoint = asset ? `/api/access/${protocol}/${asset.id}` : `/api/connections/${protocol}`
+      const createSession = (mfaCode = '') => apiRequest<ConnectionSession>(endpoint, {
+        method: 'POST',
+        body: JSON.stringify(mfaCode ? { ...payload, mfa_code: mfaCode } : payload),
+      })
+      let session: ConnectionSession
+      try {
+        session = await createSession()
+      } catch (error) {
+        if (!isAccessMFARequiredError(error)) throw error
+        const mfaCode = await requestAccessMFACode()
+        if (!mfaCode) return
+        session = await createSession(mfaCode)
+      }
+      setStatus('connecting')
+      app.setWorkspace({ type: protocol, session, status: 'connecting' })
+      app.showToast(t('workspace.reconnected', { defaultValue: 'Reconnect session created.' }))
+    } catch (error) {
+      app.handleApiError(error)
+    } finally {
+      setReconnecting(false)
+    }
+  }
+
   const insertCommandSnippet = () => {
     const command = snippetCommand(selectedSnippet)
     if (!command) return
@@ -137,7 +184,8 @@ export function WorkspaceView() {
   }
 
   return (
-    <div className='grid min-h-svh grid-rows-[52px_minmax(0,1fr)] bg-background text-foreground'>
+    <>
+      <div className='grid min-h-svh grid-rows-[52px_minmax(0,1fr)] bg-background text-foreground'>
       <div className='flex min-w-0 items-center justify-between gap-3 border-b border-border bg-background/95 px-3 backdrop-blur-xl max-md:h-auto max-md:flex-col max-md:items-start max-md:py-3'>
         <div className='flex min-w-0 items-center gap-2'>
           <strong>{workspace.session.protocol.toUpperCase()}</strong>
@@ -180,7 +228,15 @@ export function WorkspaceView() {
               ) : null}
             </>
           ) : null}
-          {status === 'disconnected' ? <Button variant='outline' onClick={() => void leave()}>{t('workspace.returnConsole')}</Button> : null}
+          {status === 'disconnected' ? (
+            <>
+              <Button variant='primary' onClick={() => void reconnect()} disabled={reconnecting}>
+                <RefreshCw className={reconnecting ? 'size-4 animate-spin' : 'size-4'} />
+                {reconnecting ? t('workspace.reconnecting', { defaultValue: 'Reconnecting...' }) : t('workspace.reconnect', { defaultValue: 'Reconnect' })}
+              </Button>
+              <Button variant='outline' onClick={() => void leave()} disabled={reconnecting}>{t('workspace.returnConsole')}</Button>
+            </>
+          ) : null}
           <Button variant='destructive' onClick={() => void close()} disabled={closing || status === 'disconnected'}>
             <Power className='size-4' />
             {closing ? t('workspace.disconnecting', { defaultValue: 'Disconnecting...' }) : t('workspace.disconnect')}
@@ -203,7 +259,9 @@ export function WorkspaceView() {
           fileTransferEnabled={fileTransferEnabled}
         />
       )}
-    </div>
+      </div>
+      {accessMFADialog}
+    </>
   )
 }
 

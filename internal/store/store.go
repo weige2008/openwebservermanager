@@ -910,6 +910,7 @@ func (s *Store) appendLegacyPlatformData(result map[string][]model.PlatformItem)
 			Metadata: map[string]any{
 				"source":                "legacy_session",
 				"credential_id":         session.CredentialID,
+				"reconnect_from":        session.ReconnectFrom,
 				"client_ip":             session.ClientIP,
 				"recording_path":        session.RecordingPath,
 				"recording_size":        session.RecordingSize,
@@ -3090,6 +3091,7 @@ func sessionPlatformItem(collection string, session model.ConnectionSession) mod
 		Description: session.Error,
 		Metadata: map[string]any{
 			"credential_id":         session.CredentialID,
+			"reconnect_from":        session.ReconnectFrom,
 			"client_ip":             session.ClientIP,
 			"recording_path":        session.RecordingPath,
 			"recording_size":        session.RecordingSize,

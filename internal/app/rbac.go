@@ -60,7 +60,8 @@ func isAlwaysAllowedAuthenticatedAPI(r *http.Request) bool {
 			strings.HasSuffix(path, "/tunnel") ||
 			strings.HasSuffix(path, "/close") ||
 			strings.HasSuffix(path, "/recording.zip") ||
-			strings.Contains(path, "/drive")) {
+			strings.Contains(path, "/drive") ||
+			strings.Contains(path, "/sftp")) {
 		return true
 	}
 	return false

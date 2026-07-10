@@ -224,6 +224,7 @@ interface DesktopAccessForm {
   recordingEnabled: boolean
   clipboardEnabled: boolean
   fileTransferEnabled: boolean
+  sshFileTransferEnabled: boolean
   ignoreCert: boolean
   readOnly: boolean
   watermarkEnabled: boolean
@@ -558,7 +559,7 @@ export function PlatformTablePage({ config }: { config: PlatformPageConfig }) {
           header: app.t('targetResourceType', '目标资源类型'),
           cell: ({ row }) => {
             const resourceType = metadataText(row.original.metadata?.resource_type) || 'storage'
-            return <Badge tone='neutral'>{resourceType === 'asset' ? app.t('assetResource', '桌面资产') : app.t('storageResource', '用户存储')}</Badge>
+            return <Badge tone='neutral'>{resourceType === 'asset' ? app.t('assetResource', '服务器资产') : app.t('storageResource', '用户存储')}</Badge>
           },
         },
         {
@@ -3451,7 +3452,7 @@ function PlatformItemDialog({
                   })}
                 >
                   <option value='storage'>{app.t('storageResource', '用户存储')}</option>
-                  <option value='asset'>{app.t('assetResource', '桌面资产')}</option>
+                  <option value='asset'>{app.t('assetResource', '服务器资产')}</option>
                 </Select>
               </Field>
               <Field label={authorizationResourceType === 'asset' ? app.t('targetAsset', '目标资产') : app.t('targetStorage', '目标存储')}>
@@ -4491,6 +4492,7 @@ export function PlatformSettingsPage({ config }: { config: PlatformPageConfig })
                 <CheckboxRow checked={accessForm.recordingEnabled} onChange={(recordingEnabled) => patchAccessForm({ recordingEnabled })} label={app.t('defaultRecording', 'Record desktop sessions by default')} />
                 <CheckboxRow checked={accessForm.clipboardEnabled} onChange={(clipboardEnabled) => patchAccessForm({ clipboardEnabled })} label={app.t('clipboardEnabled', 'Enable clipboard')} />
                 <CheckboxRow checked={accessForm.fileTransferEnabled} onChange={(fileTransferEnabled) => patchAccessForm({ fileTransferEnabled })} label={app.t('fileTransferEnabled', 'Enable file transfer')} />
+                <CheckboxRow checked={accessForm.sshFileTransferEnabled} onChange={(sshFileTransferEnabled) => patchAccessForm({ sshFileTransferEnabled })} label={app.t('sshFileTransferEnabled', 'Enable SSH file transfer')} />
                 <CheckboxRow checked={accessForm.ignoreCert} onChange={(ignoreCert) => patchAccessForm({ ignoreCert })} label={app.t('ignoreCertificate', 'Ignore server certificate')} />
                 <CheckboxRow checked={accessForm.readOnly} onChange={(readOnly) => patchAccessForm({ readOnly })} label={app.t('readOnlyDesktop', 'Read-only desktop')} />
                 <CheckboxRow checked={accessForm.watermarkEnabled} onChange={(watermarkEnabled) => patchAccessForm({ watermarkEnabled })} label={app.t('workspaceWatermark', 'Workspace watermark')} />
@@ -4916,6 +4918,7 @@ function desktopAccessFormFromItem(item?: PlatformItem): DesktopAccessForm {
     fileTransferEnabled: metadata.rdp_file_transfer_enabled === undefined && metadata.desktop_file_transfer_enabled === undefined
       ? true
       : metadataBool(metadata.rdp_file_transfer_enabled ?? metadata.desktop_file_transfer_enabled),
+    sshFileTransferEnabled: metadata.ssh_file_transfer_enabled === undefined ? true : metadataBool(metadata.ssh_file_transfer_enabled),
     ignoreCert: metadata.desktop_ignore_cert === undefined ? true : metadataBool(metadata.desktop_ignore_cert),
     readOnly: metadataBool(metadata.desktop_read_only),
     watermarkEnabled: metadataBool(metadata.watermark_enabled),
@@ -4937,6 +4940,7 @@ function desktopAccessMetadataFromForm(form: DesktopAccessForm, existing?: Recor
   metadata.desktop_recording_enabled = form.recordingEnabled
   metadata.desktop_clipboard_enabled = form.clipboardEnabled
   metadata.rdp_file_transfer_enabled = form.fileTransferEnabled
+  metadata.ssh_file_transfer_enabled = form.sshFileTransferEnabled
   metadata.desktop_ignore_cert = form.ignoreCert
   metadata.desktop_read_only = form.readOnly
   metadata.watermark_enabled = form.watermarkEnabled

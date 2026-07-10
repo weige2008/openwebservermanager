@@ -369,6 +369,7 @@ func (s *Server) createPlatformSSHSession(w http.ResponseWriter, r *http.Request
 		Width:         req.Cols,
 		Height:        req.Rows,
 	}
+	applySSHAccessPolicy(&sessionRequest, s.sshAccessPolicy())
 	applyGatewayRouteSession(&sessionRequest, gatewayRoute)
 	session, err := s.cfg.Store.CreateSession(sessionRequest)
 	if err != nil {

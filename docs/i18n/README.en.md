@@ -11,7 +11,7 @@ Deployment guide: [English](DEPLOYMENT.en.md) | [简体中文](../../DEPLOYMENT.
 - Go backend with embedded static frontend.
 - Frontend stack aligned with NewAPI-style conventions: Rsbuild, React 19, TypeScript, Tailwind CSS v4, TanStack Router, TanStack Query, TanStack Table, Base UI, i18next, and Zustand.
 - First-run administrator setup and authenticated console.
-- SSH: WebSocket to SSH PTY bridge with password, private key, and private key passphrase authentication.
+- SSH: WebSocket to SSH PTY bridge with password, private key, and private key passphrase authentication, plus policy-controlled SFTP browsing, upload, download, deletion, and audit logs.
 - RDP: Guacamole WebSocket tunnel to `guacd`; credentials stay server-side.
 - Local JSON store with AES-GCM encrypted credential fields.
 - RDP recording index and recording ZIP download for authenticated administrators.

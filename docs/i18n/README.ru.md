@@ -11,7 +11,7 @@ openwebservermanager — это самостоятельная веб-консо
 - Go backend со встроенным статическим frontend.
 - Frontend в стиле новой UI-схемы NewAPI: Rsbuild, React 19, TypeScript, Tailwind CSS v4, TanStack Router, TanStack Query, TanStack Table, Base UI, i18next и Zustand.
 - Создание администратора при первом запуске.
-- SSH: мост WebSocket к SSH PTY с паролем, приватным ключом и passphrase.
+- SSH: мост WebSocket к SSH PTY с паролем, приватным ключом и passphrase, а также управляемые политиками просмотр SFTP, загрузка, скачивание, удаление и журналы аудита.
 - RDP: WebSocket tunnel Guacamole к `guacd`; учетные данные остаются на сервере.
 - Локальное JSON-хранилище с AES-GCM шифрованием секретных полей.
 - Индекс RDP-записей и ZIP-загрузка для администраторов.

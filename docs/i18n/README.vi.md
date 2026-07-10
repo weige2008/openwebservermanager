@@ -11,7 +11,7 @@ Hướng dẫn triển khai: [Tiếng Việt](DEPLOYMENT.vi.md) | [简体中文]
 - Backend Go nhúng frontend tĩnh.
 - Frontend theo phong cách NewAPI mới: Rsbuild, React 19, TypeScript, Tailwind CSS v4, TanStack Router, TanStack Query, TanStack Table, Base UI, i18next và Zustand.
 - Tạo quản trị viên lần đầu và console yêu cầu đăng nhập.
-- SSH: cầu nối WebSocket tới SSH PTY, hỗ trợ mật khẩu, khóa riêng và passphrase.
+- SSH: cầu nối WebSocket tới SSH PTY, hỗ trợ mật khẩu, khóa riêng và passphrase, cùng duyệt SFTP, tải lên, tải xuống, xóa và nhật ký kiểm toán được kiểm soát bằng chính sách ủy quyền.
 - RDP: Guacamole WebSocket tunnel tới `guacd`; thông tin xác thực chỉ nằm ở server.
 - Lưu trữ JSON cục bộ, mã hóa trường nhạy cảm bằng AES-GCM.
 - Chỉ mục ghi phiên RDP và tải ZIP cho quản trị viên.

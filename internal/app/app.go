@@ -238,6 +238,8 @@ func (s *Server) serveAPI(w http.ResponseWriter, r *http.Request) {
 		s.handleRecordingDownload(w, r)
 	case strings.HasPrefix(r.URL.Path, "/api/connections/") && strings.Contains(r.URL.Path, "/drive"):
 		s.handleDesktopDrive(w, r)
+	case strings.HasPrefix(r.URL.Path, "/api/connections/") && strings.Contains(r.URL.Path, "/sftp"):
+		s.handleSSHFiles(w, r)
 	case r.Method == http.MethodPost && strings.HasPrefix(r.URL.Path, "/api/connections/") && strings.HasSuffix(r.URL.Path, "/close"):
 		s.handleClose(w, r)
 	default:
@@ -437,7 +439,8 @@ func (s *Server) handleCreateSSH(w http.ResponseWriter, r *http.Request) {
 	req.Cols = clampInt(req.Cols, 40, 300, 120)
 	req.Rows = clampInt(req.Rows, 10, 120, 32)
 
-	session, err := s.cfg.Store.CreateSession(model.ConnectionSession{
+	sshPolicy := s.sshAccessPolicy()
+	sessionRequest := model.ConnectionSession{
 		Protocol:      model.ProtocolSSH,
 		ServerID:      server.ID,
 		CredentialID:  credential.ID,
@@ -446,7 +449,9 @@ func (s *Server) handleCreateSSH(w http.ResponseWriter, r *http.Request) {
 		ReconnectFrom: strings.TrimSpace(req.ReconnectFrom),
 		Width:         req.Cols,
 		Height:        req.Rows,
-	})
+	}
+	applySSHAccessPolicy(&sessionRequest, sshPolicy)
+	session, err := s.cfg.Store.CreateSession(sessionRequest)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, err.Error())
 		return

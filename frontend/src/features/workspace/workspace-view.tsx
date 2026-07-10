@@ -2,7 +2,7 @@ import { FitAddon } from '@xterm/addon-fit'
 import { useQuery } from '@tanstack/react-query'
 import { Terminal } from '@xterm/xterm'
 import { ArrowUp, Clipboard, Code2, Download, FileDown, FolderOpen, Power, RefreshCw, Trash2, Upload } from 'lucide-react'
-import { useEffect, useMemo, useRef, useState } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { useTranslation } from 'react-i18next'
 
 import { useApp } from '@/app/app-provider'
@@ -31,6 +31,24 @@ interface DesktopDriveEntry {
 interface DesktopDriveResponse {
   path: string
   entries: DesktopDriveEntry[]
+}
+
+interface FileWorkspaceMessages {
+  sessionFiles: string
+  sessionFilesDescription: string
+  refreshFiles: string
+  parentFolder: string
+  emptyFiles: string
+  openFolder: string
+  downloadFile: string
+  deleteFile: string
+  fileDeleted: string
+  fileUploaded: string
+  uploadSessionFile: string
+  fileListFailed: string
+  pathLabel: string
+  modifiedLabel: string
+  sizeLabel: string
 }
 
 export function WorkspaceView() {
@@ -87,6 +105,13 @@ export function WorkspaceView() {
     }),
     [t]
   )
+  const sshFileMessages = useMemo(
+    () => ({
+      ...rdpMessages,
+      sessionFilesDescription: t('workspace.sshFilesDescription', { defaultValue: 'Browse files on the remote SSH server through SFTP.' }),
+    }),
+    [rdpMessages, t]
+  )
   const commandSnippetsQuery = useQuery({
     queryKey: ['access-command-snippets'],
     queryFn: () => apiRequest<AccessCommandSnippetsResponse>('/api/access/command-snippets'),
@@ -103,9 +128,17 @@ export function WorkspaceView() {
   const selectedSnippet = commandSnippets.find((item) => item.id === selectedSnippetID) || commandSnippets[0]
   const isDesktopWorkspace = workspace.type === 'rdp' || workspace.type === 'vnc'
   const clipboardEnabled = isDesktopWorkspace && workspace.session.clipboard_enabled !== false
+  const sshFileTransferEnabled = workspace.type === 'ssh' && workspace.session.file_transfer_enabled !== false
   const fileTransferEnabled = workspace.type === 'rdp'
     ? workspace.session.file_transfer_enabled !== false
     : workspace.type === 'vnc' && workspace.session.file_transfer_enabled === true
+  const watermarkText = workspace.session.watermark_enabled
+    ? resolveWorkspaceWatermark(
+      workspace.session.watermark_text || '',
+      app.auth?.username || workspace.session.user_id,
+      server?.name || platformAsset?.name || workspace.session.server_id
+    )
+    : ''
 
   const leave = async () => {
     app.setWorkspace(null)
@@ -185,7 +218,7 @@ export function WorkspaceView() {
 
   return (
     <>
-      <div className='grid min-h-svh grid-rows-[52px_minmax(0,1fr)] bg-background text-foreground'>
+      <div className='grid h-svh grid-rows-[52px_minmax(0,1fr)] bg-background text-foreground max-md:grid-rows-[auto_minmax(0,1fr)]'>
       <div className='flex min-w-0 items-center justify-between gap-3 border-b border-border bg-background/95 px-3 backdrop-blur-xl max-md:h-auto max-md:flex-col max-md:items-start max-md:py-3'>
         <div className='flex min-w-0 items-center gap-2'>
           <strong>{workspace.session.protocol.toUpperCase()}</strong>
@@ -195,25 +228,33 @@ export function WorkspaceView() {
         </div>
         <div className='flex flex-wrap gap-2'>
           {workspace.type === 'ssh' ? (
-            <div className='flex min-w-0 gap-2'>
-              <Select
-                className='w-48 max-w-[52vw]'
-                value={selectedSnippet?.id || ''}
-                onChange={(event) => setSelectedSnippetID(event.currentTarget.value)}
-                disabled={!commandSnippets.length}
-                aria-label={t('workspace.commandSnippet', { defaultValue: 'Command snippet' })}
-              >
-                {commandSnippets.length ? commandSnippets.map((snippet) => (
-                  <option key={snippet.id} value={snippet.id}>{snippet.name}</option>
-                )) : (
-                  <option value=''>{t('workspace.noCommandSnippets', { defaultValue: 'No snippets' })}</option>
-                )}
-              </Select>
-              <Button variant='outline' onClick={insertCommandSnippet} disabled={status !== 'connected' || !snippetCommand(selectedSnippet)}>
-                <Code2 className='size-4' />
-                {t('workspace.insertSnippet', { defaultValue: 'Insert' })}
-              </Button>
-            </div>
+            <>
+              <div className='flex min-w-0 gap-2'>
+                <Select
+                  className='w-48 max-w-[52vw]'
+                  value={selectedSnippet?.id || ''}
+                  onChange={(event) => setSelectedSnippetID(event.currentTarget.value)}
+                  disabled={!commandSnippets.length}
+                  aria-label={t('workspace.commandSnippet', { defaultValue: 'Command snippet' })}
+                >
+                  {commandSnippets.length ? commandSnippets.map((snippet) => (
+                    <option key={snippet.id} value={snippet.id}>{snippet.name}</option>
+                  )) : (
+                    <option value=''>{t('workspace.noCommandSnippets', { defaultValue: 'No snippets' })}</option>
+                  )}
+                </Select>
+                <Button variant='outline' onClick={insertCommandSnippet} disabled={status !== 'connected' || !snippetCommand(selectedSnippet)}>
+                  <Code2 className='size-4' />
+                  {t('workspace.insertSnippet', { defaultValue: 'Insert' })}
+                </Button>
+              </div>
+              {sshFileTransferEnabled ? (
+                <>
+                  <Button variant='outline' onClick={() => window.dispatchEvent(new Event('openwebservermanager:ssh-files'))}><FolderOpen className='size-4' />{rdpMessages.sessionFiles}</Button>
+                  <Button variant='outline' onClick={() => window.dispatchEvent(new Event('openwebservermanager:ssh-upload'))}><Upload className='size-4' />{t('workspace.uploadFile')}</Button>
+                </>
+              ) : null}
+            </>
           ) : null}
           {isDesktopWorkspace ? (
             <>
@@ -248,6 +289,9 @@ export function WorkspaceView() {
           session={workspace.session}
           setStatus={setStatus}
           messages={sshMessages}
+          fileMessages={sshFileMessages}
+          fileTransferEnabled={sshFileTransferEnabled}
+          watermarkText={watermarkText}
         />
       ) : (
         <RDPWorkspace
@@ -257,6 +301,7 @@ export function WorkspaceView() {
           messages={rdpMessages}
           clipboardEnabled={clipboardEnabled}
           fileTransferEnabled={fileTransferEnabled}
+          watermarkText={watermarkText}
         />
       )}
       </div>
@@ -269,12 +314,89 @@ function SSHWorkspace({
   session,
   setStatus,
   messages,
+  fileMessages,
+  fileTransferEnabled,
+  watermarkText,
 }: {
   session: ConnectionSession
   setStatus: (status: string) => void
   messages: { connecting: string; connected: string; disconnected: string }
+  fileMessages: FileWorkspaceMessages
+  fileTransferEnabled: boolean
+  watermarkText: string
 }) {
+  const app = useApp()
   const containerRef = useRef<HTMLDivElement | null>(null)
+  const [filesOpen, setFilesOpen] = useState(false)
+  const [filePath, setFilePath] = useState('')
+  const [uploading, setUploading] = useState(false)
+  const filesQuery = useQuery({
+    queryKey: ['ssh-files', session.id, filePath],
+    queryFn: () => apiRequest<DesktopDriveResponse>(`/api/connections/${session.id}/sftp?path=${encodeURIComponent(filePath)}`),
+    enabled: fileTransferEnabled && filesOpen,
+    staleTime: 2_000,
+  })
+  const currentPath = filesQuery.data?.path || filePath
+  const refetchFiles = filesQuery.refetch
+  const handleApiError = app.handleApiError
+  const showToast = app.showToast
+
+  const openEntry = (entry: DesktopDriveEntry) => {
+    if (entry.is_dir) setFilePath(entry.path)
+  }
+
+  const goParent = () => {
+    setFilePath(parentRemotePath(currentPath))
+  }
+
+  const downloadEntry = async (entry: DesktopDriveEntry) => {
+    try {
+      await downloadSSHFile(session.id, entry)
+    } catch (error) {
+      app.handleApiError(error)
+    }
+  }
+
+  const deleteEntry = async (entry: DesktopDriveEntry) => {
+    if (entry.is_dir) return
+    try {
+      await apiRequest(`/api/connections/${session.id}/sftp?path=${encodeURIComponent(entry.path)}`, { method: 'DELETE' })
+      app.showToast(fileMessages.fileDeleted)
+      await filesQuery.refetch()
+    } catch (error) {
+      app.handleApiError(error)
+    }
+  }
+
+  const uploadFile = useCallback(() => {
+    const input = document.createElement('input')
+    input.type = 'file'
+    input.onchange = () => {
+      const file = input.files?.[0]
+      if (!file) return
+      setUploading(true)
+      void uploadSSHFile(session.id, currentPath, file)
+        .then(async () => {
+          showToast(fileMessages.fileUploaded)
+          if (filesOpen) await refetchFiles()
+        })
+        .catch(handleApiError)
+        .finally(() => setUploading(false))
+    }
+    input.click()
+  }, [currentPath, fileMessages.fileUploaded, filesOpen, handleApiError, refetchFiles, session.id, showToast])
+
+  useEffect(() => {
+    if (!fileTransferEnabled) return
+    const onFiles = () => setFilesOpen(true)
+    const onUpload = () => uploadFile()
+    window.addEventListener('openwebservermanager:ssh-files', onFiles)
+    window.addEventListener('openwebservermanager:ssh-upload', onUpload)
+    return () => {
+      window.removeEventListener('openwebservermanager:ssh-files', onFiles)
+      window.removeEventListener('openwebservermanager:ssh-upload', onUpload)
+    }
+  }, [fileTransferEnabled, uploadFile])
 
   useEffect(() => {
     if (!containerRef.current) return
@@ -346,7 +468,101 @@ function SSHWorkspace({
     }
   }, [messages.connected, messages.connecting, messages.disconnected, session.id, setStatus])
 
-  return <div ref={containerRef} className='h-[calc(100vh-52px)] bg-background p-3 max-md:h-[calc(100vh-120px)]' />
+  return (
+    <>
+      <div className='relative min-h-0 overflow-hidden bg-background'>
+        <div ref={containerRef} className='size-full p-3' />
+        {watermarkText ? (
+          <div
+            className='pointer-events-none absolute inset-0 z-10 grid place-items-center text-center font-semibold uppercase'
+            style={{
+              color: session.watermark_color || 'rgba(255,255,255,0.18)',
+              fontSize: `${session.watermark_font_size || 28}px`,
+            }}
+          >
+            {watermarkText}
+          </div>
+        ) : null}
+      </div>
+      <DialogShell
+        open={filesOpen}
+        onOpenChange={setFilesOpen}
+        title={fileMessages.sessionFiles}
+        description={fileMessages.sessionFilesDescription}
+      >
+        <div className='grid gap-3'>
+          <div className='flex flex-wrap items-center justify-between gap-2 rounded-lg border border-border bg-muted/30 px-3 py-2'>
+            <div className='min-w-0 text-xs text-muted-foreground'>
+              <span className='font-medium text-foreground'>{fileMessages.pathLabel}: </span>
+              <span className='break-all'>{currentPath || '/'}</span>
+            </div>
+            <div className='flex gap-2'>
+              <Button size='sm' variant='outline' onClick={uploadFile} disabled={uploading}>
+                <Upload className='size-3.5' />
+                {fileMessages.uploadSessionFile}
+              </Button>
+              <Button size='sm' variant='outline' onClick={goParent} disabled={!currentPath || currentPath === '/'}>
+                <ArrowUp className='size-3.5' />
+                {fileMessages.parentFolder}
+              </Button>
+              <Button size='sm' variant='outline' onClick={() => void filesQuery.refetch()}>
+                <RefreshCw className='size-3.5' />
+                {fileMessages.refreshFiles}
+              </Button>
+            </div>
+          </div>
+          {filesQuery.isError ? (
+            <div className='rounded-lg border border-destructive/20 bg-destructive/10 px-3 py-2 text-sm text-destructive'>{fileMessages.fileListFailed}</div>
+          ) : null}
+          <div className='max-h-[50vh] overflow-auto rounded-lg border border-border'>
+            <div className='grid grid-cols-[minmax(0,1fr)_7rem_10rem_10rem] items-center gap-2 border-b border-border bg-muted/40 px-3 py-2 text-xs font-medium text-muted-foreground max-md:grid-cols-[minmax(0,1fr)_auto]'>
+              <span>{fileMessages.sessionFiles}</span>
+              <span className='max-md:hidden'>{fileMessages.sizeLabel}</span>
+              <span className='max-md:hidden'>{fileMessages.modifiedLabel}</span>
+              <span className='text-right'>{fileMessages.openFolder}</span>
+            </div>
+            {filesQuery.isLoading ? (
+              <div className='px-3 py-8 text-center text-sm text-muted-foreground'>{fileMessages.refreshFiles}...</div>
+            ) : filesQuery.data?.entries?.length ? (
+              filesQuery.data.entries.map((entry) => (
+                <div key={entry.path} className='grid grid-cols-[minmax(0,1fr)_7rem_10rem_10rem] items-center gap-2 border-b border-border/60 px-3 py-2 text-sm last:border-0 max-md:grid-cols-[minmax(0,1fr)_auto]'>
+                  <button
+                    type='button'
+                    className='min-w-0 truncate text-left font-medium hover:text-primary disabled:hover:text-foreground'
+                    disabled={!entry.is_dir}
+                    onClick={() => openEntry(entry)}
+                  >
+                    {entry.is_dir ? <FolderOpen className='mr-2 inline size-4 align-[-2px]' /> : <FileDown className='mr-2 inline size-4 align-[-2px]' />}
+                    {entry.name}
+                  </button>
+                  <span className='text-xs text-muted-foreground max-md:hidden'>{entry.is_dir ? '-' : formatBytes(entry.size)}</span>
+                  <span className='truncate text-xs text-muted-foreground max-md:hidden'>{formatDate(entry.modified)}</span>
+                  <span className='flex justify-end gap-1'>
+                    {entry.is_dir ? (
+                      <Button size='icon-sm' variant='ghost' onClick={() => openEntry(entry)} aria-label={fileMessages.openFolder}>
+                        <FolderOpen className='size-4' />
+                      </Button>
+                    ) : (
+                      <>
+                        <Button size='icon-sm' variant='ghost' onClick={() => void downloadEntry(entry)} aria-label={fileMessages.downloadFile}>
+                          <Download className='size-4' />
+                        </Button>
+                        <Button size='icon-sm' variant='ghost' onClick={() => void deleteEntry(entry)} aria-label={fileMessages.deleteFile}>
+                          <Trash2 className='size-4 text-destructive' />
+                        </Button>
+                      </>
+                    )}
+                  </span>
+                </div>
+              ))
+            ) : (
+              <div className='px-3 py-8 text-center text-sm text-muted-foreground'>{fileMessages.emptyFiles}</div>
+            )}
+          </div>
+        </div>
+      </DialogShell>
+    </>
+  )
 }
 
 function snippetCommand(snippet: PlatformItem | undefined): string {
@@ -379,12 +595,14 @@ function RDPWorkspace({
   messages,
   clipboardEnabled,
   fileTransferEnabled,
+  watermarkText,
 }: {
   session: ConnectionSession
   setStatus: (status: string) => void
   showToast: (message: string) => void
   clipboardEnabled: boolean
   fileTransferEnabled: boolean
+  watermarkText: string
   messages: {
     missingGuacamole: string
     rdpFailed: string
@@ -695,15 +913,13 @@ function RDPWorkspace({
     }
   }, [clipboardEnabled, fileTransferEnabled, messages, session.dpi, session.id, session.protocol, setStatus, showToast])
 
-  const watermarkText = session.watermark_enabled ? session.watermark_text?.trim() : ''
-
   return (
     <>
-      <div className='relative h-[calc(100vh-52px)] overflow-hidden bg-black max-md:h-[calc(100vh-120px)]'>
+      <div className='relative min-h-0 overflow-hidden bg-black'>
         <div ref={containerRef} className='size-full' />
         {watermarkText ? (
           <div
-            className='pointer-events-none absolute inset-0 z-10 grid place-items-center text-center font-semibold uppercase tracking-wider'
+            className='pointer-events-none absolute inset-0 z-10 grid place-items-center text-center font-semibold uppercase'
             style={{
               color: session.watermark_color || 'rgba(255,255,255,0.18)',
               fontSize: `${session.watermark_font_size || 28}px`,
@@ -848,6 +1064,59 @@ function RDPWorkspace({
       </DialogShell>
     </>
   )
+}
+
+async function downloadSSHFile(sessionID: string, entry: DesktopDriveEntry) {
+  const response = await fetch(`/api/connections/${sessionID}/sftp/download?path=${encodeURIComponent(entry.path)}`, {
+    credentials: 'same-origin',
+  })
+  if (!response.ok) {
+    const payload = await response.json().catch(() => ({})) as { error?: string }
+    throw new ApiError(payload.error || response.statusText, response.status, false, payload)
+  }
+  const blob = await response.blob()
+  const url = URL.createObjectURL(blob)
+  const anchor = document.createElement('a')
+  anchor.href = url
+  anchor.download = entry.name || 'download'
+  document.body.appendChild(anchor)
+  anchor.click()
+  anchor.remove()
+  URL.revokeObjectURL(url)
+}
+
+async function uploadSSHFile(sessionID: string, path: string, file: File) {
+  const form = new FormData()
+  form.set('path', path)
+  form.set('file', file, file.name)
+  const response = await fetch(`/api/connections/${sessionID}/sftp/upload`, {
+    method: 'POST',
+    credentials: 'same-origin',
+    body: form,
+  })
+  const payload = (await response.json().catch(() => ({}))) as { error?: string }
+  if (!response.ok) {
+    throw new ApiError(payload.error || response.statusText, response.status, false, payload)
+  }
+  return payload
+}
+
+function parentRemotePath(value: string) {
+  const normalized = value.trim().replaceAll('\\', '/').replace(/\/+$/g, '')
+  if (!normalized || normalized === '.') return ''
+  const separator = normalized.lastIndexOf('/')
+  if (separator < 0) return ''
+  if (separator === 0) return '/'
+  return normalized.slice(0, separator)
+}
+
+function resolveWorkspaceWatermark(template: string, user: string, asset: string) {
+  return template
+    .trim()
+    .replaceAll('{{user}}', user)
+    .replaceAll('{{asset}}', asset)
+    .replaceAll('${user}', user)
+    .replaceAll('${asset}', asset)
 }
 
 async function downloadDesktopDriveFile(sessionID: string, entry: DesktopDriveEntry) {

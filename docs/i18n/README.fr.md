@@ -11,7 +11,7 @@ Guide de déploiement : [Français](DEPLOYMENT.fr.md) | [简体中文](../../DEP
 - Backend Go avec frontend statique embarqué.
 - Frontend aligné sur les conventions UI NewAPI : Rsbuild, React 19, TypeScript, Tailwind CSS v4, TanStack Router, TanStack Query, TanStack Table, Base UI, i18next et Zustand.
 - Création du premier administrateur au premier lancement.
-- SSH : pont WebSocket vers SSH PTY, avec mot de passe, clé privée et passphrase.
+- SSH : pont WebSocket vers SSH PTY, avec mot de passe, clé privée et passphrase, ainsi que navigation SFTP, envoi, téléchargement, suppression et journaux d'audit contrôlés par les stratégies d'autorisation.
 - RDP : tunnel WebSocket Guacamole vers `guacd`; les identifiants restent côté serveur.
 - Stockage JSON local avec champs sensibles chiffrés en AES-GCM.
 - Index des enregistrements RDP et téléchargement ZIP pour les administrateurs.

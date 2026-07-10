@@ -7,6 +7,7 @@ require (
 	github.com/go-ldap/ldap/v3 v3.4.13
 	github.com/go-sql-driver/mysql v1.10.0
 	github.com/jackc/pgx/v5 v5.10.0
+	github.com/pkg/sftp v1.13.9
 	golang.org/x/crypto v0.52.0
 	modernc.org/sqlite v1.42.2
 )
@@ -20,6 +21,7 @@ require (
 	github.com/jackc/pgpassfile v1.0.0 // indirect
 	github.com/jackc/pgservicefile v0.0.0-20240606120523-5a60cdf6a761 // indirect
 	github.com/jackc/puddle/v2 v2.2.2 // indirect
+	github.com/kr/fs v0.1.0 // indirect
 	github.com/mattn/go-isatty v0.0.20 // indirect
 	github.com/ncruces/go-strftime v0.1.9 // indirect
 	github.com/remyoudompheng/bigfft v0.0.0-20230129092748-24d4a6f8daec // indirect

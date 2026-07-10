@@ -31,6 +31,7 @@ import (
 	"net/http/httptest"
 	"net/url"
 	"os"
+	"path"
 	"path/filepath"
 	"strconv"
 	"strings"
@@ -44,6 +45,7 @@ import (
 	"openwebservermanager/internal/store"
 
 	"github.com/fxamacker/cbor/v2"
+	"github.com/pkg/sftp"
 	cryptossh "golang.org/x/crypto/ssh"
 	_ "modernc.org/sqlite"
 )
@@ -2598,7 +2600,7 @@ func TestPlatformConnectionsRejectDisabledAssetsAndCredentialsAtOpen(t *testing.
 	}
 }
 
-func TestDesktopAccessSettingsApplyToRDPAndVNC(t *testing.T) {
+func TestAccessSettingsApplyToSSHRDPAndVNC(t *testing.T) {
 	handler, adminCookie := newTestHandler(t)
 
 	assertStatus(t, handler, http.MethodPost, "/api/admin/system-settings", map[string]any{
@@ -2616,12 +2618,40 @@ func TestDesktopAccessSettingsApplyToRDPAndVNC(t *testing.T) {
 			"desktop_ignore_cert":       false,
 			"desktop_read_only":         true,
 			"rdp_file_transfer_enabled": false,
+			"ssh_file_transfer_enabled": false,
 			"watermark_enabled":         true,
 			"watermark_text":            "AUDIT",
 			"watermark_color":           "rgba(255,0,0,0.2)",
 			"watermark_font_size":       36,
 		},
 	}, adminCookie, http.StatusCreated)
+	linuxRec := assertStatus(t, handler, http.MethodPost, "/api/servers", map[string]any{
+		"name":     "linux-policy",
+		"host":     "127.0.0.1",
+		"os":       "linux",
+		"ssh_port": 22,
+	}, adminCookie, http.StatusCreated)
+	var linux model.Server
+	decodeResponse(t, linuxRec, &linux)
+	sshCredRec := assertStatus(t, handler, http.MethodPost, "/api/credentials", map[string]any{
+		"name":      "ssh-policy",
+		"server_id": linux.ID,
+		"type":      "ssh_password",
+		"username":  "root",
+		"password":  "secret",
+	}, adminCookie, http.StatusCreated)
+	var sshCred model.CredentialPublic
+	decodeResponse(t, sshCredRec, &sshCred)
+	sshRec := assertStatus(t, handler, http.MethodPost, "/api/connections/ssh", map[string]any{
+		"server_id":     linux.ID,
+		"credential_id": sshCred.ID,
+	}, adminCookie, http.StatusCreated)
+	var sshSession model.ConnectionSession
+	decodeResponse(t, sshRec, &sshSession)
+	if boolPtrValue(sshSession.FileTransferEnabled, true) || !boolPtrValue(sshSession.WatermarkEnabled, false) || sshSession.WatermarkText != "AUDIT" || sshSession.WatermarkFontSize != 36 {
+		t.Fatalf("SSH access policy not applied: %#v", sshSession)
+	}
+	assertStatus(t, handler, http.MethodGet, "/api/connections/"+sshSession.ID+"/sftp", nil, adminCookie, http.StatusForbidden)
 
 	windowsRec := assertStatus(t, handler, http.MethodPost, "/api/servers", map[string]any{
 		"name":     "windows-policy",
@@ -13957,6 +13987,200 @@ func TestRecordingAuditRejectsSymlinkRecordingRoot(t *testing.T) {
 	}
 }
 
+func TestSSHSessionFiles(t *testing.T) {
+	remoteRoot := t.TempDir()
+	reportsRoot := filepath.Join(remoteRoot, "reports")
+	if err := os.MkdirAll(reportsRoot, 0o770); err != nil {
+		t.Fatalf("create fake sftp reports directory: %v", err)
+	}
+	for name, content := range map[string]string{
+		"download.txt": "ssh download",
+		"remove.txt":   "ssh remove",
+		"blocked.txt":  "ssh blocked",
+	} {
+		if err := os.WriteFile(filepath.Join(reportsRoot, name), []byte(content), 0o660); err != nil {
+			t.Fatalf("write fake sftp file %s: %v", name, err)
+		}
+	}
+	targetAddr, closeTarget := startFakeSFTPServer(t, remoteRoot, "root", "target-secret")
+	defer closeTarget()
+	host, portText, err := net.SplitHostPort(targetAddr)
+	if err != nil {
+		t.Fatalf("split fake sftp address: %v", err)
+	}
+	port, err := strconv.Atoi(portText)
+	if err != nil {
+		t.Fatalf("parse fake sftp port: %v", err)
+	}
+
+	handler, adminCookie := newTestHandler(t)
+	srv := handler.(*Server)
+	serverRec := assertStatus(t, handler, http.MethodPost, "/api/servers", map[string]any{
+		"name":     "ssh-sftp-target",
+		"host":     host,
+		"os":       "linux",
+		"ssh_port": port,
+	}, adminCookie, http.StatusCreated)
+	var server model.Server
+	decodeResponse(t, serverRec, &server)
+	credentialRec := assertStatus(t, handler, http.MethodPost, "/api/credentials", map[string]any{
+		"name":      "ssh-sftp-root",
+		"server_id": server.ID,
+		"type":      "ssh_password",
+		"username":  "root",
+		"password":  "target-secret",
+	}, adminCookie, http.StatusCreated)
+	var credential model.CredentialPublic
+	decodeResponse(t, credentialRec, &credential)
+	sessionRec := assertStatus(t, handler, http.MethodPost, "/api/connections/ssh", map[string]any{
+		"server_id":     server.ID,
+		"credential_id": credential.ID,
+	}, adminCookie, http.StatusCreated)
+	var session model.ConnectionSession
+	decodeResponse(t, sessionRec, &session)
+	if !boolPtrValue(session.FileTransferEnabled, false) {
+		t.Fatalf("SSH session file transfer policy was not applied: %#v", session)
+	}
+
+	rootListRec := assertStatus(t, handler, http.MethodGet, "/api/connections/"+session.ID+"/sftp", nil, adminCookie, http.StatusOK)
+	var rootList struct {
+		Path    string         `json:"path"`
+		Entries []sshFileEntry `json:"entries"`
+	}
+	decodeResponse(t, rootListRec, &rootList)
+	if rootList.Path == "" || !sshFileEntriesContain(rootList.Entries, "reports") {
+		t.Fatalf("SSH root listing = %#v", rootList)
+	}
+	reportsPath := path.Join(rootList.Path, "reports")
+	reportsListRec := assertStatus(t, handler, http.MethodGet, "/api/connections/"+session.ID+"/sftp?path="+url.QueryEscape(reportsPath), nil, adminCookie, http.StatusOK)
+	if !strings.Contains(reportsListRec.Body.String(), "download.txt") || !strings.Contains(reportsListRec.Body.String(), "remove.txt") {
+		t.Fatalf("SSH reports listing missing files: %s", reportsListRec.Body.String())
+	}
+	downloadPath := path.Join(reportsPath, "download.txt")
+	downloadRec := assertStatus(t, handler, http.MethodGet, "/api/connections/"+session.ID+"/sftp/download?path="+url.QueryEscape(downloadPath), nil, adminCookie, http.StatusOK)
+	if downloadRec.Body.String() != "ssh download" {
+		t.Fatalf("SSH file download = %q", downloadRec.Body.String())
+	}
+	if disposition := downloadRec.Header().Get("Content-Disposition"); !strings.Contains(disposition, `filename="download.txt"`) {
+		t.Fatalf("SSH file download disposition = %q", disposition)
+	}
+	uploadRec := assertMultipartStatus(t, handler, "/api/connections/"+session.ID+"/sftp/upload", map[string]string{"path": reportsPath}, `C:\Users\ops\uploaded.txt`, []byte("ssh uploaded"), adminCookie, http.StatusCreated)
+	if !strings.Contains(uploadRec.Body.String(), `"name":"uploaded.txt"`) || strings.Contains(uploadRec.Body.String(), `C:\Users`) {
+		t.Fatalf("SSH upload response leaked client path: %s", uploadRec.Body.String())
+	}
+	uploadedPath := path.Join(reportsPath, "uploaded.txt")
+	uploadedDownload := assertStatus(t, handler, http.MethodGet, "/api/connections/"+session.ID+"/sftp/download?path="+url.QueryEscape(uploadedPath), nil, adminCookie, http.StatusOK)
+	if uploadedDownload.Body.String() != "ssh uploaded" {
+		t.Fatalf("SSH uploaded file body = %q", uploadedDownload.Body.String())
+	}
+	removePath := path.Join(reportsPath, "remove.txt")
+	assertStatus(t, handler, http.MethodDelete, "/api/connections/"+session.ID+"/sftp?path="+url.QueryEscape(removePath), nil, adminCookie, http.StatusOK)
+	if _, err := os.Stat(filepath.Join(reportsRoot, "remove.txt")); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("SSH delete left remote file: %v", err)
+	}
+
+	removeCreateLogBlocker := blockPlatformItemCreate(t, srv.cfg.Store, "file_logs")
+	blockedAuditUpload := assertMultipartStatus(t, handler, "/api/connections/"+session.ID+"/sftp/upload", map[string]string{"path": reportsPath}, "audit-blocked.txt", []byte("must rollback"), adminCookie, http.StatusInternalServerError)
+	removeCreateLogBlocker()
+	if !strings.Contains(blockedAuditUpload.Body.String(), "persist file log failed") {
+		t.Fatalf("SSH upload audit failure was not reported: %s", blockedAuditUpload.Body.String())
+	}
+	if _, err := os.Stat(filepath.Join(reportsRoot, "audit-blocked.txt")); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("SSH upload changed remote file before audit persisted: %v", err)
+	}
+
+	userRec := assertStatus(t, handler, http.MethodPost, "/api/admin/users", map[string]any{
+		"name":     "ssh-sftp-user",
+		"type":     "local",
+		"status":   "enabled",
+		"password": "password123",
+		"metadata": map[string]any{"role": "user"},
+	}, adminCookie, http.StatusCreated)
+	var user model.PlatformItem
+	decodeResponse(t, userRec, &user)
+	authorizationRec := assertStatus(t, handler, http.MethodPost, "/api/admin/authorizations/assets", map[string]any{
+		"name":      "ssh-sftp-user target",
+		"owner_id":  user.ID,
+		"target_id": server.ID,
+		"status":    "enabled",
+	}, adminCookie, http.StatusCreated)
+	var authorization model.PlatformItem
+	decodeResponse(t, authorizationRec, &authorization)
+	if _, err := srv.cfg.Store.UpdateSession(session.ID, func(item *model.ConnectionSession) {
+		item.UserID = user.ID
+	}); err != nil {
+		t.Fatalf("assign SSH session owner: %v", err)
+	}
+	loginRec := assertStatus(t, handler, http.MethodPost, "/api/auth/login", map[string]any{"username": "ssh-sftp-user", "password": "password123"}, nil, http.StatusOK)
+	userCookie := loginRec.Result().Cookies()[0]
+	blockedPath := path.Join(reportsPath, "blocked.txt")
+	assertStatus(t, handler, http.MethodPost, "/api/admin/strategies", map[string]any{
+		"name":      "deny SSH protected file",
+		"type":      "file",
+		"status":    "enabled",
+		"owner_id":  user.ID,
+		"target_id": server.ID,
+		"permissions": map[string]bool{
+			"download": false,
+			"upload":   false,
+			"edit":     false,
+			"delete":   false,
+		},
+		"metadata": map[string]any{"resource_type": "asset", "path_prefix": blockedPath},
+	}, adminCookie, http.StatusCreated)
+	filteredList := assertStatus(t, handler, http.MethodGet, "/api/connections/"+session.ID+"/sftp?path="+url.QueryEscape(reportsPath), nil, userCookie, http.StatusOK)
+	if strings.Contains(filteredList.Body.String(), "blocked.txt") || !strings.Contains(filteredList.Body.String(), "download.txt") {
+		t.Fatalf("SSH policy list filtering failed: %s", filteredList.Body.String())
+	}
+	assertStatus(t, handler, http.MethodGet, "/api/connections/"+session.ID+"/sftp/download?path="+url.QueryEscape(blockedPath), nil, userCookie, http.StatusForbidden)
+	adminBlockedDownload := assertStatus(t, handler, http.MethodGet, "/api/connections/"+session.ID+"/sftp/download?path="+url.QueryEscape(blockedPath), nil, adminCookie, http.StatusOK)
+	if adminBlockedDownload.Body.String() != "ssh blocked" {
+		t.Fatalf("admin SSH policy bypass = %q", adminBlockedDownload.Body.String())
+	}
+
+	assertStatus(t, handler, http.MethodPost, "/api/admin/users", map[string]any{
+		"name":     "ssh-sftp-other",
+		"type":     "local",
+		"status":   "enabled",
+		"password": "password123",
+		"metadata": map[string]any{"role": "user"},
+	}, adminCookie, http.StatusCreated)
+	otherLogin := assertStatus(t, handler, http.MethodPost, "/api/auth/login", map[string]any{"username": "ssh-sftp-other", "password": "password123"}, nil, http.StatusOK)
+	otherCookie := otherLogin.Result().Cookies()[0]
+	assertStatus(t, handler, http.MethodGet, "/api/connections/"+session.ID+"/sftp?path="+url.QueryEscape(reportsPath), nil, otherCookie, http.StatusForbidden)
+
+	disabled := false
+	if _, err := srv.cfg.Store.UpdateSession(session.ID, func(item *model.ConnectionSession) {
+		item.FileTransferEnabled = &disabled
+	}); err != nil {
+		t.Fatalf("disable SSH file transfer: %v", err)
+	}
+	assertStatus(t, handler, http.MethodGet, "/api/connections/"+session.ID+"/sftp?path="+url.QueryEscape(reportsPath), nil, userCookie, http.StatusForbidden)
+	enabled := true
+	if _, err := srv.cfg.Store.UpdateSession(session.ID, func(item *model.ConnectionSession) {
+		item.FileTransferEnabled = &enabled
+	}); err != nil {
+		t.Fatalf("re-enable SSH file transfer: %v", err)
+	}
+	assertStatus(t, handler, http.MethodDelete, "/api/admin/authorizations/assets/"+authorization.ID, nil, adminCookie, http.StatusOK)
+	assertStatus(t, handler, http.MethodGet, "/api/connections/"+session.ID+"/sftp?path="+url.QueryEscape(reportsPath), nil, userCookie, http.StatusForbidden)
+	fileLogs := assertStatus(t, handler, http.MethodGet, "/api/admin/audit/file-logs", nil, adminCookie, http.StatusOK)
+	for _, want := range []string{session.ID, "list", "upload", "download", "delete", "denied", "authorization_strategy", "session_access", "file_transfer_disabled", "asset_authorization"} {
+		if !strings.Contains(fileLogs.Body.String(), want) {
+			t.Fatalf("SSH file log missing %q: %s", want, fileLogs.Body.String())
+		}
+	}
+}
+
+func sshFileEntriesContain(entries []sshFileEntry, name string) bool {
+	for _, entry := range entries {
+		if entry.Name == name {
+			return true
+		}
+	}
+	return false
+}
+
 func TestDesktopSessionDriveFiles(t *testing.T) {
 	srv, adminCookie := newTestServer(t, nil)
 	handler := http.Handler(srv)
@@ -14325,6 +14549,88 @@ func TestDesktopDriveFileLogPersistenceFailureReturnsServerError(t *testing.T) {
 	}
 	if data, err := os.ReadFile(filepath.Join(driveRoot, "delete-dir", "nested.txt")); err != nil || string(data) != "desktop delete dir" {
 		t.Fatalf("desktop drive directory delete did not restore content after file log failure: data=%q err=%v", string(data), err)
+	}
+}
+
+func startFakeSFTPServer(t *testing.T, root, username, password string) (string, func()) {
+	t.Helper()
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("listen fake sftp server: %v", err)
+	}
+	_, privateKey, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatalf("generate sftp host key: %v", err)
+	}
+	signer, err := cryptossh.NewSignerFromKey(privateKey)
+	if err != nil {
+		t.Fatalf("create sftp signer: %v", err)
+	}
+	config := &cryptossh.ServerConfig{
+		PasswordCallback: func(meta cryptossh.ConnMetadata, payload []byte) (*cryptossh.Permissions, error) {
+			if meta.User() == username && string(payload) == password {
+				return nil, nil
+			}
+			return nil, os.ErrPermission
+		},
+	}
+	config.AddHostKey(signer)
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		for {
+			conn, err := listener.Accept()
+			if err != nil {
+				return
+			}
+			go handleFakeSFTPConnection(conn, config, root)
+		}
+	}()
+	return listener.Addr().String(), func() {
+		_ = listener.Close()
+		<-done
+	}
+}
+
+func handleFakeSFTPConnection(conn net.Conn, config *cryptossh.ServerConfig, root string) {
+	sshConn, channels, requests, err := cryptossh.NewServerConn(conn, config)
+	if err != nil {
+		_ = conn.Close()
+		return
+	}
+	defer sshConn.Close()
+	go cryptossh.DiscardRequests(requests)
+	for newChannel := range channels {
+		if newChannel.ChannelType() != "session" {
+			_ = newChannel.Reject(cryptossh.UnknownChannelType, "session only")
+			continue
+		}
+		channel, reqs, err := newChannel.Accept()
+		if err != nil {
+			continue
+		}
+		go handleFakeSFTPChannel(channel, reqs, root)
+	}
+}
+
+func handleFakeSFTPChannel(channel cryptossh.Channel, requests <-chan *cryptossh.Request, root string) {
+	defer channel.Close()
+	for req := range requests {
+		var payload struct{ Name string }
+		if req.Type != "subsystem" || cryptossh.Unmarshal(req.Payload, &payload) != nil || payload.Name != "sftp" {
+			if req.WantReply {
+				_ = req.Reply(false, nil)
+			}
+			continue
+		}
+		_ = req.Reply(true, nil)
+		server, err := sftp.NewServer(channel, sftp.WithServerWorkingDirectory(root))
+		if err != nil {
+			return
+		}
+		_ = server.Serve()
+		_ = server.Close()
+		return
 	}
 }
 

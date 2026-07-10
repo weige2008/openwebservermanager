@@ -1,24 +1,58 @@
 import type { ColumnDef } from '@tanstack/react-table'
 import { Download } from 'lucide-react'
-import { useMemo } from 'react'
+import { useMemo, useState } from 'react'
 import { useTranslation } from 'react-i18next'
 
 import { useApp } from '@/app/app-provider'
 import { DataTable } from '@/components/data-table/data-table'
 import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
-import { apiRequest } from '@/lib/api'
+import { ApiError, apiRequest } from '@/lib/api'
 import { formatDate, statusLabel } from '@/lib/utils'
 import type { ConnectionSession } from '@/types'
 
 export function SessionsTable({ sessions }: { sessions: ConnectionSession[] }) {
   const app = useApp()
   const { t } = useTranslation()
+  const [busySessionID, setBusySessionID] = useState('')
   const serverName = (id: string) => app.data.servers.find((server) => server.id === id)?.name || id
 
   const closeSession = async (id: string) => {
-    await apiRequest(`/api/connections/${id}/close`, { method: 'POST', body: '{}' })
-    await app.refresh(true)
+    if (busySessionID) return
+    setBusySessionID(id)
+    try {
+      await apiRequest(`/api/connections/${id}/close`, { method: 'POST', body: '{}' })
+      await app.refresh(true)
+    } catch (error) {
+      app.handleApiError(error)
+    } finally {
+      setBusySessionID('')
+    }
+  }
+
+  const downloadRecording = async (session: ConnectionSession) => {
+    if (busySessionID) return
+    setBusySessionID(session.id)
+    try {
+      const response = await fetch(`/api/connections/${session.id}/recording.zip`, { credentials: 'same-origin' })
+      if (!response.ok) {
+        const payload = await response.json().catch(() => ({})) as { error?: string }
+        throw new ApiError(payload.error || response.statusText, response.status, false, payload)
+      }
+      const blob = await response.blob()
+      const url = URL.createObjectURL(blob)
+      const anchor = document.createElement('a')
+      anchor.href = url
+      anchor.download = `${session.id}-recording.zip`
+      document.body.appendChild(anchor)
+      anchor.click()
+      anchor.remove()
+      URL.revokeObjectURL(url)
+    } catch (error) {
+      app.handleApiError(error)
+    } finally {
+      setBusySessionID('')
+    }
   }
 
   const columns = useMemo<ColumnDef<ConnectionSession>[]>(
@@ -53,17 +87,17 @@ export function SessionsTable({ sessions }: { sessions: ConnectionSession[] }) {
         cell: ({ row }) => (
           <div className='flex justify-end gap-2'>
             {row.original.recording_path ? (
-              <Button size='sm' variant='outline' onClick={() => { window.location.href = `/api/connections/${row.original.id}/recording.zip` }}>
+              <Button size='sm' variant='outline' disabled={Boolean(busySessionID)} onClick={() => void downloadRecording(row.original)}>
                 <Download className='size-3.5' />
                 {t('downloadRecording')}
               </Button>
             ) : null}
-            <Button size='sm' variant='outline' onClick={() => void closeSession(row.original.id)}>{t('close')}</Button>
+            <Button size='sm' variant='outline' disabled={Boolean(busySessionID) || !['pending', 'active'].includes(row.original.status)} onClick={() => void closeSession(row.original.id)}>{t('close')}</Button>
           </div>
         ),
       },
     ],
-    [app.data.servers, t]
+    [app.data.servers, busySessionID, t]
   )
 
   return (

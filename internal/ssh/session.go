@@ -128,6 +128,9 @@ func (r Runner) Run(conn *ws.Conn, session model.ConnectionSession, server model
 			_ = sshSession.Close()
 			now := time.Now().UTC()
 			_, _ = r.Store.UpdateSession(session.ID, func(item *model.ConnectionSession) {
+				if item.Status == model.SessionClosed && item.EndedAt != nil {
+					return
+				}
 				item.Status = model.SessionClosed
 				item.EndedAt = &now
 			})

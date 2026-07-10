@@ -54,6 +54,7 @@ type DesktopConfig struct {
 	ClipboardEnabled bool
 	ReadOnly         bool
 	ResizeMethod     string
+	FilePermission   func(operation, path string) bool
 }
 
 type guacDirection string
@@ -147,6 +148,9 @@ func (t Tunnel) RunDesktop(ctx context.Context, browser *ws.Conn, cfg DesktopCon
 		once.Do(func() {
 			now := time.Now().UTC()
 			_, _ = t.Store.UpdateSession(cfg.Session.ID, func(item *model.ConnectionSession) {
+				if item.Status == model.SessionClosed && item.EndedAt != nil {
+					return
+				}
 				item.Status = model.SessionClosed
 				item.EndedAt = &now
 				if cfg.Session.RecordingPath != "" {
@@ -267,7 +271,12 @@ func (f *desktopInstructionFilter) allowInstruction(direction guacDirection, ins
 		if direction == directionBrowser {
 			operation = "upload"
 		}
-		stream := desktopStream{Kind: "file", Operation: operation, MimeType: argAt(instruction, 1), Name: argAt(instruction, 2), Blocked: !f.cfg.EnableDrive}
+		name := argAt(instruction, 2)
+		blocked := !f.cfg.EnableDrive
+		if !blocked && f.cfg.FilePermission != nil {
+			blocked = !f.cfg.FilePermission(operation, name)
+		}
+		stream := desktopStream{Kind: "file", Operation: operation, MimeType: argAt(instruction, 1), Name: name, Blocked: blocked}
 		f.setStream(streamKey, stream)
 		f.auditStreamEvent(direction, stream, "started")
 		return !stream.Blocked

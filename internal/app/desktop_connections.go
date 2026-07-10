@@ -86,6 +86,12 @@ func (s *Server) handleDesktopTunnel(w http.ResponseWriter, r *http.Request, pro
 		writeError(w, http.StatusBadRequest, err.Error())
 		return
 	}
+	unregister := s.activeConnections.register(cfg.Session.ID, conn.Close)
+	defer unregister()
+	if !s.sessionStillOpen(cfg.Session.ID) {
+		_ = conn.Close()
+		return
+	}
 	_ = s.audit(r, "connection."+string(protocol)+".open", cfg.Session.ID, protocol, "opened "+string(protocol)+" tunnel")
 	guac.Tunnel{Manager: s.cfg.Guacd, Store: s.cfg.Store, Logger: slog.Default(), DataDir: s.cfg.DataDir}.RunDesktop(r.Context(), conn, cfg)
 }
@@ -100,8 +106,12 @@ func (s *Server) desktopTunnelConfig(w http.ResponseWriter, r *http.Request, ses
 		writeError(w, http.StatusBadRequest, "session protocol mismatch")
 		return guac.DesktopConfig{}, false
 	}
-	if !s.canAccessSession(r, session) {
+	if !s.canControlSession(r, session) {
 		writeError(w, http.StatusForbidden, "session access denied")
+		return guac.DesktopConfig{}, false
+	}
+	if !sessionStatusOpen(session.Status) {
+		writeError(w, http.StatusConflict, "session is closed")
 		return guac.DesktopConfig{}, false
 	}
 	if protocol == model.ProtocolRDP {
@@ -120,7 +130,7 @@ func (s *Server) desktopTunnelConfig(w http.ResponseWriter, r *http.Request, ses
 				port = 3389
 			}
 			policy := s.desktopAccessPolicy(model.ProtocolRDP)
-			return guac.DesktopConfig{
+			return s.withDesktopFilePolicy(r, guac.DesktopConfig{
 				Protocol:         model.ProtocolRDP,
 				Session:          session,
 				Host:             server.Host,
@@ -137,14 +147,27 @@ func (s *Server) desktopTunnelConfig(w http.ResponseWriter, r *http.Request, ses
 				ClipboardEnabled: boolPtrValue(session.ClipboardEnabled, policy.ClipboardEnabled),
 				ReadOnly:         boolPtrValue(session.ReadOnly, policy.ReadOnly),
 				ResizeMethod:     valueOrDefault(session.ResizeMethod, policy.ResizeMethod),
-			}, true
+			}), true
 		}
 	}
 	asset, credential, secret, ok := s.platformDesktopParts(w, session, protocol)
 	if !ok {
 		return guac.DesktopConfig{}, false
 	}
-	return platformDesktopConfig(session, asset, credential, secret, protocol), true
+	return s.withDesktopFilePolicy(r, platformDesktopConfig(session, asset, credential, secret, protocol)), true
+}
+
+func (s *Server) withDesktopFilePolicy(r *http.Request, cfg guac.DesktopConfig) guac.DesktopConfig {
+	if !cfg.EnableDrive || s.isAdminRequest(r) {
+		return cfg
+	}
+	userID := s.currentUserID(r)
+	assetID := cfg.Session.ServerID
+	cfg.FilePermission = func(operation, path string) bool {
+		allowed, matched := s.filePermissionAllowed("asset", assetID, operation, path, userID)
+		return !matched || allowed
+	}
+	return cfg
 }
 
 func (s *Server) platformDesktopParts(w http.ResponseWriter, session model.ConnectionSession, protocol model.Protocol) (model.PlatformItem, model.PlatformItem, store.CredentialSecret, bool) {

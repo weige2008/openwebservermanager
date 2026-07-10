@@ -112,6 +112,42 @@ func TestDesktopInstructionFilterAuditsFileTransfers(t *testing.T) {
 	}
 }
 
+func TestDesktopInstructionFilterEnforcesFilePermissionCallback(t *testing.T) {
+	checked := []string{}
+	filter := newDesktopInstructionFilter(Tunnel{}, DesktopConfig{
+		Protocol:    model.ProtocolRDP,
+		Session:     model.ConnectionSession{ID: "sess_file_policy"},
+		EnableDrive: true,
+		FilePermission: func(operation, path string) bool {
+			checked = append(checked, operation+":"+path)
+			return operation == "download"
+		},
+	})
+	upload := append([]byte{}, Encode("file", "12", "text/plain", "blocked.txt")...)
+	upload = append(upload, Encode("blob", "12", "payload")...)
+	upload = append(upload, Encode("end", "12")...)
+	filteredUpload, err := filter.filterPayload(directionBrowser, upload, nil)
+	if err != nil {
+		t.Fatalf("filter denied upload: %v", err)
+	}
+	if len(filteredUpload) != 0 {
+		t.Fatalf("denied upload leaked upstream: %q", string(filteredUpload))
+	}
+	download := append([]byte{}, Encode("file", "13", "text/plain", "allowed.txt")...)
+	download = append(download, Encode("blob", "13", "payload")...)
+	download = append(download, Encode("end", "13")...)
+	filteredDownload, err := filter.filterPayload(directionGuacd, download, nil)
+	if err != nil {
+		t.Fatalf("filter allowed download: %v", err)
+	}
+	if string(filteredDownload) != string(download) {
+		t.Fatalf("allowed download was filtered: %q", string(filteredDownload))
+	}
+	if strings.Join(checked, ",") != "upload:blocked.txt,download:allowed.txt" {
+		t.Fatalf("file permission checks = %v", checked)
+	}
+}
+
 func TestDesktopInstructionFilterAuditsClipboardTransfers(t *testing.T) {
 	key := make([]byte, 32)
 	cipher, err := security.NewCipher(key)

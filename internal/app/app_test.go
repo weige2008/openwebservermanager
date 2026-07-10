@@ -60,6 +60,39 @@ func TestEnsureChildPathRejectsEscape(t *testing.T) {
 	}
 }
 
+func TestActiveConnectionRegistryDisconnectsEverySocketForSession(t *testing.T) {
+	var registry activeConnectionRegistry
+	closed := 0
+	unregisterFirst := registry.register("session-a", func() error {
+		closed++
+		return nil
+	})
+	unregisterSecond := registry.register("session-a", func() error {
+		closed++
+		return errors.New("already closed")
+	})
+	unregisterOther := registry.register("session-b", func() error {
+		closed += 10
+		return nil
+	})
+	defer unregisterFirst()
+	defer unregisterSecond()
+	defer unregisterOther()
+
+	if got := registry.count("session-a"); got != 2 {
+		t.Fatalf("session-a active connection count = %d, want 2", got)
+	}
+	if got := registry.disconnect("session-a"); got != 2 {
+		t.Fatalf("session-a disconnected connection count = %d, want 2", got)
+	}
+	if closed != 2 || registry.count("session-a") != 0 || registry.count("session-b") != 1 {
+		t.Fatalf("registry disconnect state: closed=%d session-a=%d session-b=%d", closed, registry.count("session-a"), registry.count("session-b"))
+	}
+	if got := registry.disconnect("session-a"); got != 0 || closed != 2 {
+		t.Fatalf("second disconnect = %d, closed=%d; want 0/2", got, closed)
+	}
+}
+
 func TestValidateServer(t *testing.T) {
 	if err := validateServer(model.Server{Name: "web", Host: "10.0.0.1", OS: model.ServerOSLinux, SSHPort: 22}); err != nil {
 		t.Fatalf("expected valid server: %v", err)
@@ -13384,6 +13417,7 @@ func TestPlatformOnlineSessionCloseEndpoint(t *testing.T) {
 
 func TestAuditSessionOperations(t *testing.T) {
 	handler, adminCookie := newTestHandler(t)
+	srv := handler.(*Server)
 
 	linuxRec := assertStatus(t, handler, http.MethodPost, "/api/servers", map[string]any{
 		"name":     "linux-audit",
@@ -13408,6 +13442,12 @@ func TestAuditSessionOperations(t *testing.T) {
 	}, adminCookie, http.StatusCreated)
 	var sshSession model.ConnectionSession
 	decodeResponse(t, sshSessionRec, &sshSession)
+	sshRuntimeClosed := 0
+	unregisterSSHRuntime := srv.activeConnections.register(sshSession.ID, func() error {
+		sshRuntimeClosed++
+		return nil
+	})
+	defer unregisterSSHRuntime()
 	removeDisconnectLogBlocker := blockOperationLogName(t, handler.(*Server).cfg.Store, "audit.session.disconnect")
 	blockedDisconnectRec := assertStatus(t, handler, http.MethodPost, "/api/admin/audit/online-sessions/"+sshSession.ID+"/disconnect", nil, adminCookie, http.StatusInternalServerError)
 	removeDisconnectLogBlocker()
@@ -13421,6 +13461,9 @@ func TestAuditSessionOperations(t *testing.T) {
 	if !coreAuditLogsContainAction(handler.(*Server).cfg.Store, "operation.log.persist_failed") {
 		t.Fatal("audit disconnect operation log failure was not audited")
 	}
+	if sshRuntimeClosed != 0 {
+		t.Fatal("failed audit disconnect closed the live SSH socket")
+	}
 	closeRec := assertStatus(t, handler, http.MethodPost, "/api/admin/audit/online-sessions/"+sshSession.ID+"/disconnect", nil, adminCookie, http.StatusOK)
 	if !strings.Contains(closeRec.Body.String(), string(model.SessionClosed)) {
 		t.Fatal("audit disconnect did not close session")
@@ -13429,6 +13472,10 @@ func TestAuditSessionOperations(t *testing.T) {
 	if strings.Contains(onlineRec.Body.String(), sshSession.ID) {
 		t.Fatal("closed session still appears in online sessions")
 	}
+	if sshRuntimeClosed != 1 || srv.activeConnections.count(sshSession.ID) != 0 {
+		t.Fatalf("audit disconnect live SSH sockets: closed=%d remaining=%d", sshRuntimeClosed, srv.activeConnections.count(sshSession.ID))
+	}
+	assertStatus(t, handler, http.MethodGet, "/api/connections/ssh/"+sshSession.ID+"/ws", nil, adminCookie, http.StatusConflict)
 
 	windowsRec := assertStatus(t, handler, http.MethodPost, "/api/servers", map[string]any{
 		"name":     "windows-audit",
@@ -13460,6 +13507,12 @@ func TestAuditSessionOperations(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(rdpSession.RecordingPath, "recording.guac"), []byte("frames"), 0o660); err != nil {
 		t.Fatalf("write fake recording: %v", err)
 	}
+	rdpRuntimeClosed := 0
+	unregisterRDPRuntime := srv.activeConnections.register(rdpSession.ID, func() error {
+		rdpRuntimeClosed++
+		return nil
+	})
+	defer unregisterRDPRuntime()
 	removeConnectionCloseLogBlocker := blockOperationLogName(t, handler.(*Server).cfg.Store, "connection.close")
 	blockedConnectionCloseRec := assertStatus(t, handler, http.MethodPost, "/api/connections/"+rdpSession.ID+"/close", nil, adminCookie, http.StatusInternalServerError)
 	removeConnectionCloseLogBlocker()
@@ -13470,12 +13523,19 @@ func TestAuditSessionOperations(t *testing.T) {
 	if !strings.Contains(blockedConnectionOnlineRec.Body.String(), rdpSession.ID) {
 		t.Fatalf("connection close removed session after operation log failure: %s", blockedConnectionOnlineRec.Body.String())
 	}
+	if rdpRuntimeClosed != 0 {
+		t.Fatal("failed connection close closed the live RDP socket")
+	}
 	closeRDPRec := assertStatus(t, handler, http.MethodPost, "/api/connections/"+rdpSession.ID+"/close", nil, adminCookie, http.StatusOK)
 	var closedRDP model.ConnectionSession
 	decodeResponse(t, closeRDPRec, &closedRDP)
 	if closedRDP.RecordingSize != int64(len("frames")) {
 		t.Fatalf("closed rdp recording size = %d, want %d", closedRDP.RecordingSize, len("frames"))
 	}
+	if rdpRuntimeClosed != 1 || srv.activeConnections.count(rdpSession.ID) != 0 {
+		t.Fatalf("connection close live RDP sockets: closed=%d remaining=%d", rdpRuntimeClosed, srv.activeConnections.count(rdpSession.ID))
+	}
+	assertStatus(t, handler, http.MethodGet, "/api/connections/rdp/"+rdpSession.ID+"/tunnel", nil, adminCookie, http.StatusConflict)
 	offlineSessionsRec := assertStatus(t, handler, http.MethodGet, "/api/admin/audit/offline-sessions", nil, adminCookie, http.StatusOK)
 	if !strings.Contains(offlineSessionsRec.Body.String(), `"recording_size":6`) {
 		t.Fatalf("offline session index did not include recording size: %s", offlineSessionsRec.Body.String())
@@ -13524,6 +13584,16 @@ func TestAuditSessionOperations(t *testing.T) {
 		assertZipOmitsEntryAndContent(t, auditorDownload.Body.Bytes(), recordingSymlinkName, externalRecordingContent)
 	}
 	assertStatus(t, handler, http.MethodPost, "/api/admin/audit/online-sessions/"+rdpSession.ID+"/disconnect", nil, auditorCookie, http.StatusForbidden)
+	auditorGuardSessionRec := assertStatus(t, handler, http.MethodPost, "/api/connections/rdp", map[string]any{
+		"server_id":     windows.ID,
+		"credential_id": rdpCred.ID,
+	}, adminCookie, http.StatusCreated)
+	var auditorGuardSession model.ConnectionSession
+	decodeResponse(t, auditorGuardSessionRec, &auditorGuardSession)
+	assertStatus(t, handler, http.MethodGet, "/api/connections/rdp/"+auditorGuardSession.ID+"/tunnel", nil, auditorCookie, http.StatusForbidden)
+	assertStatus(t, handler, http.MethodGet, "/api/connections/"+auditorGuardSession.ID+"/drive", nil, auditorCookie, http.StatusForbidden)
+	assertStatus(t, handler, http.MethodPost, "/api/connections/"+auditorGuardSession.ID+"/close", nil, auditorCookie, http.StatusForbidden)
+	assertStatus(t, handler, http.MethodPost, "/api/connections/"+auditorGuardSession.ID+"/close", nil, adminCookie, http.StatusOK)
 	assertStatus(t, handler, http.MethodPost, "/api/admin/roles", map[string]any{
 		"name":   "recording-limited",
 		"type":   "custom",
@@ -13915,6 +13985,108 @@ func TestDesktopSessionDriveFiles(t *testing.T) {
 	for _, want := range []string{"connection.drive.list.denied", "connection.drive.upload.denied"} {
 		if !strings.Contains(operationLogs.Body.String(), want) {
 			t.Fatalf("drive denied operation log missing %q: %s", want, operationLogs.Body.String())
+		}
+	}
+}
+
+func TestDesktopSessionDriveHonorsAssetFileStrategy(t *testing.T) {
+	handler, adminCookie := newTestHandler(t)
+	srv := handler.(*Server)
+	userRec := assertStatus(t, handler, http.MethodPost, "/api/admin/users", map[string]any{
+		"name":     "desktop-drive-policy-user",
+		"type":     "local",
+		"status":   "enabled",
+		"password": "password123",
+		"metadata": map[string]any{"role": "user"},
+	}, adminCookie, http.StatusCreated)
+	var user model.PlatformItem
+	decodeResponse(t, userRec, &user)
+	loginRec := assertStatus(t, handler, http.MethodPost, "/api/auth/login", map[string]any{
+		"username": "desktop-drive-policy-user",
+		"password": "password123",
+	}, nil, http.StatusOK)
+	userCookie := loginRec.Result().Cookies()[0]
+
+	const assetID = "asset-desktop-drive-policy"
+	assertStatus(t, handler, http.MethodPost, "/api/admin/strategies", map[string]any{
+		"name":      "deny protected desktop drive files",
+		"type":      "file",
+		"status":    "enabled",
+		"owner_id":  user.ID,
+		"target_id": assetID,
+		"permissions": map[string]bool{
+			"upload":   false,
+			"download": false,
+			"edit":     false,
+			"delete":   false,
+		},
+		"metadata": map[string]any{
+			"resource_type": "asset",
+			"path_prefix":   "blocked",
+		},
+	}, adminCookie, http.StatusCreated)
+	fileTransferEnabled := true
+	session, err := srv.cfg.Store.CreateSession(model.ConnectionSession{
+		Protocol:            model.ProtocolRDP,
+		ServerID:            assetID,
+		UserID:              user.ID,
+		FileTransferEnabled: &fileTransferEnabled,
+	})
+	if err != nil {
+		t.Fatalf("create desktop policy session: %v", err)
+	}
+	root := filepath.Join(srv.cfg.DataDir, "drives", session.ID)
+	for _, dir := range []string{"blocked", "safe"} {
+		if err := os.MkdirAll(filepath.Join(root, dir), 0o770); err != nil {
+			t.Fatalf("create %s drive directory: %v", dir, err)
+		}
+	}
+	for path, content := range map[string]string{
+		"blocked/report.txt":  "blocked report",
+		"blocked/replace.txt": "blocked old content",
+		"safe/report.txt":     "safe report",
+	} {
+		if err := os.WriteFile(filepath.Join(root, filepath.FromSlash(path)), []byte(content), 0o660); err != nil {
+			t.Fatalf("write %s: %v", path, err)
+		}
+	}
+
+	rootList := assertStatus(t, handler, http.MethodGet, "/api/connections/"+session.ID+"/drive", nil, userCookie, http.StatusOK)
+	if strings.Contains(rootList.Body.String(), `"name":"blocked"`) || !strings.Contains(rootList.Body.String(), `"name":"safe"`) {
+		t.Fatalf("desktop drive list did not filter denied subtree: %s", rootList.Body.String())
+	}
+	assertStatus(t, handler, http.MethodGet, "/api/connections/"+session.ID+"/drive?path=blocked", nil, userCookie, http.StatusForbidden)
+	assertStatus(t, handler, http.MethodGet, "/api/connections/"+session.ID+"/drive/download?path=blocked/report.txt", nil, userCookie, http.StatusForbidden)
+	safeDownload := assertStatus(t, handler, http.MethodGet, "/api/connections/"+session.ID+"/drive/download?path=safe/report.txt", nil, userCookie, http.StatusOK)
+	if safeDownload.Body.String() != "safe report" {
+		t.Fatalf("safe desktop drive download = %q", safeDownload.Body.String())
+	}
+	assertMultipartStatus(t, handler, "/api/connections/"+session.ID+"/drive/upload", map[string]string{"path": "blocked"}, "new.txt", []byte("blocked"), userCookie, http.StatusForbidden)
+	assertMultipartStatus(t, handler, "/api/connections/"+session.ID+"/drive/upload", map[string]string{"path": "blocked"}, "replace.txt", []byte("replacement"), userCookie, http.StatusForbidden)
+	assertMultipartStatus(t, handler, "/api/connections/"+session.ID+"/drive/upload", map[string]string{"path": "safe"}, "new.txt", []byte("allowed"), userCookie, http.StatusCreated)
+	assertStatus(t, handler, http.MethodDelete, "/api/connections/"+session.ID+"/drive?path=blocked/report.txt", nil, userCookie, http.StatusForbidden)
+	if data, err := os.ReadFile(filepath.Join(root, "blocked", "report.txt")); err != nil || string(data) != "blocked report" {
+		t.Fatalf("denied desktop delete changed file: data=%q err=%v", string(data), err)
+	}
+	assertStatus(t, handler, http.MethodDelete, "/api/connections/"+session.ID+"/drive?path=safe/new.txt", nil, userCookie, http.StatusOK)
+
+	policyRequest := httptest.NewRequest(http.MethodGet, "/api/connections/"+session.ID+"/drive", nil)
+	policyRequest.AddCookie(userCookie)
+	config := srv.withDesktopFilePolicy(policyRequest, guac.DesktopConfig{
+		Session:     session,
+		EnableDrive: true,
+	})
+	if config.FilePermission == nil || config.FilePermission("upload", "blocked/native.txt") || config.FilePermission("download", "blocked/report.txt") || !config.FilePermission("upload", "safe/native.txt") {
+		t.Fatal("Guacamole desktop file policy did not mirror asset authorization strategy")
+	}
+	adminDownload := assertStatus(t, handler, http.MethodGet, "/api/connections/"+session.ID+"/drive/download?path=blocked/report.txt", nil, adminCookie, http.StatusOK)
+	if adminDownload.Body.String() != "blocked report" {
+		t.Fatalf("admin desktop drive policy bypass = %q", adminDownload.Body.String())
+	}
+	fileLogs := assertStatus(t, handler, http.MethodGet, "/api/admin/audit/file-logs", nil, adminCookie, http.StatusOK)
+	for _, want := range []string{"authorization_strategy", "blocked/report.txt", `"status":"denied"`} {
+		if !strings.Contains(fileLogs.Body.String(), want) {
+			t.Fatalf("desktop drive strategy file log missing %q: %s", want, fileLogs.Body.String())
 		}
 	}
 }

@@ -37,6 +37,7 @@ export function WorkspaceView() {
   const { t } = useTranslation()
   const workspace = app.workspace
   const [status, setStatus] = useState(workspace?.status || 'connecting')
+  const [closing, setClosing] = useState(false)
   const [selectedSnippetID, setSelectedSnippetID] = useState('')
   const sshMessages = useMemo(
     () => ({
@@ -109,9 +110,22 @@ export function WorkspaceView() {
   }
 
   const close = async () => {
-    await apiRequest(`/api/connections/${workspace.session.id}/close`, { method: 'POST', body: '{}' })
-    app.setWorkspace(null)
-    await app.refresh(true)
+    if (closing) return
+    setClosing(true)
+    try {
+      await apiRequest(`/api/connections/${workspace.session.id}/close`, { method: 'POST', body: '{}' })
+      app.setWorkspace(null)
+      await app.refresh(true)
+    } catch (error) {
+      if (error instanceof ApiError && (error.status === 404 || error.status === 409)) {
+        app.setWorkspace(null)
+        await app.refresh(true)
+        return
+      }
+      app.handleApiError(error)
+    } finally {
+      setClosing(false)
+    }
   }
 
   const insertCommandSnippet = () => {
@@ -166,8 +180,11 @@ export function WorkspaceView() {
               ) : null}
             </>
           ) : null}
-          <Button variant='outline' onClick={() => void leave()}>{t('workspace.returnConsole')}</Button>
-          <Button variant='destructive' onClick={() => void close()}><Power className='size-4' />{t('workspace.disconnect')}</Button>
+          {status === 'disconnected' ? <Button variant='outline' onClick={() => void leave()}>{t('workspace.returnConsole')}</Button> : null}
+          <Button variant='destructive' onClick={() => void close()} disabled={closing || status === 'disconnected'}>
+            <Power className='size-4' />
+            {closing ? t('workspace.disconnecting', { defaultValue: 'Disconnecting...' }) : t('workspace.disconnect')}
+          </Button>
         </div>
       </div>
       {workspace.type === 'ssh' ? (

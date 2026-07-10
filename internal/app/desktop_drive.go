@@ -75,7 +75,7 @@ func (s *Server) desktopDriveTarget(w http.ResponseWriter, r *http.Request, sess
 		writeError(w, http.StatusBadRequest, "session drive is only available for desktop sessions")
 		return model.ConnectionSession{}, "", false
 	}
-	if !s.canAccessSession(r, session) {
+	if !s.canControlSession(r, session) {
 		if err := s.recordDesktopDriveDenied(r, session, operation, "session_access", r.URL.Query().Get("path")); err != nil {
 			writeError(w, http.StatusInternalServerError, err.Error())
 			return model.ConnectionSession{}, "", false
@@ -112,6 +112,9 @@ func (s *Server) handleDesktopDriveList(w http.ResponseWriter, r *http.Request, 
 	if !s.requireExistingStorageDirectory(w, root, dirPath) {
 		return
 	}
+	if !s.requireDesktopDrivePermission(w, r, session, "list", rel) {
+		return
+	}
 	entries, err := os.ReadDir(dirPath)
 	if err != nil {
 		writeError(w, http.StatusNotFound, "path not found")
@@ -123,9 +126,13 @@ func (s *Server) handleDesktopDriveList(w http.ResponseWriter, r *http.Request, 
 		if err != nil {
 			continue
 		}
+		entryPath := filepath.ToSlash(filepath.Join(rel, entry.Name()))
+		if !s.desktopDriveListEntryVisible(session, entryPath, s.currentUserID(r), s.isAdminRequest(r)) {
+			continue
+		}
 		result = append(result, desktopDriveEntry{
 			Name:     entry.Name(),
-			Path:     filepath.ToSlash(filepath.Join(rel, entry.Name())),
+			Path:     entryPath,
 			IsDir:    entry.IsDir(),
 			Size:     info.Size(),
 			Modified: info.ModTime().UTC(),
@@ -160,6 +167,9 @@ func (s *Server) handleDesktopDriveDownload(w http.ResponseWriter, r *http.Reque
 	}
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	if !s.requireDesktopDrivePermission(w, r, session, "download", rel) {
 		return
 	}
 	if err := s.recordDesktopDriveFileLog(r, session, "download", "success", rel, map[string]any{
@@ -214,6 +224,13 @@ func (s *Server) handleDesktopDriveUpload(w http.ResponseWriter, r *http.Request
 	}
 	if exists && !info.Mode().IsRegular() {
 		writeError(w, http.StatusBadRequest, "target is not a regular file")
+		return
+	}
+	permission := "upload"
+	if exists {
+		permission = "edit"
+	}
+	if !s.requireDesktopDrivePermission(w, r, session, permission, rel) {
 		return
 	}
 	if !s.ensureStorageParentDirectory(w, root, target) {
@@ -280,6 +297,9 @@ func (s *Server) handleDesktopDriveDelete(w http.ResponseWriter, r *http.Request
 		writeError(w, http.StatusBadRequest, "target is not a regular file")
 		return
 	}
+	if !s.requireDesktopDriveTreePermission(w, r, session, "delete", target, rel) {
+		return
+	}
 	rollback, err := prepareStoragePathRollback(target)
 	if err != nil {
 		if errors.Is(err, errStorageSpecialFile) {
@@ -335,6 +355,71 @@ func (s *Server) recordDesktopDriveDenied(r *http.Request, session model.Connect
 	}
 	_ = s.audit(r, "connection.drive."+action+".denied", session.ID, session.Protocol, "denied session drive "+action+": "+reason)
 	return nil
+}
+
+func (s *Server) requireDesktopDrivePermission(w http.ResponseWriter, r *http.Request, session model.ConnectionSession, action, path string) bool {
+	if s.isAdminRequest(r) {
+		return true
+	}
+	allowed, matched := s.filePermissionAllowed("asset", session.ServerID, action, path, s.currentUserID(r))
+	if action == "list" {
+		allowed, matched = s.fileListPermissionAllowed("asset", session.ServerID, path, s.currentUserID(r))
+	}
+	if !matched || allowed {
+		return true
+	}
+	if err := s.recordDesktopDriveDenied(r, session, action, "authorization_strategy", path); err != nil {
+		writeError(w, http.StatusInternalServerError, err.Error())
+		return false
+	}
+	writeError(w, http.StatusForbidden, "file permission denied: "+action)
+	return false
+}
+
+func (s *Server) desktopDriveListEntryVisible(session model.ConnectionSession, path, userID string, isAdmin bool) bool {
+	if isAdmin {
+		return true
+	}
+	allowed, matched := s.fileListPermissionAllowed("asset", session.ServerID, path, userID)
+	return !matched || allowed
+}
+
+func (s *Server) requireDesktopDriveTreePermission(w http.ResponseWriter, r *http.Request, session model.ConnectionSession, action, target, rel string) bool {
+	if !s.requireDesktopDrivePermission(w, r, session, action, rel) {
+		return false
+	}
+	info, err := os.Lstat(target)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err.Error())
+		return false
+	}
+	if !info.IsDir() {
+		return true
+	}
+	err = filepath.WalkDir(target, func(path string, entry os.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		if path == target {
+			return nil
+		}
+		child, err := filepath.Rel(target, path)
+		if err != nil {
+			return err
+		}
+		if !s.requireDesktopDrivePermission(w, r, session, action, joinStoragePolicyPath(rel, child)) {
+			return errStoragePermissionDenied
+		}
+		return nil
+	})
+	if errors.Is(err, errStoragePermissionDenied) {
+		return false
+	}
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err.Error())
+		return false
+	}
+	return true
 }
 
 func sanitizeAttachmentName(value string) string {

@@ -2691,10 +2691,14 @@ func (s *Server) storageListEntryVisible(storageID, path, userID string, isAdmin
 }
 
 func (s *Server) storageListPermissionAllowed(storageID, path, userID string) (bool, bool) {
-	if allowed, matched := s.storagePermissionAllowed(storageID, "list", path, userID); matched {
+	return s.fileListPermissionAllowed("storage", storageID, path, userID)
+}
+
+func (s *Server) fileListPermissionAllowed(resourceType, resourceID, path, userID string) (bool, bool) {
+	if allowed, matched := s.filePermissionAllowed(resourceType, resourceID, "list", path, userID); matched {
 		return allowed, true
 	}
-	if allowed, matched := s.storagePermissionAllowed(storageID, "download", path, userID); matched && !allowed {
+	if allowed, matched := s.filePermissionAllowed(resourceType, resourceID, "download", path, userID); matched && !allowed {
 		return false, true
 	}
 	return true, false
@@ -2762,13 +2766,17 @@ func (s *Server) requireStorageDescendantPermissions(w http.ResponseWriter, r *h
 }
 
 func (s *Server) storagePermissionAllowed(storageID, action, path, userID string) (bool, bool) {
+	return s.filePermissionAllowed("storage", storageID, action, path, userID)
+}
+
+func (s *Server) filePermissionAllowed(resourceType, resourceID, action, path, userID string) (bool, bool) {
 	platform, err := s.cfg.Store.PlatformBootstrap()
 	if err != nil {
 		return true, false
 	}
 	ctx := accessAuthorizationContextFor(platform, userID)
 	for _, strategy := range platform["authorization_strategies"] {
-		if !platformItemEnabled(strategy) || !fileStrategyMatches(strategy, storageID, path, ctx) {
+		if !platformItemEnabled(strategy) || !fileStrategyMatches(strategy, resourceType, resourceID, path, ctx) {
 			continue
 		}
 		if allowed, ok := strategy.Permissions[action]; ok {
@@ -2778,11 +2786,11 @@ func (s *Server) storagePermissionAllowed(storageID, action, path, userID string
 	return true, false
 }
 
-func fileStrategyMatches(strategy model.PlatformItem, storageID, path string, ctx accessAuthorizationContext) bool {
+func fileStrategyMatches(strategy model.PlatformItem, resourceType, resourceID, path string, ctx accessAuthorizationContext) bool {
 	if strategy.Type != "" && !strings.EqualFold(strategy.Type, "file") {
 		return false
 	}
-	if !fileStrategyStorageMatches(strategy, storageID) {
+	if !fileStrategyResourceMatches(strategy, resourceType, resourceID) {
 		return false
 	}
 	if fileStrategyHasSubjectScope(strategy) && !fileStrategySubjectMatches(strategy, ctx) {
@@ -2794,12 +2802,38 @@ func fileStrategyMatches(strategy model.PlatformItem, storageID, path string, ct
 	return true
 }
 
-func fileStrategyStorageMatches(strategy model.PlatformItem, storageID string) bool {
+func fileStrategyResourceMatches(strategy model.PlatformItem, resourceType, resourceID string) bool {
+	strategyResourceType := firstMetadataString(strategy.Metadata, "resource_type", "resourceType", "scope_type", "scopeType")
+	if strategyResourceType == "" {
+		strategyResourceType = "storage"
+	}
+	strategyResourceType = normalizeFileStrategyResourceType(strategyResourceType)
+	resourceType = normalizeFileStrategyResourceType(resourceType)
+	if strategyResourceType != "*" && strategyResourceType != resourceType {
+		return false
+	}
 	values := []string{strategy.TargetID}
-	for _, key := range []string{"target_id", "target_ids", "targetId", "storage_id", "storage_ids", "storageId"} {
+	keys := []string{"target_id", "target_ids", "targetId"}
+	if resourceType == "asset" {
+		keys = append(keys, "asset_id", "asset_ids", "assetId", "server_id", "server_ids", "serverId")
+	} else {
+		keys = append(keys, "storage_id", "storage_ids", "storageId")
+	}
+	for _, key := range keys {
 		values = append(values, metadataStrings(strategy.Metadata[key])...)
 	}
-	return strategyScopeMatches(values, storageID)
+	return strategyScopeMatches(values, resourceID)
+}
+
+func normalizeFileStrategyResourceType(value string) string {
+	switch strings.ToLower(strings.TrimSpace(value)) {
+	case "asset", "assets", "server", "servers", "desktop", "session_drive", "session-drive":
+		return "asset"
+	case "*", "all":
+		return "*"
+	default:
+		return "storage"
+	}
 }
 
 func fileStrategyHasSubjectScope(strategy model.PlatformItem) bool {
@@ -4205,7 +4239,7 @@ func (s *Server) handleAuditSessionDisconnect(w http.ResponseWriter, r *http.Req
 		return
 	}
 	if session, ok := s.cfg.Store.GetSession(id); ok {
-		if !s.canAccessSession(r, session) {
+		if !s.canControlSession(r, session) {
 			writeError(w, http.StatusForbidden, "session access denied")
 			return
 		}
@@ -4225,6 +4259,7 @@ func (s *Server) handleAuditSessionDisconnect(w http.ResponseWriter, r *http.Req
 			writeError(w, http.StatusInternalServerError, err.Error())
 			return
 		}
+		s.activeConnections.disconnect(id)
 		_ = s.audit(r, "audit.session.disconnect", id, closed.Protocol, "disconnected online session")
 		writeJSON(w, http.StatusOK, closed)
 		return
@@ -4376,7 +4411,7 @@ type auditRecording struct {
 
 func (s *Server) auditRecordingTarget(w http.ResponseWriter, r *http.Request, id string) (auditRecording, bool) {
 	if session, ok := s.cfg.Store.GetSession(id); ok {
-		if !s.canAccessSession(r, session) {
+		if !s.canViewSession(r, session) {
 			if err := s.createRecordingOperationLog(r, "audit.recording.access.denied", "denied", id, session.Protocol, "recording access denied", nil); err != nil {
 				writeError(w, http.StatusInternalServerError, err.Error())
 				return auditRecording{}, false
@@ -4396,7 +4431,7 @@ func (s *Server) auditRecordingTarget(w http.ResponseWriter, r *http.Request, id
 		writeError(w, http.StatusNotFound, "session not found")
 		return auditRecording{}, false
 	}
-	if !s.canAccessPlatformSession(r, item) {
+	if !s.canViewPlatformSession(r, item) {
 		if err := s.createRecordingOperationLog(r, "audit.recording.access.denied", "denied", id, item.Protocol, "recording access denied", nil); err != nil {
 			writeError(w, http.StatusInternalServerError, err.Error())
 			return auditRecording{}, false
@@ -4427,13 +4462,22 @@ func (s *Server) createRecordingOperationLog(r *http.Request, name, status, id s
 	})
 }
 
-func (s *Server) canAccessPlatformSession(r *http.Request, item model.PlatformItem) bool {
+func (s *Server) canViewPlatformSession(r *http.Request, item model.PlatformItem) bool {
 	_, authSession, ok := s.authSession(r)
 	if !ok {
 		return false
 	}
 	kind := s.roleDecision(authSession.Role).Kind
 	return kind == roleSuperAdmin || kind == roleAdmin || kind == roleAuditor || item.OwnerID == authSession.UserID || item.Username == authSession.UserID
+}
+
+func (s *Server) canControlPlatformSession(r *http.Request, item model.PlatformItem) bool {
+	_, authSession, ok := s.authSession(r)
+	if !ok {
+		return false
+	}
+	kind := s.roleDecision(authSession.Role).Kind
+	return kind == roleSuperAdmin || kind == roleAdmin || item.OwnerID == authSession.UserID || item.Username == authSession.UserID
 }
 
 func (s *Server) validateRecordingPath(w http.ResponseWriter, recordingPath string, protocol model.Protocol) (auditRecording, bool) {

@@ -556,6 +556,22 @@ export function PlatformTablePage({ config }: { config: PlatformPageConfig }) {
       ] satisfies ColumnDef<PlatformItem>[] : []),
       ...(config.collection === 'authorization_strategies' ? [
         {
+          header: app.t('targetResourceType', '目标资源类型'),
+          cell: ({ row }) => {
+            const resourceType = metadataText(row.original.metadata?.resource_type) || 'storage'
+            return <Badge tone='neutral'>{resourceType === 'asset' ? app.t('assetResource', '桌面资产') : app.t('storageResource', '用户存储')}</Badge>
+          },
+        },
+        {
+          header: app.t('target', '目标'),
+          cell: ({ row }) => {
+            const resourceType = metadataText(row.original.metadata?.resource_type) || 'storage'
+            const candidates = resourceType === 'asset' ? app.data.platform?.assets || [] : app.data.platform?.storages || []
+            const target = candidates.find((item) => item.id === row.original.target_id)
+            return <span className='text-xs'>{target?.name || row.original.target_id || (resourceType === 'asset' ? app.t('allAssets', '全部资产') : app.t('allStorages', '全部存储'))}</span>
+          },
+        },
+        {
           header: app.t('permissionMatrix', '权限矩阵'),
           cell: ({ row }) => <span className='font-mono text-xs'>{permissionSummary(row.original.permissions)}</span>,
         },
@@ -3310,6 +3326,8 @@ function PlatformItemDialog({
   const roleItems = app.data.platform?.roles || []
   const assetGroupItems = (app.data.platform?.asset_groups || items).filter((item) => item.id !== editingId)
   const storageItems = app.data.platform?.storages || []
+  const assetItems = app.data.platform?.assets || []
+  const authorizationResourceType = metadataFormText(form.metadata, 'resource_type') || 'storage'
   const gatewayGroupItems = app.data.platform?.gateway_groups || []
   const databaseCredentials = (app.data.platform?.credentials || []).filter((item) => item.type === 'database_password')
   const mtlsCertificates = (app.data.platform?.certificates || []).filter((item) => metadataBool(item.metadata?.mtls_enabled) && metadataBool(item.metadata?.has_private_key))
@@ -3425,11 +3443,23 @@ function PlatformItemDialog({
                   <option value='file'>{app.t('filePermissionStrategy', '文件权限策略')}</option>
                 </Select>
               </Field>
-              <Field label={app.t('targetStorage', '目标存储')}>
+              <Field label={app.t('targetResourceType', '目标资源类型')}>
+                <Select
+                  value={authorizationResourceType}
+                  onChange={(event) => onChange({
+                    target_id: '',
+                    metadata: metadataWithValue(form.metadata, 'resource_type', event.currentTarget.value),
+                  })}
+                >
+                  <option value='storage'>{app.t('storageResource', '用户存储')}</option>
+                  <option value='asset'>{app.t('assetResource', '桌面资产')}</option>
+                </Select>
+              </Field>
+              <Field label={authorizationResourceType === 'asset' ? app.t('targetAsset', '目标资产') : app.t('targetStorage', '目标存储')}>
                 <Select value={form.target_id} onChange={(event) => onChange({ target_id: event.currentTarget.value })}>
-                  <option value=''>{app.t('allStorages', '全部存储')}</option>
-                  {storageItems.map((storage) => (
-                    <option key={storage.id} value={storage.id}>{storage.name}</option>
+                  <option value=''>{authorizationResourceType === 'asset' ? app.t('allAssets', '全部资产') : app.t('allStorages', '全部存储')}</option>
+                  {(authorizationResourceType === 'asset' ? assetItems : storageItems).map((item) => (
+                    <option key={item.id} value={item.id}>{item.name}</option>
                   ))}
                 </Select>
               </Field>
@@ -4005,7 +4035,7 @@ function defaultPlatformMetadata(collection: string) {
   if (collection === 'command_filters') return JSON.stringify({ risk: 'high' }, null, 2)
   if (collection === 'asset_groups') return JSON.stringify({ sort: 0, collapsed: false }, null, 2)
   if (collection === 'command_snippets') return JSON.stringify({ command: '', append_newline: false }, null, 2)
-  if (collection === 'authorization_strategies') return JSON.stringify({ path_prefix: '' }, null, 2)
+  if (collection === 'authorization_strategies') return JSON.stringify({ resource_type: 'storage', path_prefix: '' }, null, 2)
   if (collection === 'oidc_clients') return JSON.stringify({
     client_id: '',
     redirect_uris: [],

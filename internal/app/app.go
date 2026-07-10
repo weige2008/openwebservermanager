@@ -83,13 +83,14 @@ type PublicNavLink struct {
 }
 
 type Server struct {
-	cfg      Config
-	static   http.Handler
-	staticFS fs.FS
-	auth     *authManager
-	oidc     *oidcManager
-	ldap     ldapAuthenticator
-	started  time.Time
+	cfg               Config
+	static            http.Handler
+	staticFS          fs.FS
+	auth              *authManager
+	oidc              *oidcManager
+	ldap              ldapAuthenticator
+	activeConnections activeConnectionRegistry
+	started           time.Time
 }
 
 func New(cfg Config) http.Handler {
@@ -478,6 +479,12 @@ func (s *Server) handleSSHWebSocket(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, err.Error())
 		return
 	}
+	unregister := s.activeConnections.register(session.ID, conn.Close)
+	defer unregister()
+	if !s.sessionStillOpen(session.ID) {
+		_ = conn.Close()
+		return
+	}
 	_ = s.audit(r, "connection.ssh.open", session.ID, model.ProtocolSSH, "opened ssh websocket")
 	sshrunner.Runner{Store: s.cfg.Store, Logger: slog.Default(), KnownHostsPath: filepath.Join(s.cfg.DataDir, "known_hosts")}.Run(conn, session, server, credential, secret, term, cols, rows)
 }
@@ -587,7 +594,7 @@ func (s *Server) handleRecordingDownload(w http.ResponseWriter, r *http.Request)
 		writeError(w, http.StatusNotFound, "recording not found")
 		return
 	}
-	if !s.canAccessSession(r, session) {
+	if !s.canViewSession(r, session) {
 		if err := s.createRecordingOperationLog(r, "recording.access.denied", "denied", session.ID, session.Protocol, "recording access denied", nil); err != nil {
 			writeError(w, http.StatusInternalServerError, err.Error())
 			return
@@ -621,7 +628,7 @@ func (s *Server) handleClose(w http.ResponseWriter, r *http.Request) {
 			writeError(w, http.StatusNotFound, "session not found")
 			return
 		}
-		if !s.canAccessPlatformSession(r, item) {
+		if !s.canControlPlatformSession(r, item) {
 			writeError(w, http.StatusForbidden, "session access denied")
 			return
 		}
@@ -641,7 +648,7 @@ func (s *Server) handleClose(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusOK, closed)
 		return
 	}
-	if !s.canAccessSession(r, existing) {
+	if !s.canControlSession(r, existing) {
 		writeError(w, http.StatusForbidden, "session access denied")
 		return
 	}
@@ -665,6 +672,7 @@ func (s *Server) handleClose(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
+	s.activeConnections.disconnect(id)
 	_ = s.audit(r, "connection.close", session.ID, session.Protocol, "closed session")
 	writeJSON(w, http.StatusOK, session)
 }
@@ -740,8 +748,12 @@ func (s *Server) connectionParts(w http.ResponseWriter, r *http.Request, session
 		writeError(w, http.StatusBadRequest, "session protocol mismatch")
 		return model.ConnectionSession{}, model.Server{}, model.Credential{}, store.CredentialSecret{}, false
 	}
-	if !s.canAccessSession(r, session) {
+	if !s.canControlSession(r, session) {
 		writeError(w, http.StatusForbidden, "session access denied")
+		return model.ConnectionSession{}, model.Server{}, model.Credential{}, store.CredentialSecret{}, false
+	}
+	if !sessionStatusOpen(session.Status) {
+		writeError(w, http.StatusConflict, "session is closed")
 		return model.ConnectionSession{}, model.Server{}, model.Credential{}, store.CredentialSecret{}, false
 	}
 	server, ok := s.cfg.Store.GetServer(session.ServerID)
@@ -1140,7 +1152,7 @@ func canonicalHost(value string) string {
 	return strings.TrimSuffix(value, ".")
 }
 
-func (s *Server) canAccessSession(r *http.Request, session model.ConnectionSession) bool {
+func (s *Server) canViewSession(r *http.Request, session model.ConnectionSession) bool {
 	if r == nil {
 		return true
 	}
@@ -1150,6 +1162,27 @@ func (s *Server) canAccessSession(r *http.Request, session model.ConnectionSessi
 	}
 	kind := s.roleDecision(authSession.Role).Kind
 	return kind == roleSuperAdmin || kind == roleAdmin || kind == roleAuditor || session.UserID == authSession.UserID
+}
+
+func (s *Server) canControlSession(r *http.Request, session model.ConnectionSession) bool {
+	if r == nil {
+		return true
+	}
+	_, authSession, ok := s.authSession(r)
+	if !ok {
+		return false
+	}
+	kind := s.roleDecision(authSession.Role).Kind
+	return kind == roleSuperAdmin || kind == roleAdmin || session.UserID == authSession.UserID
+}
+
+func sessionStatusOpen(status model.SessionStatus) bool {
+	return status == model.SessionPending || status == model.SessionActive
+}
+
+func (s *Server) sessionStillOpen(id string) bool {
+	session, ok := s.cfg.Store.GetSession(id)
+	return ok && sessionStatusOpen(session.Status)
 }
 
 func validateServer(server model.Server) error {

@@ -105,6 +105,10 @@ func (s *Server) handlePlatformAPI(w http.ResponseWriter, r *http.Request) bool 
 		if len(parts) > 2 {
 			return false
 		}
+		if r.Method != http.MethodGet {
+			writeError(w, http.StatusMethodNotAllowed, "audit collections are read-only")
+			return true
+		}
 		s.handleCollection(w, r, collection, tailID(parts))
 		return true
 	case strings.HasPrefix(path, "admin/authorizations/"):

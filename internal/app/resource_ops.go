@@ -303,6 +303,10 @@ func (s *Server) handleResourceOperation(w http.ResponseWriter, r *http.Request,
 		id := pathSegmentFromTrimmed(path, 3)
 		s.handleAuditSessionDisconnect(w, r, id)
 		return true
+	case strings.HasPrefix(path, "admin/audit/offline-sessions/") && strings.HasSuffix(path, "/recording/playback"):
+		id := pathSegmentFromTrimmed(path, 3)
+		s.handleAuditRecordingPlayback(w, r, id)
+		return true
 	case strings.HasPrefix(path, "admin/audit/offline-sessions/") && strings.HasSuffix(path, "/recording"):
 		id := pathSegmentFromTrimmed(path, 3)
 		s.handleAuditRecording(w, r, id)
@@ -4302,6 +4306,111 @@ func (s *Server) handleAuditRecording(w http.ResponseWriter, r *http.Request, id
 	default:
 		writeError(w, http.StatusMethodNotAllowed, "method not allowed")
 	}
+}
+
+func (s *Server) handleAuditRecordingPlayback(w http.ResponseWriter, r *http.Request, id string) {
+	if r.Method != http.MethodGet {
+		writeError(w, http.StatusMethodNotAllowed, "method not allowed")
+		return
+	}
+	recording, ok := s.auditRecordingTarget(w, r, id)
+	if !ok {
+		return
+	}
+	file, info, err := recordingPlaybackFile(recording.path, id)
+	if err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			writeError(w, http.StatusNotFound, "playable recording not found")
+			return
+		}
+		if errors.Is(err, errStorageSpecialFile) {
+			writeError(w, http.StatusBadRequest, "recording file is not a regular file")
+			return
+		}
+		writeError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	defer file.Close()
+	if err := s.createRecordingOperationLog(r, "audit.recording.playback", "success", id, recording.protocol, "opened offline session recording playback", map[string]any{
+		"recording_file": filepath.Base(info.Name()),
+		"recording_size": info.Size(),
+	}); err != nil {
+		writeError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	_ = s.audit(r, "audit.recording.playback", id, recording.protocol, "opened offline session recording playback")
+	w.Header().Set("Content-Type", "application/vnd.apache.guacamole.recording")
+	w.Header().Set("Content-Disposition", "inline; filename=\""+id+".guac\"")
+	w.Header().Set("X-Content-Type-Options", "nosniff")
+	http.ServeContent(w, r, info.Name(), info.ModTime(), file)
+}
+
+func recordingPlaybackFile(recordingPath, sessionID string) (*os.File, os.FileInfo, error) {
+	for _, name := range []string{sessionID, sessionID + ".guac", "recording.guac"} {
+		file, info, err := openRegularRecordingFile(filepath.Join(recordingPath, name))
+		if err == nil {
+			return file, info, nil
+		}
+		if !errors.Is(err, os.ErrNotExist) {
+			return nil, nil, err
+		}
+	}
+	var selectedPath string
+	var selectedSize int64 = -1
+	err := filepath.WalkDir(recordingPath, func(path string, entry os.DirEntry, walkErr error) error {
+		if walkErr != nil {
+			return walkErr
+		}
+		if entry.IsDir() {
+			return nil
+		}
+		if entry.Type()&os.ModeType != 0 {
+			return nil
+		}
+		if err := ensureChildPath(recordingPath, path); err != nil {
+			return err
+		}
+		info, err := entry.Info()
+		if err != nil {
+			return err
+		}
+		if info.Size() > selectedSize {
+			selectedPath = path
+			selectedSize = info.Size()
+		}
+		return nil
+	})
+	if err != nil {
+		return nil, nil, err
+	}
+	if selectedPath == "" {
+		return nil, nil, os.ErrNotExist
+	}
+	return openRegularRecordingFile(selectedPath)
+}
+
+func openRegularRecordingFile(path string) (*os.File, os.FileInfo, error) {
+	before, err := os.Lstat(path)
+	if err != nil {
+		return nil, nil, err
+	}
+	if !before.Mode().IsRegular() {
+		return nil, nil, errStorageSpecialFile
+	}
+	file, err := os.Open(path)
+	if err != nil {
+		return nil, nil, err
+	}
+	after, err := file.Stat()
+	if err != nil {
+		file.Close()
+		return nil, nil, err
+	}
+	if !after.Mode().IsRegular() || !os.SameFile(before, after) {
+		file.Close()
+		return nil, nil, errStorageSpecialFile
+	}
+	return file, after, nil
 }
 
 func (s *Server) downloadAuditRecording(w http.ResponseWriter, r *http.Request, id string) {

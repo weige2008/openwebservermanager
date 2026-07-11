@@ -1,8 +1,8 @@
 import type { ColumnDef } from '@tanstack/react-table'
 import { useQuery } from '@tanstack/react-query'
 import { Link } from '@tanstack/react-router'
-import { ArrowUpRight, ChevronDown, ChevronRight, Copy, Download, FileDown, FileSearch, FolderPlus, MoveRight, Pencil, Play, Plus, RefreshCw, Save, ShieldCheck, TerminalSquare, Trash2, Upload } from 'lucide-react'
-import { useEffect, useMemo, useState } from 'react'
+import { ArrowUpRight, ChevronDown, ChevronRight, Copy, Download, FileDown, FileSearch, FolderPlus, MoveRight, Pause, Pencil, Play, Plus, RefreshCw, RotateCcw, Save, ShieldCheck, TerminalSquare, Trash2, Upload } from 'lucide-react'
+import { useEffect, useMemo, useRef, useState } from 'react'
 
 import { useApp } from '@/app/app-provider'
 import { isAccessMFARequiredError, useAccessMFADialog, type RequestAccessMFACode } from '@/features/access/access-mfa'
@@ -103,6 +103,7 @@ type ResourceOperation =
   | { type: 'certificate-dns-provider' }
   | { type: 'certificate-logs'; item: PlatformItem }
   | { type: 'certificate-mtls'; item: PlatformItem }
+  | { type: 'recording-playback'; item: PlatformItem }
   | { type: 'storage-files'; item: PlatformItem }
   | { type: 'task-logs'; item: PlatformItem }
   | { type: 'sql-execute'; item: PlatformItem }
@@ -326,11 +327,12 @@ export function PlatformTablePage({ config }: { config: PlatformPageConfig }) {
   const role = app.auth?.role
   const apiPermissions = app.auth?.api_permissions || []
   const canUsePath: CanUsePath = (method, path) => canUseAPI(role, apiPermissions, method, path)
-  const canCreate = canUsePath('POST', apiPath)
+  const auditReadOnly = apiPath.startsWith('/api/admin/audit/')
+  const canCreate = !auditReadOnly && canUsePath('POST', apiPath)
   const canEditPath = (path: string) => canUsePath('PATCH', path)
   const canDeletePath = (path: string) => canUsePath('DELETE', path)
-  const canEditItem = (item: PlatformItem) => canEditPath(`${apiPath}/${item.id}`)
-  const canDeleteItem = (item: PlatformItem) => canDeletePath(`${apiPath}/${item.id}`)
+  const canEditItem = (item: PlatformItem) => !auditReadOnly && canEditPath(`${apiPath}/${item.id}`)
+  const canDeleteItem = (item: PlatformItem) => !auditReadOnly && canDeletePath(`${apiPath}/${item.id}`)
   const [formOpen, setFormOpen] = useState(false)
   const [saving, setSaving] = useState(false)
   const [editing, setEditing] = useState<PlatformItem | null>(null)
@@ -1337,11 +1339,19 @@ function ResourceRowActions({
 
   if (config.collection === 'offline_sessions' && itemHasRecording(item)) {
     const recordingPath = `/api/admin/audit/offline-sessions/${item.id}/recording`
+    const playbackPath = `${recordingPath}/playback`
+    const canPlaybackRecording = canUsePath('GET', playbackPath)
     const canDownloadRecording = canUsePath('GET', recordingPath)
     const canDeleteRecording = canUsePath('DELETE', recordingPath)
-    if (!canDownloadRecording && !canDeleteRecording) return null
+    if (!canPlaybackRecording && !canDownloadRecording && !canDeleteRecording) return null
     return (
       <>
+        {canPlaybackRecording ? (
+          <Button size='sm' variant='outline' onClick={() => onOperation({ type: 'recording-playback', item })}>
+            <Play className='size-3.5' />
+            {app.t('recordingPlayback', 'Playback')}
+          </Button>
+        ) : null}
         {canDownloadRecording ? (
           <Button size='sm' variant='outline' onClick={() => void downloadRecording()}>
             <Download className='size-3.5' />
@@ -1539,6 +1549,7 @@ function ResourceOperationDialog({
   if (operation.type === 'certificate-dns-provider') return <CertificateDNSProviderDialog onClose={() => onOpenChange(null)} canSave={canUsePath('POST', '/api/admin/certificates/dns-providers')} />
   if (operation.type === 'certificate-logs') return <CertificateLogsDialog item={operation.item} onClose={() => onOpenChange(null)} canRead={canUsePath('GET', `/api/admin/certificates/${operation.item.id}/logs`)} />
   if (operation.type === 'certificate-mtls') return <CertificateMTLSDialog item={operation.item} onClose={() => onOpenChange(null)} canSave={canUsePath('POST', `/api/admin/certificates/${operation.item.id}/mtls`)} />
+  if (operation.type === 'recording-playback') return <RecordingPlaybackDialog item={operation.item} onClose={() => onOpenChange(null)} canRead={canUsePath('GET', `/api/admin/audit/offline-sessions/${operation.item.id}/recording/playback`)} />
   if (operation.type === 'storage-files') return <StorageFilesDialog item={operation.item} onClose={() => onOpenChange(null)} canUsePath={canUsePath} />
   if (operation.type === 'task-logs') return <TaskLogsDialog item={operation.item} onClose={() => onOpenChange(null)} canRead={canUsePath('GET', `/api/admin/scheduled-tasks/${operation.item.id}/logs`)} />
   if (operation.type === 'sql-decision') return <SQLWorkOrderDecisionDialog item={operation.item} decision={operation.decision} onClose={() => onOpenChange(null)} canSubmit={canUsePath('POST', `/api/admin/sql-work-orders/${operation.item.id}/${operation.decision}`)} />
@@ -1546,6 +1557,160 @@ function ResourceOperationDialog({
   if (operation.type === 'command-decision') return <CommandApprovalDecisionDialog item={operation.item} decision={operation.decision} onClose={() => onOpenChange(null)} canSubmit={canUsePath('POST', `/api/admin/command-approvals/${operation.item.id}/${operation.decision}`)} />
   if (operation.type === 'command-execute') return <CommandApprovalExecuteDialog item={operation.item} onClose={() => onOpenChange(null)} requestAccessMFACode={requestAccessMFACode} canExecute={canUsePath('POST', `/api/admin/command-approvals/${operation.item.id}/execute`)} />
   return null
+}
+
+function RecordingPlaybackDialog({ item, onClose, canRead }: { item: PlatformItem; onClose: () => void; canRead: boolean }) {
+  const app = useApp()
+  const [container, setContainer] = useState<HTMLDivElement | null>(null)
+  const recordingRef = useRef<any>(null)
+  const [loading, setLoading] = useState(true)
+  const [error, setError] = useState('')
+  const [duration, setDuration] = useState(0)
+  const [position, setPosition] = useState(0)
+  const [playing, setPlaying] = useState(false)
+
+  useEffect(() => {
+    const Guacamole = window.Guacamole
+    if (!container) return
+    if (!canRead) {
+      setLoading(false)
+      setError(app.t('permissionDenied', 'Permission denied'))
+      return
+    }
+    if (!Guacamole?.SessionRecording) {
+      setLoading(false)
+      setError(app.t('workspace.missingGuacamole', 'Guacamole playback library is unavailable.'))
+      return
+    }
+    let resizeObserver: ResizeObserver | null = null
+    let alive = true
+    try {
+      const tunnel = new Guacamole.StaticHTTPTunnel(`/api/admin/audit/offline-sessions/${item.id}/recording/playback`, true)
+      const recording = new Guacamole.SessionRecording(tunnel)
+      recordingRef.current = recording
+      const display = recording.getDisplay()
+      const element = display.getElement()
+      element.style.margin = 'auto'
+      container.replaceChildren(element)
+      const scaleDisplay = () => {
+        const width = Math.max(1, Number(display.getWidth?.()) || element.clientWidth || 1)
+        const height = Math.max(1, Number(display.getHeight?.()) || element.clientHeight || 1)
+        display.scale(Math.min(container.clientWidth / width, container.clientHeight / height, 1))
+      }
+      resizeObserver = new ResizeObserver(scaleDisplay)
+      resizeObserver.observe(container)
+      recording.onprogress = (nextDuration: number) => {
+        if (alive) setDuration(Math.max(0, nextDuration || recording.getDuration()))
+      }
+      recording.onseek = (nextPosition: number) => {
+        if (alive) setPosition(Math.max(0, nextPosition || 0))
+      }
+      recording.onplay = () => alive && setPlaying(true)
+      recording.onpause = () => {
+        if (!alive) return
+        setPosition(Math.max(0, recording.getPosition()))
+        setPlaying(false)
+      }
+      recording.onerror = (message: string) => {
+        if (!alive) return
+        setLoading(false)
+        setError(message || app.t('recordingPlaybackFailed', 'Unable to load recording.'))
+      }
+      recording.onload = () => {
+        if (!alive) return
+        const nextDuration = Math.max(0, recording.getDuration())
+        setDuration(nextDuration)
+        setLoading(false)
+        recording.seek(0, scaleDisplay)
+      }
+      recording.connect()
+    } catch (loadError) {
+      setLoading(false)
+      setError(loadError instanceof Error ? loadError.message : app.t('recordingPlaybackFailed', 'Unable to load recording.'))
+    }
+    return () => {
+      alive = false
+      resizeObserver?.disconnect()
+      recordingRef.current?.abort?.()
+      recordingRef.current = null
+      container.replaceChildren()
+    }
+  }, [canRead, container, item.id])
+
+  useEffect(() => {
+    if (!playing) return
+    const timer = window.setInterval(() => {
+      const recording = recordingRef.current
+      if (recording) setPosition(Math.max(0, recording.getPosition()))
+    }, 100)
+    return () => window.clearInterval(timer)
+  }, [playing])
+
+  const togglePlayback = () => {
+    const recording = recordingRef.current
+    if (!recording || loading || error) return
+    if (recording.isPlaying()) recording.pause()
+    else recording.play()
+  }
+
+  const seek = (nextPosition: number) => {
+    const recording = recordingRef.current
+    if (!recording || loading || error) return
+    recording.seek(nextPosition, () => setPosition(nextPosition))
+  }
+
+  const restart = () => {
+    const recording = recordingRef.current
+    if (!recording || loading || error) return
+    recording.seek(0, () => {
+      setPosition(0)
+      recording.play()
+    })
+  }
+
+  return (
+    <DialogShell open onOpenChange={(open) => !open && onClose()} title={app.t('recordingPlayback', 'Recording playback')} description={app.t('recordingPlaybackDescription', 'Replay the raw Guacamole session recording in the browser.')}>
+      <div className='grid gap-4'>
+        <div className='relative grid min-h-[360px] place-items-center overflow-hidden rounded-lg border border-border bg-black'>
+          <div ref={setContainer} className='flex h-[min(62vh,640px)] min-h-[360px] w-full items-center justify-center overflow-hidden' />
+          {loading ? <div className='absolute inset-0 grid place-items-center bg-black/70 text-sm text-white'>{app.t('recordingLoading', 'Loading recording...')}</div> : null}
+          {error ? <div className='absolute inset-0 grid place-items-center bg-black/80 p-6 text-center text-sm text-red-200'>{error}</div> : null}
+        </div>
+        <div className='grid gap-3 sm:grid-cols-[auto_minmax(0,1fr)_auto] sm:items-center'>
+          <div className='flex gap-2'>
+            <Button size='icon-sm' variant='outline' onClick={togglePlayback} disabled={loading || Boolean(error) || duration <= 0} title={playing ? app.t('pauseRecording', 'Pause') : app.t('playRecording', 'Play')}>
+              {playing ? <Pause className='size-4' /> : <Play className='size-4' />}
+            </Button>
+            <Button size='icon-sm' variant='outline' onClick={restart} disabled={loading || Boolean(error) || duration <= 0} title={app.t('restartRecording', 'Restart')}>
+              <RotateCcw className='size-4' />
+            </Button>
+          </div>
+          <input
+            type='range'
+            min={0}
+            max={Math.max(duration, 1)}
+            step={100}
+            value={Math.min(position, Math.max(duration, 1))}
+            onChange={(event) => seek(Number(event.currentTarget.value))}
+            disabled={loading || Boolean(error) || duration <= 0}
+            aria-label={app.t('recordingPlaybackPosition', 'Playback position')}
+            className='h-2 w-full accent-primary'
+          />
+          <div className='text-right font-mono text-xs text-muted-foreground'>{formatPlaybackTime(position)} / {formatPlaybackTime(duration)}</div>
+        </div>
+      </div>
+    </DialogShell>
+  )
+}
+
+function formatPlaybackTime(milliseconds: number) {
+  const totalSeconds = Math.max(0, Math.floor(milliseconds / 1000))
+  const hours = Math.floor(totalSeconds / 3600)
+  const minutes = Math.floor((totalSeconds % 3600) / 60)
+  const seconds = totalSeconds % 60
+  return hours > 0
+    ? `${hours}:${String(minutes).padStart(2, '0')}:${String(seconds).padStart(2, '0')}`
+    : `${minutes}:${String(seconds).padStart(2, '0')}`
 }
 
 function AssetImportDialog({ onClose, canSubmit }: { onClose: () => void; canSubmit: boolean }) {

@@ -246,9 +246,6 @@ func TestPlatformCollectionEndpoints(t *testing.T) {
 	for route := range authorizationCollectionRoutes {
 		paths = append(paths, "/api/admin/authorizations/"+route)
 	}
-	for route := range auditCollectionRoutes {
-		paths = append(paths, "/api/admin/audit/"+route)
-	}
 
 	for _, path := range paths {
 		t.Run(path, func(t *testing.T) {
@@ -290,6 +287,16 @@ func TestPlatformCollectionEndpoints(t *testing.T) {
 			}
 			assertStatus(t, handler, http.MethodPatch, path+"/"+item.ID, map[string]any{"name": item.Name + " updated", "status": "disabled"}, cookie, http.StatusOK)
 			assertStatus(t, handler, http.MethodDelete, path+"/"+item.ID, nil, cookie, http.StatusOK)
+		})
+	}
+
+	for route := range auditCollectionRoutes {
+		path := "/api/admin/audit/" + route
+		t.Run(path+" is read-only", func(t *testing.T) {
+			assertStatus(t, handler, http.MethodGet, path, nil, cookie, http.StatusOK)
+			assertStatus(t, handler, http.MethodPost, path, map[string]any{"name": "forged audit record"}, cookie, http.StatusMethodNotAllowed)
+			assertStatus(t, handler, http.MethodPatch, path+"/forged-id", map[string]any{"status": "changed"}, cookie, http.StatusMethodNotAllowed)
+			assertStatus(t, handler, http.MethodDelete, path+"/forged-id", nil, cookie, http.StatusMethodNotAllowed)
 		})
 	}
 }
@@ -433,20 +440,30 @@ func TestLegacyServerCredentialOperationLogFailuresRollBackMutations(t *testing.
 
 func TestAuditLogExportJSONAndCSV(t *testing.T) {
 	handler, adminCookie := newTestHandler(t)
-
-	logRec := assertStatus(t, handler, http.MethodPost, "/api/admin/audit/login-logs", map[string]any{
-		"name":        "operator login",
-		"type":        "password",
-		"status":      "success",
-		"owner_id":    "operator",
-		"description": "login accepted",
-		"metadata": map[string]any{
+	srv := handler.(*Server)
+	logItem, err := srv.cfg.Store.CreatePlatformItem("login_logs", model.PlatformItemRequest{
+		Name:        "operator login",
+		Type:        "password",
+		Status:      "success",
+		OwnerID:     "operator",
+		Description: "login accepted",
+		Metadata: map[string]any{
 			"client_ip":  "192.0.2.10",
 			"user_agent": "test-browser",
 		},
-	}, adminCookie, http.StatusCreated)
-	var logItem model.PlatformItem
-	decodeResponse(t, logRec, &logItem)
+	})
+	if err != nil {
+		t.Fatalf("create login log fixture: %v", err)
+	}
+	for route := range auditCollectionRoutes {
+		base := "/api/admin/audit/" + route
+		assertStatus(t, handler, http.MethodPost, base, map[string]any{"name": "forged audit record"}, adminCookie, http.StatusMethodNotAllowed)
+		assertStatus(t, handler, http.MethodPatch, base+"/forged-id", map[string]any{"status": "changed"}, adminCookie, http.StatusMethodNotAllowed)
+		assertStatus(t, handler, http.MethodDelete, base+"/forged-id", nil, adminCookie, http.StatusMethodNotAllowed)
+	}
+	if stored, ok, err := srv.cfg.Store.GetPlatformItem("login_logs", logItem.ID); err != nil || !ok || stored.Name != logItem.Name {
+		t.Fatalf("read-only audit checks changed login log fixture: ok=%v item=%#v err=%v", ok, stored, err)
+	}
 
 	jsonRec := assertStatus(t, handler, http.MethodGet, "/api/admin/audit/login-logs/export", nil, adminCookie, http.StatusOK)
 	if !strings.Contains(jsonRec.Header().Get("Content-Disposition"), "openwebservermanager-login-logs") {
@@ -481,7 +498,7 @@ func TestAuditLogExportJSONAndCSV(t *testing.T) {
 	if !strings.Contains(operationLogsRec.Body.String(), "audit.login_logs.export") {
 		t.Fatalf("audit export did not write operation log: %s", operationLogsRec.Body.String())
 	}
-	removeExportBlocker := blockOperationLogName(t, handler.(*Server).cfg.Store, "audit.login_logs.export")
+	removeExportBlocker := blockOperationLogName(t, srv.cfg.Store, "audit.login_logs.export")
 	blockedExportRec := assertStatus(t, handler, http.MethodGet, "/api/admin/audit/login-logs/export", nil, adminCookie, http.StatusInternalServerError)
 	removeExportBlocker()
 	if !strings.Contains(blockedExportRec.Body.String(), "persist operation log failed") {
@@ -8790,28 +8807,26 @@ func TestToolsAndMonitoringEndpoints(t *testing.T) {
 
 func TestNotificationsReflectRuntimeAndFilterByUser(t *testing.T) {
 	handler, adminCookie := newTestHandler(t)
+	srv := handler.(*Server)
 
 	assertStatus(t, handler, http.MethodGet, "/api/notifications", nil, nil, http.StatusUnauthorized)
 	assertStatus(t, handler, http.MethodPost, "/api/notifications/read", map[string]any{"keys": []string{"notice:connection-workspace"}}, nil, http.StatusUnauthorized)
-	assertStatus(t, handler, http.MethodPost, "/api/admin/audit/online-sessions", map[string]any{
-		"name":     "admin ssh",
-		"type":     "ssh",
-		"status":   "active",
-		"protocol": "ssh",
-	}, adminCookie, http.StatusCreated)
-	assertStatus(t, handler, http.MethodPost, "/api/admin/audit/login-logs", map[string]any{
-		"name":        "root",
-		"type":        "password",
-		"status":      "failed",
-		"description": "invalid username or password",
-		"metadata":    map[string]any{"account": "root", "client_ip": "198.51.100.10"},
-	}, adminCookie, http.StatusCreated)
-	assertStatus(t, handler, http.MethodPost, "/api/admin/audit/operation-logs", map[string]any{
-		"name":        "asset health check",
-		"type":        "scheduled_task",
-		"status":      "failed",
-		"description": "asset check failed",
-	}, adminCookie, http.StatusCreated)
+	for collection, req := range map[string]model.PlatformItemRequest{
+		"online_sessions": {
+			Name: "admin ssh", Type: "ssh", Status: "active", Protocol: model.ProtocolSSH, OwnerID: "admin",
+		},
+		"login_logs": {
+			Name: "root", Type: "password", Status: "failed", Description: "invalid username or password",
+			Metadata: map[string]any{"account": "root", "client_ip": "198.51.100.10"},
+		},
+		"operation_logs": {
+			Name: "asset health check", Type: "scheduled_task", Status: "failed", Description: "asset check failed",
+		},
+	} {
+		if _, err := srv.cfg.Store.CreatePlatformItem(collection, req); err != nil {
+			t.Fatalf("create %s notification fixture: %v", collection, err)
+		}
+	}
 	assertStatus(t, handler, http.MethodPost, "/api/admin/agent-gateways", map[string]any{
 		"name":   "edge-offline",
 		"type":   "agent",
@@ -8864,21 +8879,20 @@ func TestNotificationsReflectRuntimeAndFilterByUser(t *testing.T) {
 	}, adminCookie, http.StatusCreated)
 	var user model.PlatformItem
 	decodeResponse(t, userRec, &user)
-	assertStatus(t, handler, http.MethodPost, "/api/admin/audit/login-logs", map[string]any{
-		"name":        "limited-user",
-		"type":        "password",
-		"status":      "failed",
-		"owner_id":    user.ID,
-		"description": "invalid username or password",
-		"metadata":    map[string]any{"account": "limited-user"},
-	}, adminCookie, http.StatusCreated)
-	assertStatus(t, handler, http.MethodPost, "/api/admin/audit/login-logs", map[string]any{
-		"name":        "other-user",
-		"type":        "password",
-		"status":      "failed",
-		"description": "invalid username or password",
-		"metadata":    map[string]any{"account": "other-user"},
-	}, adminCookie, http.StatusCreated)
+	for _, req := range []model.PlatformItemRequest{
+		{
+			Name: "limited-user", Type: "password", Status: "failed", OwnerID: user.ID,
+			Description: "invalid username or password", Metadata: map[string]any{"account": "limited-user"},
+		},
+		{
+			Name: "other-user", Type: "password", Status: "failed",
+			Description: "invalid username or password", Metadata: map[string]any{"account": "other-user"},
+		},
+	} {
+		if _, err := srv.cfg.Store.CreatePlatformItem("login_logs", req); err != nil {
+			t.Fatalf("create user login notification fixture: %v", err)
+		}
+	}
 	loginRec := assertStatus(t, handler, http.MethodPost, "/api/auth/login", map[string]any{"username": "limited-user", "password": "password123"}, nil, http.StatusOK)
 	userCookie := loginRec.Result().Cookies()[0]
 	limitedRec := assertStatus(t, handler, http.MethodGet, "/api/notifications", nil, userCookie, http.StatusOK)
@@ -12096,22 +12110,18 @@ func TestScheduledTaskRunners(t *testing.T) {
 		t.Fatalf("unsupported scheduled task did not persist failed metadata: %#v", storedUnsupportedTask.Metadata)
 	}
 
-	oldAccessRec := assertStatus(t, handler, http.MethodPost, "/api/admin/audit/access-logs", map[string]any{
-		"name":     "old access",
-		"type":     "GET",
-		"status":   "200",
-		"metadata": map[string]any{"uri": "/old"},
-	}, cookie, http.StatusCreated)
-	var oldAccess model.PlatformItem
-	decodeResponse(t, oldAccessRec, &oldAccess)
-	oldSQLRec := assertStatus(t, handler, http.MethodPost, "/api/admin/audit/sql-logs", map[string]any{
-		"name":     "old sql",
-		"type":     "query",
-		"status":   "success",
-		"metadata": map[string]any{"sql": "SELECT 1"},
-	}, cookie, http.StatusCreated)
-	var oldSQL model.PlatformItem
-	decodeResponse(t, oldSQLRec, &oldSQL)
+	oldAccess, err := srv.cfg.Store.CreatePlatformItem("access_logs", model.PlatformItemRequest{
+		Name: "old access", Type: "GET", Status: "200", Metadata: map[string]any{"uri": "/old"},
+	})
+	if err != nil {
+		t.Fatalf("create old access log fixture: %v", err)
+	}
+	oldSQL, err := srv.cfg.Store.CreatePlatformItem("sql_logs", model.PlatformItemRequest{
+		Name: "old sql", Type: "query", Status: "success", Metadata: map[string]any{"sql": "SELECT 1"},
+	})
+	if err != nil {
+		t.Fatalf("create old sql log fixture: %v", err)
+	}
 	oldSession, err := srv.cfg.Store.CreateSession(model.ConnectionSession{
 		Protocol:     model.ProtocolRDP,
 		ServerID:     "old-rdp-asset",
@@ -13556,6 +13566,10 @@ func TestPlatformOnlineSessionCloseEndpoint(t *testing.T) {
 	if !strings.Contains(offlineRec.Body.String(), online.ID) || !strings.Contains(offlineRec.Body.String(), `"recording_size":15`) {
 		t.Fatalf("closed platform session missing from offline index: %s", offlineRec.Body.String())
 	}
+	platformPlayback := assertStatus(t, handler, http.MethodGet, "/api/admin/audit/offline-sessions/"+online.ID+"/recording/playback", nil, adminCookie, http.StatusOK)
+	if platformPlayback.Body.String() != "platform frames" {
+		t.Fatalf("platform session recording playback = %q", platformPlayback.Body.String())
+	}
 	logsRec := assertStatus(t, handler, http.MethodGet, "/api/admin/audit/operation-logs", nil, adminCookie, http.StatusOK)
 	if !strings.Contains(logsRec.Body.String(), "connection.close") || !strings.Contains(logsRec.Body.String(), online.ID) {
 		t.Fatalf("platform close was not audited: %s", logsRec.Body.String())
@@ -13745,6 +13759,16 @@ func TestAuditSessionOperations(t *testing.T) {
 	auditorCookie := auditorLogin.Result().Cookies()[0]
 	auditorDownload := assertStatus(t, handler, http.MethodGet, "/api/admin/audit/offline-sessions/"+rdpSession.ID+"/recording", nil, auditorCookie, http.StatusOK)
 	assertZipContains(t, auditorDownload.Body.Bytes(), "recording.guac", "frames")
+	auditorPlayback := assertStatus(t, handler, http.MethodGet, "/api/admin/audit/offline-sessions/"+rdpSession.ID+"/recording/playback", nil, auditorCookie, http.StatusOK)
+	if auditorPlayback.Body.String() != "frames" || auditorPlayback.Header().Get("Content-Type") != "application/vnd.apache.guacamole.recording" {
+		t.Fatalf("auditor recording playback = body %q content-type %q", auditorPlayback.Body.String(), auditorPlayback.Header().Get("Content-Type"))
+	}
+	playbackRange := assertStatusWithHeaders(t, handler, http.MethodGet, "/api/admin/audit/offline-sessions/"+rdpSession.ID+"/recording/playback", nil, auditorCookie, map[string]string{
+		"Range": "bytes=1-3",
+	}, http.StatusPartialContent)
+	if playbackRange.Body.String() != "ram" || playbackRange.Header().Get("Content-Range") != "bytes 1-3/6" {
+		t.Fatalf("recording playback range = body %q content-range %q", playbackRange.Body.String(), playbackRange.Header().Get("Content-Range"))
+	}
 	if recordingSymlinkCreated {
 		assertZipOmitsEntryAndContent(t, auditorDownload.Body.Bytes(), recordingSymlinkName, externalRecordingContent)
 	}
@@ -13777,6 +13801,7 @@ func TestAuditSessionOperations(t *testing.T) {
 	limitedLogin := assertStatus(t, handler, http.MethodPost, "/api/auth/login", map[string]any{"username": "recording-limited-user", "password": "password123"}, nil, http.StatusOK)
 	limitedCookie := limitedLogin.Result().Cookies()[0]
 	assertStatus(t, handler, http.MethodGet, "/api/admin/audit/offline-sessions/"+rdpSession.ID+"/recording", nil, limitedCookie, http.StatusForbidden)
+	assertStatus(t, handler, http.MethodGet, "/api/admin/audit/offline-sessions/"+rdpSession.ID+"/recording/playback", nil, limitedCookie, http.StatusForbidden)
 	deniedRecordingLogs := assertStatus(t, handler, http.MethodGet, "/api/admin/audit/operation-logs", nil, adminCookie, http.StatusOK)
 	if !strings.Contains(deniedRecordingLogs.Body.String(), "audit.recording.access.denied") || !strings.Contains(deniedRecordingLogs.Body.String(), rdpSession.ID) {
 		t.Fatalf("denied recording access was not audited: %s", deniedRecordingLogs.Body.String())
@@ -13794,9 +13819,10 @@ func TestAuditSessionOperations(t *testing.T) {
 	}
 	assertStatus(t, handler, http.MethodDelete, "/api/admin/audit/offline-sessions/"+rdpSession.ID+"/recording", nil, adminCookie, http.StatusOK)
 	assertStatus(t, handler, http.MethodGet, "/api/admin/audit/offline-sessions/"+rdpSession.ID+"/recording", nil, adminCookie, http.StatusNotFound)
+	assertStatus(t, handler, http.MethodGet, "/api/admin/audit/offline-sessions/"+rdpSession.ID+"/recording/playback", nil, adminCookie, http.StatusNotFound)
 	logsRec := assertStatus(t, handler, http.MethodGet, "/api/admin/audit/operation-logs", nil, adminCookie, http.StatusOK)
-	if !strings.Contains(logsRec.Body.String(), "audit.recording.delete") {
-		t.Fatal("recording delete did not write operation log")
+	if !strings.Contains(logsRec.Body.String(), "audit.recording.delete") || !strings.Contains(logsRec.Body.String(), "audit.recording.playback") {
+		t.Fatal("recording playback/delete did not write operation logs")
 	}
 }
 
@@ -13854,6 +13880,13 @@ func TestRecordingOperationLogPersistenceFailures(t *testing.T) {
 	}
 	if strings.Contains(auditDownloadRec.Body.String(), "audit frames") {
 		t.Fatalf("audit recording download returned recording content after operation log failure: %s", auditDownloadRec.Body.String())
+	}
+
+	removePlaybackBlocker := blockPlatformItemCreate(t, srv.cfg.Store, "operation_logs")
+	playbackRec := assertStatus(t, handler, http.MethodGet, "/api/admin/audit/offline-sessions/"+session.ID+"/recording/playback", nil, adminCookie, http.StatusInternalServerError)
+	removePlaybackBlocker()
+	if !strings.Contains(playbackRec.Body.String(), "persist operation log failed") || strings.Contains(playbackRec.Body.String(), "audit frames") {
+		t.Fatalf("recording playback operation log failure response = %s", playbackRec.Body.String())
 	}
 
 	removeDeleteBlocker := blockPlatformItemCreate(t, srv.cfg.Store, "operation_logs")
@@ -13985,6 +14018,60 @@ func TestRecordingAuditRejectsSymlinkRecordingRoot(t *testing.T) {
 	}
 	if data, err := os.ReadFile(externalFile); err != nil || string(data) != externalContent {
 		t.Fatalf("external recording file changed after cleanup: content=%q err=%v", string(data), err)
+	}
+}
+
+func TestRecordingPlaybackFileSelection(t *testing.T) {
+	fallbackDir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(fallbackDir, "small.guac"), []byte("small"), 0o660); err != nil {
+		t.Fatalf("write small playback fixture: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(fallbackDir, "largest.guac"), []byte("largest recording"), 0o660); err != nil {
+		t.Fatalf("write largest playback fixture: %v", err)
+	}
+	file, info, err := recordingPlaybackFile(fallbackDir, "missing-session")
+	if err != nil {
+		t.Fatalf("select fallback playback file: %v", err)
+	}
+	data, readErr := io.ReadAll(file)
+	_ = file.Close()
+	if readErr != nil || info.Name() != "largest.guac" || string(data) != "largest recording" {
+		t.Fatalf("fallback playback file = name %q data %q readErr %v", info.Name(), string(data), readErr)
+	}
+
+	preferredDir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(preferredDir, "session-preferred"), []byte("preferred"), 0o660); err != nil {
+		t.Fatalf("write preferred playback fixture: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(preferredDir, "larger.guac"), []byte("larger fallback recording"), 0o660); err != nil {
+		t.Fatalf("write larger fallback fixture: %v", err)
+	}
+	file, info, err = recordingPlaybackFile(preferredDir, "session-preferred")
+	if err != nil {
+		t.Fatalf("select preferred playback file: %v", err)
+	}
+	data, readErr = io.ReadAll(file)
+	_ = file.Close()
+	if readErr != nil || info.Name() != "session-preferred" || string(data) != "preferred" {
+		t.Fatalf("preferred playback file = name %q data %q readErr %v", info.Name(), string(data), readErr)
+	}
+
+	external := filepath.Join(t.TempDir(), "external.guac")
+	if err := os.WriteFile(external, []byte("external"), 0o660); err != nil {
+		t.Fatalf("write external playback fixture: %v", err)
+	}
+	symlinkDir := t.TempDir()
+	if err := os.Symlink(external, filepath.Join(symlinkDir, "session-link")); err != nil {
+		t.Logf("skip playback symlink selection assertion: %v", err)
+		return
+	}
+	file, _, err = recordingPlaybackFile(symlinkDir, "session-link")
+	if file != nil {
+		_ = file.Close()
+		t.Fatal("playback selection opened a preferred symlink")
+	}
+	if !errors.Is(err, errStorageSpecialFile) {
+		t.Fatalf("preferred playback symlink error = %v", err)
 	}
 }
 

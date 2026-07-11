@@ -475,7 +475,7 @@ func (s *Server) snapshotLogCleanupRecordings(sessions []model.ConnectionSession
 
 func (s *Server) snapshotRecordingDirectory(recordingPath string) (recordingDirectorySnapshot, bool, error) {
 	path, err := s.recordingDirectory(recordingPath)
-	if errors.Is(err, os.ErrNotExist) || errors.Is(err, errStorageSpecialFile) {
+	if errors.Is(err, os.ErrNotExist) || errors.Is(err, errStorageSpecialFile) || errors.Is(err, errStoragePathEscape) {
 		return recordingDirectorySnapshot{}, false, nil
 	}
 	if err != nil {
@@ -727,11 +727,12 @@ func (s *Server) cleanupHistoryLogs(task model.PlatformItem, preservedOperationL
 	deletedByCollection["offline_sessions"] = sessionCleanup.DeletedOfflineRecords
 	totalDeleted += sessionCleanup.DeletedSessions + sessionCleanup.DeletedOfflineRecords
 	return map[string]any{
-		"deleted_count":          totalDeleted,
-		"deleted":                deletedByCollection,
-		"recordings_deleted":     sessionCleanup.DeletedRecordings,
-		"recording_bytes":        sessionCleanup.DeletedRecordingBytes,
-		"session_retention_days": sessionCleanup.RetentionDays,
+		"deleted_count":                  totalDeleted,
+		"deleted":                        deletedByCollection,
+		"recordings_deleted":             sessionCleanup.DeletedRecordings,
+		"recording_bytes":                sessionCleanup.DeletedRecordingBytes,
+		"unsafe_recording_paths_skipped": sessionCleanup.UnsafeRecordingPaths,
+		"session_retention_days":         sessionCleanup.RetentionDays,
 	}, nil
 }
 
@@ -741,6 +742,7 @@ type sessionCleanupResult struct {
 	DeletedOfflineRecords int
 	DeletedRecordings     int
 	DeletedRecordingBytes int64
+	UnsafeRecordingPaths  int
 }
 
 func (s *Server) cleanupExpiredConnectionSessions(taskMetadata, settings map[string]any, now time.Time) (sessionCleanupResult, error) {
@@ -755,9 +757,12 @@ func (s *Server) cleanupExpiredConnectionSessions(taskMetadata, settings map[str
 		if retentionTime := connectionSessionRetentionTime(session); retentionTime.IsZero() || retentionTime.After(cutoff) {
 			continue
 		}
-		recordingDeleted, recordingBytes, err := s.deleteSessionRecordingPath(session.RecordingPath)
+		recordingDeleted, recordingBytes, unsafe, err := s.deleteSessionRecordingPath(session.RecordingPath)
 		if err != nil {
 			return result, err
+		}
+		if unsafe {
+			result.UnsafeRecordingPaths++
 		}
 		if recordingDeleted {
 			result.DeletedRecordings++
@@ -776,9 +781,12 @@ func (s *Server) cleanupExpiredConnectionSessions(taskMetadata, settings map[str
 		if retentionTime := offlineSessionRetentionTime(item); retentionTime.IsZero() || retentionTime.After(cutoff) {
 			continue
 		}
-		recordingDeleted, recordingBytes, err := s.deleteSessionRecordingPath(firstMetadataString(item.Metadata, "recording_path"))
+		recordingDeleted, recordingBytes, unsafe, err := s.deleteSessionRecordingPath(firstMetadataString(item.Metadata, "recording_path"))
 		if err != nil {
 			return result, err
+		}
+		if unsafe {
+			result.UnsafeRecordingPaths++
 		}
 		if recordingDeleted {
 			result.DeletedRecordings++
@@ -838,26 +846,29 @@ func offlineSessionRetentionTime(item model.PlatformItem) time.Time {
 	return item.CreatedAt.UTC()
 }
 
-func (s *Server) deleteSessionRecordingPath(recordingPath string) (bool, int64, error) {
+func (s *Server) deleteSessionRecordingPath(recordingPath string) (bool, int64, bool, error) {
 	recordingPath = strings.TrimSpace(recordingPath)
 	if recordingPath == "" {
-		return false, 0, nil
+		return false, 0, false, nil
 	}
 	path, err := s.recordingDirectory(recordingPath)
 	if errors.Is(err, os.ErrNotExist) || errors.Is(err, errStorageSpecialFile) {
-		return false, 0, nil
+		return false, 0, false, nil
+	}
+	if errors.Is(err, errStoragePathEscape) {
+		return false, 0, true, nil
 	}
 	if err != nil {
-		return false, 0, err
+		return false, 0, false, err
 	}
 	size := int64(0)
 	if value, ok := directoryUsage(path)["bytes"].(int64); ok {
 		size = value
 	}
 	if err := os.RemoveAll(path); err != nil {
-		return false, 0, err
+		return false, 0, false, err
 	}
-	return true, size, nil
+	return true, size, false, nil
 }
 
 func (s *Server) retentionSettings() map[string]any {

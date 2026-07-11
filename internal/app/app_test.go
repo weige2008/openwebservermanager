@@ -12548,6 +12548,108 @@ func TestScheduledTaskRunners(t *testing.T) {
 	}
 }
 
+func TestLegacyRecordingPathMigration(t *testing.T) {
+	var sessionID string
+	var legacyPath string
+	var currentPath string
+	srv := newUnconfiguredTestServer(t, func(cfg *Config) {
+		base := t.TempDir()
+		cfg.DataDir = filepath.Join(base, "openwebservermanager", "data")
+		legacyPath = filepath.Join(base, "servermanager", "data", "recordings", "legacy-session")
+		currentPath = filepath.Join(cfg.DataDir, "recordings", "legacy-session")
+		if err := os.MkdirAll(legacyPath, 0o770); err != nil {
+			t.Fatalf("create legacy recording path: %v", err)
+		}
+		if err := os.WriteFile(filepath.Join(legacyPath, "recording.guac"), []byte("legacy frames"), 0o660); err != nil {
+			t.Fatalf("write legacy recording: %v", err)
+		}
+		session, err := cfg.Store.CreateSession(model.ConnectionSession{
+			Protocol: model.ProtocolRDP, ServerID: "legacy-asset", CredentialID: "legacy-credential", UserID: "legacy-user",
+		})
+		if err != nil {
+			t.Fatalf("create legacy recording session: %v", err)
+		}
+		sessionID = session.ID
+		endedAt := time.Now().UTC().Add(-time.Hour)
+		if _, err := cfg.Store.UpdateSession(session.ID, func(item *model.ConnectionSession) {
+			item.Status = model.SessionClosed
+			item.EndedAt = &endedAt
+			item.RecordingPath = legacyPath
+			item.RecordingSize = int64(len("legacy frames"))
+		}); err != nil {
+			t.Fatalf("close legacy recording session: %v", err)
+		}
+	})
+
+	session, ok := srv.cfg.Store.GetSession(sessionID)
+	if !ok || session.RecordingPath != currentPath {
+		t.Fatalf("migrated session path = ok %v path %q, want %q", ok, session.RecordingPath, currentPath)
+	}
+	if data, err := os.ReadFile(filepath.Join(currentPath, "recording.guac")); err != nil || string(data) != "legacy frames" {
+		t.Fatalf("migrated recording content = %q err %v", string(data), err)
+	}
+	if data, err := os.ReadFile(filepath.Join(legacyPath, "recording.guac")); err != nil || string(data) != "legacy frames" {
+		t.Fatalf("legacy source recording changed = %q err %v", string(data), err)
+	}
+	offline, ok, err := srv.cfg.Store.GetPlatformItem("offline_sessions", sessionID)
+	if err != nil || !ok || firstMetadataString(offline.Metadata, "recording_path") != currentPath {
+		t.Fatalf("migrated offline session = ok %v item %#v err %v", ok, offline, err)
+	}
+	logs, err := srv.cfg.Store.ListPlatformItems("operation_logs")
+	foundMigrationLog := false
+	for _, logItem := range logs {
+		if logItem.Name == "recording.path.migrated" && logItem.TargetID == sessionID {
+			foundMigrationLog = true
+			break
+		}
+	}
+	if err != nil || !foundMigrationLog {
+		t.Fatalf("legacy recording migration log missing: logs=%#v err=%v", logs, err)
+	}
+}
+
+func TestLogCleanupSkipsUnsafeRecordingPath(t *testing.T) {
+	handler, adminCookie := newTestHandler(t)
+	srv := handler.(*Server)
+	externalPath := filepath.Join(t.TempDir(), "external-recording")
+	if err := os.MkdirAll(externalPath, 0o770); err != nil {
+		t.Fatalf("create external recording path: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(externalPath, "recording.guac"), []byte("external frames"), 0o660); err != nil {
+		t.Fatalf("write external recording: %v", err)
+	}
+	session, err := srv.cfg.Store.CreateSession(model.ConnectionSession{
+		Protocol: model.ProtocolRDP, ServerID: "unsafe-asset", CredentialID: "unsafe-credential", UserID: "admin",
+	})
+	if err != nil {
+		t.Fatalf("create unsafe recording session: %v", err)
+	}
+	endedAt := time.Now().UTC().AddDate(0, 0, -2)
+	if _, err := srv.cfg.Store.UpdateSession(session.ID, func(item *model.ConnectionSession) {
+		item.Status = model.SessionClosed
+		item.EndedAt = &endedAt
+		item.RecordingPath = externalPath
+	}); err != nil {
+		t.Fatalf("close unsafe recording session: %v", err)
+	}
+	taskRec := assertStatus(t, handler, http.MethodPost, "/api/admin/scheduled-tasks", map[string]any{
+		"name": "Unsafe recording cleanup", "type": "log-cleanup", "status": "enabled",
+		"metadata": map[string]any{"retention_days": 0},
+	}, adminCookie, http.StatusCreated)
+	var task model.PlatformItem
+	decodeResponse(t, taskRec, &task)
+	runRec := assertStatus(t, handler, http.MethodPost, "/api/admin/scheduled-tasks/"+task.ID+"/run", nil, adminCookie, http.StatusAccepted)
+	if !strings.Contains(runRec.Body.String(), `"unsafe_recording_paths_skipped":1`) {
+		t.Fatalf("unsafe recording cleanup result = %s", runRec.Body.String())
+	}
+	if _, ok := srv.cfg.Store.GetSession(session.ID); ok {
+		t.Fatal("unsafe recording cleanup did not delete expired session record")
+	}
+	if data, err := os.ReadFile(filepath.Join(externalPath, "recording.guac")); err != nil || string(data) != "external frames" {
+		t.Fatalf("unsafe recording cleanup changed external file: data=%q err=%v", string(data), err)
+	}
+}
+
 func TestScheduledTaskScheduleParsing(t *testing.T) {
 	now := time.Date(2026, 7, 6, 12, 4, 30, 0, time.UTC)
 	next, ok := nextCronRun("0 0/10 * * * ?", now)
@@ -14017,9 +14119,9 @@ func TestRecordingAuditRejectsSymlinkRecordingRoot(t *testing.T) {
 	if _, err := os.Lstat(linkPath); err != nil {
 		t.Fatalf("rejected recording delete removed local symlink: %v", err)
 	}
-	deleted, bytes, err := srv.deleteSessionRecordingPath(linkPath)
-	if err != nil || deleted || bytes != 0 {
-		t.Fatalf("cleanup linked recording root = deleted %v bytes %d err %v, want no-op", deleted, bytes, err)
+	deleted, bytes, unsafe, err := srv.deleteSessionRecordingPath(linkPath)
+	if err != nil || deleted || unsafe || bytes != 0 {
+		t.Fatalf("cleanup linked recording root = deleted %v unsafe %v bytes %d err %v, want no-op", deleted, unsafe, bytes, err)
 	}
 	if data, err := os.ReadFile(externalFile); err != nil || string(data) != externalContent {
 		t.Fatalf("external recording file changed after cleanup: content=%q err=%v", string(data), err)

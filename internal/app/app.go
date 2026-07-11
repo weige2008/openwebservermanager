@@ -85,6 +85,8 @@ type PublicNavLink struct {
 	External bool   `json:"external,omitempty"`
 }
 
+var errStoragePathEscape = errors.New("recording path escapes data directory")
+
 type Server struct {
 	cfg                 Config
 	static              http.Handler
@@ -131,6 +133,7 @@ func NewServer(cfg Config) *Server {
 		recordingTranscoder: transcoder,
 		started:             time.Now().UTC(),
 	}
+	server.migrateLegacyRecordingPaths()
 	server.reconcileInterruptedRecordingTranscodes()
 	return server
 }
@@ -1095,7 +1098,7 @@ func ensureChildPath(root, child string) error {
 		return err
 	}
 	if rel == "." || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) || filepath.IsAbs(rel) {
-		return errors.New("recording path escapes data directory")
+		return errStoragePathEscape
 	}
 	return nil
 }

@@ -171,6 +171,33 @@ func (s *Store) DBStats() sql.DBStats {
 	return s.db.Stats()
 }
 
+func (s *Store) CreateBackupDatabase(path string) error {
+	path = strings.TrimSpace(path)
+	if path == "" {
+		return errors.New("backup database path is required")
+	}
+	if err := os.Remove(path); err != nil && !errors.Is(err, os.ErrNotExist) {
+		return err
+	}
+	if _, err := s.db.Exec(`VACUUM INTO ?`, path); err != nil {
+		return fmt.Errorf("create sqlite backup snapshot: %w", err)
+	}
+	db, err := sql.Open("sqlite", path)
+	if err != nil {
+		return fmt.Errorf("open sqlite backup snapshot: %w", err)
+	}
+	defer db.Close()
+	for _, collection := range ephemeralPlatformCollections() {
+		if _, err := db.Exec(`DELETE FROM platform_records WHERE collection = ?`, collection); err != nil {
+			return fmt.Errorf("remove ephemeral %s records from backup: %w", collection, err)
+		}
+	}
+	if _, err := db.Exec(`VACUUM`); err != nil {
+		return fmt.Errorf("compact sanitized sqlite backup snapshot: %w", err)
+	}
+	return nil
+}
+
 func (s *Store) AdminConfigured() bool {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
@@ -588,6 +615,7 @@ var platformCollections = []string{
 	"oidc_runtime",
 	"oidc_authorization_codes",
 	"oidc_access_tokens",
+	"auth_sessions",
 }
 
 func openPlatformDB(jsonPath string) (*sql.DB, error) {
@@ -993,6 +1021,29 @@ func serverPort(server model.Server) int {
 }
 
 func (s *Store) ListPlatformItems(collection string) ([]model.PlatformItem, error) {
+	if privatePlatformCollection(collection) {
+		rows, err := s.db.Query(`SELECT payload FROM platform_records WHERE collection = ? ORDER BY created_at DESC`, collection)
+		if err != nil {
+			return nil, fmt.Errorf("list private platform records: %w", err)
+		}
+		defer rows.Close()
+		items := []model.PlatformItem{}
+		for rows.Next() {
+			var payload string
+			if err := rows.Scan(&payload); err != nil {
+				return nil, err
+			}
+			var item model.PlatformItem
+			if err := json.Unmarshal([]byte(payload), &item); err != nil {
+				return nil, fmt.Errorf("decode private platform record: %w", err)
+			}
+			items = append(items, item)
+		}
+		if err := rows.Err(); err != nil {
+			return nil, err
+		}
+		return items, nil
+	}
 	items, err := s.PlatformBootstrap()
 	if err != nil {
 		return nil, err
@@ -1429,6 +1480,11 @@ func (s *Store) RestoreSnapshot(legacyRaw []byte, sqlitePath string) (RestoreSum
 			return RestoreSummary{}, fmt.Errorf("commit platform restore: %w", err)
 		}
 	}
+	for _, collection := range ephemeralPlatformCollections() {
+		if _, err := s.db.Exec(`DELETE FROM platform_records WHERE collection = ?`, collection); err != nil {
+			return RestoreSummary{}, fmt.Errorf("clear restored ephemeral %s records: %w", collection, err)
+		}
+	}
 	return summary, nil
 }
 
@@ -1453,6 +1509,9 @@ func (s *Store) readPlatformRecordSnapshot(sqlitePath string) ([]platformRecordS
 		var record platformRecordSnapshot
 		if err := rows.Scan(&record.Collection, &record.ID, &record.Payload, &record.CreatedAt, &record.UpdatedAt); err != nil {
 			return nil, err
+		}
+		if ephemeralPlatformCollection(record.Collection) {
+			continue
 		}
 		if !allowedCollections[record.Collection] {
 			return nil, fmt.Errorf("backup contains unsupported platform collection %q", record.Collection)
@@ -1579,11 +1638,24 @@ func platformCollectionSet() map[string]bool {
 
 func privatePlatformCollection(collection string) bool {
 	switch collection {
-	case "notification_reads", "oidc_runtime", "oidc_authorization_codes", "oidc_access_tokens":
+	case "notification_reads", "oidc_runtime", "oidc_authorization_codes", "oidc_access_tokens", "auth_sessions":
 		return true
 	default:
 		return false
 	}
+}
+
+func ephemeralPlatformCollection(collection string) bool {
+	switch collection {
+	case "auth_sessions", "oidc_authorization_codes", "oidc_access_tokens":
+		return true
+	default:
+		return false
+	}
+}
+
+func ephemeralPlatformCollections() []string {
+	return []string{"auth_sessions", "oidc_authorization_codes", "oidc_access_tokens"}
 }
 
 func collectionPrefix(collection string) string {

@@ -665,7 +665,26 @@ func (s *Server) createBackupSnapshotWithRetentionCleanup(cleanup func(time.Time
 		return nil, err
 	}
 	dbPath := strings.TrimSuffix(storePath, filepath.Ext(storePath)) + ".db"
-	if err := addBackupFile(archive, dbPath, filepath.Base(dbPath)); err == nil {
+	tempDB, err := os.CreateTemp(backupDir, ".openwebservermanager-backup-*.db")
+	if err != nil {
+		_ = archive.Close()
+		_ = output.Close()
+		return nil, err
+	}
+	tempDBPath := tempDB.Name()
+	if err := tempDB.Close(); err != nil {
+		_ = os.Remove(tempDBPath)
+		_ = archive.Close()
+		_ = output.Close()
+		return nil, err
+	}
+	defer os.Remove(tempDBPath)
+	if err := s.cfg.Store.CreateBackupDatabase(tempDBPath); err != nil {
+		_ = archive.Close()
+		_ = output.Close()
+		return nil, err
+	}
+	if err := addBackupFile(archive, tempDBPath, filepath.Base(dbPath)); err == nil {
 		files = append(files, filepath.Base(dbPath))
 	} else if !errors.Is(err, os.ErrNotExist) {
 		_ = archive.Close()

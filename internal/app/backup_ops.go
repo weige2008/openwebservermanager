@@ -259,16 +259,20 @@ func (s *Server) handleBackupRestore(w http.ResponseWriter, r *http.Request) {
 		},
 	}); err != nil {
 		if rollbackErr := s.restoreBackupSnapshot(preRestore); rollbackErr != nil {
-			s.auth.clearSessions()
+			_ = s.auth.clearSessions()
 			writeError(w, http.StatusInternalServerError, err.Error()+"; restore rollback failed: "+rollbackErr.Error())
 			return
 		}
 		_ = s.audit(r, "operation.log.persist_failed", "backups", "", "backup restore rolled back after operation log failure: "+err.Error())
-		s.auth.clearSessions()
+		_ = s.auth.clearSessions()
 		writeError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
-	s.auth.clearSessions()
+	if err := s.auth.clearSessions(); err != nil {
+		_ = s.audit(r, "backup.restore.session_cleanup_failed", "backups", "", err.Error())
+		writeError(w, http.StatusInternalServerError, "backup restored but session cleanup failed: "+err.Error())
+		return
+	}
 	writeJSON(w, http.StatusOK, map[string]any{
 		"restored":           true,
 		"summary":            summary,

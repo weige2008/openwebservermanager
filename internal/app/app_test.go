@@ -154,6 +154,88 @@ func TestInitialAdminRoleIsCanonicalSuperAdmin(t *testing.T) {
 	}
 }
 
+func TestAuthSessionPersistsAcrossRestartAndLogoutRevokesIt(t *testing.T) {
+	srv := newUnconfiguredTestServer(t, nil)
+	setupRec := assertStatus(t, srv, http.MethodPost, "/api/auth/setup", map[string]any{"username": "admin", "password": "password123"}, nil, http.StatusCreated)
+	cookies := setupRec.Result().Cookies()
+	if len(cookies) == 0 {
+		t.Fatal("setup did not set auth cookie")
+	}
+	cookie := cookies[0]
+	items, err := srv.cfg.Store.ListPlatformItems("auth_sessions")
+	if err != nil || len(items) != 1 {
+		t.Fatalf("persisted auth sessions = %#v, err=%v", items, err)
+	}
+	if items[0].ID == cookie.Value || strings.Contains(firstMetadataString(items[0].Metadata, "payload"), cookie.Value) {
+		t.Fatal("persisted auth session contains the plaintext cookie token")
+	}
+	bootstrap, err := srv.cfg.Store.PlatformBootstrap()
+	if err != nil {
+		t.Fatalf("platform bootstrap: %v", err)
+	}
+	if _, exposed := bootstrap["auth_sessions"]; exposed {
+		t.Fatal("private auth sessions collection was exposed in bootstrap")
+	}
+
+	restarted := NewServer(srv.cfg)
+	assertStatus(t, restarted, http.MethodGet, "/api/auth/me", nil, cookie, http.StatusOK)
+	removeDeleteBlocker := blockPlatformItemDeletePayloadFragment(t, srv.cfg.Store, "auth_sessions", `"name":"auth session"`)
+	blockedLogout := assertStatus(t, restarted, http.MethodPost, "/api/auth/logout", map[string]any{}, cookie, http.StatusInternalServerError)
+	removeDeleteBlocker()
+	if !strings.Contains(blockedLogout.Body.String(), "revoke persisted auth session failed") {
+		t.Fatalf("logout session revocation failure was not reported: %s", blockedLogout.Body.String())
+	}
+	assertStatus(t, NewServer(srv.cfg), http.MethodGet, "/api/auth/me", nil, cookie, http.StatusOK)
+	if !coreAuditLogsContainAction(srv.cfg.Store, "auth.logout.session.persist_failed") {
+		t.Fatal("logout session revocation failure was not audited")
+	}
+	assertStatus(t, restarted, http.MethodPost, "/api/auth/logout", map[string]any{}, cookie, http.StatusOK)
+	if _, ok, err := srv.cfg.Store.GetPlatformItem("auth_sessions", authSessionRecordID(cookie.Value)); err != nil || ok {
+		t.Fatalf("logout did not revoke persisted session: ok=%v err=%v", ok, err)
+	}
+
+	restartedAgain := NewServer(srv.cfg)
+	assertStatus(t, restartedAgain, http.MethodGet, "/api/auth/me", nil, cookie, http.StatusUnauthorized)
+}
+
+func TestExpiredPersistedAuthSessionIsRejectedAndRemoved(t *testing.T) {
+	srv, _ := newTestServer(t, nil)
+	token := "expired-auth-session-token"
+	session := authSession{UserID: "expired-user", Username: "expired", Role: string(roleUser), ExpiresAt: time.Now().Add(-time.Minute).UTC()}
+	payload, err := json.Marshal(session)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := srv.cfg.Store.SavePlatformItem("auth_sessions", model.PlatformItem{
+		ID: authSessionRecordID(token), Name: "expired", Type: "auth-session", Status: "active", OwnerID: session.UserID,
+		Metadata: map[string]any{"payload": string(payload), "expires_at": session.ExpiresAt.Format(time.RFC3339Nano)},
+	}); err != nil {
+		t.Fatalf("save expired session: %v", err)
+	}
+	cookie := &http.Cookie{Name: authCookieName, Value: token}
+	assertStatus(t, NewServer(srv.cfg), http.MethodGet, "/api/auth/me", nil, cookie, http.StatusUnauthorized)
+	if _, ok, err := srv.cfg.Store.GetPlatformItem("auth_sessions", authSessionRecordID(token)); err != nil || ok {
+		t.Fatalf("expired session was not removed: ok=%v err=%v", ok, err)
+	}
+}
+
+func TestSetupSessionPersistenceFailureRollsBackAdminInitialization(t *testing.T) {
+	srv := newUnconfiguredTestServer(t, nil)
+	removeBlocker := blockPlatformItemCreate(t, srv.cfg.Store, "auth_sessions")
+	failedRec := assertStatus(t, srv, http.MethodPost, "/api/auth/setup", map[string]any{"username": "admin", "password": "password123"}, nil, http.StatusInternalServerError)
+	removeBlocker()
+	if !strings.Contains(failedRec.Body.String(), "forced platform item create failure") {
+		t.Fatalf("session persistence failure was not reported: %s", failedRec.Body.String())
+	}
+	if srv.cfg.Store.AdminConfigured() {
+		t.Fatal("admin remained configured after session persistence failure")
+	}
+	retryRec := assertStatus(t, srv, http.MethodPost, "/api/auth/setup", map[string]any{"username": "admin", "password": "password123"}, nil, http.StatusCreated)
+	if len(retryRec.Result().Cookies()) == 0 {
+		t.Fatal("setup retry after session persistence failure did not set auth cookie")
+	}
+}
+
 func TestSetupLoginLogFailureRollsBackAdminInitialization(t *testing.T) {
 	srv := newUnconfiguredTestServer(t, nil)
 	handler := http.Handler(srv)
@@ -1002,6 +1084,21 @@ func TestAuthenticatedPasswordChange(t *testing.T) {
 	assertStatus(t, handler, http.MethodGet, "/api/auth/me", nil, secondAdminCookie, http.StatusOK)
 	assertStatus(t, handler, http.MethodPost, "/api/auth/login", map[string]any{"username": "admin", "password": "blocked-admin-password"}, nil, http.StatusUnauthorized)
 	assertStatus(t, handler, http.MethodPost, "/api/auth/login", map[string]any{"username": "admin", "password": "password123"}, nil, http.StatusOK)
+
+	removeSessionDeleteBlocker := blockPlatformItemDeletePayloadFragment(t, handler.(*Server).cfg.Store, "auth_sessions", `"name":"auth session"`)
+	blockedSessionRevokeRec := assertStatus(t, handler, http.MethodPost, "/api/auth/password", map[string]any{
+		"current_password": "password123",
+		"new_password":     "revocation-blocked-password",
+	}, adminCookie, http.StatusInternalServerError)
+	removeSessionDeleteBlocker()
+	if !strings.Contains(blockedSessionRevokeRec.Body.String(), "revoke other auth sessions failed") {
+		t.Fatalf("password session revocation failure was not reported: %s", blockedSessionRevokeRec.Body.String())
+	}
+	assertStatus(t, handler, http.MethodPost, "/api/auth/login", map[string]any{"username": "admin", "password": "revocation-blocked-password"}, nil, http.StatusUnauthorized)
+	assertStatus(t, handler, http.MethodPost, "/api/auth/login", map[string]any{"username": "admin", "password": "password123"}, nil, http.StatusOK)
+	if !coreAuditLogsContainAction(handler.(*Server).cfg.Store, "auth.password.session_revoke_failed") {
+		t.Fatal("password session revocation failure was not audited")
+	}
 
 	changeRec := assertStatus(t, handler, http.MethodPost, "/api/auth/password", map[string]any{
 		"current_password": "password123",
@@ -11763,6 +11860,10 @@ func TestBackupListDownloadAndRestore(t *testing.T) {
 	}
 	if !zipHasEntry(downloadZip, "manifest.json") {
 		t.Fatal("backup download did not include manifest.json")
+	}
+	backupDatabase := zipEntryText(t, downloadZip, filepath.Base(handler.(*Server).cfg.Store.DatabasePath()))
+	if strings.Contains(backupDatabase, cookie.Value) || strings.Contains(backupDatabase, "auth_sessions") || strings.Contains(backupDatabase, "oidc_authorization_codes") || strings.Contains(backupDatabase, "oidc_access_tokens") {
+		t.Fatal("backup database contains ephemeral authentication state")
 	}
 	downloadLogsRec := assertStatus(t, handler, http.MethodGet, "/api/admin/audit/operation-logs", nil, cookie, http.StatusOK)
 	if !strings.Contains(downloadLogsRec.Body.String(), "backup.download") || !strings.Contains(downloadLogsRec.Body.String(), backupName) {

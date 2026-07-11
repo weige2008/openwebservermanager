@@ -2,10 +2,14 @@ package app
 
 import (
 	"crypto/rand"
+	"crypto/sha256"
+	"encoding/base64"
 	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"net/http"
+	"os"
 	"strconv"
 	"strings"
 	"sync"
@@ -22,6 +26,7 @@ const (
 
 type authManager struct {
 	mu                   sync.RWMutex
+	store                *store.Store
 	sessions             map[string]authSession
 	failures             map[string]loginFailure
 	mfaChallenges        map[string]mfaChallenge
@@ -96,8 +101,9 @@ type passwordChangeRequest struct {
 	NewPassword     string `json:"new_password"`
 }
 
-func newAuthManager() *authManager {
+func newAuthManager(st *store.Store) *authManager {
 	return &authManager{
+		store:                st,
 		sessions:             map[string]authSession{},
 		failures:             map[string]loginFailure{},
 		mfaChallenges:        map[string]mfaChallenge{},
@@ -121,39 +127,72 @@ func (m *authManager) create(admin store.AdminPublic) (string, authSession, erro
 		Role:      admin.Role,
 		ExpiresAt: time.Now().Add(authSessionTTL).UTC(),
 	}
+	if err := m.prunePersistedSessions(); err != nil {
+		return "", authSession{}, err
+	}
+	if err := m.persistSession(token, session); err != nil {
+		return "", authSession{}, err
+	}
 	m.mu.Lock()
-	defer m.mu.Unlock()
 	m.sessions[token] = session
+	m.mu.Unlock()
 	return token, session, nil
 }
 
-func (m *authManager) delete(token string) {
+func (m *authManager) delete(token string) error {
 	m.mu.Lock()
-	defer m.mu.Unlock()
 	delete(m.sessions, token)
 	delete(m.accessMFAGrants, token)
+	m.mu.Unlock()
+	if m.store != nil {
+		if err := m.store.DeletePlatformItem("auth_sessions", authSessionRecordID(token)); err != nil && !errors.Is(err, os.ErrNotExist) {
+			return err
+		}
+	}
+	return nil
 }
 
-func (m *authManager) refreshSession(token string, session authSession) {
+func (m *authManager) refreshSession(token string, session authSession) error {
 	token = strings.TrimSpace(token)
 	if token == "" {
-		return
+		return nil
+	}
+	if err := m.persistSession(token, session); err != nil {
+		m.mu.Lock()
+		delete(m.sessions, token)
+		delete(m.accessMFAGrants, token)
+		m.mu.Unlock()
+		return err
 	}
 	m.mu.Lock()
-	defer m.mu.Unlock()
 	if _, ok := m.sessions[token]; ok {
 		m.sessions[token] = session
 	}
+	m.mu.Unlock()
+	return nil
 }
 
-func (m *authManager) deleteUserSessionsExcept(userID, keepToken string) {
+func (m *authManager) deleteUserSessionsExcept(userID, keepToken string) error {
 	userID = strings.TrimSpace(userID)
 	keepToken = strings.TrimSpace(keepToken)
 	if userID == "" {
-		return
+		return nil
+	}
+	if m.store != nil {
+		items, err := m.store.ListPlatformItems("auth_sessions")
+		if err != nil {
+			return err
+		}
+		keepID := authSessionRecordID(keepToken)
+		for _, item := range items {
+			if item.OwnerID == userID && item.ID != keepID {
+				if err := m.store.DeletePlatformItem("auth_sessions", item.ID); err != nil && !errors.Is(err, os.ErrNotExist) {
+					return err
+				}
+			}
+		}
 	}
 	m.mu.Lock()
-	defer m.mu.Unlock()
 	for token, session := range m.sessions {
 		if session.UserID != userID || token == keepToken {
 			continue
@@ -161,9 +200,14 @@ func (m *authManager) deleteUserSessionsExcept(userID, keepToken string) {
 		delete(m.sessions, token)
 		delete(m.accessMFAGrants, token)
 	}
+	m.mu.Unlock()
+	return nil
 }
 
 func (m *authManager) hasUserSession(userID string) bool {
+	if m.store != nil {
+		return m.hasPersistedUserSession(userID, "")
+	}
 	now := time.Now().UTC()
 	m.mu.Lock()
 	defer m.mu.Unlock()
@@ -180,6 +224,9 @@ func (m *authManager) hasUserSession(userID string) bool {
 }
 
 func (m *authManager) hasOtherUserSession(userID, currentToken string) bool {
+	if m.store != nil {
+		return m.hasPersistedUserSession(userID, authSessionRecordID(currentToken))
+	}
 	now := time.Now().UTC()
 	m.mu.Lock()
 	defer m.mu.Unlock()
@@ -208,15 +255,109 @@ func (m *authManager) session(r *http.Request) (string, authSession, bool) {
 		session, ok := m.sessions[token]
 		m.mu.RUnlock()
 		if !ok {
+			var err error
+			session, ok, err = m.loadPersistedSession(token)
+			if err != nil {
+				continue
+			}
+			if ok {
+				m.mu.Lock()
+				m.sessions[token] = session
+				m.mu.Unlock()
+			}
+		}
+		if !ok {
 			continue
 		}
 		if now.After(session.ExpiresAt) {
-			m.delete(token)
+			_ = m.delete(token)
 			continue
 		}
 		return token, session, true
 	}
 	return "", authSession{}, false
+}
+
+func authSessionRecordID(token string) string {
+	sum := sha256.Sum256([]byte(strings.TrimSpace(token)))
+	return base64.RawURLEncoding.EncodeToString(sum[:])
+}
+
+func (m *authManager) persistSession(token string, session authSession) error {
+	if m.store == nil {
+		return nil
+	}
+	payload, err := json.Marshal(session)
+	if err != nil {
+		return err
+	}
+	_, err = m.store.SavePlatformItem("auth_sessions", model.PlatformItem{
+		ID: authSessionRecordID(token), Name: "auth session", Type: "auth-session", Status: "active", OwnerID: session.UserID,
+		Metadata: map[string]any{"payload": string(payload), "expires_at": session.ExpiresAt.UTC().Format(time.RFC3339Nano)},
+	})
+	return err
+}
+
+func (m *authManager) loadPersistedSession(token string) (authSession, bool, error) {
+	if m.store == nil {
+		return authSession{}, false, nil
+	}
+	item, ok, err := m.store.GetPlatformItem("auth_sessions", authSessionRecordID(token))
+	if err != nil || !ok {
+		return authSession{}, ok, err
+	}
+	var session authSession
+	payload, _ := item.Metadata["payload"].(string)
+	if payload == "" || json.Unmarshal([]byte(payload), &session) != nil {
+		_ = m.store.DeletePlatformItem("auth_sessions", item.ID)
+		return authSession{}, false, nil
+	}
+	if !time.Now().UTC().Before(session.ExpiresAt) {
+		_ = m.store.DeletePlatformItem("auth_sessions", item.ID)
+		return authSession{}, false, nil
+	}
+	return session, true, nil
+}
+
+func (m *authManager) hasPersistedUserSession(userID, excludedID string) bool {
+	items, err := m.store.ListPlatformItems("auth_sessions")
+	if err != nil {
+		return false
+	}
+	now := time.Now().UTC()
+	for _, item := range items {
+		var session authSession
+		payload, _ := item.Metadata["payload"].(string)
+		if payload == "" || json.Unmarshal([]byte(payload), &session) != nil || !now.Before(session.ExpiresAt) {
+			_ = m.store.DeletePlatformItem("auth_sessions", item.ID)
+			continue
+		}
+		if item.ID != excludedID && session.UserID == userID {
+			return true
+		}
+	}
+	return false
+}
+
+func (m *authManager) prunePersistedSessions() error {
+	if m.store == nil {
+		return nil
+	}
+	items, err := m.store.ListPlatformItems("auth_sessions")
+	if err != nil {
+		return err
+	}
+	now := time.Now().UTC()
+	for _, item := range items {
+		expiresAt, ok := metadataTime(item.Metadata["expires_at"])
+		if ok && now.Before(expiresAt) {
+			continue
+		}
+		if err := m.store.DeletePlatformItem("auth_sessions", item.ID); err != nil && !errors.Is(err, os.ErrNotExist) {
+			return err
+		}
+	}
+	return nil
 }
 
 func (m *authManager) checkLoginAllowed(key string, policy loginFailurePolicy) (time.Duration, bool) {
@@ -279,9 +420,8 @@ func (m *authManager) resetLoginFailuresFor(username, clientIP string) {
 	}
 }
 
-func (m *authManager) clearSessions() {
+func (m *authManager) clearSessions() error {
 	m.mu.Lock()
-	defer m.mu.Unlock()
 	m.sessions = map[string]authSession{}
 	m.mfaChallenges = map[string]mfaChallenge{}
 	m.captchas = map[string]captchaChallenge{}
@@ -290,6 +430,21 @@ func (m *authManager) clearSessions() {
 	m.wecomStates = map[string]externalWeComState{}
 	m.passkeyRegistrations = map[string]passkeyChallenge{}
 	m.passkeyLogins = map[string]passkeyChallenge{}
+	m.mu.Unlock()
+	if m.store == nil {
+		return nil
+	}
+	items, err := m.store.ListPlatformItems("auth_sessions")
+	if err != nil {
+		return err
+	}
+	var errs []error
+	for _, item := range items {
+		if err := m.store.DeletePlatformItem("auth_sessions", item.ID); err != nil && !errors.Is(err, os.ErrNotExist) {
+			errs = append(errs, err)
+		}
+	}
+	return errors.Join(errs...)
 }
 
 func (m *authManager) grantAccessMFA(token, userID string, ttl time.Duration) {
@@ -457,7 +612,7 @@ func (s *Server) authSession(r *http.Request) (string, authSession, bool) {
 func (s *Server) refreshAuthSession(token string, session authSession) (authSession, bool) {
 	session.UserID = strings.TrimSpace(session.UserID)
 	if session.UserID == "" {
-		s.auth.delete(token)
+		_ = s.auth.delete(token)
 		return authSession{}, false
 	}
 	user, ok, err := s.authUserByID(session.UserID)
@@ -465,7 +620,7 @@ func (s *Server) refreshAuthSession(token string, session authSession) (authSess
 		return session, true
 	}
 	if !ok {
-		s.auth.delete(token)
+		_ = s.auth.delete(token)
 		return authSession{}, false
 	}
 	refreshed := authSession{
@@ -477,7 +632,12 @@ func (s *Server) refreshAuthSession(token string, session authSession) (authSess
 	if refreshed.Username == "" {
 		refreshed.Username = session.Username
 	}
-	s.auth.refreshSession(token, refreshed)
+	if refreshed.UserID == session.UserID && refreshed.Username == session.Username && refreshed.Role == session.Role {
+		return session, true
+	}
+	if err := s.auth.refreshSession(token, refreshed); err != nil {
+		return authSession{}, false
+	}
 	return refreshed, true
 }
 
@@ -588,6 +748,9 @@ func (s *Server) handleSetup(w http.ResponseWriter, r *http.Request) {
 
 	token, session, err := s.auth.create(admin)
 	if err != nil {
+		if rollbackErr := s.cfg.Store.RollbackSetupAdmin(admin.UserID); rollbackErr != nil {
+			_ = s.audit(r, "auth.setup.rollback_failed", admin.UserID, "", rollbackErr.Error())
+		}
 		writeError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
@@ -816,7 +979,8 @@ func (s *Server) recordExternalLDAPLoginFailure(r *http.Request, username, provi
 
 func (s *Server) handleLogout(w http.ResponseWriter, r *http.Request) {
 	if token, session, ok := s.authSession(r); ok {
-		if !s.auth.hasOtherUserSession(session.UserID, token) {
+		hasOtherSession := s.auth.hasOtherUserSession(session.UserID, token)
+		if !hasOtherSession {
 			if err := s.cfg.Store.RecordUserLogout(session.UserID); err != nil {
 				detail := "persist user logout state failed: " + err.Error()
 				_ = s.audit(r, "auth.logout.state.persist_failed", session.UserID, "", detail)
@@ -824,7 +988,17 @@ func (s *Server) handleLogout(w http.ResponseWriter, r *http.Request) {
 				return
 			}
 		}
-		s.auth.delete(token)
+		if err := s.auth.delete(token); err != nil {
+			if !hasOtherSession {
+				if rollbackErr := s.cfg.Store.RecordUserLogin(session.UserID, s.clientIP(r), r.UserAgent()); rollbackErr != nil {
+					_ = s.audit(r, "auth.logout.state.rollback_failed", session.UserID, "", rollbackErr.Error())
+				}
+			}
+			detail := "revoke persisted auth session failed: " + err.Error()
+			_ = s.audit(r, "auth.logout.session.persist_failed", session.UserID, "", detail)
+			writeError(w, http.StatusInternalServerError, detail)
+			return
+		}
 		_ = s.audit(r, "auth.logout", session.UserID, "", "admin signed out")
 	}
 	http.SetCookie(w, s.authCookie(r, "", -1))
@@ -879,14 +1053,26 @@ func (s *Server) handlePasswordChange(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
-	if err := s.createPasswordChangeOperationLog(r, session.UserID); err != nil {
+	passwordLog, err := s.createPasswordChangeOperationLog(r, session.UserID)
+	if err != nil {
 		if restoreErr := s.cfg.Store.RestoreUserPasswordSnapshot(snapshot); restoreErr != nil {
 			err = fmt.Errorf("%w; additionally failed to restore password: %v", err, restoreErr)
 		}
 		writeError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
-	s.auth.deleteUserSessionsExcept(session.UserID, token)
+	if err := s.auth.deleteUserSessionsExcept(session.UserID, token); err != nil {
+		if restoreErr := s.cfg.Store.RestoreUserPasswordSnapshot(snapshot); restoreErr != nil {
+			err = fmt.Errorf("%w; additionally failed to restore password: %v", err, restoreErr)
+		}
+		if deleteErr := s.cfg.Store.DeletePlatformItem("operation_logs", passwordLog.ID); deleteErr != nil && !errors.Is(deleteErr, os.ErrNotExist) {
+			err = fmt.Errorf("%w; additionally failed to remove password change log: %v", err, deleteErr)
+			_ = s.audit(r, "auth.password.session_revoke.rollback_failed", session.UserID, "", deleteErr.Error())
+		}
+		_ = s.audit(r, "auth.password.session_revoke_failed", session.UserID, "", err.Error())
+		writeError(w, http.StatusInternalServerError, "revoke other auth sessions failed: "+err.Error())
+		return
+	}
 	s.auth.resetLoginFailuresFor(session.Username, s.clientIP(r))
 	_ = s.audit(r, "auth.password.change", session.UserID, "", "changed local password")
 	writeJSON(w, http.StatusOK, map[string]any{"user": s.authUserPayload(authSession{
@@ -897,8 +1083,8 @@ func (s *Server) handlePasswordChange(w http.ResponseWriter, r *http.Request) {
 	})})
 }
 
-func (s *Server) createPasswordChangeOperationLog(r *http.Request, userID string) error {
-	return s.createOperationLog(r, model.PlatformItemRequest{
+func (s *Server) createPasswordChangeOperationLog(r *http.Request, userID string) (model.PlatformItem, error) {
+	item, err := s.cfg.Store.CreatePlatformItem("operation_logs", model.PlatformItemRequest{
 		Name:        "auth.password.change",
 		Type:        "auth",
 		Status:      "success",
@@ -910,11 +1096,17 @@ func (s *Server) createPasswordChangeOperationLog(r *http.Request, userID string
 			"client_ip": s.clientIP(r),
 		},
 	})
+	if err != nil {
+		detail := "persist operation log failed: " + err.Error()
+		_ = s.audit(r, "operation.log.persist_failed", userID, "", detail)
+		return model.PlatformItem{}, errors.New(detail)
+	}
+	return item, nil
 }
 
 func (s *Server) recordUserLoginState(r *http.Request, token string, session authSession, clientIP string) error {
 	if err := s.cfg.Store.RecordUserLogin(session.UserID, clientIP, r.UserAgent()); err != nil {
-		s.auth.delete(token)
+		_ = s.auth.delete(token)
 		detail := "persist user login state failed: " + err.Error()
 		_ = s.audit(r, "auth.login.state.persist_failed", session.UserID, "", detail)
 		return errors.New(detail)

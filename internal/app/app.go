@@ -139,7 +139,7 @@ func NewServer(cfg Config) *Server {
 		cfg:                 cfg,
 		static:              http.FileServer(http.FS(sub)),
 		staticFS:            sub,
-		auth:                newAuthManager(),
+		auth:                newAuthManager(cfg.Store),
 		oidc:                newOIDCManager(cfg.Store),
 		ldap:                ldapAuth,
 		agentRelay:          relay,

@@ -352,6 +352,77 @@ func TestRestoreSnapshotRejectsSQLiteCoreRecordsWithoutAdmin(t *testing.T) {
 	}
 }
 
+func TestBackupDatabaseAndRestoreExcludeEphemeralAuthenticationState(t *testing.T) {
+	st := newTestStore(t)
+	now := time.Now().UTC()
+	asset := model.PlatformItem{ID: "asset_backup_kept", Name: "kept", Module: "assets", Type: "linux", Status: "enabled", Protocol: model.ProtocolSSH, Host: "192.0.2.10", Port: 22, CreatedAt: now, UpdatedAt: now}
+	if _, err := st.SavePlatformItem("assets", asset); err != nil {
+		t.Fatalf("save backup asset: %v", err)
+	}
+	for _, collection := range ephemeralPlatformCollections() {
+		if _, err := st.SavePlatformItem(collection, model.PlatformItem{ID: collection + "_secret", Name: "runtime-secret", Type: "runtime", Status: "active", Metadata: map[string]any{"payload": "plaintext-runtime-secret"}}); err != nil {
+			t.Fatalf("save %s fixture: %v", collection, err)
+		}
+	}
+
+	backupPath := filepath.Join(t.TempDir(), "sanitized.db")
+	if err := st.CreateBackupDatabase(backupPath); err != nil {
+		t.Fatalf("create sanitized backup database: %v", err)
+	}
+	backupDB, err := sql.Open("sqlite", backupPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer backupDB.Close()
+	for _, collection := range ephemeralPlatformCollections() {
+		var count int
+		if err := backupDB.QueryRow(`SELECT COUNT(*) FROM platform_records WHERE collection = ?`, collection).Scan(&count); err != nil {
+			t.Fatalf("count backup %s records: %v", collection, err)
+		}
+		if count != 0 {
+			t.Fatalf("backup retained %d %s records", count, collection)
+		}
+	}
+
+	legacyBackupPath := filepath.Join(t.TempDir(), "legacy-with-runtime.db")
+	legacyDB, err := sql.Open("sqlite", legacyBackupPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := legacyDB.Exec(`CREATE TABLE platform_records (collection TEXT NOT NULL, id TEXT NOT NULL, payload TEXT NOT NULL, created_at TEXT NOT NULL, updated_at TEXT NOT NULL)`); err != nil {
+		_ = legacyDB.Close()
+		t.Fatal(err)
+	}
+	insert := func(collection string, item model.PlatformItem) {
+		raw, err := json.Marshal(item)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := legacyDB.Exec(`INSERT INTO platform_records(collection, id, payload, created_at, updated_at) VALUES (?, ?, ?, ?, ?)`, collection, item.ID, string(raw), now.Format(time.RFC3339Nano), now.Format(time.RFC3339Nano)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	insert("assets", asset)
+	for _, collection := range ephemeralPlatformCollections() {
+		insert(collection, model.PlatformItem{ID: collection + "_legacy", Name: "legacy runtime", Type: "runtime", Status: "active", Metadata: map[string]any{"payload": "legacy-secret"}})
+	}
+	if err := legacyDB.Close(); err != nil {
+		t.Fatal(err)
+	}
+	summary, err := st.RestoreSnapshot(nil, legacyBackupPath)
+	if err != nil {
+		t.Fatalf("restore legacy backup with runtime state: %v", err)
+	}
+	if summary.PlatformRecords != 1 || summary.RecordsByCollection["assets"] != 1 {
+		t.Fatalf("restore summary included ephemeral records: %#v", summary)
+	}
+	for _, collection := range ephemeralPlatformCollections() {
+		if count := platformRecordCount(t, st, collection); count != 0 {
+			t.Fatalf("restore injected %d %s records", count, collection)
+		}
+	}
+}
+
 func testCipher(t *testing.T) *security.Cipher {
 	t.Helper()
 	key := sha256.Sum256([]byte("store-test-key"))

@@ -3,6 +3,7 @@ package app
 import (
 	"archive/zip"
 	"bytes"
+	"context"
 	"crypto/ecdsa"
 	"crypto/ed25519"
 	"crypto/rand"
@@ -3188,21 +3189,6 @@ func (s *Server) handleCertificateACME(w http.ResponseWriter, r *http.Request) {
 		req.DNS = []string{req.Domain}
 	}
 	domains := uniqueNonEmptyStrings(append([]string{req.Domain}, req.DNS...))
-	token, keyAuthorization, err := makeACMEHTTPChallenge()
-	if err != nil {
-		writeError(w, http.StatusInternalServerError, err.Error())
-		return
-	}
-	certPEM, keyPEM, err := makeSelfSignedCertificate(certificateRequest{
-		Domain: req.Domain,
-		DNS:    domains,
-		IP:     req.IP,
-		Days:   clampInt(req.Days, 1, 3650, 90),
-	})
-	if err != nil {
-		writeError(w, http.StatusInternalServerError, err.Error())
-		return
-	}
 	name := strings.TrimSpace(req.Name)
 	if name == "" {
 		name = req.Domain
@@ -3215,21 +3201,75 @@ func (s *Server) handleCertificateACME(w http.ResponseWriter, r *http.Request) {
 	if directoryURL == "" {
 		directoryURL = "local-ca"
 	}
+	var certPEM, keyPEM, chainPEM, certificateURL, token, keyAuthorization string
+	var expiresAt time.Time
+	if strings.EqualFold(directoryURL, "local-ca") {
+		var err error
+		token, keyAuthorization, err = makeACMEHTTPChallenge()
+		if err != nil {
+			writeError(w, http.StatusInternalServerError, err.Error())
+			return
+		}
+		certificate, privateKey, err := makeSelfSignedCertificate(certificateRequest{
+			Domain: req.Domain,
+			DNS:    domains,
+			IP:     req.IP,
+			Days:   clampInt(req.Days, 1, 3650, 90),
+		})
+		if err != nil {
+			writeError(w, http.StatusInternalServerError, err.Error())
+			return
+		}
+		certPEM, keyPEM = string(certificate), string(privateKey)
+		expiresAt = time.Now().UTC().Add(time.Duration(clampInt(req.Days, 1, 3650, 90)) * 24 * time.Hour)
+	} else {
+		if challengeType != "http-01" {
+			writeError(w, http.StatusBadRequest, "real ACME issuance currently supports http-01 only")
+			return
+		}
+		ctx, cancel := context.WithTimeout(r.Context(), acmeIssueTimeout)
+		defer cancel()
+		issued, err := s.acmeIssuer.Issue(ctx, ACMEIssueRequest{
+			DirectoryURL: directoryURL, Email: strings.TrimSpace(req.Email), Domains: domains, ChallengeType: challengeType,
+		}, s.acmeChallenges.present)
+		if err != nil {
+			_ = s.createCertificateOperationLog(r, "certificate.acme.issue", "failed", "", err.Error(), map[string]any{
+				"domain": req.Domain, "directory_url": directoryURL, "challenge_type": challengeType,
+			})
+			_ = s.audit(r, "certificate.acme.issue_failed", req.Domain, "", err.Error())
+			writeError(w, http.StatusBadGateway, err.Error())
+			return
+		}
+		certPEM, keyPEM, chainPEM = issued.CertificatePEM, issued.PrivateKeyPEM, issued.ChainPEM
+		certificateURL, expiresAt = issued.CertificateURL, issued.ExpiresAt
+	}
 	metadata := cloneMetadata(req.Metadata)
 	metadata["domain"] = req.Domain
 	metadata["dns_names"] = domains
 	metadata["ip_addresses"] = metadataStrings(req.IP)
-	metadata["certificate"] = string(certPEM)
-	metadata["private_key"] = string(keyPEM)
+	metadata["certificate"] = certPEM
+	metadata["private_key"] = keyPEM
+	if chainPEM != "" {
+		metadata["chain"] = chainPEM
+	}
 	metadata["has_private_key"] = true
-	metadata["expires_at"] = time.Now().UTC().Add(time.Duration(clampInt(req.Days, 1, 3650, 90)) * 24 * time.Hour)
+	metadata["expires_at"] = expiresAt
 	metadata["acme_directory_url"] = directoryURL
-	metadata["acme_mode"] = "local-ca"
+	if strings.EqualFold(directoryURL, "local-ca") {
+		metadata["acme_mode"] = "local-ca"
+	} else {
+		metadata["acme_mode"] = "acme"
+	}
 	metadata["acme_order_status"] = "valid"
 	metadata["acme_challenge_type"] = challengeType
-	metadata["acme_http_token"] = token
-	metadata["acme_http_key_authorization"] = keyAuthorization
-	metadata["acme_http_url"] = "/.well-known/acme-challenge/" + token
+	if token != "" {
+		metadata["acme_http_token"] = token
+		metadata["acme_http_key_authorization"] = keyAuthorization
+		metadata["acme_http_url"] = "/.well-known/acme-challenge/" + token
+	}
+	if certificateURL != "" {
+		metadata["acme_certificate_url"] = certificateURL
+	}
 	metadata["issued_at"] = time.Now().UTC()
 	if strings.TrimSpace(req.Email) != "" {
 		metadata["account_email"] = strings.TrimSpace(req.Email)
@@ -3257,7 +3297,7 @@ func (s *Server) handleCertificateACME(w http.ResponseWriter, r *http.Request) {
 		Name:        name,
 		Type:        "acme",
 		Status:      "issued",
-		Description: "ACME/local-ca certificate for " + req.Domain,
+		Description: "ACME certificate for " + req.Domain,
 		Metadata:    metadata,
 	})
 	if err != nil {
@@ -3273,15 +3313,15 @@ func (s *Server) handleCertificateACME(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
-	if err := s.createCertificateOperationLog(r, "certificate.acme.issue", "success", item.ID, "issued local ACME certificate for "+req.Domain, map[string]any{
-		"domain": req.Domain,
+	if err := s.createCertificateOperationLog(r, "certificate.acme.issue", "success", item.ID, "issued ACME certificate for "+req.Domain, map[string]any{
+		"domain": req.Domain, "mode": metadata["acme_mode"], "directory_url": directoryURL,
 	}); err != nil {
 		err = s.rollbackCreatedPlatformItem("certificates", item.ID, err)
 		writeError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
 	_ = s.audit(r, "certificate.acme.request", item.ID, "", "requested ACME certificate for "+req.Domain)
-	_ = s.audit(r, "certificate.acme.issue", item.ID, "", "issued local ACME certificate for "+req.Domain)
+	_ = s.audit(r, "certificate.acme.issue", item.ID, "", "issued ACME certificate for "+req.Domain)
 	if req.Default {
 		snapshot, err := s.certificateSnapshot()
 		if err != nil {
@@ -3673,6 +3713,11 @@ func (s *Server) handleACMEHTTPChallenge(w http.ResponseWriter, r *http.Request)
 	token = strings.TrimSpace(strings.Trim(token, "/"))
 	if token == "" || strings.ContainsAny(token, "/\\\x00\r\n\t") {
 		writeError(w, http.StatusBadRequest, "invalid challenge token")
+		return
+	}
+	if keyAuthorization, ok := s.acmeChallenges.get(token); ok {
+		w.Header().Set("Content-Type", "text/plain; charset=utf-8")
+		_, _ = io.WriteString(w, keyAuthorization)
 		return
 	}
 	items, err := s.cfg.Store.ListPlatformItems("certificates")

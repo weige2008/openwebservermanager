@@ -2,6 +2,7 @@ package app
 
 import (
 	"archive/zip"
+	"context"
 	"database/sql"
 	"encoding/json"
 	"errors"
@@ -32,7 +33,7 @@ func (s *Server) runScheduledTask(_ *http.Request, task model.PlatformItem) (str
 		metadata, err := s.checkAssetStatuses(task)
 		return "asset status check completed", metadata, err
 	case "certificate-renewal":
-		metadata, err := s.renewDueSelfSignedCertificates(task)
+		metadata, err := s.renewDueCertificates(task)
 		return "certificate renewal completed", metadata, err
 	default:
 		taskType := normalizeScheduledTaskType(task.Type)
@@ -1154,7 +1155,7 @@ func defaultProtocolPort(protocol model.Protocol) int {
 	}
 }
 
-func (s *Server) renewDueSelfSignedCertificates(task model.PlatformItem) (map[string]any, error) {
+func (s *Server) renewDueCertificates(task model.PlatformItem) (map[string]any, error) {
 	items, err := s.cfg.Store.ListPlatformItems("certificates")
 	if err != nil {
 		return nil, err
@@ -1166,7 +1167,8 @@ func (s *Server) renewDueSelfSignedCertificates(task model.PlatformItem) (map[st
 	skipped := 0
 	results := []map[string]any{}
 	for _, item := range items {
-		if !strings.EqualFold(item.Type, "self-signed") {
+		certificateType := strings.ToLower(strings.TrimSpace(item.Type))
+		if certificateType != "self-signed" && certificateType != "acme" {
 			skipped++
 			continue
 		}
@@ -1187,23 +1189,61 @@ func (s *Server) renewDueSelfSignedCertificates(task model.PlatformItem) (map[st
 			skipped++
 			continue
 		}
-		certPEM, keyPEM, err := makeSelfSignedCertificate(certificateRequest{
-			Domain: domain,
-			DNS:    metadataStrings(item.Metadata["dns"]),
-			IP:     metadataStrings(item.Metadata["ip"]),
-			Days:   validityDays,
-		})
-		if err != nil {
-			return nil, err
-		}
 		nextMetadata := map[string]any{}
 		for key, value := range item.Metadata {
 			nextMetadata[key] = value
 		}
-		nextExpiresAt := time.Now().UTC().Add(time.Duration(clampInt(validityDays, 1, 3650, 365)) * 24 * time.Hour)
+		var certPEM, keyPEM, chainPEM, certificateURL string
+		var nextExpiresAt time.Time
+		acmeMode := firstMetadataString(item.Metadata, "acme_mode")
+		directoryURL := firstMetadataString(item.Metadata, "acme_directory_url")
+		if certificateType == "acme" && !strings.EqualFold(acmeMode, "local-ca") && !strings.EqualFold(directoryURL, "local-ca") {
+			raw, ok, err := s.cfg.Store.GetPlatformItem("certificates", item.ID)
+			if err != nil {
+				return nil, err
+			}
+			if !ok {
+				return nil, fmt.Errorf("certificate %s disappeared during renewal", item.ID)
+			}
+			if err := s.decryptCertificatePrivateKey(&raw); err != nil {
+				return nil, err
+			}
+			ctx, cancel := context.WithTimeout(context.Background(), acmeIssueTimeout)
+			issued, issueErr := s.acmeIssuer.Issue(ctx, ACMEIssueRequest{
+				DirectoryURL:  directoryURL,
+				Email:         firstMetadataString(item.Metadata, "account_email"),
+				Domains:       uniqueNonEmptyStrings(append([]string{domain}, metadataStrings(item.Metadata["dns_names"])...)),
+				ChallengeType: firstMetadataString(item.Metadata, "acme_challenge_type"),
+				PrivateKeyPEM: firstMetadataString(raw.Metadata, "private_key"),
+			}, s.acmeChallenges.present)
+			cancel()
+			if issueErr != nil {
+				return nil, fmt.Errorf("renew ACME certificate %s: %w", item.ID, issueErr)
+			}
+			certPEM, keyPEM, chainPEM = issued.CertificatePEM, issued.PrivateKeyPEM, issued.ChainPEM
+			certificateURL, nextExpiresAt = issued.CertificateURL, issued.ExpiresAt
+		} else {
+			certificate, privateKey, err := makeSelfSignedCertificate(certificateRequest{
+				Domain: domain,
+				DNS:    metadataStrings(item.Metadata["dns_names"]),
+				IP:     metadataStrings(item.Metadata["ip_addresses"]),
+				Days:   validityDays,
+			})
+			if err != nil {
+				return nil, err
+			}
+			certPEM, keyPEM = string(certificate), string(privateKey)
+			nextExpiresAt = time.Now().UTC().Add(time.Duration(clampInt(validityDays, 1, 3650, 365)) * 24 * time.Hour)
+		}
 		nextMetadata["domain"] = domain
-		nextMetadata["certificate"] = string(certPEM)
-		nextMetadata["private_key"] = string(keyPEM)
+		nextMetadata["certificate"] = certPEM
+		nextMetadata["private_key"] = keyPEM
+		if chainPEM != "" {
+			nextMetadata["chain"] = chainPEM
+		}
+		if certificateURL != "" {
+			nextMetadata["acme_certificate_url"] = certificateURL
+		}
 		nextMetadata["previous_expires_at"] = expiresAt
 		nextMetadata["expires_at"] = nextExpiresAt
 		nextMetadata["renewed_at"] = time.Now().UTC()

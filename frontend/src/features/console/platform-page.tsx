@@ -2346,47 +2346,32 @@ function CertificateUploadDialog({ onClose, canUpload }: { onClose: () => void; 
 function CertificateACMEDialog({ onClose, canUsePath }: { onClose: () => void; canUsePath: CanUsePath }) {
   const app = useApp()
   const canIssueACME = canUsePath('POST', '/api/admin/certificates/acme')
-  const canReadDNSProviders = canUsePath('GET', '/api/admin/certificates/dns-providers')
-  const [providers, setProviders] = useState<PlatformItem[]>([])
   const [name, setName] = useState('')
   const [domain, setDomain] = useState('')
   const [dns, setDNS] = useState('')
   const [ip, setIP] = useState('')
   const [email, setEmail] = useState('')
   const [days, setDays] = useState('90')
-  const [challengeType, setChallengeType] = useState('http-01')
-  const [dnsProviderID, setDNSProviderID] = useState('')
+  const [issuanceMode, setIssuanceMode] = useState('letsencrypt')
+  const [customDirectoryURL, setCustomDirectoryURL] = useState('')
   const [defaultCert, setDefaultCert] = useState(false)
   const [mtlsEnabled, setMTLSEnabled] = useState(false)
   const [saving, setSaving] = useState(false)
   const [issued, setIssued] = useState<PlatformItem | null>(null)
-
-  useEffect(() => {
-    if (!canReadDNSProviders) {
-      setProviders([])
-      setDNSProviderID('')
-      return
-    }
-    let alive = true
-    const load = async () => {
-      try {
-        const data = await apiRequest<{ items: PlatformItem[] }>('/api/admin/certificates/dns-providers')
-        if (alive) setProviders(data.items || [])
-      } catch {
-        if (alive) setProviders([])
-      }
-    }
-    void load()
-    return () => {
-      alive = false
-    }
-  }, [canReadDNSProviders])
 
   const submit = async () => {
     if (!canIssueACME) {
       app.showToast(app.t('permissionDenied', 'Permission denied'))
       return
     }
+    const directoryURL = issuanceMode === 'letsencrypt'
+      ? 'https://acme-v02.api.letsencrypt.org/directory'
+      : issuanceMode === 'staging'
+        ? 'https://acme-staging-v02.api.letsencrypt.org/directory'
+        : issuanceMode === 'local-ca'
+          ? 'local-ca'
+          : customDirectoryURL.trim()
+    if (!directoryURL) return
     setSaving(true)
     try {
       const item = await apiRequest<PlatformItem>('/api/admin/certificates/acme', {
@@ -2398,8 +2383,8 @@ function CertificateACMEDialog({ onClose, canUsePath }: { onClose: () => void; c
           ip: splitCSV(ip),
           email,
           days: Number(days) || 90,
-          challenge_type: challengeType,
-          dns_provider_id: dnsProviderID || undefined,
+          directory_url: directoryURL,
+          challenge_type: 'http-01',
           default: defaultCert,
           mtls_enabled: mtlsEnabled,
         }),
@@ -2415,38 +2400,37 @@ function CertificateACMEDialog({ onClose, canUsePath }: { onClose: () => void; c
   }
 
   return (
-    <DialogShell open onOpenChange={(open) => !open && onClose()} title='ACME / Local CA' description='签发本地可用的 ACME 流程证书，记录 HTTP-01 challenge、订单状态和申请日志。'>
+    <DialogShell
+      open
+      onOpenChange={(open) => !open && onClose()}
+      title={app.t('certificateAcmeTitle', 'ACME certificate')}
+      description={app.t('certificateAcmeDescription', 'Issue a certificate through ACME HTTP-01 or use the local CA mode for offline environments.')}
+    >
       <div className='grid gap-4'>
         <div className='grid gap-3 sm:grid-cols-2'>
-          <Field label='名称'><Input value={name} onChange={(event) => setName(event.currentTarget.value)} /></Field>
-          <Field label='主域名'><Input value={domain} onChange={(event) => setDomain(event.currentTarget.value)} placeholder='example.com' /></Field>
+          <Field label={app.t('certificateName', 'Name')}><Input value={name} onChange={(event) => setName(event.currentTarget.value)} /></Field>
+          <Field label={app.t('primaryDomain', 'Primary domain')}><Input value={domain} onChange={(event) => setDomain(event.currentTarget.value)} placeholder='example.com' /></Field>
           <Field label='DNS SAN'><Input value={dns} onChange={(event) => setDNS(event.currentTarget.value)} placeholder='www.example.com,api.example.com' /></Field>
           <Field label='IP SAN'><Input value={ip} onChange={(event) => setIP(event.currentTarget.value)} placeholder='127.0.0.1,10.0.0.1' /></Field>
-          <Field label='邮箱'><Input value={email} onChange={(event) => setEmail(event.currentTarget.value)} placeholder='ops@example.com' /></Field>
-          <Field label='有效天数'><Input type='number' value={days} onChange={(event) => setDays(event.currentTarget.value)} /></Field>
-          <Field label='Challenge'>
-            <Select value={challengeType} onChange={(event) => setChallengeType(event.currentTarget.value)}>
-              <option value='http-01'>HTTP-01</option>
-              <option value='dns-01'>DNS-01</option>
+          <Field label={app.t('email', 'Email')}><Input value={email} onChange={(event) => setEmail(event.currentTarget.value)} placeholder='ops@example.com' /></Field>
+          <Field label={app.t('issuanceMode', 'Issuance mode')}>
+            <Select value={issuanceMode} onChange={(event) => setIssuanceMode(event.currentTarget.value)}>
+              <option value='letsencrypt'>{app.t('letsEncryptProduction', "Let's Encrypt production")}</option>
+              <option value='staging'>{app.t('letsEncryptStaging', "Let's Encrypt staging")}</option>
+              <option value='local-ca'>{app.t('localCA', 'Local CA')}</option>
+              <option value='custom'>{app.t('customDirectory', 'Custom directory')}</option>
             </Select>
           </Field>
-          <Field label='DNS provider'>
-            <Select value={dnsProviderID} onChange={(event) => setDNSProviderID(event.currentTarget.value)}>
-              <option value=''>{app.t('none', 'None')}</option>
-              {providers.map((provider) => (
-                <option key={provider.id} value={provider.id}>{provider.name}</option>
-              ))}
-            </Select>
-            {!canReadDNSProviders ? (
-              <p className='mt-1 text-xs leading-5 text-muted-foreground'>
-                {app.t('dnsProviderReadPermissionRequired', 'DNS provider list requires read permission. HTTP-01 and ACME requests without a saved provider can still be submitted.')}
-              </p>
-            ) : null}
-          </Field>
+          {issuanceMode === 'custom' ? (
+            <Field label={app.t('directoryURL', 'Directory URL')}><Input value={customDirectoryURL} onChange={(event) => setCustomDirectoryURL(event.currentTarget.value)} placeholder='https://acme.example.com/directory' /></Field>
+          ) : null}
+          {issuanceMode === 'local-ca' ? (
+            <Field label={app.t('validityDays', 'Validity days')}><Input type='number' value={days} onChange={(event) => setDays(event.currentTarget.value)} /></Field>
+          ) : null}
         </div>
         <div className='grid gap-2 sm:grid-cols-2'>
-          <CheckboxRow checked={defaultCert} onChange={setDefaultCert} label='设为默认证书' />
-          <CheckboxRow checked={mtlsEnabled} onChange={setMTLSEnabled} label='启用 mTLS 标记' />
+          <CheckboxRow checked={defaultCert} onChange={setDefaultCert} label={app.t('setDefaultCertificate', 'Set as default certificate')} />
+          <CheckboxRow checked={mtlsEnabled} onChange={setMTLSEnabled} label={app.t('enableMTLSFlag', 'Enable mTLS flag')} />
         </div>
         {issued ? (
           <div className='rounded-xl border border-border bg-background/60 p-3 text-sm'>
@@ -2455,16 +2439,16 @@ function CertificateACMEDialog({ onClose, canUsePath }: { onClose: () => void; c
               <Badge tone={statusTone(issued.status)}>{issued.status}</Badge>
             </div>
             <div className='mt-2 grid gap-1 text-xs text-muted-foreground'>
-              <span>{app.t('challenge', 'Challenge')}: {metadataText(issued.metadata?.acme_http_url) || '-'}</span>
+              <span>{app.t('issuanceMode', 'Issuance mode')}: {metadataText(issued.metadata?.acme_mode) || '-'}</span>
               <span>{app.t('expiresAt', 'Expires at')}: {formatDate(metadataText(issued.metadata?.expires_at))}</span>
             </div>
           </div>
         ) : null}
         <div className='flex justify-end gap-2'>
-          <Button variant='outline' onClick={onClose}>关闭</Button>
-          <Button variant='primary' onClick={() => void submit()} disabled={saving || !domain.trim() || !canIssueACME}>
+          <Button variant='outline' onClick={onClose}>{app.t('close', 'Close')}</Button>
+          <Button variant='primary' onClick={() => void submit()} disabled={saving || !domain.trim() || !canIssueACME || (issuanceMode === 'custom' && !customDirectoryURL.trim())}>
             <Save className='size-4' />
-            {saving ? '签发中' : '签发'}
+            {saving ? app.t('issuing', 'Issuing') : app.t('issue', 'Issue')}
           </Button>
         </div>
       </div>

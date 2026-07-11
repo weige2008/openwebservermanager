@@ -10394,6 +10394,70 @@ func TestCertificateOperationLogPersistenceFailureRollsBackMutations(t *testing.
 	}
 }
 
+type fakeACMEIssuer struct {
+	requests []ACMEIssueRequest
+	err      error
+}
+
+func (f *fakeACMEIssuer) Issue(_ context.Context, req ACMEIssueRequest, present ACMEChallengePresenter) (ACMEIssueResult, error) {
+	f.requests = append(f.requests, req)
+	if f.err != nil {
+		return ACMEIssueResult{}, f.err
+	}
+	cleanup := present("live-token", "live-token.key-authorization")
+	cleanup()
+	certificate, privateKey, err := makeSelfSignedCertificate(certificateRequest{Domain: req.Domains[0], DNS: req.Domains, Days: 60})
+	if err != nil {
+		return ACMEIssueResult{}, err
+	}
+	return ACMEIssueResult{
+		CertificatePEM: string(certificate),
+		PrivateKeyPEM:  string(privateKey),
+		CertificateURL: "https://acme.test/cert/1",
+		ExpiresAt:      time.Now().UTC().Add(60 * 24 * time.Hour),
+	}, nil
+}
+
+func TestCertificateACMEUsesConfiguredIssuerAndRuntimeChallenge(t *testing.T) {
+	issuer := &fakeACMEIssuer{}
+	server, cookie := newTestServer(t, func(cfg *Config) { cfg.ACMEIssuer = issuer })
+
+	badChallenge := assertStatus(t, server, http.MethodPost, "/api/admin/certificates/acme", map[string]any{
+		"domain": "wildcard.example.test", "directory_url": "https://acme.test/directory", "challenge_type": "dns-01",
+	}, cookie, http.StatusBadRequest)
+	if !strings.Contains(badChallenge.Body.String(), "http-01 only") || len(issuer.requests) != 0 {
+		t.Fatalf("unsupported real ACME challenge was not rejected before issuance: %s", badChallenge.Body.String())
+	}
+
+	rec := assertStatus(t, server, http.MethodPost, "/api/admin/certificates/acme", map[string]any{
+		"name": "production-acme", "domain": "example.test", "dns": []string{"www.example.test"},
+		"email": "ops@example.test", "directory_url": "https://acme.test/directory", "challenge_type": "http-01",
+	}, cookie, http.StatusCreated)
+	var certificate model.PlatformItem
+	decodeResponse(t, rec, &certificate)
+	if len(issuer.requests) != 1 || issuer.requests[0].DirectoryURL != "https://acme.test/directory" || len(issuer.requests[0].Domains) != 2 {
+		t.Fatalf("unexpected ACME issuer request: %#v", issuer.requests)
+	}
+	if firstMetadataString(certificate.Metadata, "acme_mode") != "acme" || firstMetadataString(certificate.Metadata, "acme_certificate_url") == "" {
+		t.Fatalf("real ACME metadata missing: %#v", certificate.Metadata)
+	}
+	if firstMetadataString(certificate.Metadata, "acme_http_token", "acme_http_key_authorization") != "" {
+		t.Fatalf("completed real ACME challenge leaked into persisted metadata: %#v", certificate.Metadata)
+	}
+	raw, ok, err := server.cfg.Store.GetPlatformItem("certificates", certificate.ID)
+	if err != nil || !ok || firstMetadataString(raw.Metadata, "certificate_private_key_encrypted") == "" {
+		t.Fatalf("real ACME private key was not encrypted: ok=%v err=%v metadata=%#v", ok, err, raw.Metadata)
+	}
+
+	cleanup := server.acmeChallenges.present("runtime-token", "runtime-token.response")
+	challenge := assertStatus(t, server, http.MethodGet, "/.well-known/acme-challenge/runtime-token", nil, nil, http.StatusOK)
+	if strings.TrimSpace(challenge.Body.String()) != "runtime-token.response" {
+		t.Fatalf("runtime challenge response = %q", challenge.Body.String())
+	}
+	cleanup()
+	assertStatus(t, server, http.MethodGet, "/.well-known/acme-challenge/runtime-token", nil, nil, http.StatusNotFound)
+}
+
 func TestAssetSensitiveMetadataIsNotPersistedOrExported(t *testing.T) {
 	handler, cookie := newTestHandler(t)
 	server := handler.(*Server)
@@ -12022,8 +12086,9 @@ func TestBackupOperationLogPersistenceFailures(t *testing.T) {
 }
 
 func TestScheduledTaskRunners(t *testing.T) {
-	handler, cookie := newTestHandler(t)
-	srv := handler.(*Server)
+	issuer := &fakeACMEIssuer{}
+	srv, cookie := newTestServer(t, func(cfg *Config) { cfg.ACMEIssuer = issuer })
+	handler := http.Handler(srv)
 
 	backupTaskRec := assertStatus(t, handler, http.MethodPost, "/api/admin/scheduled-tasks", map[string]any{
 		"name":   "Backup now",
@@ -12464,6 +12529,15 @@ func TestScheduledTaskRunners(t *testing.T) {
 		"status":   "disabled",
 		"metadata": disabledCert.Metadata,
 	}, cookie, http.StatusOK)
+	realACMERec := assertStatus(t, handler, http.MethodPost, "/api/admin/certificates/acme", map[string]any{
+		"name": "renew-real-acme", "domain": "real-renew.example.test", "directory_url": "https://acme.test/directory", "challenge_type": "http-01",
+	}, cookie, http.StatusCreated)
+	var realACMECert model.PlatformItem
+	decodeResponse(t, realACMERec, &realACMECert)
+	realACMECert.Metadata["expires_at"] = time.Now().Add(-time.Hour).UTC().Format(time.RFC3339)
+	assertStatus(t, handler, http.MethodPatch, "/api/admin/certificates/"+realACMECert.ID, map[string]any{
+		"name": realACMECert.Name, "status": realACMECert.Status, "metadata": realACMECert.Metadata,
+	}, cookie, http.StatusOK)
 	renewTaskRec := assertStatus(t, handler, http.MethodPost, "/api/admin/scheduled-tasks", map[string]any{
 		"name":     "Renew certs",
 		"type":     "certificate-renewal",
@@ -12473,8 +12547,11 @@ func TestScheduledTaskRunners(t *testing.T) {
 	var renewTask model.PlatformItem
 	decodeResponse(t, renewTaskRec, &renewTask)
 	renewRunRec := assertStatus(t, handler, http.MethodPost, "/api/admin/scheduled-tasks/"+renewTask.ID+"/run", nil, cookie, http.StatusAccepted)
-	if !strings.Contains(renewRunRec.Body.String(), "renewed_count") || !strings.Contains(renewRunRec.Body.String(), cert.ID) {
+	if !strings.Contains(renewRunRec.Body.String(), "renewed_count") || !strings.Contains(renewRunRec.Body.String(), cert.ID) || !strings.Contains(renewRunRec.Body.String(), realACMECert.ID) {
 		t.Fatal("certificate renewal task did not renew due certificate")
+	}
+	if len(issuer.requests) != 2 || issuer.requests[1].PrivateKeyPEM == "" {
+		t.Fatalf("real ACME renewal did not reuse the encrypted certificate key: %#v", issuer.requests)
 	}
 	if strings.Contains(renewRunRec.Body.String(), disabledCert.ID) {
 		t.Fatal("certificate renewal task renewed a disabled certificate")

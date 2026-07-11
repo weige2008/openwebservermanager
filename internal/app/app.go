@@ -39,6 +39,7 @@ type Config struct {
 	LDAPAuthenticator   ldapAuthenticator
 	AgentRelay          *agentrelay.Manager
 	RecordingTranscoder RecordingTranscoder
+	ACMEIssuer          ACMEIssuer
 }
 
 type sshGatewayRuntime interface {
@@ -98,6 +99,8 @@ type Server struct {
 	agentRelay          *agentrelay.Manager
 	recordingTranscodes recordingTranscodeRegistry
 	recordingTranscoder RecordingTranscoder
+	acmeIssuer          ACMEIssuer
+	acmeChallenges      acmeChallengeRegistry
 	started             time.Time
 }
 
@@ -122,6 +125,10 @@ func NewServer(cfg Config) *Server {
 	if transcoder == nil {
 		transcoder = newGuacencTranscoderFromEnvironment()
 	}
+	acmeIssuer := cfg.ACMEIssuer
+	if acmeIssuer == nil {
+		acmeIssuer = realACMEIssuer{}
+	}
 	server := &Server{
 		cfg:                 cfg,
 		static:              http.FileServer(http.FS(sub)),
@@ -131,6 +138,7 @@ func NewServer(cfg Config) *Server {
 		ldap:                ldapAuth,
 		agentRelay:          relay,
 		recordingTranscoder: transcoder,
+		acmeIssuer:          acmeIssuer,
 		started:             time.Now().UTC(),
 	}
 	server.migrateLegacyRecordingPaths()

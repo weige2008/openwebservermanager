@@ -83,6 +83,7 @@ export function passkeyAttestationPayload(credential: PublicKeyCredential, chall
     response: {
       client_data_json: bufferToBase64URL(response.clientDataJSON),
       attestation_object: bufferToBase64URL(response.attestationObject),
+      transports: response.getTransports?.() || [],
     },
   }
 }

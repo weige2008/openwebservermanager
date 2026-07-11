@@ -3,10 +3,13 @@ param(
   [string]$UserName = "ubuntu",
   [string]$KeyPath = $(if (Test-Path -LiteralPath "$env:USERPROFILE\.ssh\openwebservermanager_deploy_rsa") { "$env:USERPROFILE\.ssh\openwebservermanager_deploy_rsa" } else { "$env:USERPROFILE\.ssh\servermanager_deploy_rsa" }),
   [string]$RemoteRoot = "/opt/openwebservermanager",
-  [int]$Port = 23876
+  [int]$Port = 23876,
+  [string]$PublicHost = ""
 )
 
 $ErrorActionPreference = "Stop"
+$ListenAddress = if ([string]::IsNullOrWhiteSpace($PublicHost)) { "0.0.0.0" } else { "127.0.0.1" }
+$TrustProxyHeaders = if ([string]::IsNullOrWhiteSpace($PublicHost)) { "false" } else { "true" }
 
 $commit = (git rev-parse --short HEAD).Trim()
 $archive = Join-Path $env:TEMP "openwebservermanager-$commit.tar"
@@ -67,7 +70,7 @@ Type=simple
 User=`$APP_USER
 Group=`$APP_GROUP
 WorkingDirectory=`$REMOTE_ROOT/src
-Environment=OPENWEBSERVERMANAGER_ADDR=0.0.0.0:`$PORT
+Environment=OPENWEBSERVERMANAGER_ADDR=$ListenAddress`:`$PORT
 Environment=OPENWEBSERVERMANAGER_DATA_DIR=`$REMOTE_ROOT/data
 Environment=OPENWEBSERVERMANAGER_VERSION=`$VERSION
 Environment=OPENWEBSERVERMANAGER_GUACD_HOST=127.0.0.1
@@ -76,6 +79,7 @@ Environment=OPENWEBSERVERMANAGER_GUACENC_PATH=/usr/local/bin/guacenc
 Environment=OPENWEBSERVERMANAGER_FFMPEG_PATH=/usr/bin/ffmpeg
 Environment=OPENWEBSERVERMANAGER_RECORDING_TRANSCODE_TIMEOUT_SECONDS=1800
 Environment=OPENWEBSERVERMANAGER_SHARED_DIR_MODE=0770
+Environment=OPENWEBSERVERMANAGER_TRUST_PROXY_HEADERS=$TrustProxyHeaders
 ExecStart=`$REMOTE_ROOT/bin/openwebservermanager
 Restart=always
 RestartSec=3
@@ -89,6 +93,9 @@ sudo systemctl enable --now guacd
 sudo systemctl restart guacd
 sudo systemctl enable --now openwebservermanager
 sudo systemctl restart openwebservermanager
+if [ -n "$PublicHost" ] && [ -f scripts/configure-https-linux.sh ]; then
+  sudo bash scripts/configure-https-linux.sh "`$PORT" "$PublicHost"
+fi
 systemctl --no-pager --full status openwebservermanager | sed -n '1,18p'
 "@
 

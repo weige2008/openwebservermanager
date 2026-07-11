@@ -1480,6 +1480,87 @@ func TestPasskeyRegistrationAndLogin(t *testing.T) {
 	}
 }
 
+func TestPasskeyRequiresUserVerificationAndValidatesUserHandle(t *testing.T) {
+	handler, adminCookie := newTestHandler(t)
+	privateKey, credentialID, _ := registerTestPasskeyWithCredentialID(t, handler, adminCookie, "admin", []byte("verified-passkey-credential"))
+
+	optionsRec := assertStatus(t, handler, http.MethodPost, "/api/auth/passkeys/register/options", map[string]any{}, adminCookie, http.StatusOK)
+	var registrationOptions testPasskeyCreationOptionsResponse
+	decodeResponse(t, optionsRec, &registrationOptions)
+	if registrationOptions.PublicKey.AuthenticatorSelection.UserVerification != "required" {
+		t.Fatalf("registration user verification = %q, want required", registrationOptions.PublicKey.AuthenticatorSelection.UserVerification)
+	}
+	loginOptions := testPasskeyLoginOptions(t, handler, "admin")
+	if loginOptions.PublicKey.UserVerification != "required" {
+		t.Fatalf("login user verification = %q, want required", loginOptions.PublicKey.UserVerification)
+	}
+	missingUVPayload := testPasskeyAssertionPayload(t, loginOptions.ChallengeID, loginOptions.PublicKey.Challenge, loginOptions.PublicKey.RPID, credentialID, privateKey, 2, false)
+	response := missingUVPayload["response"].(map[string]any)
+	authData, err := passkeyBase64Decode(response["authenticator_data"].(string))
+	if err != nil {
+		t.Fatal(err)
+	}
+	authData[32] &^= 0x04
+	response["authenticator_data"] = passkeyBase64Encode(authData)
+	missingUVRec := assertStatus(t, handler, http.MethodPost, "/api/auth/passkeys/login/verify", missingUVPayload, nil, http.StatusUnauthorized)
+	if !strings.Contains(missingUVRec.Body.String(), "user verification") {
+		t.Fatalf("missing UV response did not explain rejection: %s", missingUVRec.Body.String())
+	}
+
+	handleOptions := testPasskeyLoginOptions(t, handler, "admin")
+	handlePayload := testPasskeyAssertionPayload(t, handleOptions.ChallengeID, handleOptions.PublicKey.Challenge, handleOptions.PublicKey.RPID, credentialID, privateKey, 2, false)
+	handlePayload["response"].(map[string]any)["user_handle"] = passkeyBase64Encode([]byte("wrong-user-id"))
+	handleRec := assertStatus(t, handler, http.MethodPost, "/api/auth/passkeys/login/verify", handlePayload, nil, http.StatusUnauthorized)
+	if !strings.Contains(handleRec.Body.String(), "user handle mismatch") {
+		t.Fatalf("mismatched user handle response: %s", handleRec.Body.String())
+	}
+}
+
+func TestPasskeyCredentialWorksAfterServerRestart(t *testing.T) {
+	srv, adminCookie := newTestServer(t, nil)
+	privateKey, credentialID, passkey := registerTestPasskeyWithCredentialID(t, srv, adminCookie, "admin", []byte("restart-passkey-credential"))
+	raw, ok, err := srv.cfg.Store.GetPlatformItem("passkeys", passkey.ID)
+	if err != nil || !ok {
+		t.Fatalf("load restart passkey: ok=%v err=%v", ok, err)
+	}
+	transports := metadataStrings(raw.Metadata["transports"])
+	if strings.Join(transports, ",") != "internal,usb" {
+		t.Fatalf("passkey transports were not normalized and persisted: %#v", transports)
+	}
+
+	restarted := NewServer(srv.cfg)
+	options := testPasskeyLoginOptions(t, restarted, "admin")
+	if len(options.PublicKey.AllowCredentials) != 1 || strings.Join(options.PublicKey.AllowCredentials[0].Transports, ",") != "internal,usb" {
+		t.Fatalf("persisted passkey transports missing after restart: %#v", options.PublicKey.AllowCredentials)
+	}
+	payload := testPasskeyAssertionPayload(t, options.ChallengeID, options.PublicKey.Challenge, options.PublicKey.RPID, credentialID, privateKey, 2, false)
+	loginRec := assertStatus(t, restarted, http.MethodPost, "/api/auth/passkeys/login/verify", payload, nil, http.StatusOK)
+	if len(loginRec.Result().Cookies()) == 0 {
+		t.Fatal("persisted passkey did not create session after restart")
+	}
+}
+
+func TestPasskeyRejectsUnsupportedAttestationFormat(t *testing.T) {
+	privateKey, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	raw := testPasskeyAttestation(t, "example.com", []byte("attestation-format-credential"), privateKey, 1)
+	var object map[string]any
+	if err := cbor.Unmarshal(raw, &object); err != nil {
+		t.Fatal(err)
+	}
+	object["fmt"] = "packed"
+	object["attStmt"] = map[string]any{"sig": []byte("invalid")}
+	packed, err := cbor.Marshal(object)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := parsePasskeyAttestation(packed, "example.com"); err == nil || !strings.Contains(err.Error(), "unsupported") {
+		t.Fatalf("unsupported attestation was accepted: %v", err)
+	}
+}
+
 func TestPasskeyOperationLogFailureRollsBackMutations(t *testing.T) {
 	srv, adminCookie := newTestServer(t, nil)
 	handler := http.Handler(srv)
@@ -15862,6 +15943,7 @@ func testPasskeyRegistrationPayload(t *testing.T, options testPasskeyCreationOpt
 		"response": map[string]any{
 			"client_data_json":   passkeyBase64Encode(clientData),
 			"attestation_object": passkeyBase64Encode(attestation),
+			"transports":         []string{"internal", "usb", "invalid", "internal"},
 		},
 	}
 }
@@ -15907,7 +15989,7 @@ func testPasskeyAttestation(t *testing.T, rpID string, credentialID []byte, priv
 	rpHash := sha256.Sum256([]byte(rpID))
 	authData := make([]byte, 0, 37+16+2+len(credentialID)+len(coseKey))
 	authData = append(authData, rpHash[:]...)
-	authData = append(authData, 0x41)
+	authData = append(authData, 0x45)
 	counter := make([]byte, 4)
 	binary.BigEndian.PutUint32(counter, signCount)
 	authData = append(authData, counter...)
@@ -15960,7 +16042,7 @@ func testPasskeyAssertionAuthData(t *testing.T, rpID string, signCount uint32) [
 	rpHash := sha256.Sum256([]byte(rpID))
 	authData := make([]byte, 0, 37)
 	authData = append(authData, rpHash[:]...)
-	authData = append(authData, 0x01)
+	authData = append(authData, 0x05)
 	counter := make([]byte, 4)
 	binary.BigEndian.PutUint32(counter, signCount)
 	authData = append(authData, counter...)

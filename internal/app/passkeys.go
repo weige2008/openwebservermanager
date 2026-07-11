@@ -45,8 +45,9 @@ type passkeyRegisterVerifyRequest struct {
 }
 
 type passkeyAttestationReply struct {
-	ClientDataJSON    string `json:"client_data_json"`
-	AttestationObject string `json:"attestation_object"`
+	ClientDataJSON    string   `json:"client_data_json"`
+	AttestationObject string   `json:"attestation_object"`
+	Transports        []string `json:"transports"`
 }
 
 type passkeyLoginOptionsRequest struct {
@@ -137,7 +138,9 @@ type webauthnClientData struct {
 }
 
 type passkeyAttestationObject struct {
-	AuthData []byte `cbor:"authData"`
+	Format   string         `cbor:"fmt"`
+	AuthData []byte         `cbor:"authData"`
+	AttStmt  map[string]any `cbor:"attStmt"`
 }
 
 type passkeyEC2PublicKey struct {
@@ -213,7 +216,7 @@ func (s *Server) handlePasskeyRegisterOptions(w http.ResponseWriter, r *http.Req
 	exclude := make([]passkeyCredentialDescriptor, 0, len(existing))
 	for _, item := range existing {
 		if credentialID := passkeyCredentialID(item); credentialID != "" {
-			exclude = append(exclude, passkeyCredentialDescriptor{Type: "public-key", ID: credentialID})
+			exclude = append(exclude, passkeyCredentialDescriptor{Type: "public-key", ID: credentialID, Transports: normalizePasskeyTransports(metadataStrings(item.Metadata["transports"]))})
 		}
 	}
 	token, err := s.auth.createPasskeyRegistrationChallenge(passkeyChallenge{
@@ -240,7 +243,7 @@ func (s *Server) handlePasskeyRegisterOptions(w http.ResponseWriter, r *http.Req
 		Timeout:          60000,
 		AuthenticatorSelection: passkeyAuthenticatorSelection{
 			ResidentKey:      "preferred",
-			UserVerification: "preferred",
+			UserVerification: "required",
 		},
 		Attestation:        "none",
 		ExcludeCredentials: exclude,
@@ -319,6 +322,7 @@ func (s *Server) handlePasskeyRegisterVerify(w http.ResponseWriter, r *http.Requ
 			"rp_id":         challenge.RPID,
 			"aaguid":        passkeyBase64Encode(data.AAGUID),
 			"flags":         int(data.Flags),
+			"transports":    normalizePasskeyTransports(req.Response.Transports),
 			"created_ip":    challenge.ClientIP,
 			"user_agent":    trimMetadataTextForPasskey(r.UserAgent(), 512),
 		},
@@ -457,7 +461,7 @@ func (s *Server) handlePasskeyLoginOptions(w http.ResponseWriter, r *http.Reques
 	allow := make([]passkeyCredentialDescriptor, 0, len(items))
 	for _, item := range items {
 		if credentialID := passkeyCredentialID(item); credentialID != "" {
-			allow = append(allow, passkeyCredentialDescriptor{Type: "public-key", ID: credentialID})
+			allow = append(allow, passkeyCredentialDescriptor{Type: "public-key", ID: credentialID, Transports: normalizePasskeyTransports(metadataStrings(item.Metadata["transports"]))})
 		}
 	}
 	if len(allow) == 0 {
@@ -487,7 +491,7 @@ func (s *Server) handlePasskeyLoginOptions(w http.ResponseWriter, r *http.Reques
 		Timeout:          60000,
 		RPID:             requestRPID(r, s.cfg.TrustProxyHeaders),
 		AllowCredentials: allow,
-		UserVerification: "preferred",
+		UserVerification: "required",
 	}
 	writeJSON(w, http.StatusOK, passkeyOptionsResponse{ChallengeID: token, PublicKey: options})
 }
@@ -537,6 +541,13 @@ func (s *Server) handlePasskeyLoginVerify(w http.ResponseWriter, r *http.Request
 	if !ok {
 		s.recordPasskeyLoginFailure(w, r, challenge.Username, challenge.ClientIP, challenge.FailureKey, "passkey credential is not registered")
 		return
+	}
+	if userHandle := strings.TrimSpace(req.Response.UserHandle); userHandle != "" {
+		decodedUserHandle, err := passkeyBase64Decode(userHandle)
+		if err != nil || !bytes.Equal(decodedUserHandle, []byte(challenge.User.UserID)) {
+			s.recordPasskeyLoginFailure(w, r, challenge.Username, challenge.ClientIP, challenge.FailureKey, "passkey user handle mismatch")
+			return
+		}
 	}
 	authenticatorData, err := passkeyBase64Decode(req.Response.AuthenticatorData)
 	if err != nil {
@@ -774,6 +785,12 @@ func parsePasskeyAttestation(raw []byte, rpID string) (passkeyRegistrationData, 
 	if len(obj.AuthData) == 0 {
 		return passkeyRegistrationData{}, errors.New("attestation object missing auth data")
 	}
+	if obj.Format != "none" {
+		return passkeyRegistrationData{}, fmt.Errorf("unsupported passkey attestation format %q", obj.Format)
+	}
+	if len(obj.AttStmt) != 0 {
+		return passkeyRegistrationData{}, errors.New("none passkey attestation statement must be empty")
+	}
 	return parsePasskeyRegistrationAuthData(obj.AuthData, rpID)
 }
 
@@ -787,6 +804,9 @@ func parsePasskeyRegistrationAuthData(authData []byte, rpID string) (passkeyRegi
 	flags := authData[32]
 	if flags&0x01 == 0 {
 		return passkeyRegistrationData{}, errors.New("passkey user presence was not verified")
+	}
+	if flags&0x04 == 0 {
+		return passkeyRegistrationData{}, errors.New("passkey user verification was not performed")
 	}
 	if flags&0x40 == 0 {
 		return passkeyRegistrationData{}, errors.New("passkey attested credential data is missing")
@@ -828,7 +848,24 @@ func validatePasskeyAssertionAuthData(authData []byte, rpID string) (uint32, err
 	if authData[32]&0x01 == 0 {
 		return 0, errors.New("passkey user presence was not verified")
 	}
+	if authData[32]&0x04 == 0 {
+		return 0, errors.New("passkey user verification was not performed")
+	}
 	return binary.BigEndian.Uint32(authData[33:37]), nil
+}
+
+func normalizePasskeyTransports(values []string) []string {
+	allowed := map[string]bool{"ble": true, "hybrid": true, "internal": true, "nfc": true, "smart-card": true, "usb": true}
+	result := []string{}
+	seen := map[string]bool{}
+	for _, value := range values {
+		value = strings.ToLower(strings.TrimSpace(value))
+		if allowed[value] && !seen[value] {
+			seen[value] = true
+			result = append(result, value)
+		}
+	}
+	return result
 }
 
 func validatePasskeyRPHash(authData []byte, rpID string) error {

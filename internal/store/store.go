@@ -616,6 +616,8 @@ var platformCollections = []string{
 	"oidc_authorization_codes",
 	"oidc_access_tokens",
 	"auth_sessions",
+	"external_oidc_states",
+	"external_wecom_states",
 }
 
 func openPlatformDB(jsonPath string) (*sql.DB, error) {
@@ -1638,7 +1640,7 @@ func platformCollectionSet() map[string]bool {
 
 func privatePlatformCollection(collection string) bool {
 	switch collection {
-	case "notification_reads", "oidc_runtime", "oidc_authorization_codes", "oidc_access_tokens", "auth_sessions":
+	case "notification_reads", "oidc_runtime", "oidc_authorization_codes", "oidc_access_tokens", "auth_sessions", "external_oidc_states", "external_wecom_states":
 		return true
 	default:
 		return false
@@ -1647,7 +1649,7 @@ func privatePlatformCollection(collection string) bool {
 
 func ephemeralPlatformCollection(collection string) bool {
 	switch collection {
-	case "auth_sessions", "oidc_authorization_codes", "oidc_access_tokens":
+	case "auth_sessions", "oidc_authorization_codes", "oidc_access_tokens", "external_oidc_states", "external_wecom_states":
 		return true
 	default:
 		return false
@@ -1655,7 +1657,7 @@ func ephemeralPlatformCollection(collection string) bool {
 }
 
 func ephemeralPlatformCollections() []string {
-	return []string{"auth_sessions", "oidc_authorization_codes", "oidc_access_tokens"}
+	return []string{"auth_sessions", "oidc_authorization_codes", "oidc_access_tokens", "external_oidc_states", "external_wecom_states"}
 }
 
 func collectionPrefix(collection string) string {

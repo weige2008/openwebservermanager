@@ -20,12 +20,13 @@ import (
 )
 
 const externalOIDCStateTTL = 5 * time.Minute
+const externalOIDCStateCollection = "external_oidc_states"
 
 type externalOIDCState struct {
-	ProviderID string
-	Next       string
-	Nonce      string
-	ExpiresAt  time.Time
+	ProviderID string    `json:"provider_id"`
+	Next       string    `json:"next"`
+	Nonce      string    `json:"nonce"`
+	ExpiresAt  time.Time `json:"expires_at"`
 }
 
 type externalOIDCProvider struct {
@@ -102,7 +103,11 @@ func (s *Server) handleExternalOIDCStart(w http.ResponseWriter, r *http.Request)
 }
 
 func (s *Server) handleExternalOIDCCallback(w http.ResponseWriter, r *http.Request) {
-	state, ok := s.auth.consumeExternalOIDCState(r.URL.Query().Get("state"))
+	state, ok, err := s.auth.consumeExternalOIDCState(r.URL.Query().Get("state"))
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
 	if !ok {
 		writeError(w, http.StatusBadRequest, "oidc state is invalid or expired")
 		return
@@ -851,27 +856,48 @@ func (m *authManager) createExternalOIDCState(providerID, next string) (string, 
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	now := time.Now().UTC()
+	item := externalOIDCState{ProviderID: providerID, Next: next, Nonce: nonce, ExpiresAt: now.Add(externalOIDCStateTTL)}
+	if m.store != nil {
+		if err := m.pruneAuthRuntimeStates(externalOIDCStateCollection); err != nil {
+			return "", "", err
+		}
+		if err := m.persistAuthRuntimeState(externalOIDCStateCollection, state, item, item.ExpiresAt); err != nil {
+			return "", "", err
+		}
+		return state, nonce, nil
+	}
 	for key, item := range m.oidcStates {
 		if now.After(item.ExpiresAt) {
 			delete(m.oidcStates, key)
 		}
 	}
-	m.oidcStates[state] = externalOIDCState{ProviderID: providerID, Next: next, Nonce: nonce, ExpiresAt: now.Add(externalOIDCStateTTL)}
+	m.oidcStates[state] = item
 	return state, nonce, nil
 }
 
-func (m *authManager) consumeExternalOIDCState(value string) (externalOIDCState, bool) {
+func (m *authManager) consumeExternalOIDCState(value string) (externalOIDCState, bool, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
+	if m.store != nil {
+		var state externalOIDCState
+		ok, err := m.consumeAuthRuntimeState(externalOIDCStateCollection, value, &state)
+		if err != nil || !ok {
+			return externalOIDCState{}, ok, err
+		}
+		if !time.Now().UTC().Before(state.ExpiresAt) {
+			return externalOIDCState{}, false, nil
+		}
+		return state, true, nil
+	}
 	state, ok := m.oidcStates[value]
 	if !ok {
-		return externalOIDCState{}, false
+		return externalOIDCState{}, false, nil
 	}
 	delete(m.oidcStates, value)
 	if time.Now().UTC().After(state.ExpiresAt) {
-		return externalOIDCState{}, false
+		return externalOIDCState{}, false, nil
 	}
-	return state, true
+	return state, true, nil
 }
 
 func externalOIDCRedirectURI(r *http.Request, trustProxy bool) string {

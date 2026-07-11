@@ -6718,7 +6718,7 @@ func TestOIDCProviderStateSurvivesRestartWithoutPersistingPlainTokens(t *testing
 	if err != nil {
 		t.Fatalf("platform bootstrap after OIDC persistence: %v", err)
 	}
-	for _, privateCollection := range []string{"oidc_runtime", "oidc_authorization_codes", "oidc_access_tokens"} {
+	for _, privateCollection := range []string{"oidc_runtime", "oidc_authorization_codes", "oidc_access_tokens", "external_oidc_states", "external_wecom_states"} {
 		if _, exposed := bootstrap[privateCollection]; exposed {
 			t.Fatalf("private OIDC collection %s was exposed in bootstrap", privateCollection)
 		}
@@ -6726,6 +6726,93 @@ func TestOIDCProviderStateSurvivesRestartWithoutPersistingPlainTokens(t *testing
 	signingKey, ok, err := srv.cfg.Store.GetPlatformItem("oidc_runtime", "signing-key-v1")
 	if err != nil || !ok || firstMetadataString(signingKey.Metadata, "private_key_encrypted") == "" {
 		t.Fatalf("encrypted OIDC signing key missing: ok=%v err=%v item=%#v", ok, err, signingKey)
+	}
+}
+
+func TestExternalLoginStatesSurviveRestartWithoutPlaintextAndRemainOneTime(t *testing.T) {
+	srv, _ := newTestServer(t, nil)
+	oidcToken, oidcNonce, err := srv.auth.createExternalOIDCState("restart-sso", "/app/access")
+	if err != nil {
+		t.Fatalf("create persisted external OIDC state: %v", err)
+	}
+	oidcRecord, ok, err := srv.cfg.Store.GetPlatformItem(externalOIDCStateCollection, authSessionRecordID(oidcToken))
+	if err != nil || !ok {
+		t.Fatalf("load persisted external OIDC state: ok=%v err=%v", ok, err)
+	}
+	if oidcRecord.ID == oidcToken || strings.Contains(firstMetadataString(oidcRecord.Metadata, "payload"), oidcToken) {
+		t.Fatal("external OIDC state token was persisted in plaintext")
+	}
+
+	restarted := NewServer(srv.cfg)
+	oidcState, ok, err := restarted.auth.consumeExternalOIDCState(oidcToken)
+	if err != nil || !ok {
+		t.Fatalf("consume external OIDC state after restart: ok=%v err=%v", ok, err)
+	}
+	if oidcState.ProviderID != "restart-sso" || oidcState.Next != "/app/access" || oidcState.Nonce != oidcNonce {
+		t.Fatalf("unexpected restored external OIDC state: %#v", oidcState)
+	}
+	if _, ok, err := restarted.auth.consumeExternalOIDCState(oidcToken); err != nil || ok {
+		t.Fatalf("external OIDC state replay was accepted: ok=%v err=%v", ok, err)
+	}
+
+	wecomToken, err := srv.auth.createExternalWeComState("restart-wecom", "/app")
+	if err != nil {
+		t.Fatalf("create persisted external WeCom state: %v", err)
+	}
+	wecomRecord, ok, err := srv.cfg.Store.GetPlatformItem(externalWeComStateCollection, authSessionRecordID(wecomToken))
+	if err != nil || !ok {
+		t.Fatalf("load persisted external WeCom state: ok=%v err=%v", ok, err)
+	}
+	if wecomRecord.ID == wecomToken || strings.Contains(firstMetadataString(wecomRecord.Metadata, "payload"), wecomToken) {
+		t.Fatal("external WeCom state token was persisted in plaintext")
+	}
+	restarted = NewServer(srv.cfg)
+	wecomState, ok, err := restarted.auth.consumeExternalWeComState(wecomToken)
+	if err != nil || !ok || wecomState.ProviderID != "restart-wecom" || wecomState.Next != "/app" {
+		t.Fatalf("consume external WeCom state after restart: state=%#v ok=%v err=%v", wecomState, ok, err)
+	}
+	if _, ok, err := restarted.auth.consumeExternalWeComState(wecomToken); err != nil || ok {
+		t.Fatalf("external WeCom state replay was accepted: ok=%v err=%v", ok, err)
+	}
+
+	expiredToken := "expired-external-oidc-state"
+	expired := externalOIDCState{ProviderID: "expired", Next: "/app", Nonce: "expired-nonce", ExpiresAt: time.Now().Add(-time.Minute).UTC()}
+	if err := srv.auth.persistAuthRuntimeState(externalOIDCStateCollection, expiredToken, expired, expired.ExpiresAt); err != nil {
+		t.Fatalf("save expired external OIDC state: %v", err)
+	}
+	if _, ok, err := NewServer(srv.cfg).auth.consumeExternalOIDCState(expiredToken); err != nil || ok {
+		t.Fatalf("expired external OIDC state was accepted: ok=%v err=%v", ok, err)
+	}
+	if _, ok, err := srv.cfg.Store.GetPlatformItem(externalOIDCStateCollection, authSessionRecordID(expiredToken)); err != nil || ok {
+		t.Fatalf("expired external OIDC state was not removed: ok=%v err=%v", ok, err)
+	}
+
+	retryToken, err := srv.auth.createExternalWeComState("delete-failure-wecom", "/app/access")
+	if err != nil {
+		t.Fatal(err)
+	}
+	removeDeleteBlocker := blockPlatformItemDeletePayloadFragment(t, srv.cfg.Store, externalWeComStateCollection, `"name":"external_wecom_states"`)
+	if _, ok, err := srv.auth.consumeExternalWeComState(retryToken); err == nil || ok {
+		t.Fatalf("state delete failure was not reported: ok=%v err=%v", ok, err)
+	}
+	removeDeleteBlocker()
+	if _, ok, err := NewServer(srv.cfg).auth.consumeExternalWeComState(retryToken); err != nil || !ok {
+		t.Fatalf("state was not retryable after delete failure: ok=%v err=%v", ok, err)
+	}
+
+	removeCreateBlocker := blockPlatformItemCreate(t, srv.cfg.Store, externalOIDCStateCollection)
+	if _, _, err := srv.auth.createExternalOIDCState("blocked-sso", "/app"); err == nil {
+		t.Fatal("external OIDC state persistence failure was ignored")
+	}
+	removeCreateBlocker()
+	bootstrap, err := srv.cfg.Store.PlatformBootstrap()
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, collection := range []string{externalOIDCStateCollection, externalWeComStateCollection} {
+		if _, exposed := bootstrap[collection]; exposed {
+			t.Fatalf("private external login state collection %s was exposed", collection)
+		}
 	}
 }
 
@@ -7304,6 +7391,7 @@ func TestExternalOIDCCallbackProviderErrorConsumesStateAndAudits(t *testing.T) {
 	if err != nil {
 		t.Fatalf("create external oidc state: %v", err)
 	}
+	handler = NewServer(srv.cfg)
 	failedRec := assertStatus(t, handler, http.MethodGet, "/api/auth/oidc/callback?state="+url.QueryEscape(state)+"&error=access_denied", nil, nil, http.StatusBadRequest)
 	if !strings.Contains(failedRec.Body.String(), "oidc provider returned error: access_denied") {
 		t.Fatalf("oidc provider error response missing reason: %s", failedRec.Body.String())
@@ -8970,6 +9058,7 @@ func TestExternalWeComCallbackProviderErrorConsumesStateAndAudits(t *testing.T) 
 	if err != nil {
 		t.Fatalf("create external wecom state: %v", err)
 	}
+	handler = NewServer(srv.cfg)
 	failedRec := assertStatus(t, handler, http.MethodGet, "/api/auth/wecom/callback?state="+url.QueryEscape(state)+"&error=access_denied", nil, nil, http.StatusBadRequest)
 	if !strings.Contains(failedRec.Body.String(), "wecom provider returned error: access_denied") {
 		t.Fatalf("wecom provider error response missing reason: %s", failedRec.Body.String())

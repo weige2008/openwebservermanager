@@ -360,6 +360,64 @@ func (m *authManager) prunePersistedSessions() error {
 	return nil
 }
 
+func (m *authManager) persistAuthRuntimeState(collection, token string, payload any, expiresAt time.Time) error {
+	if m.store == nil {
+		return nil
+	}
+	encoded, err := json.Marshal(payload)
+	if err != nil {
+		return err
+	}
+	_, err = m.store.SavePlatformItem(collection, model.PlatformItem{
+		ID: authSessionRecordID(token), Name: collection, Type: "auth-runtime", Status: "active",
+		Metadata: map[string]any{"payload": string(encoded), "expires_at": expiresAt.UTC().Format(time.RFC3339Nano)},
+	})
+	return err
+}
+
+func (m *authManager) consumeAuthRuntimeState(collection, token string, target any) (bool, error) {
+	if m.store == nil {
+		return false, nil
+	}
+	id := authSessionRecordID(token)
+	item, ok, err := m.store.GetPlatformItem(collection, id)
+	if err != nil || !ok {
+		return ok, err
+	}
+	if err := m.store.DeletePlatformItem(collection, id); err != nil {
+		return false, err
+	}
+	payload, _ := item.Metadata["payload"].(string)
+	if payload == "" {
+		return false, errors.New("persisted authentication state is missing payload")
+	}
+	if err := json.Unmarshal([]byte(payload), target); err != nil {
+		return false, fmt.Errorf("decode persisted authentication state: %w", err)
+	}
+	return true, nil
+}
+
+func (m *authManager) pruneAuthRuntimeStates(collection string) error {
+	if m.store == nil {
+		return nil
+	}
+	items, err := m.store.ListPlatformItems(collection)
+	if err != nil {
+		return err
+	}
+	now := time.Now().UTC()
+	for _, item := range items {
+		expiresAt, ok := metadataTime(item.Metadata["expires_at"])
+		if ok && now.Before(expiresAt) {
+			continue
+		}
+		if err := m.store.DeletePlatformItem(collection, item.ID); err != nil && !errors.Is(err, os.ErrNotExist) {
+			return err
+		}
+	}
+	return nil
+}
+
 func (m *authManager) checkLoginAllowed(key string, policy loginFailurePolicy) (time.Duration, bool) {
 	m.mu.Lock()
 	defer m.mu.Unlock()

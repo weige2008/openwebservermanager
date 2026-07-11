@@ -16,11 +16,12 @@ import (
 )
 
 const externalWeComStateTTL = 5 * time.Minute
+const externalWeComStateCollection = "external_wecom_states"
 
 type externalWeComState struct {
-	ProviderID string
-	Next       string
-	ExpiresAt  time.Time
+	ProviderID string    `json:"provider_id"`
+	Next       string    `json:"next"`
+	ExpiresAt  time.Time `json:"expires_at"`
 }
 
 type externalWeComProvider struct {
@@ -117,7 +118,11 @@ func (s *Server) handleExternalWeComStart(w http.ResponseWriter, r *http.Request
 }
 
 func (s *Server) handleExternalWeComCallback(w http.ResponseWriter, r *http.Request) {
-	state, ok := s.auth.consumeExternalWeComState(r.URL.Query().Get("state"))
+	state, ok, err := s.auth.consumeExternalWeComState(r.URL.Query().Get("state"))
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
 	if !ok {
 		writeError(w, http.StatusBadRequest, "wecom state is invalid or expired")
 		return
@@ -552,27 +557,48 @@ func (m *authManager) createExternalWeComState(providerID, next string) (string,
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	now := time.Now().UTC()
+	item := externalWeComState{ProviderID: providerID, Next: next, ExpiresAt: now.Add(externalWeComStateTTL)}
+	if m.store != nil {
+		if err := m.pruneAuthRuntimeStates(externalWeComStateCollection); err != nil {
+			return "", err
+		}
+		if err := m.persistAuthRuntimeState(externalWeComStateCollection, state, item, item.ExpiresAt); err != nil {
+			return "", err
+		}
+		return state, nil
+	}
 	for key, item := range m.wecomStates {
 		if now.After(item.ExpiresAt) {
 			delete(m.wecomStates, key)
 		}
 	}
-	m.wecomStates[state] = externalWeComState{ProviderID: providerID, Next: next, ExpiresAt: now.Add(externalWeComStateTTL)}
+	m.wecomStates[state] = item
 	return state, nil
 }
 
-func (m *authManager) consumeExternalWeComState(value string) (externalWeComState, bool) {
+func (m *authManager) consumeExternalWeComState(value string) (externalWeComState, bool, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
+	if m.store != nil {
+		var state externalWeComState
+		ok, err := m.consumeAuthRuntimeState(externalWeComStateCollection, value, &state)
+		if err != nil || !ok {
+			return externalWeComState{}, ok, err
+		}
+		if !time.Now().UTC().Before(state.ExpiresAt) {
+			return externalWeComState{}, false, nil
+		}
+		return state, true, nil
+	}
 	state, ok := m.wecomStates[value]
 	if !ok {
-		return externalWeComState{}, false
+		return externalWeComState{}, false, nil
 	}
 	delete(m.wecomStates, value)
 	if time.Now().UTC().After(state.ExpiresAt) {
-		return externalWeComState{}, false
+		return externalWeComState{}, false, nil
 	}
-	return state, true
+	return state, true, nil
 }
 
 func externalWeComRedirectURI(r *http.Request, trustProxy bool) string {

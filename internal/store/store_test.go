@@ -241,6 +241,7 @@ func TestRestoreSnapshotRestoresSQLiteCoreRecords(t *testing.T) {
 	if err != nil {
 		t.Fatalf("open store: %v", err)
 	}
+	defer st.Close()
 	if _, err := st.SetupAdmin("old-admin", "password123"); err != nil {
 		t.Fatalf("setup old admin: %v", err)
 	}

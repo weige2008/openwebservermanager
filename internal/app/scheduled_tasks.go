@@ -1109,7 +1109,12 @@ func checkSQLiteDatabaseAssetReachability(path string) (string, string) {
 }
 
 func sqliteReadOnlyDSN(path string) string {
-	endpoint := url.URL{Scheme: "file", Path: filepath.ToSlash(path)}
+	uriPath := filepath.ToSlash(path)
+	if filepath.VolumeName(path) != "" && !strings.HasPrefix(uriPath, "/") {
+		// SQLite file URIs require /C:/... for absolute Windows paths.
+		uriPath = "/" + uriPath
+	}
+	endpoint := url.URL{Scheme: "file", Path: uriPath}
 	query := endpoint.Query()
 	query.Set("mode", "ro")
 	endpoint.RawQuery = query.Encode()

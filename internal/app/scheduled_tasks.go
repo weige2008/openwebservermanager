@@ -447,27 +447,14 @@ func (s *Server) finalizeScheduledTaskSetupFailure(r *http.Request, task, logIte
 }
 
 func (s *Server) reconcileInterruptedScheduledTaskLogs() {
-	items, err := s.cfg.Store.ListPlatformItems("operation_logs")
+	count, err := s.cfg.Store.ReconcileInterruptedScheduledTaskLogs(time.Now().UTC())
 	if err != nil {
 		return
 	}
-	now := time.Now().UTC()
-	for _, item := range items {
-		if item.Type != "scheduled_task" || item.Status != "running" {
-			continue
-		}
-		item.Metadata = cloneMetadata(item.Metadata)
-		item.Status = "failed"
-		item.Description = "scheduled task interrupted by service restart"
-		item.Metadata["completed_at"] = now
-		item.Metadata["error"] = item.Description
-		item.Metadata["interrupted"] = true
-		if _, err := s.cfg.Store.SavePlatformItem("operation_logs", item); err != nil {
-			continue
-		}
+	if count > 0 {
 		_ = s.cfg.Store.Audit(model.AuditLog{
-			UserID: "system", Action: "scheduled_task.interrupted", TargetID: item.TargetID,
-			Detail: item.Description,
+			UserID: "system", Action: "scheduled_task.interrupted",
+			Detail: fmt.Sprintf("marked %d interrupted scheduled task logs as failed", count),
 		})
 	}
 }

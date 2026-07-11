@@ -1304,6 +1304,35 @@ func (s *Store) DeletePlatformItem(collection, id string) error {
 	return nil
 }
 
+func (s *Store) ReconcileInterruptedScheduledTaskLogs(completedAt time.Time) (int64, error) {
+	completedAt = completedAt.UTC()
+	timestamp := completedAt.Format(time.RFC3339Nano)
+	message := "scheduled task interrupted by service restart"
+	result, err := s.db.Exec(`
+		UPDATE platform_records
+		SET payload = json_set(
+			payload,
+			'$.status', 'failed',
+			'$.description', ?,
+			'$.metadata.completed_at', ?,
+			'$.metadata.error', ?,
+			'$.metadata.interrupted', json('true'),
+			'$.updated_at', ?
+		), updated_at = ?
+		WHERE collection = 'operation_logs'
+		  AND json_extract(payload, '$.type') = 'scheduled_task'
+		  AND json_extract(payload, '$.status') = 'running'
+	`, message, timestamp, message, timestamp, timestamp)
+	if err != nil {
+		return 0, fmt.Errorf("reconcile interrupted scheduled task logs: %w", err)
+	}
+	count, err := result.RowsAffected()
+	if err != nil {
+		return 0, fmt.Errorf("count reconciled scheduled task logs: %w", err)
+	}
+	return count, nil
+}
+
 func (s *Store) RestoreSnapshot(legacyRaw []byte, sqlitePath string) (RestoreSummary, error) {
 	var nextState *state
 	legacyStateRestored := false

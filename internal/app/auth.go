@@ -42,6 +42,7 @@ type authSession struct {
 	UserID    string    `json:"id"`
 	Username  string    `json:"username"`
 	Role      string    `json:"role"`
+	AuthTime  time.Time `json:"auth_time"`
 	ExpiresAt time.Time `json:"expires_at"`
 }
 
@@ -121,11 +122,13 @@ func (m *authManager) create(admin store.AdminPublic) (string, authSession, erro
 	if err != nil {
 		return "", authSession{}, err
 	}
+	now := time.Now().UTC()
 	session := authSession{
 		UserID:    admin.UserID,
 		Username:  admin.Username,
 		Role:      admin.Role,
-		ExpiresAt: time.Now().Add(authSessionTTL).UTC(),
+		AuthTime:  now,
+		ExpiresAt: now.Add(authSessionTTL),
 	}
 	if err := m.prunePersistedSessions(); err != nil {
 		return "", authSession{}, err
@@ -685,6 +688,7 @@ func (s *Server) refreshAuthSession(token string, session authSession) (authSess
 		UserID:    user.UserID,
 		Username:  strings.TrimSpace(user.Username),
 		Role:      user.Role,
+		AuthTime:  session.AuthTime,
 		ExpiresAt: session.ExpiresAt,
 	}
 	if refreshed.Username == "" {
@@ -1037,30 +1041,36 @@ func (s *Server) recordExternalLDAPLoginFailure(r *http.Request, username, provi
 
 func (s *Server) handleLogout(w http.ResponseWriter, r *http.Request) {
 	if token, session, ok := s.authSession(r); ok {
-		hasOtherSession := s.auth.hasOtherUserSession(session.UserID, token)
-		if !hasOtherSession {
-			if err := s.cfg.Store.RecordUserLogout(session.UserID); err != nil {
-				detail := "persist user logout state failed: " + err.Error()
-				_ = s.audit(r, "auth.logout.state.persist_failed", session.UserID, "", detail)
-				writeError(w, http.StatusInternalServerError, detail)
-				return
-			}
-		}
-		if err := s.auth.delete(token); err != nil {
-			if !hasOtherSession {
-				if rollbackErr := s.cfg.Store.RecordUserLogin(session.UserID, s.clientIP(r), r.UserAgent()); rollbackErr != nil {
-					_ = s.audit(r, "auth.logout.state.rollback_failed", session.UserID, "", rollbackErr.Error())
-				}
-			}
-			detail := "revoke persisted auth session failed: " + err.Error()
-			_ = s.audit(r, "auth.logout.session.persist_failed", session.UserID, "", detail)
-			writeError(w, http.StatusInternalServerError, detail)
+		if err := s.revokeAuthSession(r, token, session); err != nil {
+			writeError(w, http.StatusInternalServerError, err.Error())
 			return
 		}
 		_ = s.audit(r, "auth.logout", session.UserID, "", "admin signed out")
 	}
 	http.SetCookie(w, s.authCookie(r, "", -1))
 	writeJSON(w, http.StatusOK, map[string]bool{"ok": true})
+}
+
+func (s *Server) revokeAuthSession(r *http.Request, token string, session authSession) error {
+	hasOtherSession := s.auth.hasOtherUserSession(session.UserID, token)
+	if !hasOtherSession {
+		if err := s.cfg.Store.RecordUserLogout(session.UserID); err != nil {
+			detail := "persist user logout state failed: " + err.Error()
+			_ = s.audit(r, "auth.logout.state.persist_failed", session.UserID, "", detail)
+			return errors.New(detail)
+		}
+	}
+	if err := s.auth.delete(token); err != nil {
+		if !hasOtherSession {
+			if rollbackErr := s.cfg.Store.RecordUserLogin(session.UserID, s.clientIP(r), r.UserAgent()); rollbackErr != nil {
+				_ = s.audit(r, "auth.logout.state.rollback_failed", session.UserID, "", rollbackErr.Error())
+			}
+		}
+		detail := "revoke persisted auth session failed: " + err.Error()
+		_ = s.audit(r, "auth.logout.session.persist_failed", session.UserID, "", detail)
+		return errors.New(detail)
+	}
+	return nil
 }
 
 func (s *Server) handleMe(w http.ResponseWriter, r *http.Request) {

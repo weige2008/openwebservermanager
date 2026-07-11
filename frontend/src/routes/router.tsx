@@ -81,8 +81,10 @@ function AuditGate({ children }: { children: ReactNode }) {
 function LoginGate() {
   const app = useApp()
   if (!app.booted) return <LoadingScreen />
-  if (app.auth) {
-    const next = new URLSearchParams(window.location.search).get('next')
+  const params = new URLSearchParams(window.location.search)
+  const reauthenticate = params.get('reauth') === '1'
+  if (app.auth && !reauthenticate) {
+    const next = params.get('next')
     if (next && next.startsWith('/') && !next.startsWith('//')) {
       window.location.assign(next)
       return <LoadingScreen />

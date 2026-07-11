@@ -6370,7 +6370,7 @@ func TestOIDCProviderAuthorizationCodeFlow(t *testing.T) {
 		t.Fatal("jwks did not include rsa signing key")
 	}
 
-	codeVerifier := "verifier-1234567890"
+	codeVerifier := "verifier-1234567890-abcdefghijklmnopqrstuvwxyz"
 	challengeRaw := sha256.Sum256([]byte(codeVerifier))
 	codeChallenge := base64.RawURLEncoding.EncodeToString(challengeRaw[:])
 	redirectURI := "https://client.example/callback"
@@ -6474,7 +6474,7 @@ func TestOIDCProviderAuthorizationCodeFlow(t *testing.T) {
 		}
 	}
 
-	clearedCodeVerifier := "cleared-verifier-1234567890"
+	clearedCodeVerifier := "cleared-verifier-1234567890-abcdefghijklmnop"
 	clearedChallengeRaw := sha256.Sum256([]byte(clearedCodeVerifier))
 	clearedCodeChallenge := base64.RawURLEncoding.EncodeToString(clearedChallengeRaw[:])
 	clearedAuthorizePath := "/api/oidc/authorize?" + url.Values{
@@ -6552,7 +6552,7 @@ func TestOIDCProviderAuthorizationCodeFlow(t *testing.T) {
 		t.Fatalf("public client without PKCE error did not explain requirement: %q", publicNoPKCELocation.String())
 	}
 
-	publicCodeVerifier := "public-verifier-1234567890"
+	publicCodeVerifier := "public-verifier-1234567890-abcdefghijklmnopq"
 	publicChallengeRaw := sha256.Sum256([]byte(publicCodeVerifier))
 	publicCodeChallenge := base64.RawURLEncoding.EncodeToString(publicChallengeRaw[:])
 	publicAuthorizePath := "/api/oidc/authorize?" + url.Values{
@@ -6592,6 +6592,165 @@ func TestOIDCProviderAuthorizationCodeFlow(t *testing.T) {
 	}
 }
 
+func TestOIDCPromptMaxAgeAndAuthenticationTime(t *testing.T) {
+	srv, adminCookie := newTestServer(t, nil)
+	handler := http.Handler(srv)
+	assertStatus(t, handler, http.MethodPost, "/api/admin/oidc-clients", map[string]any{
+		"name": "prompt-client", "type": "confidential", "status": "enabled", "password": "prompt-secret",
+		"metadata": map[string]any{"client_id": "prompt-client", "redirect_uris": []string{"https://client.example/prompt"}, "scopes": []string{"openid", "profile"}},
+	}, adminCookie, http.StatusCreated)
+	redirectURI := "https://client.example/prompt"
+	base := url.Values{
+		"response_type": {"code"}, "client_id": {"prompt-client"}, "redirect_uri": {redirectURI},
+		"scope": {"openid profile"}, "state": {"prompt-state"}, "nonce": {"prompt-nonce"},
+	}
+	authorize := func(values url.Values, cookie *http.Cookie) *httptest.ResponseRecorder {
+		t.Helper()
+		return assertStatus(t, handler, http.MethodGet, "/api/oidc/authorize?"+values.Encode(), nil, cookie, http.StatusFound)
+	}
+	redirectQuery := func(rec *httptest.ResponseRecorder) url.Values {
+		t.Helper()
+		location, err := url.Parse(rec.Header().Get("Location"))
+		if err != nil {
+			t.Fatalf("parse OIDC redirect: %v", err)
+		}
+		return location.Query()
+	}
+
+	promptNone := cloneURLValues(base)
+	promptNone.Set("prompt", "none")
+	if query := redirectQuery(authorize(promptNone, nil)); query.Get("error") != "login_required" || query.Get("state") != "prompt-state" {
+		t.Fatalf("unauthenticated prompt=none response: %v", query)
+	}
+	invalidPrompt := cloneURLValues(base)
+	invalidPrompt.Set("prompt", "none login")
+	if query := redirectQuery(authorize(invalidPrompt, adminCookie)); query.Get("error") != "invalid_request" {
+		t.Fatalf("combined prompt=none was accepted: %v", query)
+	}
+	unsupportedPrompt := cloneURLValues(base)
+	unsupportedPrompt.Set("prompt", "unsupported")
+	if query := redirectQuery(authorize(unsupportedPrompt, adminCookie)); query.Get("error") != "invalid_request" {
+		t.Fatalf("unsupported prompt was accepted: %v", query)
+	}
+	invalidMaxAge := cloneURLValues(base)
+	invalidMaxAge.Set("max_age", "-1")
+	if query := redirectQuery(authorize(invalidMaxAge, adminCookie)); query.Get("error") != "invalid_request" {
+		t.Fatalf("negative max_age was accepted: %v", query)
+	}
+	wrongResponseType := cloneURLValues(base)
+	wrongResponseType.Set("response_type", "token")
+	if query := redirectQuery(authorize(wrongResponseType, adminCookie)); query.Get("error") != "unsupported_response_type" || query.Get("state") != "prompt-state" {
+		t.Fatalf("unsupported response_type was not redirected safely: %v", query)
+	}
+	unsupportedResponseMode := cloneURLValues(base)
+	unsupportedResponseMode.Set("response_mode", "fragment")
+	if query := redirectQuery(authorize(unsupportedResponseMode, adminCookie)); query.Get("error") != "invalid_request" {
+		t.Fatalf("unsupported response_mode was accepted: %v", query)
+	}
+	methodWithoutChallenge := cloneURLValues(base)
+	methodWithoutChallenge.Set("code_challenge_method", "S256")
+	if query := redirectQuery(authorize(methodWithoutChallenge, adminCookie)); query.Get("error") != "invalid_request" {
+		t.Fatalf("PKCE method without challenge was accepted: %v", query)
+	}
+	shortChallenge := cloneURLValues(base)
+	shortChallenge.Set("code_challenge", "too-short")
+	shortChallenge.Set("code_challenge_method", "plain")
+	if query := redirectQuery(authorize(shortChallenge, adminCookie)); query.Get("error") != "invalid_request" {
+		t.Fatalf("short PKCE challenge was accepted: %v", query)
+	}
+
+	oldAuthTime := time.Now().Add(-time.Hour).UTC().Truncate(time.Second)
+	srv.auth.mu.Lock()
+	session := srv.auth.sessions[adminCookie.Value]
+	session.AuthTime = oldAuthTime
+	srv.auth.sessions[adminCookie.Value] = session
+	srv.auth.mu.Unlock()
+	if err := srv.auth.persistSession(adminCookie.Value, session); err != nil {
+		t.Fatalf("persist old authentication time: %v", err)
+	}
+	staleNone := cloneURLValues(base)
+	staleNone.Set("prompt", "none")
+	staleNone.Set("max_age", "10")
+	if query := redirectQuery(authorize(staleNone, adminCookie)); query.Get("error") != "login_required" {
+		t.Fatalf("stale prompt=none session did not require login: %v", query)
+	}
+
+	staleInteractive := cloneURLValues(base)
+	staleInteractive.Set("max_age", "10")
+	reauthRec := authorize(staleInteractive, adminCookie)
+	reauthLocation, err := url.Parse(reauthRec.Header().Get("Location"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if reauthLocation.Path != "/login" || reauthLocation.Query().Get("reauth") != "1" {
+		t.Fatalf("stale max_age did not enter reauthentication flow: %s", reauthLocation.String())
+	}
+	next := reauthLocation.Query().Get("next")
+	nextURL, err := url.Parse(next)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if nextURL.Query().Has("max_age") || nextURL.Query().Has("prompt") || nextURL.Query().Get("nonce") != "prompt-nonce" || nextURL.Query().Get("state") != "prompt-state" {
+		t.Fatalf("reauthentication resume request was not normalized safely: %s", next)
+	}
+	if cookies := reauthRec.Result().Cookies(); len(cookies) == 0 || cookies[0].MaxAge >= 0 {
+		t.Fatalf("reauthentication did not clear old auth cookie: %#v", cookies)
+	}
+	assertStatus(t, handler, http.MethodGet, "/api/auth/me", nil, adminCookie, http.StatusUnauthorized)
+
+	loginStarted := time.Now().UTC().Add(-time.Second)
+	loginRec := assertStatus(t, handler, http.MethodPost, "/api/auth/login", map[string]any{"username": "admin", "password": "password123"}, nil, http.StatusOK)
+	newCookie := loginRec.Result().Cookies()[0]
+	authorizeAfterLogin := assertStatus(t, handler, http.MethodGet, next, nil, newCookie, http.StatusFound)
+	code := redirectQuery(authorizeAfterLogin).Get("code")
+	if code == "" {
+		t.Fatal("reauthenticated OIDC request did not issue authorization code")
+	}
+	tokenRec := assertFormStatus(t, handler, "/api/oidc/token", url.Values{
+		"grant_type": {"authorization_code"}, "code": {code}, "redirect_uri": {redirectURI},
+	}, nil, map[string]string{"Authorization": "Basic " + base64.StdEncoding.EncodeToString([]byte("prompt-client:prompt-secret"))}, http.StatusOK)
+	var tokens map[string]any
+	decodeResponse(t, tokenRec, &tokens)
+	idToken, _ := tokens["id_token"].(string)
+	parts := strings.Split(idToken, ".")
+	if len(parts) != 3 {
+		t.Fatalf("invalid ID token: %q", idToken)
+	}
+	claimsRaw, err := base64.RawURLEncoding.DecodeString(parts[1])
+	if err != nil {
+		t.Fatal(err)
+	}
+	var claims map[string]any
+	if err := json.Unmarshal(claimsRaw, &claims); err != nil {
+		t.Fatal(err)
+	}
+	authTime, _ := claims["auth_time"].(float64)
+	iat, _ := claims["iat"].(float64)
+	if int64(authTime) < loginStarted.Unix() || int64(authTime) > time.Now().UTC().Unix() || int64(iat) < int64(authTime) {
+		t.Fatalf("ID token authentication timestamps are invalid: %#v", claims)
+	}
+	if claims["nonce"] != "prompt-nonce" || int64(authTime) == oldAuthTime.Unix() {
+		t.Fatalf("ID token did not bind fresh authentication and nonce: %#v", claims)
+	}
+
+	forceLogin := cloneURLValues(base)
+	forceLogin.Set("prompt", "login")
+	forceRec := authorize(forceLogin, newCookie)
+	forceLocation, err := url.Parse(forceRec.Header().Get("Location"))
+	if err != nil || forceLocation.Path != "/login" || forceLocation.Query().Get("reauth") != "1" {
+		t.Fatalf("prompt=login did not force reauthentication: %s err=%v", forceRec.Header().Get("Location"), err)
+	}
+	assertStatus(t, handler, http.MethodGet, "/api/auth/me", nil, newCookie, http.StatusUnauthorized)
+}
+
+func cloneURLValues(source url.Values) url.Values {
+	result := url.Values{}
+	for key, values := range source {
+		result[key] = append([]string(nil), values...)
+	}
+	return result
+}
+
 func TestOIDCTokenOperationLogPersistenceFailure(t *testing.T) {
 	srv, adminCookie := newTestServer(t, nil)
 	handler := http.Handler(srv)
@@ -6608,7 +6767,7 @@ func TestOIDCTokenOperationLogPersistenceFailure(t *testing.T) {
 		},
 	}, adminCookie, http.StatusCreated)
 
-	codeVerifier := "blocked-verifier-1234567890"
+	codeVerifier := "blocked-verifier-1234567890-abcdefghijklmnop"
 	challengeRaw := sha256.Sum256([]byte(codeVerifier))
 	codeChallenge := base64.RawURLEncoding.EncodeToString(challengeRaw[:])
 	redirectURI := "https://client.example/blocked-callback"
@@ -6701,6 +6860,21 @@ func TestOIDCProviderStateSurvivesRestartWithoutPersistingPlainTokens(t *testing
 	idToken, _ := tokenResponse["id_token"].(string)
 	if accessToken == "" || idToken == "" {
 		t.Fatalf("restart token exchange missing tokens: %#v", tokenResponse)
+	}
+	idTokenParts := strings.Split(idToken, ".")
+	if len(idTokenParts) != 3 {
+		t.Fatalf("restart ID token is malformed: %q", idToken)
+	}
+	claimsRaw, err := base64.RawURLEncoding.DecodeString(idTokenParts[1])
+	if err != nil {
+		t.Fatal(err)
+	}
+	var idTokenClaims map[string]any
+	if err := json.Unmarshal(claimsRaw, &idTokenClaims); err != nil {
+		t.Fatal(err)
+	}
+	if authTime, _ := idTokenClaims["auth_time"].(float64); authTime <= 0 || idTokenClaims["nonce"] != "restart-nonce" {
+		t.Fatalf("restart ID token lost authentication time or nonce: %#v", idTokenClaims)
 	}
 	assertOIDCRuntimeSecretsNotPlaintext(t, srv.cfg.Store, code, accessToken, "BEGIN PRIVATE KEY", "BEGIN RSA PRIVATE KEY")
 	assertFormStatus(t, handler, "/api/oidc/token", tokenForm, nil, map[string]string{

@@ -15,6 +15,7 @@ import (
 	"net/http"
 	"net/url"
 	"os"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -49,6 +50,7 @@ type oidcAuthorizationCode struct {
 	UserID              string
 	Username            string
 	Role                string
+	AuthTime            time.Time
 	ExpiresAt           time.Time
 }
 
@@ -175,6 +177,7 @@ func (s *Server) handleOIDCDiscovery(w http.ResponseWriter, r *http.Request) {
 		"scopes_supported":                      []string{"openid", "profile", "email"},
 		"claims_supported":                      []string{"sub", "iss", "aud", "exp", "iat", "auth_time", "nonce", "name", "preferred_username", "role"},
 		"code_challenge_methods_supported":      []string{"plain", "S256"},
+		"prompt_values_supported":               []string{"none", "login", "consent", "select_account"},
 	})
 }
 
@@ -194,10 +197,6 @@ func (s *Server) handleOIDCJWKS(w http.ResponseWriter, _ *http.Request) {
 
 func (s *Server) handleOIDCAuthorize(w http.ResponseWriter, r *http.Request) {
 	query := r.URL.Query()
-	if query.Get("response_type") != "code" {
-		writeError(w, http.StatusBadRequest, "unsupported response_type")
-		return
-	}
 	client, err := s.oidcClientByID(query.Get("client_id"))
 	if err != nil {
 		writeError(w, http.StatusBadRequest, err.Error())
@@ -208,31 +207,75 @@ func (s *Server) handleOIDCAuthorize(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "redirect_uri is not allowed for client")
 		return
 	}
+	if query.Get("response_type") != "code" {
+		s.redirectOIDCError(w, r, redirectURI, "unsupported_response_type", "only the authorization code flow is supported")
+		return
+	}
+	if responseMode := strings.TrimSpace(query.Get("response_mode")); responseMode != "" && responseMode != "query" {
+		s.redirectOIDCError(w, r, redirectURI, "invalid_request", "only query response_mode is supported")
+		return
+	}
 	scope, err := oidcValidateScope(client, query.Get("scope"))
 	if err != nil {
 		s.redirectOIDCError(w, r, redirectURI, "invalid_scope", err.Error())
 		return
 	}
+	codeChallenge := strings.TrimSpace(query.Get("code_challenge"))
 	codeChallengeMethod := strings.TrimSpace(query.Get("code_challenge_method"))
-	if codeChallengeMethod == "" {
+	if codeChallenge == "" && codeChallengeMethod != "" {
+		s.redirectOIDCError(w, r, redirectURI, "invalid_request", "code_challenge_method requires code_challenge")
+		return
+	}
+	if codeChallenge != "" && codeChallengeMethod == "" {
 		codeChallengeMethod = "plain"
 	}
-	if query.Get("code_challenge") != "" && codeChallengeMethod != "plain" && codeChallengeMethod != "S256" {
+	if codeChallenge != "" && codeChallengeMethod != "plain" && codeChallengeMethod != "S256" {
 		s.redirectOIDCError(w, r, redirectURI, "invalid_request", "unsupported code_challenge_method")
 		return
 	}
-	if oidcClientRequiresPKCE(client) && strings.TrimSpace(query.Get("code_challenge")) == "" {
+	if codeChallenge != "" && !oidcPKCEValueValid(codeChallenge) {
+		s.redirectOIDCError(w, r, redirectURI, "invalid_request", "code_challenge must be 43-128 RFC 7636 unreserved characters")
+		return
+	}
+	if oidcClientRequiresPKCE(client) && codeChallenge == "" {
 		s.redirectOIDCError(w, r, redirectURI, "invalid_request", "public clients must use PKCE")
 		return
 	}
-	_, session, ok := s.authSession(r)
+	prompts, err := oidcPromptValues(query.Get("prompt"))
+	if err != nil {
+		s.redirectOIDCError(w, r, redirectURI, "invalid_request", err.Error())
+		return
+	}
+	maxAge, hasMaxAge, err := oidcMaxAge(query.Get("max_age"))
+	if err != nil {
+		s.redirectOIDCError(w, r, redirectURI, "invalid_request", err.Error())
+		return
+	}
+	token, session, ok := s.authSession(r)
 	if !ok {
-		if query.Get("prompt") == "none" {
+		if prompts["none"] {
 			s.redirectOIDCError(w, r, redirectURI, "login_required", "user is not signed in")
 			return
 		}
-		next := r.URL.RequestURI()
-		http.Redirect(w, r, "/login?next="+url.QueryEscape(next), http.StatusFound)
+		s.redirectOIDCLogin(w, r, false)
+		return
+	}
+	requiresReauthentication := session.AuthTime.IsZero() || prompts["login"] || prompts["select_account"]
+	if hasMaxAge && (maxAge == 0 || time.Since(session.AuthTime) > maxAge) {
+		requiresReauthentication = true
+	}
+	if requiresReauthentication {
+		if prompts["none"] {
+			s.redirectOIDCError(w, r, redirectURI, "login_required", "user authentication is too old")
+			return
+		}
+		if err := s.revokeAuthSession(r, token, session); err != nil {
+			writeError(w, http.StatusInternalServerError, err.Error())
+			return
+		}
+		http.SetCookie(w, s.authCookie(r, "", -1))
+		_ = s.audit(r, "oidc.reauthenticate", oidcClientID(client), "", "OIDC request requires fresh authentication")
+		s.redirectOIDCLogin(w, r, true)
 		return
 	}
 	code, err := s.oidc.createAuthorizationCode(oidcAuthorizationCode{
@@ -240,11 +283,12 @@ func (s *Server) handleOIDCAuthorize(w http.ResponseWriter, r *http.Request) {
 		RedirectURI:         redirectURI,
 		Scope:               scope,
 		Nonce:               query.Get("nonce"),
-		CodeChallenge:       query.Get("code_challenge"),
+		CodeChallenge:       codeChallenge,
 		CodeChallengeMethod: codeChallengeMethod,
 		UserID:              session.UserID,
 		Username:            session.Username,
 		Role:                session.Role,
+		AuthTime:            session.AuthTime,
 		ExpiresAt:           time.Now().UTC().Add(oidcAuthorizationCodeTTL),
 	})
 	if err != nil {
@@ -260,6 +304,52 @@ func (s *Server) handleOIDCAuthorize(w http.ResponseWriter, r *http.Request) {
 	location.RawQuery = values.Encode()
 	_ = s.audit(r, "oidc.authorize", oidcClientID(client), "", "issued authorization code")
 	http.Redirect(w, r, location.String(), http.StatusFound)
+}
+
+func oidcPromptValues(raw string) (map[string]bool, error) {
+	result := map[string]bool{}
+	for _, value := range strings.Fields(strings.TrimSpace(raw)) {
+		switch value {
+		case "none", "login", "consent", "select_account":
+			result[value] = true
+		default:
+			return nil, fmt.Errorf("unsupported prompt value %q", value)
+		}
+	}
+	if result["none"] && len(result) > 1 {
+		return nil, errors.New("prompt none cannot be combined with other values")
+	}
+	return result, nil
+}
+
+func oidcMaxAge(raw string) (time.Duration, bool, error) {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return 0, false, nil
+	}
+	seconds, err := strconv.ParseInt(raw, 10, 64)
+	if err != nil || seconds < 0 {
+		return 0, false, errors.New("max_age must be a non-negative integer")
+	}
+	if seconds > int64((time.Duration(1<<63-1))/time.Second) {
+		return 0, false, errors.New("max_age is too large")
+	}
+	return time.Duration(seconds) * time.Second, true, nil
+}
+
+func (s *Server) redirectOIDCLogin(w http.ResponseWriter, r *http.Request, reauthenticate bool) {
+	nextURL := *r.URL
+	query := nextURL.Query()
+	if reauthenticate {
+		query.Del("prompt")
+		query.Del("max_age")
+	}
+	nextURL.RawQuery = query.Encode()
+	values := url.Values{"next": {nextURL.RequestURI()}}
+	if reauthenticate {
+		values.Set("reauth", "1")
+	}
+	http.Redirect(w, r, "/login?"+values.Encode(), http.StatusFound)
 }
 
 func (s *Server) handleOIDCToken(w http.ResponseWriter, r *http.Request) {
@@ -721,7 +811,7 @@ func oidcPKCEValid(code oidcAuthorizationCode, verifier string) bool {
 	if code.CodeChallenge == "" {
 		return true
 	}
-	if verifier == "" {
+	if !oidcPKCEValueValid(verifier) {
 		return false
 	}
 	switch code.CodeChallengeMethod {
@@ -733,6 +823,19 @@ func oidcPKCEValid(code oidcAuthorizationCode, verifier string) bool {
 	}
 }
 
+func oidcPKCEValueValid(value string) bool {
+	if len(value) < 43 || len(value) > 128 {
+		return false
+	}
+	for _, ch := range value {
+		if (ch >= 'a' && ch <= 'z') || (ch >= 'A' && ch <= 'Z') || (ch >= '0' && ch <= '9') || ch == '-' || ch == '.' || ch == '_' || ch == '~' {
+			continue
+		}
+		return false
+	}
+	return true
+}
+
 func (m *oidcManager) signIDToken(issuer string, code oidcAuthorizationCode) (string, error) {
 	now := time.Now().UTC()
 	claims := map[string]any{
@@ -741,10 +844,12 @@ func (m *oidcManager) signIDToken(issuer string, code oidcAuthorizationCode) (st
 		"aud":                code.ClientID,
 		"exp":                now.Add(oidcAccessTokenTTL).Unix(),
 		"iat":                now.Unix(),
-		"auth_time":          now.Unix(),
 		"name":               code.Username,
 		"preferred_username": code.Username,
 		"role":               code.Role,
+	}
+	if !code.AuthTime.IsZero() {
+		claims["auth_time"] = code.AuthTime.UTC().Unix()
 	}
 	if code.Nonce != "" {
 		claims["nonce"] = code.Nonce

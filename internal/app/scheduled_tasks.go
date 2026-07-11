@@ -1208,14 +1208,30 @@ func (s *Server) renewDueCertificates(task model.PlatformItem) (map[string]any, 
 			if err := s.decryptCertificatePrivateKey(&raw); err != nil {
 				return nil, err
 			}
+			challengeType := firstMetadataString(item.Metadata, "acme_challenge_type")
+			var dnsProvider DNSChallengeProvider
+			if strings.EqualFold(challengeType, "dns-01") {
+				providerID := firstMetadataString(item.Metadata, "dns_provider_id")
+				providerItem, ok, err := s.certificateDNSProviderByID(providerID)
+				if err != nil {
+					return nil, err
+				}
+				if !ok {
+					return nil, fmt.Errorf("renew ACME certificate %s: DNS provider is missing or disabled", item.ID)
+				}
+				dnsProvider, err = s.dnsChallengeProvider(providerItem)
+				if err != nil {
+					return nil, fmt.Errorf("renew ACME certificate %s: %w", item.ID, err)
+				}
+			}
 			ctx, cancel := context.WithTimeout(context.Background(), acmeIssueTimeout)
 			issued, issueErr := s.acmeIssuer.Issue(ctx, ACMEIssueRequest{
 				DirectoryURL:  directoryURL,
 				Email:         firstMetadataString(item.Metadata, "account_email"),
 				Domains:       uniqueNonEmptyStrings(append([]string{domain}, metadataStrings(item.Metadata["dns_names"])...)),
-				ChallengeType: firstMetadataString(item.Metadata, "acme_challenge_type"),
+				ChallengeType: challengeType,
 				PrivateKeyPEM: firstMetadataString(raw.Metadata, "private_key"),
-			}, s.acmeChallenges.present)
+			}, s.acmeChallengePresenter(dnsProvider))
 			cancel()
 			if issueErr != nil {
 				return nil, fmt.Errorf("renew ACME certificate %s: %w", item.ID, issueErr)

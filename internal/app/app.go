@@ -40,6 +40,7 @@ type Config struct {
 	AgentRelay          *agentrelay.Manager
 	RecordingTranscoder RecordingTranscoder
 	ACMEIssuer          ACMEIssuer
+	DNSProviderFactory  DNSChallengeProviderFactory
 }
 
 type sshGatewayRuntime interface {
@@ -101,6 +102,7 @@ type Server struct {
 	recordingTranscoder RecordingTranscoder
 	acmeIssuer          ACMEIssuer
 	acmeChallenges      acmeChallengeRegistry
+	dnsProviderFactory  DNSChallengeProviderFactory
 	started             time.Time
 }
 
@@ -129,6 +131,10 @@ func NewServer(cfg Config) *Server {
 	if acmeIssuer == nil {
 		acmeIssuer = realACMEIssuer{}
 	}
+	dnsProviderFactory := cfg.DNSProviderFactory
+	if dnsProviderFactory == nil {
+		dnsProviderFactory = realDNSChallengeProviderFactory{}
+	}
 	server := &Server{
 		cfg:                 cfg,
 		static:              http.FileServer(http.FS(sub)),
@@ -139,6 +145,7 @@ func NewServer(cfg Config) *Server {
 		agentRelay:          relay,
 		recordingTranscoder: transcoder,
 		acmeIssuer:          acmeIssuer,
+		dnsProviderFactory:  dnsProviderFactory,
 		started:             time.Now().UTC(),
 	}
 	server.migrateLegacyRecordingPaths()

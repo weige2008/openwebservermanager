@@ -115,11 +115,16 @@ type certificateACMERequest struct {
 }
 
 type dnsProviderRequest struct {
-	Name     string         `json:"name"`
-	Provider string         `json:"provider"`
-	Zone     string         `json:"zone"`
-	Token    string         `json:"token"`
-	Metadata map[string]any `json:"metadata"`
+	Name                       string         `json:"name"`
+	Provider                   string         `json:"provider"`
+	Status                     string         `json:"status"`
+	Zone                       string         `json:"zone"`
+	Token                      string         `json:"token"`
+	AccessKeyID                string         `json:"access_key_id"`
+	APIBaseURL                 string         `json:"api_base_url"`
+	PropagationTimeoutSeconds  int            `json:"propagation_timeout_seconds"`
+	PropagationIntervalSeconds int            `json:"propagation_interval_seconds"`
+	Metadata                   map[string]any `json:"metadata"`
 }
 
 type certificateMTLSRequest struct {
@@ -177,6 +182,9 @@ func (s *Server) handleResourceOperation(w http.ResponseWriter, r *http.Request,
 		return true
 	case path == "admin/certificates/dns-providers":
 		s.handleCertificateDNSProviders(w, r)
+		return true
+	case strings.HasPrefix(path, "admin/certificates/dns-providers/"):
+		s.handleCertificateDNSProviderItem(w, r, pathSegmentFromTrimmed(path, 3))
 		return true
 	case path == "admin/proxy-services":
 		s.handleProxyServices(w, r)
@@ -3201,6 +3209,31 @@ func (s *Server) handleCertificateACME(w http.ResponseWriter, r *http.Request) {
 	if directoryURL == "" {
 		directoryURL = "local-ca"
 	}
+	var dnsProviderItem model.PlatformItem
+	var dnsProvider DNSChallengeProvider
+	if dnsProviderID := strings.TrimSpace(req.DNSProviderID); dnsProviderID != "" {
+		provider, ok, err := s.certificateDNSProviderByID(dnsProviderID)
+		if err != nil {
+			writeError(w, http.StatusInternalServerError, err.Error())
+			return
+		}
+		if !ok {
+			writeError(w, http.StatusNotFound, "dns provider not found")
+			return
+		}
+		dnsProviderItem = provider
+		if challengeType == "dns-01" && !strings.EqualFold(directoryURL, "local-ca") {
+			dnsProvider, err = s.dnsChallengeProvider(provider)
+			if err != nil {
+				writeError(w, http.StatusBadRequest, err.Error())
+				return
+			}
+		}
+	}
+	if challengeType == "dns-01" && !strings.EqualFold(directoryURL, "local-ca") && dnsProvider == nil {
+		writeError(w, http.StatusBadRequest, "dns provider is required for dns-01")
+		return
+	}
 	var certPEM, keyPEM, chainPEM, certificateURL, token, keyAuthorization string
 	var expiresAt time.Time
 	if strings.EqualFold(directoryURL, "local-ca") {
@@ -3223,15 +3256,15 @@ func (s *Server) handleCertificateACME(w http.ResponseWriter, r *http.Request) {
 		certPEM, keyPEM = string(certificate), string(privateKey)
 		expiresAt = time.Now().UTC().Add(time.Duration(clampInt(req.Days, 1, 3650, 90)) * 24 * time.Hour)
 	} else {
-		if challengeType != "http-01" {
-			writeError(w, http.StatusBadRequest, "real ACME issuance currently supports http-01 only")
+		if challengeType != "http-01" && challengeType != "dns-01" {
+			writeError(w, http.StatusBadRequest, "ACME challenge type must be http-01 or dns-01")
 			return
 		}
 		ctx, cancel := context.WithTimeout(r.Context(), acmeIssueTimeout)
 		defer cancel()
 		issued, err := s.acmeIssuer.Issue(ctx, ACMEIssueRequest{
 			DirectoryURL: directoryURL, Email: strings.TrimSpace(req.Email), Domains: domains, ChallengeType: challengeType,
-		}, s.acmeChallenges.present)
+		}, s.acmeChallengePresenter(dnsProvider))
 		if err != nil {
 			_ = s.createCertificateOperationLog(r, "certificate.acme.issue", "failed", "", err.Error(), map[string]any{
 				"domain": req.Domain, "directory_url": directoryURL, "challenge_type": challengeType,
@@ -3274,19 +3307,10 @@ func (s *Server) handleCertificateACME(w http.ResponseWriter, r *http.Request) {
 	if strings.TrimSpace(req.Email) != "" {
 		metadata["account_email"] = strings.TrimSpace(req.Email)
 	}
-	if dnsProviderID := strings.TrimSpace(req.DNSProviderID); dnsProviderID != "" {
-		provider, ok, err := s.certificateDNSProviderByID(dnsProviderID)
-		if err != nil {
-			writeError(w, http.StatusInternalServerError, err.Error())
-			return
-		}
-		if !ok {
-			writeError(w, http.StatusNotFound, "dns provider not found")
-			return
-		}
-		metadata["dns_provider_id"] = provider.ID
-		metadata["dns_provider_name"] = provider.Name
-		if zone := firstMetadataString(provider.Metadata, "zone"); zone != "" {
+	if dnsProviderItem.ID != "" {
+		metadata["dns_provider_id"] = dnsProviderItem.ID
+		metadata["dns_provider_name"] = dnsProviderItem.Name
+		if zone := firstMetadataString(dnsProviderItem.Metadata, "zone"); zone != "" {
 			metadata["dns_provider_zone"] = zone
 		}
 	}
@@ -3404,9 +3428,39 @@ func (s *Server) handleCertificateDNSProviders(w http.ResponseWriter, r *http.Re
 			writeError(w, http.StatusBadRequest, "provider name is required")
 			return
 		}
+		providerName := normalizeDNSProviderName(req.Provider)
+		if providerName != "cloudflare" && providerName != "alidns" && providerName != "dnspod" {
+			writeError(w, http.StatusBadRequest, "provider must be cloudflare, alidns, or dnspod")
+			return
+		}
+		zone := normalizeDNSName(req.Zone)
+		if zone == "" {
+			writeError(w, http.StatusBadRequest, "DNS zone is required")
+			return
+		}
+		if providerName == "alidns" && strings.TrimSpace(req.AccessKeyID) == "" {
+			writeError(w, http.StatusBadRequest, "AliDNS access key ID is required")
+			return
+		}
+		if strings.TrimSpace(req.Token) == "" {
+			writeError(w, http.StatusBadRequest, "DNS provider token or secret is required")
+			return
+		}
 		metadata := cloneMetadata(req.Metadata)
-		metadata["provider"] = strings.TrimSpace(req.Provider)
-		metadata["zone"] = strings.TrimSpace(req.Zone)
+		metadata["provider"] = providerName
+		metadata["zone"] = zone
+		if accessKeyID := strings.TrimSpace(req.AccessKeyID); accessKeyID != "" {
+			metadata["access_key_id"] = accessKeyID
+		}
+		if apiBaseURL := strings.TrimSpace(req.APIBaseURL); apiBaseURL != "" {
+			metadata["api_base_url"] = apiBaseURL
+		}
+		if req.PropagationTimeoutSeconds > 0 {
+			metadata["propagation_timeout_seconds"] = req.PropagationTimeoutSeconds
+		}
+		if req.PropagationIntervalSeconds > 0 {
+			metadata["propagation_interval_seconds"] = req.PropagationIntervalSeconds
+		}
 		if strings.TrimSpace(req.Token) != "" {
 			metadata["dns_api_token"] = strings.TrimSpace(req.Token)
 		}
@@ -3422,8 +3476,8 @@ func (s *Server) handleCertificateDNSProviders(w http.ResponseWriter, r *http.Re
 			return
 		}
 		if err := s.createCertificateOperationLog(r, "certificate.dns_provider.create", "success", item.ID, "created DNS provider "+name, map[string]any{
-			"provider": strings.TrimSpace(req.Provider),
-			"zone":     strings.TrimSpace(req.Zone),
+			"provider": providerName,
+			"zone":     zone,
 		}); err != nil {
 			err = s.rollbackCreatedPlatformItem("system_settings", item.ID, err)
 			writeError(w, http.StatusInternalServerError, err.Error())
@@ -3431,6 +3485,129 @@ func (s *Server) handleCertificateDNSProviders(w http.ResponseWriter, r *http.Re
 		}
 		_ = s.audit(r, "certificate.dns_provider.create", item.ID, "", "created DNS provider "+name)
 		writeJSON(w, http.StatusCreated, item)
+	default:
+		writeError(w, http.StatusMethodNotAllowed, "method not allowed")
+	}
+}
+
+func (s *Server) handleCertificateDNSProviderItem(w http.ResponseWriter, r *http.Request, id string) {
+	if strings.TrimSpace(id) == "" {
+		writeError(w, http.StatusNotFound, "DNS provider not found")
+		return
+	}
+	raw, ok, err := s.cfg.Store.GetPlatformItem("system_settings", id)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	if !ok || !strings.EqualFold(raw.Type, "dns-provider") {
+		writeError(w, http.StatusNotFound, "DNS provider not found")
+		return
+	}
+	switch r.Method {
+	case http.MethodGet:
+		items, err := s.cfg.Store.ListPlatformItems("system_settings")
+		if err != nil {
+			writeError(w, http.StatusInternalServerError, err.Error())
+			return
+		}
+		for _, item := range items {
+			if item.ID == id {
+				writeJSON(w, http.StatusOK, item)
+				return
+			}
+		}
+		writeError(w, http.StatusNotFound, "DNS provider not found")
+	case http.MethodPatch:
+		var req dnsProviderRequest
+		if !decodeJSON(w, r, &req) {
+			return
+		}
+		providerName := normalizeDNSProviderName(defaultString(req.Provider, firstMetadataString(raw.Metadata, "provider")))
+		if providerName != "cloudflare" && providerName != "alidns" && providerName != "dnspod" {
+			writeError(w, http.StatusBadRequest, "provider must be cloudflare, alidns, or dnspod")
+			return
+		}
+		zone := normalizeDNSName(defaultString(req.Zone, firstMetadataString(raw.Metadata, "zone")))
+		if zone == "" {
+			writeError(w, http.StatusBadRequest, "DNS zone is required")
+			return
+		}
+		accessKeyID := strings.TrimSpace(req.AccessKeyID)
+		if accessKeyID == "" {
+			accessKeyID = firstMetadataString(raw.Metadata, "access_key_id")
+		}
+		if providerName == "alidns" && accessKeyID == "" {
+			writeError(w, http.StatusBadRequest, "AliDNS access key ID is required")
+			return
+		}
+		currentProviderName := normalizeDNSProviderName(firstMetadataString(raw.Metadata, "provider"))
+		if providerName != currentProviderName && strings.TrimSpace(req.Token) == "" {
+			writeError(w, http.StatusBadRequest, "a new token or secret is required when changing DNS provider type")
+			return
+		}
+		metadata := cloneMetadata(raw.Metadata)
+		metadata["provider"] = providerName
+		metadata["zone"] = zone
+		if accessKeyID != "" {
+			metadata["access_key_id"] = accessKeyID
+		} else {
+			delete(metadata, "access_key_id")
+		}
+		if apiBaseURL := strings.TrimSpace(req.APIBaseURL); apiBaseURL != "" {
+			metadata["api_base_url"] = apiBaseURL
+		}
+		if req.PropagationTimeoutSeconds > 0 {
+			metadata["propagation_timeout_seconds"] = req.PropagationTimeoutSeconds
+		}
+		if req.PropagationIntervalSeconds > 0 {
+			metadata["propagation_interval_seconds"] = req.PropagationIntervalSeconds
+		}
+		if token := strings.TrimSpace(req.Token); token != "" {
+			metadata["dns_api_token"] = token
+		}
+		name := strings.TrimSpace(req.Name)
+		if name == "" {
+			name = raw.Name
+		}
+		status := defaultString(req.Status, raw.Status)
+		updated, err := s.cfg.Store.UpdatePlatformItem("system_settings", id, model.PlatformItemRequest{
+			Name: name, Type: "dns-provider", Status: status, Metadata: metadata,
+		})
+		if err != nil {
+			writeError(w, http.StatusInternalServerError, err.Error())
+			return
+		}
+		if err := s.createCertificateOperationLog(r, "certificate.dns_provider.update", "success", id, "updated DNS provider "+name, map[string]any{"provider": providerName, "zone": zone}); err != nil {
+			_, _ = s.cfg.Store.SavePlatformItem("system_settings", raw)
+			writeError(w, http.StatusInternalServerError, err.Error())
+			return
+		}
+		_ = s.audit(r, "certificate.dns_provider.update", id, "", "updated DNS provider "+name)
+		writeJSON(w, http.StatusOK, updated)
+	case http.MethodDelete:
+		certificates, err := s.cfg.Store.ListPlatformItems("certificates")
+		if err != nil {
+			writeError(w, http.StatusInternalServerError, err.Error())
+			return
+		}
+		for _, certificate := range certificates {
+			if firstMetadataString(certificate.Metadata, "dns_provider_id") == id {
+				writeError(w, http.StatusConflict, "DNS provider is used by certificate "+certificate.Name)
+				return
+			}
+		}
+		if err := s.cfg.Store.DeletePlatformItem("system_settings", id); err != nil {
+			writeError(w, http.StatusInternalServerError, err.Error())
+			return
+		}
+		if err := s.createCertificateOperationLog(r, "certificate.dns_provider.delete", "success", id, "deleted DNS provider "+raw.Name, nil); err != nil {
+			_, _ = s.cfg.Store.SavePlatformItem("system_settings", raw)
+			writeError(w, http.StatusInternalServerError, err.Error())
+			return
+		}
+		_ = s.audit(r, "certificate.dns_provider.delete", id, "", "deleted DNS provider "+raw.Name)
+		w.WriteHeader(http.StatusNoContent)
 	default:
 		writeError(w, http.StatusMethodNotAllowed, "method not allowed")
 	}

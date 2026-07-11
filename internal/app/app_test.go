@@ -10017,6 +10017,40 @@ func TestResourceOperationEndpoints(t *testing.T) {
 			t.Fatalf("dns provider response leaked %s", leaked)
 		}
 	}
+	assertStatus(t, handler, http.MethodPost, "/api/admin/certificates/dns-providers", map[string]any{
+		"name": "invalid-alidns", "provider": "alidns", "zone": "example.test", "token": "secret",
+	}, cookie, http.StatusBadRequest)
+	temporaryProviderRec := assertStatus(t, handler, http.MethodPost, "/api/admin/certificates/dns-providers", map[string]any{
+		"name": "temporary-dnspod", "provider": "dnspod", "zone": "old.example.test", "token": "1,old-secret",
+	}, cookie, http.StatusCreated)
+	var temporaryProvider model.PlatformItem
+	decodeResponse(t, temporaryProviderRec, &temporaryProvider)
+	providerGetRec := assertStatus(t, handler, http.MethodGet, "/api/admin/certificates/dns-providers/"+temporaryProvider.ID, nil, cookie, http.StatusOK)
+	if strings.Contains(providerGetRec.Body.String(), "old-secret") || !strings.Contains(providerGetRec.Body.String(), "dns_api_token_set") {
+		t.Fatalf("DNS provider detail leaked or omitted secret state: %s", providerGetRec.Body.String())
+	}
+	providerTypeChangeRec := assertStatus(t, handler, http.MethodPatch, "/api/admin/certificates/dns-providers/"+temporaryProvider.ID, map[string]any{
+		"name": "unsafe-provider-change", "provider": "cloudflare", "zone": "example.test",
+	}, cookie, http.StatusBadRequest)
+	if !strings.Contains(providerTypeChangeRec.Body.String(), "new token") {
+		t.Fatalf("DNS provider type change without a new secret was accepted: %s", providerTypeChangeRec.Body.String())
+	}
+	providerPatchRec := assertStatus(t, handler, http.MethodPatch, "/api/admin/certificates/dns-providers/"+temporaryProvider.ID, map[string]any{
+		"name": "updated-dnspod", "provider": "dnspod", "zone": "example.test", "token": "2,new-secret", "propagation_timeout_seconds": 90,
+	}, cookie, http.StatusOK)
+	if !strings.Contains(providerPatchRec.Body.String(), "updated-dnspod") || strings.Contains(providerPatchRec.Body.String(), "new-secret") {
+		t.Fatalf("DNS provider update response invalid: %s", providerPatchRec.Body.String())
+	}
+	rawTemporaryProvider, ok, err := server.cfg.Store.GetPlatformItem("system_settings", temporaryProvider.ID)
+	if err != nil || !ok {
+		t.Fatalf("load updated DNS provider: ok=%v err=%v", ok, err)
+	}
+	decryptedDNSProviderToken, err := server.cfg.Store.DecryptPlatformSecret(firstMetadataString(rawTemporaryProvider.Metadata, "dns_api_token_encrypted"))
+	if err != nil || decryptedDNSProviderToken != "2,new-secret" {
+		t.Fatalf("updated DNS provider token was not encrypted correctly: token=%q err=%v", decryptedDNSProviderToken, err)
+	}
+	assertStatus(t, handler, http.MethodDelete, "/api/admin/certificates/dns-providers/"+temporaryProvider.ID, nil, cookie, http.StatusNoContent)
+	assertStatus(t, handler, http.MethodGet, "/api/admin/certificates/dns-providers/"+temporaryProvider.ID, nil, cookie, http.StatusNotFound)
 	dnsProvidersRec := assertStatus(t, handler, http.MethodGet, "/api/admin/certificates/dns-providers", nil, cookie, http.StatusOK)
 	if !strings.Contains(dnsProvidersRec.Body.String(), "cloudflare-test") || !strings.Contains(dnsProvidersRec.Body.String(), "dns_api_token_set") {
 		t.Fatal("dns provider list did not include configured provider state")
@@ -10052,6 +10086,10 @@ func TestResourceOperationEndpoints(t *testing.T) {
 	decodeResponse(t, acmeRec, &acmeCert)
 	if acmeCert.Status != "issued" || acmeCert.Type != "acme" {
 		t.Fatalf("unexpected acme certificate state: %#v", acmeCert)
+	}
+	dnsProviderDeleteConflict := assertStatus(t, handler, http.MethodDelete, "/api/admin/certificates/dns-providers/"+dnsProvider.ID, nil, cookie, http.StatusConflict)
+	if !strings.Contains(dnsProviderDeleteConflict.Body.String(), acmeCert.Name) {
+		t.Fatalf("used DNS provider delete conflict missing certificate: %s", dnsProviderDeleteConflict.Body.String())
 	}
 	if acmeCert.Metadata["certificate"] == "" || acmeCert.Metadata["expires_at"] == nil || acmeCert.Metadata["acme_http_url"] == "" {
 		t.Fatalf("acme response missing certificate metadata: %#v", acmeCert.Metadata)
@@ -10395,8 +10433,9 @@ func TestCertificateOperationLogPersistenceFailureRollsBackMutations(t *testing.
 }
 
 type fakeACMEIssuer struct {
-	requests []ACMEIssueRequest
-	err      error
+	requests      []ACMEIssueRequest
+	presentations []ACMEChallengePresentation
+	err           error
 }
 
 func (f *fakeACMEIssuer) Issue(_ context.Context, req ACMEIssueRequest, present ACMEChallengePresenter) (ACMEIssueResult, error) {
@@ -10404,8 +10443,15 @@ func (f *fakeACMEIssuer) Issue(_ context.Context, req ACMEIssueRequest, present 
 	if f.err != nil {
 		return ACMEIssueResult{}, f.err
 	}
-	cleanup := present("live-token", "live-token.key-authorization")
-	cleanup()
+	presentation := ACMEChallengePresentation{Type: req.ChallengeType, Domain: req.Domains[0], Token: "live-token", Value: "live-token.challenge-value"}
+	f.presentations = append(f.presentations, presentation)
+	cleanup, err := present(context.Background(), presentation)
+	if err != nil {
+		return ACMEIssueResult{}, err
+	}
+	if err := cleanup(context.Background()); err != nil {
+		return ACMEIssueResult{}, err
+	}
 	certificate, privateKey, err := makeSelfSignedCertificate(certificateRequest{Domain: req.Domains[0], DNS: req.Domains, Days: 60})
 	if err != nil {
 		return ACMEIssueResult{}, err
@@ -10418,15 +10464,59 @@ func (f *fakeACMEIssuer) Issue(_ context.Context, req ACMEIssueRequest, present 
 	}, nil
 }
 
+type fakeDNSChallengeProvider struct {
+	presented []ACMEChallengePresentation
+	cleaned   int
+	err       error
+}
+
+func (p *fakeDNSChallengeProvider) Present(_ context.Context, fqdn, value string) (ACMEChallengeCleanup, error) {
+	if p.err != nil {
+		return nil, p.err
+	}
+	p.presented = append(p.presented, ACMEChallengePresentation{Type: "dns-01", Domain: fqdn, Value: value})
+	return func(context.Context) error { p.cleaned++; return nil }, nil
+}
+
+type fakeDNSChallengeProviderFactory struct {
+	provider *fakeDNSChallengeProvider
+	configs  []DNSProviderConfig
+}
+
+func (f *fakeDNSChallengeProviderFactory) New(cfg DNSProviderConfig) (DNSChallengeProvider, error) {
+	f.configs = append(f.configs, cfg)
+	return f.provider, nil
+}
+
 func TestCertificateACMEUsesConfiguredIssuerAndRuntimeChallenge(t *testing.T) {
 	issuer := &fakeACMEIssuer{}
-	server, cookie := newTestServer(t, func(cfg *Config) { cfg.ACMEIssuer = issuer })
+	dnsProvider := &fakeDNSChallengeProvider{}
+	dnsFactory := &fakeDNSChallengeProviderFactory{provider: dnsProvider}
+	server, cookie := newTestServer(t, func(cfg *Config) {
+		cfg.ACMEIssuer = issuer
+		cfg.DNSProviderFactory = dnsFactory
+	})
 
 	badChallenge := assertStatus(t, server, http.MethodPost, "/api/admin/certificates/acme", map[string]any{
 		"domain": "wildcard.example.test", "directory_url": "https://acme.test/directory", "challenge_type": "dns-01",
 	}, cookie, http.StatusBadRequest)
-	if !strings.Contains(badChallenge.Body.String(), "http-01 only") || len(issuer.requests) != 0 {
+	if !strings.Contains(badChallenge.Body.String(), "dns provider is required") || len(issuer.requests) != 0 {
 		t.Fatalf("unsupported real ACME challenge was not rejected before issuance: %s", badChallenge.Body.String())
+	}
+	dnsProviderRec := assertStatus(t, server, http.MethodPost, "/api/admin/certificates/dns-providers", map[string]any{
+		"name": "Cloudflare DNS-01", "provider": "cloudflare", "zone": "example.test", "token": "dns-provider-secret",
+	}, cookie, http.StatusCreated)
+	var savedDNSProvider model.PlatformItem
+	decodeResponse(t, dnsProviderRec, &savedDNSProvider)
+	dnsACMERec := assertStatus(t, server, http.MethodPost, "/api/admin/certificates/acme", map[string]any{
+		"name": "wildcard-acme", "domain": "*.example.test", "dns": []string{"example.test"},
+		"directory_url": "https://acme.test/directory", "challenge_type": "dns-01", "dns_provider_id": savedDNSProvider.ID,
+	}, cookie, http.StatusCreated)
+	if len(dnsProvider.presented) != 1 || dnsProvider.presented[0].Domain != "_acme-challenge.example.test" || dnsProvider.cleaned != 1 {
+		t.Fatalf("DNS-01 challenge was not presented and cleaned: %#v cleaned=%d body=%s", dnsProvider.presented, dnsProvider.cleaned, dnsACMERec.Body.String())
+	}
+	if len(dnsFactory.configs) != 1 || dnsFactory.configs[0].Token != "dns-provider-secret" || dnsFactory.configs[0].Zone != "example.test" {
+		t.Fatalf("DNS provider secret/config was not resolved correctly: %#v", dnsFactory.configs)
 	}
 
 	rec := assertStatus(t, server, http.MethodPost, "/api/admin/certificates/acme", map[string]any{
@@ -10435,7 +10525,7 @@ func TestCertificateACMEUsesConfiguredIssuerAndRuntimeChallenge(t *testing.T) {
 	}, cookie, http.StatusCreated)
 	var certificate model.PlatformItem
 	decodeResponse(t, rec, &certificate)
-	if len(issuer.requests) != 1 || issuer.requests[0].DirectoryURL != "https://acme.test/directory" || len(issuer.requests[0].Domains) != 2 {
+	if len(issuer.requests) != 2 || issuer.requests[1].DirectoryURL != "https://acme.test/directory" || len(issuer.requests[1].Domains) != 2 {
 		t.Fatalf("unexpected ACME issuer request: %#v", issuer.requests)
 	}
 	if firstMetadataString(certificate.Metadata, "acme_mode") != "acme" || firstMetadataString(certificate.Metadata, "acme_certificate_url") == "" {
@@ -12087,7 +12177,12 @@ func TestBackupOperationLogPersistenceFailures(t *testing.T) {
 
 func TestScheduledTaskRunners(t *testing.T) {
 	issuer := &fakeACMEIssuer{}
-	srv, cookie := newTestServer(t, func(cfg *Config) { cfg.ACMEIssuer = issuer })
+	dnsProviderRuntime := &fakeDNSChallengeProvider{}
+	dnsFactory := &fakeDNSChallengeProviderFactory{provider: dnsProviderRuntime}
+	srv, cookie := newTestServer(t, func(cfg *Config) {
+		cfg.ACMEIssuer = issuer
+		cfg.DNSProviderFactory = dnsFactory
+	})
 	handler := http.Handler(srv)
 
 	backupTaskRec := assertStatus(t, handler, http.MethodPost, "/api/admin/scheduled-tasks", map[string]any{
@@ -12538,6 +12633,21 @@ func TestScheduledTaskRunners(t *testing.T) {
 	assertStatus(t, handler, http.MethodPatch, "/api/admin/certificates/"+realACMECert.ID, map[string]any{
 		"name": realACMECert.Name, "status": realACMECert.Status, "metadata": realACMECert.Metadata,
 	}, cookie, http.StatusOK)
+	renewDNSProviderRec := assertStatus(t, handler, http.MethodPost, "/api/admin/certificates/dns-providers", map[string]any{
+		"name": "renew-dns-provider", "provider": "cloudflare", "zone": "example.test", "token": "renew-dns-secret",
+	}, cookie, http.StatusCreated)
+	var renewDNSProvider model.PlatformItem
+	decodeResponse(t, renewDNSProviderRec, &renewDNSProvider)
+	realDNSACMERec := assertStatus(t, handler, http.MethodPost, "/api/admin/certificates/acme", map[string]any{
+		"name": "renew-real-dns-acme", "domain": "*.example.test", "directory_url": "https://acme.test/directory",
+		"challenge_type": "dns-01", "dns_provider_id": renewDNSProvider.ID,
+	}, cookie, http.StatusCreated)
+	var realDNSACMECert model.PlatformItem
+	decodeResponse(t, realDNSACMERec, &realDNSACMECert)
+	realDNSACMECert.Metadata["expires_at"] = time.Now().Add(-time.Hour).UTC().Format(time.RFC3339)
+	assertStatus(t, handler, http.MethodPatch, "/api/admin/certificates/"+realDNSACMECert.ID, map[string]any{
+		"name": realDNSACMECert.Name, "status": realDNSACMECert.Status, "metadata": realDNSACMECert.Metadata,
+	}, cookie, http.StatusOK)
 	renewTaskRec := assertStatus(t, handler, http.MethodPost, "/api/admin/scheduled-tasks", map[string]any{
 		"name":     "Renew certs",
 		"type":     "certificate-renewal",
@@ -12547,11 +12657,14 @@ func TestScheduledTaskRunners(t *testing.T) {
 	var renewTask model.PlatformItem
 	decodeResponse(t, renewTaskRec, &renewTask)
 	renewRunRec := assertStatus(t, handler, http.MethodPost, "/api/admin/scheduled-tasks/"+renewTask.ID+"/run", nil, cookie, http.StatusAccepted)
-	if !strings.Contains(renewRunRec.Body.String(), "renewed_count") || !strings.Contains(renewRunRec.Body.String(), cert.ID) || !strings.Contains(renewRunRec.Body.String(), realACMECert.ID) {
+	if !strings.Contains(renewRunRec.Body.String(), "renewed_count") || !strings.Contains(renewRunRec.Body.String(), cert.ID) || !strings.Contains(renewRunRec.Body.String(), realACMECert.ID) || !strings.Contains(renewRunRec.Body.String(), realDNSACMECert.ID) {
 		t.Fatal("certificate renewal task did not renew due certificate")
 	}
-	if len(issuer.requests) != 2 || issuer.requests[1].PrivateKeyPEM == "" {
+	if len(issuer.requests) != 4 || issuer.requests[2].PrivateKeyPEM == "" || issuer.requests[3].PrivateKeyPEM == "" {
 		t.Fatalf("real ACME renewal did not reuse the encrypted certificate key: %#v", issuer.requests)
+	}
+	if len(dnsFactory.configs) != 2 || dnsProviderRuntime.cleaned != 2 {
+		t.Fatalf("DNS-01 issuance/renewal did not load provider and clean challenges: configs=%#v cleaned=%d", dnsFactory.configs, dnsProviderRuntime.cleaned)
 	}
 	if strings.Contains(renewRunRec.Body.String(), disabledCert.ID) {
 		t.Fatal("certificate renewal task renewed a disabled certificate")

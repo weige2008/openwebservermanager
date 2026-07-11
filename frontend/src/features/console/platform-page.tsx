@@ -1616,7 +1616,7 @@ function ResourceOperationDialog({
   if (operation.type === 'certificate-create') return <CertificateCreateDialog onClose={() => onOpenChange(null)} canSubmit={canUsePath('POST', '/api/admin/certificates/self-signed')} />
   if (operation.type === 'certificate-upload') return <CertificateUploadDialog onClose={() => onOpenChange(null)} canUpload={canUsePath('POST', '/api/admin/certificates/upload')} />
   if (operation.type === 'certificate-acme') return <CertificateACMEDialog onClose={() => onOpenChange(null)} canUsePath={canUsePath} />
-  if (operation.type === 'certificate-dns-provider') return <CertificateDNSProviderDialog onClose={() => onOpenChange(null)} canSave={canUsePath('POST', '/api/admin/certificates/dns-providers')} />
+  if (operation.type === 'certificate-dns-provider') return <CertificateDNSProviderDialog onClose={() => onOpenChange(null)} canUsePath={canUsePath} />
   if (operation.type === 'certificate-logs') return <CertificateLogsDialog item={operation.item} onClose={() => onOpenChange(null)} canRead={canUsePath('GET', `/api/admin/certificates/${operation.item.id}/logs`)} />
   if (operation.type === 'certificate-mtls') return <CertificateMTLSDialog item={operation.item} onClose={() => onOpenChange(null)} canSave={canUsePath('POST', `/api/admin/certificates/${operation.item.id}/mtls`)} />
   if (operation.type === 'recording-playback') return <RecordingPlaybackDialog item={operation.item} onClose={() => onOpenChange(null)} canRead={canUsePath('GET', `/api/admin/audit/offline-sessions/${operation.item.id}/recording/playback`)} />
@@ -2346,6 +2346,8 @@ function CertificateUploadDialog({ onClose, canUpload }: { onClose: () => void; 
 function CertificateACMEDialog({ onClose, canUsePath }: { onClose: () => void; canUsePath: CanUsePath }) {
   const app = useApp()
   const canIssueACME = canUsePath('POST', '/api/admin/certificates/acme')
+  const canReadDNSProviders = canUsePath('GET', '/api/admin/certificates/dns-providers')
+  const [providers, setProviders] = useState<PlatformItem[]>([])
   const [name, setName] = useState('')
   const [domain, setDomain] = useState('')
   const [dns, setDNS] = useState('')
@@ -2354,10 +2356,25 @@ function CertificateACMEDialog({ onClose, canUsePath }: { onClose: () => void; c
   const [days, setDays] = useState('90')
   const [issuanceMode, setIssuanceMode] = useState('letsencrypt')
   const [customDirectoryURL, setCustomDirectoryURL] = useState('')
+  const [challengeType, setChallengeType] = useState('http-01')
+  const [dnsProviderID, setDNSProviderID] = useState('')
   const [defaultCert, setDefaultCert] = useState(false)
   const [mtlsEnabled, setMTLSEnabled] = useState(false)
   const [saving, setSaving] = useState(false)
   const [issued, setIssued] = useState<PlatformItem | null>(null)
+
+  useEffect(() => {
+    if (!canReadDNSProviders) {
+      setProviders([])
+      setDNSProviderID('')
+      return
+    }
+    let alive = true
+    void apiRequest<{ items: PlatformItem[] }>('/api/admin/certificates/dns-providers')
+      .then((data) => { if (alive) setProviders(data.items || []) })
+      .catch(() => { if (alive) setProviders([]) })
+    return () => { alive = false }
+  }, [canReadDNSProviders])
 
   const submit = async () => {
     if (!canIssueACME) {
@@ -2384,7 +2401,8 @@ function CertificateACMEDialog({ onClose, canUsePath }: { onClose: () => void; c
           email,
           days: Number(days) || 90,
           directory_url: directoryURL,
-          challenge_type: 'http-01',
+          challenge_type: issuanceMode === 'local-ca' ? 'http-01' : challengeType,
+          dns_provider_id: challengeType === 'dns-01' ? dnsProviderID : undefined,
           default: defaultCert,
           mtls_enabled: mtlsEnabled,
         }),
@@ -2427,6 +2445,22 @@ function CertificateACMEDialog({ onClose, canUsePath }: { onClose: () => void; c
           {issuanceMode === 'local-ca' ? (
             <Field label={app.t('validityDays', 'Validity days')}><Input type='number' value={days} onChange={(event) => setDays(event.currentTarget.value)} /></Field>
           ) : null}
+          {issuanceMode !== 'local-ca' ? (
+            <Field label={app.t('challengeType', 'Challenge type')}>
+              <Select value={challengeType} onChange={(event) => setChallengeType(event.currentTarget.value)}>
+                <option value='http-01'>HTTP-01</option>
+                <option value='dns-01'>DNS-01</option>
+              </Select>
+            </Field>
+          ) : null}
+          {issuanceMode !== 'local-ca' && challengeType === 'dns-01' ? (
+            <Field label={app.t('dnsProvider', 'DNS provider')}>
+              <Select value={dnsProviderID} onChange={(event) => setDNSProviderID(event.currentTarget.value)} disabled={!canReadDNSProviders}>
+                <option value=''>{app.t('selectDNSProvider', 'Select DNS provider')}</option>
+                {providers.map((provider) => <option key={provider.id} value={provider.id}>{provider.name}</option>)}
+              </Select>
+            </Field>
+          ) : null}
         </div>
         <div className='grid gap-2 sm:grid-cols-2'>
           <CheckboxRow checked={defaultCert} onChange={setDefaultCert} label={app.t('setDefaultCertificate', 'Set as default certificate')} />
@@ -2446,7 +2480,7 @@ function CertificateACMEDialog({ onClose, canUsePath }: { onClose: () => void; c
         ) : null}
         <div className='flex justify-end gap-2'>
           <Button variant='outline' onClick={onClose}>{app.t('close', 'Close')}</Button>
-          <Button variant='primary' onClick={() => void submit()} disabled={saving || !domain.trim() || !canIssueACME || (issuanceMode === 'custom' && !customDirectoryURL.trim())}>
+          <Button variant='primary' onClick={() => void submit()} disabled={saving || !domain.trim() || !canIssueACME || (issuanceMode === 'custom' && !customDirectoryURL.trim()) || (issuanceMode !== 'local-ca' && challengeType === 'dns-01' && !dnsProviderID)}>
             <Save className='size-4' />
             {saving ? app.t('issuing', 'Issuing') : app.t('issue', 'Issue')}
           </Button>
@@ -2456,28 +2490,78 @@ function CertificateACMEDialog({ onClose, canUsePath }: { onClose: () => void; c
   )
 }
 
-function CertificateDNSProviderDialog({ onClose, canSave }: { onClose: () => void; canSave: boolean }) {
+function CertificateDNSProviderDialog({ onClose, canUsePath }: { onClose: () => void; canUsePath: CanUsePath }) {
   const app = useApp()
+  const { confirm, confirmDialog } = useConfirmDialog()
+  const canCreate = canUsePath('POST', '/api/admin/certificates/dns-providers')
+  const canRead = canUsePath('GET', '/api/admin/certificates/dns-providers')
+  const [providers, setProviders] = useState<PlatformItem[]>([])
+  const [editing, setEditing] = useState<PlatformItem | null>(null)
   const [name, setName] = useState('')
   const [provider, setProvider] = useState('cloudflare')
   const [zone, setZone] = useState('')
+  const [accessKeyID, setAccessKeyID] = useState('')
   const [token, setToken] = useState('')
+  const [propagationTimeout, setPropagationTimeout] = useState('120')
   const [saving, setSaving] = useState(false)
 
+  const loadProviders = async () => {
+    if (!canRead) {
+      setProviders([])
+      return
+    }
+    const data = await apiRequest<{ items: PlatformItem[] }>('/api/admin/certificates/dns-providers')
+    setProviders(data.items || [])
+  }
+
+  useEffect(() => {
+    void loadProviders().catch((error) => app.handleApiError(error))
+  }, [canRead])
+
+  const resetForm = () => {
+    setEditing(null)
+    setName('')
+    setProvider('cloudflare')
+    setZone('')
+    setAccessKeyID('')
+    setToken('')
+    setPropagationTimeout('120')
+  }
+
+  const editProvider = (item: PlatformItem) => {
+    setEditing(item)
+    setName(item.name || '')
+    setProvider(metadataText(item.metadata?.provider) || 'cloudflare')
+    setZone(metadataText(item.metadata?.zone))
+    setAccessKeyID(metadataText(item.metadata?.access_key_id))
+    setToken('')
+    setPropagationTimeout(String(metadataNumber(item.metadata?.propagation_timeout_seconds) || 120))
+  }
+
   const submit = async () => {
-    if (!canSave) {
+    const path = editing ? `/api/admin/certificates/dns-providers/${editing.id}` : '/api/admin/certificates/dns-providers'
+    const method = editing ? 'PATCH' : 'POST'
+    if (!canUsePath(method, path)) {
       app.showToast(app.t('permissionDenied', 'Permission denied'))
       return
     }
     setSaving(true)
     try {
-      await apiRequest('/api/admin/certificates/dns-providers', {
-        method: 'POST',
-        body: JSON.stringify({ name, provider, zone, token }),
+      await apiRequest(path, {
+        method,
+        body: JSON.stringify({
+          name,
+          provider,
+          zone,
+          access_key_id: provider === 'alidns' ? accessKeyID : undefined,
+          token: token || undefined,
+          propagation_timeout_seconds: Number(propagationTimeout) || 120,
+        }),
       })
+      await loadProviders()
       await app.refresh(true)
       app.showToast(app.t('dnsProviderSaved', 'DNS provider saved'))
-      onClose()
+      resetForm()
     } catch (error) {
       app.handleApiError(error)
     } finally {
@@ -2485,24 +2569,96 @@ function CertificateDNSProviderDialog({ onClose, canSave }: { onClose: () => voi
     }
   }
 
+  const deleteProvider = async (item: PlatformItem) => {
+    const path = `/api/admin/certificates/dns-providers/${item.id}`
+    if (!canUsePath('DELETE', path)) return
+    const accepted = await confirm({
+      title: app.t('deleteDNSProviderTitle', 'Delete DNS provider?'),
+      description: app.t('deleteDNSProviderDescription', 'Certificates using this provider must be changed or removed first.'),
+      confirmText: app.t('delete', 'Delete'),
+      destructive: true,
+    })
+    if (!accepted) return
+    try {
+      await apiRequest(path, { method: 'DELETE' })
+      await loadProviders()
+      await app.refresh(true)
+      if (editing?.id === item.id) resetForm()
+      app.showToast(app.t('dnsProviderDeleted', 'DNS provider deleted'))
+    } catch (error) {
+      app.handleApiError(error)
+    }
+  }
+
+  const tokenPlaceholder = provider === 'cloudflare'
+    ? 'Cloudflare API Token'
+    : provider === 'dnspod'
+      ? 'ID,Token'
+      : 'AccessKeySecret'
+  const canSubmit = editing
+    ? canUsePath('PATCH', `/api/admin/certificates/dns-providers/${editing.id}`)
+    : canCreate
+  const providerChanged = Boolean(editing && provider !== (metadataText(editing.metadata?.provider) || 'cloudflare'))
+
   return (
-    <DialogShell open onOpenChange={(open) => !open && onClose()} title='DNS provider' description='保存 ACME DNS-01 使用的 DNS 供应商配置，令牌在服务端加密，API 响应只返回已配置状态。'>
-      <div className='grid gap-4'>
-        <div className='grid gap-3 sm:grid-cols-2'>
-          <Field label='名称'><Input value={name} onChange={(event) => setName(event.currentTarget.value)} placeholder='Cloudflare production' /></Field>
-          <Field label='供应商'><Input value={provider} onChange={(event) => setProvider(event.currentTarget.value)} placeholder='cloudflare / aliyun / dnspod' /></Field>
-          <Field label='Zone'><Input value={zone} onChange={(event) => setZone(event.currentTarget.value)} placeholder='example.com' /></Field>
-          <Field label='API token'><Input type='password' value={token} onChange={(event) => setToken(event.currentTarget.value)} /></Field>
+    <>
+      <DialogShell
+        open
+        onOpenChange={(open) => !open && onClose()}
+        title={app.t('dnsProvider', 'DNS provider')}
+        description={app.t('dnsProviderDescription', 'Configure credentials used to create and remove ACME DNS-01 TXT records.')}
+      >
+        <div className='grid gap-5'>
+          <div className='grid gap-3 sm:grid-cols-2'>
+            <Field label={app.t('certificateName', 'Name')}><Input value={name} onChange={(event) => setName(event.currentTarget.value)} placeholder='Production DNS' /></Field>
+            <Field label={app.t('provider', 'Provider')}>
+              <Select value={provider} onChange={(event) => setProvider(event.currentTarget.value)}>
+                <option value='cloudflare'>Cloudflare</option>
+                <option value='alidns'>AliDNS</option>
+                <option value='dnspod'>DNSPod</option>
+              </Select>
+            </Field>
+            <Field label={app.t('dnsZone', 'DNS zone')}><Input value={zone} onChange={(event) => setZone(event.currentTarget.value)} placeholder='example.com' /></Field>
+            {provider === 'alidns' ? (
+              <Field label={app.t('accessKeyID', 'Access key ID')}><Input value={accessKeyID} onChange={(event) => setAccessKeyID(event.currentTarget.value)} /></Field>
+            ) : null}
+            <Field label={app.t('apiTokenOrSecret', 'API token or secret')}>
+              <Input type='password' value={token} onChange={(event) => setToken(event.currentTarget.value)} placeholder={editing ? app.t('leaveBlankToKeepSecret', 'Leave blank to keep current secret') : tokenPlaceholder} />
+            </Field>
+            <Field label={app.t('propagationTimeout', 'Propagation timeout (seconds)')}><Input type='number' min='10' value={propagationTimeout} onChange={(event) => setPropagationTimeout(event.currentTarget.value)} /></Field>
+          </div>
+          <div className='flex justify-end gap-2'>
+            {editing ? <Button variant='outline' onClick={resetForm}>{app.t('cancel', 'Cancel')}</Button> : null}
+            <Button variant='primary' onClick={() => void submit()} disabled={saving || !canSubmit || !name.trim() || !zone.trim() || ((!editing || providerChanged) && !token.trim()) || (provider === 'alidns' && !accessKeyID.trim())}>
+              <Save className='size-4' />
+              {saving ? app.t('saving', 'Saving') : editing ? app.t('update', 'Update') : app.t('save', 'Save')}
+            </Button>
+          </div>
+          {canRead ? (
+            <div className='grid gap-2 border-t border-border pt-4'>
+              <div className='text-sm font-medium'>{app.t('savedDNSProviders', 'Saved DNS providers')}</div>
+              {providers.length ? providers.map((item) => (
+                <div key={item.id} className='flex items-center justify-between gap-3 rounded-md border border-border px-3 py-2'>
+                  <div className='min-w-0'>
+                    <div className='truncate text-sm font-medium'>{item.name}</div>
+                    <div className='truncate text-xs text-muted-foreground'>{metadataText(item.metadata?.provider)} · {metadataText(item.metadata?.zone)}</div>
+                  </div>
+                  <div className='flex shrink-0 gap-1'>
+                    {canUsePath('PATCH', `/api/admin/certificates/dns-providers/${item.id}`) ? (
+                      <Button size='icon' variant='ghost' title={app.t('edit', 'Edit')} onClick={() => editProvider(item)}><Pencil className='size-4' /></Button>
+                    ) : null}
+                    {canUsePath('DELETE', `/api/admin/certificates/dns-providers/${item.id}`) ? (
+                      <Button size='icon' variant='ghost' title={app.t('delete', 'Delete')} onClick={() => void deleteProvider(item)}><Trash2 className='size-4' /></Button>
+                    ) : null}
+                  </div>
+                </div>
+              )) : <div className='text-sm text-muted-foreground'>{app.t('none', 'None')}</div>}
+            </div>
+          ) : null}
         </div>
-        <div className='flex justify-end gap-2'>
-          <Button variant='outline' onClick={onClose}>取消</Button>
-          <Button variant='primary' onClick={() => void submit()} disabled={saving || !canSave || !provider.trim()}>
-            <Save className='size-4' />
-            {saving ? '保存中' : '保存'}
-          </Button>
-        </div>
-      </div>
-    </DialogShell>
+      </DialogShell>
+      {confirmDialog}
+    </>
   )
 }
 

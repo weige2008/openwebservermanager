@@ -36,7 +36,16 @@ type ACMEIssueResult struct {
 	ExpiresAt      time.Time
 }
 
-type ACMEChallengePresenter func(token, keyAuthorization string) func()
+type ACMEChallengePresentation struct {
+	Type   string
+	Domain string
+	Token  string
+	Value  string
+}
+
+type ACMEChallengeCleanup func(context.Context) error
+
+type ACMEChallengePresenter func(context.Context, ACMEChallengePresentation) (ACMEChallengeCleanup, error)
 
 type ACMEIssuer interface {
 	Issue(context.Context, ACMEIssueRequest, ACMEChallengePresenter) (ACMEIssueResult, error)
@@ -45,16 +54,17 @@ type ACMEIssuer interface {
 type realACMEIssuer struct{}
 
 func (realACMEIssuer) Issue(ctx context.Context, req ACMEIssueRequest, present ACMEChallengePresenter) (ACMEIssueResult, error) {
-	if strings.ToLower(strings.TrimSpace(req.ChallengeType)) != "http-01" {
-		return ACMEIssueResult{}, errors.New("real ACME issuance currently supports http-01 only")
+	challengeType := strings.ToLower(strings.TrimSpace(req.ChallengeType))
+	if challengeType != "http-01" && challengeType != "dns-01" {
+		return ACMEIssueResult{}, errors.New("ACME challenge type must be http-01 or dns-01")
 	}
 	domains := uniqueNonEmptyStrings(req.Domains)
 	if len(domains) == 0 {
 		return ACMEIssueResult{}, errors.New("at least one ACME domain is required")
 	}
 	for _, domain := range domains {
-		if strings.HasPrefix(domain, "*.") {
-			return ACMEIssueResult{}, errors.New("wildcard certificates require dns-01, which is not configured")
+		if strings.HasPrefix(domain, "*.") && challengeType != "dns-01" {
+			return ACMEIssueResult{}, errors.New("wildcard certificates require dns-01")
 		}
 	}
 	key, keyPEM, err := acmePrivateKey(req.PrivateKeyPEM)
@@ -85,26 +95,40 @@ func (realACMEIssuer) Issue(ctx context.Context, req ACMEIssueRequest, present A
 		if authorization.Status == acme.StatusValid {
 			continue
 		}
-		challenge := findACMEChallenge(authorization.Challenges, "http-01")
+		challenge := findACMEChallenge(authorization.Challenges, challengeType)
 		if challenge == nil {
-			return ACMEIssueResult{}, fmt.Errorf("ACME authorization for %s does not offer http-01", authorization.Identifier.Value)
+			return ACMEIssueResult{}, fmt.Errorf("ACME authorization for %s does not offer %s", authorization.Identifier.Value, challengeType)
 		}
-		response, err := client.HTTP01ChallengeResponse(challenge.Token)
+		value := ""
+		switch challengeType {
+		case "http-01":
+			value, err = client.HTTP01ChallengeResponse(challenge.Token)
+		case "dns-01":
+			value, err = client.DNS01ChallengeRecord(challenge.Token)
+		}
 		if err != nil {
-			return ACMEIssueResult{}, fmt.Errorf("build ACME challenge response: %w", err)
+			return ACMEIssueResult{}, fmt.Errorf("build ACME %s challenge response: %w", challengeType, err)
 		}
-		cleanup := present(challenge.Token, response)
+		cleanup, err := present(ctx, ACMEChallengePresentation{
+			Type: challengeType, Domain: authorization.Identifier.Value, Token: challenge.Token, Value: value,
+		})
+		if err != nil {
+			return ACMEIssueResult{}, fmt.Errorf("present ACME %s challenge for %s: %w", challengeType, authorization.Identifier.Value, err)
+		}
 		if cleanup == nil {
-			cleanup = func() {}
+			cleanup = func(context.Context) error { return nil }
 		}
 		if _, err := client.Accept(ctx, challenge); err != nil {
-			cleanup()
-			return ACMEIssueResult{}, fmt.Errorf("accept ACME challenge: %w", err)
+			cleanupErr := cleanup(context.WithoutCancel(ctx))
+			return ACMEIssueResult{}, combineACMEChallengeError(fmt.Errorf("accept ACME challenge: %w", err), cleanupErr)
 		}
 		_, err = client.WaitAuthorization(ctx, authorizationURL)
-		cleanup()
+		cleanupErr := cleanup(context.WithoutCancel(ctx))
 		if err != nil {
-			return ACMEIssueResult{}, fmt.Errorf("validate ACME authorization for %s: %w", authorization.Identifier.Value, err)
+			return ACMEIssueResult{}, combineACMEChallengeError(fmt.Errorf("validate ACME authorization for %s: %w", authorization.Identifier.Value, err), cleanupErr)
+		}
+		if cleanupErr != nil {
+			return ACMEIssueResult{}, fmt.Errorf("clean up ACME %s challenge for %s: %w", challengeType, authorization.Identifier.Value, cleanupErr)
 		}
 	}
 	order, err = client.WaitOrder(ctx, order.URI)
@@ -136,6 +160,13 @@ func (realACMEIssuer) Issue(ctx context.Context, req ACMEIssueRequest, present A
 		CertificateURL: certificateURL,
 		ExpiresAt:      leaf.NotAfter.UTC(),
 	}, nil
+}
+
+func combineACMEChallengeError(primary, cleanup error) error {
+	if cleanup == nil {
+		return primary
+	}
+	return fmt.Errorf("%w; additionally challenge cleanup failed: %v", primary, cleanup)
 }
 
 func findACMEChallenge(challenges []*acme.Challenge, challengeType string) *acme.Challenge {
@@ -215,6 +246,17 @@ func (r *acmeChallengeRegistry) present(token, keyAuthorization string) func() {
 		delete(r.values, token)
 		r.mu.Unlock()
 	}
+}
+
+func (r *acmeChallengeRegistry) presenter(_ context.Context, challenge ACMEChallengePresentation) (ACMEChallengeCleanup, error) {
+	if challenge.Type != "http-01" {
+		return nil, fmt.Errorf("runtime challenge registry does not support %s", challenge.Type)
+	}
+	cleanup := r.present(challenge.Token, challenge.Value)
+	return func(context.Context) error {
+		cleanup()
+		return nil
+	}, nil
 }
 
 func (r *acmeChallengeRegistry) get(token string) (string, bool) {

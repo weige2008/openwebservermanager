@@ -1,7 +1,7 @@
 import type { ColumnDef } from '@tanstack/react-table'
 import { useQuery } from '@tanstack/react-query'
 import { Link } from '@tanstack/react-router'
-import { ArrowUpRight, ChevronDown, ChevronRight, Copy, Download, FileDown, FileSearch, FolderPlus, MoveRight, Pause, Pencil, Play, Plus, RefreshCw, RotateCcw, Save, ShieldCheck, TerminalSquare, Trash2, Upload } from 'lucide-react'
+import { ArrowUpRight, ChevronDown, ChevronRight, Copy, Download, FileDown, FileSearch, Film, FolderPlus, Loader2, MoveRight, Pause, Pencil, Play, Plus, RefreshCw, RotateCcw, Save, ShieldCheck, TerminalSquare, Trash2, Upload } from 'lucide-react'
 import { useEffect, useMemo, useRef, useState } from 'react'
 
 import { useApp } from '@/app/app-provider'
@@ -130,6 +130,17 @@ interface StorageUsage {
   used?: string
   limit?: string
   checked_at?: string
+}
+
+interface RecordingTranscodeStatus {
+  available: boolean
+  detail?: string
+  status?: 'queued' | 'processing' | 'completed' | 'failed'
+  error?: string
+  video_size?: number
+  video_url?: string
+  started_at?: string
+  finished_at?: string
 }
 
 interface DepartmentTreeNode {
@@ -1241,6 +1252,37 @@ function ResourceRowActions({
 }) {
   const app = useApp()
   const { confirm, confirmDialog } = useConfirmDialog()
+	const [transcoding, setTranscoding] = useState(false)
+	const persistedTranscodeStatus = stringValue(item.metadata?.recording_transcode_status)
+	const [transcodeStatus, setTranscodeStatus] = useState(persistedTranscodeStatus)
+
+	useEffect(() => {
+		setTranscodeStatus(persistedTranscodeStatus)
+	}, [persistedTranscodeStatus])
+
+	useEffect(() => {
+		if (config.collection !== 'offline_sessions' || !['queued', 'processing'].includes(transcodeStatus)) return
+		let alive = true
+		const poll = async () => {
+			try {
+				const status = await apiRequest<RecordingTranscodeStatus>(`/api/admin/audit/offline-sessions/${item.id}/recording/transcode`)
+				if (!alive) return
+				const nextStatus = status.status || ''
+				setTranscodeStatus(nextStatus)
+				if (nextStatus === 'completed' || nextStatus === 'failed') {
+					await app.refresh(true)
+					app.showToast(nextStatus === 'completed' ? app.t('recordingTranscodeCompleted', 'Recording transcode completed') : status.error || app.t('recordingTranscodeFailed', 'Recording transcode failed'))
+				}
+			} catch (error) {
+				if (alive) app.handleApiError(error)
+			}
+		}
+		const timer = window.setInterval(() => void poll(), 1000)
+		return () => {
+			alive = false
+			window.clearInterval(timer)
+		}
+	}, [config.collection, item.id, transcodeStatus])
 
   const runTask = async () => {
     try {
@@ -1324,6 +1366,20 @@ function ResourceRowActions({
     }
   }
 
+	const transcodeRecording = async () => {
+		setTranscoding(true)
+		try {
+			const status = await apiRequest<RecordingTranscodeStatus>(`/api/admin/audit/offline-sessions/${item.id}/recording/transcode`, { method: 'POST', body: '{}' })
+			setTranscodeStatus(status.status || 'queued')
+			await app.refresh(true)
+			app.showToast(app.t('recordingTranscodeQueued', 'Recording transcode queued'))
+		} catch (error) {
+			app.handleApiError(error)
+		} finally {
+			setTranscoding(false)
+		}
+	}
+
   if (config.collection === 'online_sessions') {
     if (!canUsePath('POST', `/api/admin/audit/online-sessions/${item.id}/disconnect`)) return null
     return (
@@ -1343,15 +1399,29 @@ function ResourceRowActions({
     const canPlaybackRecording = canUsePath('GET', playbackPath)
     const canDownloadRecording = canUsePath('GET', recordingPath)
     const canDeleteRecording = canUsePath('DELETE', recordingPath)
-    if (!canPlaybackRecording && !canDownloadRecording && !canDeleteRecording) return null
+		const transcodePath = `${recordingPath}/transcode`
+		const canTranscodeRecording = canUsePath('POST', transcodePath)
+		const transcodeRunning = transcoding || transcodeStatus === 'queued' || transcodeStatus === 'processing'
+		if (!canPlaybackRecording && !canDownloadRecording && !canDeleteRecording && !canTranscodeRecording) return null
     return (
       <>
+				{transcodeStatus ? (
+					<Badge tone={transcodeStatus === 'completed' ? 'success' : transcodeStatus === 'failed' ? 'danger' : 'neutral'}>
+						{app.t(`recordingTranscodeStatus.${transcodeStatus}`, transcodeStatus)}
+					</Badge>
+				) : null}
         {canPlaybackRecording ? (
           <Button size='sm' variant='outline' onClick={() => onOperation({ type: 'recording-playback', item })}>
             <Play className='size-3.5' />
             {app.t('recordingPlayback', 'Playback')}
           </Button>
         ) : null}
+				{canTranscodeRecording ? (
+					<Button size='sm' variant='outline' onClick={() => void transcodeRecording()} disabled={transcodeRunning}>
+						{transcodeRunning ? <Loader2 className='size-3.5 animate-spin' /> : <Film className='size-3.5' />}
+						{app.t(transcodeStatus === 'completed' || transcodeStatus === 'failed' ? 'retryRecordingTranscode' : 'transcodeRecording', transcodeStatus ? 'Retry transcode' : 'Transcode')}
+					</Button>
+				) : null}
         {canDownloadRecording ? (
           <Button size='sm' variant='outline' onClick={() => void downloadRecording()}>
             <Download className='size-3.5' />
@@ -1561,6 +1631,13 @@ function ResourceOperationDialog({
 
 function RecordingPlaybackDialog({ item, onClose, canRead }: { item: PlatformItem; onClose: () => void; canRead: boolean }) {
   const app = useApp()
+	const transcodeQuery = useQuery({
+		queryKey: ['recording-transcode', item.id],
+		queryFn: () => apiRequest<RecordingTranscodeStatus>(`/api/admin/audit/offline-sessions/${item.id}/recording/transcode`),
+		enabled: canRead,
+		refetchInterval: (query) => ['queued', 'processing'].includes(query.state.data?.status || '') ? 1000 : false,
+	})
+	const videoURL = transcodeQuery.data?.video_url || ''
   const [container, setContainer] = useState<HTMLDivElement | null>(null)
   const recordingRef = useRef<any>(null)
   const [loading, setLoading] = useState(true)
@@ -1571,7 +1648,13 @@ function RecordingPlaybackDialog({ item, onClose, canRead }: { item: PlatformIte
 
   useEffect(() => {
     const Guacamole = window.Guacamole
-    if (!container) return
+		if (transcodeQuery.isPending) return
+		if (videoURL) {
+			setLoading(false)
+			setError('')
+			return
+		}
+		if (!container) return
     if (!canRead) {
       setLoading(false)
       setError(app.t('permissionDenied', 'Permission denied'))
@@ -1635,7 +1718,7 @@ function RecordingPlaybackDialog({ item, onClose, canRead }: { item: PlatformIte
       recordingRef.current = null
       container.replaceChildren()
     }
-  }, [canRead, container, item.id])
+	}, [canRead, container, item.id, transcodeQuery.isPending, videoURL])
 
   useEffect(() => {
     if (!playing) return
@@ -1669,14 +1752,18 @@ function RecordingPlaybackDialog({ item, onClose, canRead }: { item: PlatformIte
   }
 
   return (
-    <DialogShell open onOpenChange={(open) => !open && onClose()} title={app.t('recordingPlayback', 'Recording playback')} description={app.t('recordingPlaybackDescription', 'Replay the raw Guacamole session recording in the browser.')}>
+		<DialogShell open onOpenChange={(open) => !open && onClose()} title={app.t('recordingPlayback', 'Recording playback')} description={videoURL ? app.t('recordingVideoPlaybackDescription', 'Play the transcoded session video in the browser.') : app.t('recordingPlaybackDescription', 'Replay the raw Guacamole session recording in the browser.')}>
       <div className='grid gap-4'>
         <div className='relative grid min-h-[360px] place-items-center overflow-hidden rounded-lg border border-border bg-black'>
-          <div ref={setContainer} className='flex h-[min(62vh,640px)] min-h-[360px] w-full items-center justify-center overflow-hidden' />
+					{videoURL ? (
+						<video className='h-[min(62vh,640px)] min-h-[360px] w-full bg-black object-contain' src={videoURL} controls autoPlay={false} preload='metadata' />
+					) : (
+						<div ref={setContainer} className='flex h-[min(62vh,640px)] min-h-[360px] w-full items-center justify-center overflow-hidden' />
+					)}
           {loading ? <div className='absolute inset-0 grid place-items-center bg-black/70 text-sm text-white'>{app.t('recordingLoading', 'Loading recording...')}</div> : null}
           {error ? <div className='absolute inset-0 grid place-items-center bg-black/80 p-6 text-center text-sm text-red-200'>{error}</div> : null}
         </div>
-        <div className='grid gap-3 sm:grid-cols-[auto_minmax(0,1fr)_auto] sm:items-center'>
+				{videoURL ? null : <div className='grid gap-3 sm:grid-cols-[auto_minmax(0,1fr)_auto] sm:items-center'>
           <div className='flex gap-2'>
             <Button size='icon-sm' variant='outline' onClick={togglePlayback} disabled={loading || Boolean(error) || duration <= 0} title={playing ? app.t('pauseRecording', 'Pause') : app.t('playRecording', 'Play')}>
               {playing ? <Pause className='size-4' /> : <Play className='size-4' />}
@@ -1697,7 +1784,8 @@ function RecordingPlaybackDialog({ item, onClose, canRead }: { item: PlatformIte
             className='h-2 w-full accent-primary'
           />
           <div className='text-right font-mono text-xs text-muted-foreground'>{formatPlaybackTime(position)} / {formatPlaybackTime(duration)}</div>
-        </div>
+				</div>}
+				{transcodeQuery.data?.status === 'failed' ? <div className='text-sm text-destructive'>{transcodeQuery.data.error || app.t('recordingTranscodeFailed', 'Recording transcode failed')}</div> : null}
       </div>
     </DialogShell>
   )
@@ -5454,6 +5542,7 @@ function MonitoringPage({ config }: { config: PlatformPageConfig }) {
   const storageInfo = recordValue(stats.storage)
   const sshGatewayInfo = recordValue(stats.ssh_gateway)
   const guacdInfo = recordValue(stats.guacd)
+	const recordingTranscoderInfo = recordValue(stats.recording_transcoder)
   const agentGatewayInfo = recordValue(stats.agent_gateways)
   const dataDirInfo = recordValue(storageInfo.data_dir)
   const recordingsInfo = recordValue(storageInfo.recordings)
@@ -5482,6 +5571,7 @@ function MonitoringPage({ config }: { config: PlatformPageConfig }) {
   const gatewayRows: Array<[string, string]> = [
     ['SSH Gateway', `${metadataText(sshGatewayInfo.status) || 'disabled'} ${metadataText(sshGatewayInfo.address)}`.trim()],
     ['guacd', `${metadataText(guacdInfo.status) || 'unavailable'} ${metadataText(guacdInfo.address)}`.trim()],
+		['Recording transcoder', `${metadataText(recordingTranscoderInfo.status) || 'unavailable'} ${metadataText(recordingTranscoderInfo.detail)}`.trim()],
     ['Agent gateways', `${formatNumberValue(agentGatewayInfo.online)} online / ${formatNumberValue(agentGatewayInfo.offline)} offline`],
   ]
   const storageRows: Array<[string, string]> = [

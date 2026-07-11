@@ -37,6 +37,9 @@ mkdir -p "`$REMOTE_ROOT/src"
 tar -xf "`$ARCHIVE" -C "`$REMOTE_ROOT/src"
 
 cd "`$REMOTE_ROOT/src"
+if [ -f scripts/install-guacenc-linux.sh ]; then
+  sudo bash scripts/install-guacenc-linux.sh
+fi
 if [ -f frontend/package.json ]; then
   npm --prefix frontend ci
   npm --prefix frontend run build
@@ -69,6 +72,9 @@ Environment=OPENWEBSERVERMANAGER_DATA_DIR=`$REMOTE_ROOT/data
 Environment=OPENWEBSERVERMANAGER_VERSION=`$VERSION
 Environment=OPENWEBSERVERMANAGER_GUACD_HOST=127.0.0.1
 Environment=OPENWEBSERVERMANAGER_GUACD_PORT=4822
+Environment=OPENWEBSERVERMANAGER_GUACENC_PATH=/usr/local/bin/guacenc
+Environment=OPENWEBSERVERMANAGER_FFMPEG_PATH=/usr/bin/ffmpeg
+Environment=OPENWEBSERVERMANAGER_RECORDING_TRANSCODE_TIMEOUT_SECONDS=1800
 Environment=OPENWEBSERVERMANAGER_SHARED_DIR_MODE=0770
 ExecStart=`$REMOTE_ROOT/bin/openwebservermanager
 Restart=always

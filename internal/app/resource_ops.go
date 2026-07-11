@@ -307,6 +307,14 @@ func (s *Server) handleResourceOperation(w http.ResponseWriter, r *http.Request,
 		id := pathSegmentFromTrimmed(path, 3)
 		s.handleAuditRecordingPlayback(w, r, id)
 		return true
+	case strings.HasPrefix(path, "admin/audit/offline-sessions/") && strings.HasSuffix(path, "/recording/transcode"):
+		id := pathSegmentFromTrimmed(path, 3)
+		s.handleAuditRecordingTranscode(w, r, id)
+		return true
+	case strings.HasPrefix(path, "admin/audit/offline-sessions/") && strings.HasSuffix(path, "/recording/video"):
+		id := pathSegmentFromTrimmed(path, 3)
+		s.handleAuditRecordingVideo(w, r, id)
+		return true
 	case strings.HasPrefix(path, "admin/audit/offline-sessions/") && strings.HasSuffix(path, "/recording"):
 		id := pathSegmentFromTrimmed(path, 3)
 		s.handleAuditRecording(w, r, id)
@@ -4367,6 +4375,10 @@ func recordingPlaybackFile(recordingPath, sessionID string) (*os.File, os.FileIn
 		if entry.Type()&os.ModeType != 0 {
 			return nil
 		}
+		switch strings.ToLower(filepath.Ext(entry.Name())) {
+		case ".m4v", ".mp4", ".webm":
+			return nil
+		}
 		if err := ensureChildPath(recordingPath, path); err != nil {
 			return err
 		}
@@ -4431,6 +4443,10 @@ func (s *Server) downloadAuditRecording(w http.ResponseWriter, r *http.Request, 
 func (s *Server) deleteAuditRecording(w http.ResponseWriter, r *http.Request, id string) {
 	recording, ok := s.auditRecordingTarget(w, r, id)
 	if !ok {
+		return
+	}
+	if s.recordingTranscodes.running(id) {
+		writeError(w, http.StatusConflict, "recording transcode is still running")
 		return
 	}
 	if err := s.createRecordingOperationLog(r, "audit.recording.delete", "requested", id, recording.protocol, "delete offline session recording requested", map[string]any{
@@ -4692,6 +4708,11 @@ func clearRecordingMetadata(item *model.PlatformItem) {
 	item.Metadata["recording_size"] = 0
 	item.Metadata["recording_deleted"] = true
 	item.Metadata["recording_deleted_at"] = time.Now().UTC()
+	item.Metadata["recording_transcode_status"] = ""
+	item.Metadata["recording_transcode_error"] = ""
+	item.Metadata["recording_video_file"] = ""
+	item.Metadata["recording_video_mime_type"] = ""
+	item.Metadata["recording_video_size"] = 0
 	item.Description = strings.TrimSpace(item.Description + " recording deleted")
 }
 

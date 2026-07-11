@@ -1577,6 +1577,11 @@ func (s *Server) handleSystemMonitoring(w http.ResponseWriter, _ *http.Request) 
 	if s.cfg.Guacd != nil {
 		guacdAddress = s.cfg.Guacd.Address()
 	}
+	transcoderAvailable, transcoderDetail := s.recordingTranscoder.Available()
+	transcoderStatus := "unavailable"
+	if transcoderAvailable {
+		transcoderStatus = "available"
+	}
 	writeJSON(w, http.StatusOK, map[string]any{
 		"status":            "normal",
 		"started_at":        s.started,
@@ -1651,6 +1656,10 @@ func (s *Server) handleSystemMonitoring(w http.ResponseWriter, _ *http.Request) 
 		"guacd": map[string]any{
 			"address": guacdAddress,
 			"status":  guacdRuntimeStatus(guacdAddress),
+		},
+		"recording_transcoder": map[string]any{
+			"status": transcoderStatus,
+			"detail": transcoderDetail,
 		},
 		"agent_gateways": map[string]any{
 			"total":   len(platform["agent_gateways"]),

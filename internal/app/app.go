@@ -26,18 +26,19 @@ import (
 )
 
 type Config struct {
-	Store             *store.Store
-	Guacd             *guac.Manager
-	SSHGatewayAddress string
-	SSHGateway        sshGatewayRuntime
-	RDPProxy          rdpProxyRuntime
-	DatabaseProxy     databaseProxyRuntime
-	StaticFS          fs.FS
-	DataDir           string
-	Public            PublicConfig
-	TrustProxyHeaders bool
-	LDAPAuthenticator ldapAuthenticator
-	AgentRelay        *agentrelay.Manager
+	Store               *store.Store
+	Guacd               *guac.Manager
+	SSHGatewayAddress   string
+	SSHGateway          sshGatewayRuntime
+	RDPProxy            rdpProxyRuntime
+	DatabaseProxy       databaseProxyRuntime
+	StaticFS            fs.FS
+	DataDir             string
+	Public              PublicConfig
+	TrustProxyHeaders   bool
+	LDAPAuthenticator   ldapAuthenticator
+	AgentRelay          *agentrelay.Manager
+	RecordingTranscoder RecordingTranscoder
 }
 
 type sshGatewayRuntime interface {
@@ -85,15 +86,17 @@ type PublicNavLink struct {
 }
 
 type Server struct {
-	cfg               Config
-	static            http.Handler
-	staticFS          fs.FS
-	auth              *authManager
-	oidc              *oidcManager
-	ldap              ldapAuthenticator
-	activeConnections activeConnectionRegistry
-	agentRelay        *agentrelay.Manager
-	started           time.Time
+	cfg                 Config
+	static              http.Handler
+	staticFS            fs.FS
+	auth                *authManager
+	oidc                *oidcManager
+	ldap                ldapAuthenticator
+	activeConnections   activeConnectionRegistry
+	agentRelay          *agentrelay.Manager
+	recordingTranscodes recordingTranscodeRegistry
+	recordingTranscoder RecordingTranscoder
+	started             time.Time
 }
 
 func New(cfg Config) http.Handler {
@@ -113,16 +116,23 @@ func NewServer(cfg Config) *Server {
 	if relay == nil {
 		relay = agentrelay.NewManager(cfg.Store)
 	}
-	return &Server{
-		cfg:        cfg,
-		static:     http.FileServer(http.FS(sub)),
-		staticFS:   sub,
-		auth:       newAuthManager(),
-		oidc:       newOIDCManager(),
-		ldap:       ldapAuth,
-		agentRelay: relay,
-		started:    time.Now().UTC(),
+	transcoder := cfg.RecordingTranscoder
+	if transcoder == nil {
+		transcoder = newGuacencTranscoderFromEnvironment()
 	}
+	server := &Server{
+		cfg:                 cfg,
+		static:              http.FileServer(http.FS(sub)),
+		staticFS:            sub,
+		auth:                newAuthManager(),
+		oidc:                newOIDCManager(),
+		ldap:                ldapAuth,
+		agentRelay:          relay,
+		recordingTranscoder: transcoder,
+		started:             time.Now().UTC(),
+	}
+	server.reconcileInterruptedRecordingTranscodes()
+	return server
 }
 
 type ldapAuthenticator interface {

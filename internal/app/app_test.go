@@ -8772,7 +8772,7 @@ func TestToolsAndMonitoringEndpoints(t *testing.T) {
 	monitorRec := assertStatus(t, handler, http.MethodGet, "/api/system/monitoring", nil, cookie, http.StatusOK)
 	var monitor map[string]any
 	decodeResponse(t, monitorRec, &monitor)
-	for _, key := range []string{"runtime", "memory", "database", "storage", "sessions_state", "ssh_gateway", "guacd", "uptime_seconds", "cpu_cores"} {
+	for _, key := range []string{"runtime", "memory", "database", "storage", "sessions_state", "ssh_gateway", "guacd", "recording_transcoder", "uptime_seconds", "cpu_cores"} {
 		if _, ok := monitor[key]; !ok {
 			t.Fatalf("monitoring response missing %s: %v", key, monitor)
 		}
@@ -8785,6 +8785,9 @@ func TestToolsAndMonitoringEndpoints(t *testing.T) {
 	}
 	if storageInfo, ok := monitor["storage"].(map[string]any); !ok || storageInfo["data_dir"] == nil || storageInfo["total_bytes"] == nil {
 		t.Fatalf("monitoring storage info incomplete: %v", monitor["storage"])
+	}
+	if transcoderInfo, ok := monitor["recording_transcoder"].(map[string]any); !ok || transcoderInfo["status"] == "" || transcoderInfo["detail"] == "" {
+		t.Fatalf("monitoring recording transcoder info incomplete: %v", monitor["recording_transcoder"])
 	}
 	assertStatus(t, handler, http.MethodPost, "/api/tools/ping", map[string]any{"target": "localhost", "count": 1, "mode": "icmp"}, cookie, http.StatusOK)
 	listener, closeListener := startAppTestTCPListener(t)
@@ -13763,12 +13766,14 @@ func TestAuditSessionOperations(t *testing.T) {
 	if auditorPlayback.Body.String() != "frames" || auditorPlayback.Header().Get("Content-Type") != "application/vnd.apache.guacamole.recording" {
 		t.Fatalf("auditor recording playback = body %q content-type %q", auditorPlayback.Body.String(), auditorPlayback.Header().Get("Content-Type"))
 	}
+	assertStatus(t, handler, http.MethodGet, "/api/admin/audit/offline-sessions/"+rdpSession.ID+"/recording/transcode", nil, auditorCookie, http.StatusOK)
 	playbackRange := assertStatusWithHeaders(t, handler, http.MethodGet, "/api/admin/audit/offline-sessions/"+rdpSession.ID+"/recording/playback", nil, auditorCookie, map[string]string{
 		"Range": "bytes=1-3",
 	}, http.StatusPartialContent)
 	if playbackRange.Body.String() != "ram" || playbackRange.Header().Get("Content-Range") != "bytes 1-3/6" {
 		t.Fatalf("recording playback range = body %q content-range %q", playbackRange.Body.String(), playbackRange.Header().Get("Content-Range"))
 	}
+	assertStatus(t, handler, http.MethodPost, "/api/admin/audit/offline-sessions/"+rdpSession.ID+"/recording/transcode", nil, auditorCookie, http.StatusForbidden)
 	if recordingSymlinkCreated {
 		assertZipOmitsEntryAndContent(t, auditorDownload.Body.Bytes(), recordingSymlinkName, externalRecordingContent)
 	}
@@ -14073,6 +14078,207 @@ func TestRecordingPlaybackFileSelection(t *testing.T) {
 	if !errors.Is(err, errStorageSpecialFile) {
 		t.Fatalf("preferred playback symlink error = %v", err)
 	}
+}
+
+type testRecordingTranscoder struct {
+	available bool
+	detail    string
+	started   chan struct{}
+	release   chan struct{}
+	result    []byte
+	err       error
+}
+
+func (t *testRecordingTranscoder) Available() (bool, string) {
+	return t.available, t.detail
+}
+
+func (t *testRecordingTranscoder) Transcode(ctx context.Context, _ string, outputDir string) (RecordingTranscodeResult, error) {
+	if t.started != nil {
+		select {
+		case t.started <- struct{}{}:
+		default:
+		}
+	}
+	if t.release != nil {
+		select {
+		case <-t.release:
+		case <-ctx.Done():
+			return RecordingTranscodeResult{}, ctx.Err()
+		}
+	}
+	if t.err != nil {
+		return RecordingTranscodeResult{}, t.err
+	}
+	path := filepath.Join(outputDir, "recording-video.mp4")
+	if err := os.WriteFile(path, t.result, 0o660); err != nil {
+		return RecordingTranscodeResult{}, err
+	}
+	return RecordingTranscodeResult{Path: path, MimeType: "video/mp4"}, nil
+}
+
+func TestRecordingTranscodeLifecycleAndVideoPlayback(t *testing.T) {
+	transcoder := &testRecordingTranscoder{
+		available: true,
+		detail:    "test guacenc",
+		started:   make(chan struct{}, 1),
+		release:   make(chan struct{}),
+		result:    []byte("transcoded-video"),
+	}
+	srv, adminCookie := newTestServer(t, func(cfg *Config) {
+		cfg.RecordingTranscoder = transcoder
+	})
+	handler := http.Handler(srv)
+	id := "offline-transcode"
+	recordingPath := filepath.Join(srv.cfg.DataDir, "recordings", id)
+	if err := os.MkdirAll(recordingPath, 0o770); err != nil {
+		t.Fatalf("create transcode recording dir: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(recordingPath, "recording.guac"), []byte("raw-guacamole"), 0o660); err != nil {
+		t.Fatalf("write transcode recording: %v", err)
+	}
+	if _, err := srv.cfg.Store.SavePlatformItem("offline_sessions", model.PlatformItem{
+		ID: id, Name: "transcode session", Type: "rdp", Status: "closed", Protocol: model.ProtocolRDP,
+		OwnerID: "admin", Metadata: map[string]any{"recording_path": recordingPath, "recording_size": 13},
+	}); err != nil {
+		t.Fatalf("save transcode offline session: %v", err)
+	}
+
+	statusRec := assertStatus(t, handler, http.MethodGet, "/api/admin/audit/offline-sessions/"+id+"/recording/transcode", nil, adminCookie, http.StatusOK)
+	if !strings.Contains(statusRec.Body.String(), `"available":true`) || !strings.Contains(statusRec.Body.String(), "test guacenc") {
+		t.Fatalf("initial transcode status = %s", statusRec.Body.String())
+	}
+	assertStatus(t, handler, http.MethodPost, "/api/admin/audit/offline-sessions/"+id+"/recording/transcode", nil, adminCookie, http.StatusAccepted)
+	select {
+	case <-transcoder.started:
+	case <-time.After(3 * time.Second):
+		t.Fatal("recording transcode did not start")
+	}
+	processingRec := assertStatus(t, handler, http.MethodGet, "/api/admin/audit/offline-sessions/"+id+"/recording/transcode", nil, adminCookie, http.StatusOK)
+	if !strings.Contains(processingRec.Body.String(), `"status":"processing"`) {
+		t.Fatalf("processing transcode status = %s", processingRec.Body.String())
+	}
+	assertStatus(t, handler, http.MethodPost, "/api/admin/audit/offline-sessions/"+id+"/recording/transcode", nil, adminCookie, http.StatusConflict)
+	assertStatus(t, handler, http.MethodDelete, "/api/admin/audit/offline-sessions/"+id+"/recording", nil, adminCookie, http.StatusConflict)
+	close(transcoder.release)
+	waitForRecordingTranscodeStatus(t, srv, id, recordingTranscodeCompleted)
+
+	completedRec := assertStatus(t, handler, http.MethodGet, "/api/admin/audit/offline-sessions/"+id+"/recording/transcode", nil, adminCookie, http.StatusOK)
+	if !strings.Contains(completedRec.Body.String(), `"status":"completed"`) || !strings.Contains(completedRec.Body.String(), `"video_size":16`) || !strings.Contains(completedRec.Body.String(), "/recording/video") {
+		t.Fatalf("completed transcode status = %s", completedRec.Body.String())
+	}
+	videoRec := assertStatus(t, handler, http.MethodGet, "/api/admin/audit/offline-sessions/"+id+"/recording/video", nil, adminCookie, http.StatusOK)
+	if videoRec.Body.String() != "transcoded-video" || videoRec.Header().Get("Content-Type") != "video/mp4" {
+		t.Fatalf("transcoded video = body %q content-type %q", videoRec.Body.String(), videoRec.Header().Get("Content-Type"))
+	}
+	videoRange := assertStatusWithHeaders(t, handler, http.MethodGet, "/api/admin/audit/offline-sessions/"+id+"/recording/video", nil, adminCookie, map[string]string{"Range": "bytes=2-5"}, http.StatusPartialContent)
+	if videoRange.Body.String() != "ansc" || videoRange.Header().Get("Content-Range") != "bytes 2-5/16" {
+		t.Fatalf("transcoded video range = body %q range %q", videoRange.Body.String(), videoRange.Header().Get("Content-Range"))
+	}
+	rawRec := assertStatus(t, handler, http.MethodGet, "/api/admin/audit/offline-sessions/"+id+"/recording/playback", nil, adminCookie, http.StatusOK)
+	if rawRec.Body.String() != "raw-guacamole" {
+		t.Fatalf("raw playback selected transcoded output: %q", rawRec.Body.String())
+	}
+	logsRec := assertStatus(t, handler, http.MethodGet, "/api/admin/audit/operation-logs", nil, adminCookie, http.StatusOK)
+	for _, action := range []string{"audit.recording.transcode", "audit.recording.video.playback"} {
+		if !strings.Contains(logsRec.Body.String(), action) {
+			t.Fatalf("recording transcode logs missing %q: %s", action, logsRec.Body.String())
+		}
+	}
+}
+
+func TestRecordingTranscodeUnavailableAndFailure(t *testing.T) {
+	unavailable := &testRecordingTranscoder{available: false, detail: "guacenc missing"}
+	srv, adminCookie := newTestServer(t, func(cfg *Config) { cfg.RecordingTranscoder = unavailable })
+	handler := http.Handler(srv)
+	id := "offline-transcode-unavailable"
+	recordingPath := filepath.Join(srv.cfg.DataDir, "recordings", id)
+	if err := os.MkdirAll(recordingPath, 0o770); err != nil {
+		t.Fatalf("create unavailable recording dir: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(recordingPath, "recording.guac"), []byte("raw"), 0o660); err != nil {
+		t.Fatalf("write unavailable recording: %v", err)
+	}
+	if _, err := srv.cfg.Store.SavePlatformItem("offline_sessions", model.PlatformItem{
+		ID: id, Name: "unavailable transcode", Protocol: model.ProtocolRDP, OwnerID: "admin",
+		Metadata: map[string]any{"recording_path": recordingPath},
+	}); err != nil {
+		t.Fatalf("save unavailable transcode session: %v", err)
+	}
+	unavailableRec := assertStatus(t, handler, http.MethodPost, "/api/admin/audit/offline-sessions/"+id+"/recording/transcode", nil, adminCookie, http.StatusServiceUnavailable)
+	if !strings.Contains(unavailableRec.Body.String(), "guacenc missing") {
+		t.Fatalf("unavailable transcode response = %s", unavailableRec.Body.String())
+	}
+
+	failing := &testRecordingTranscoder{available: true, detail: "test", err: errors.New("forced transcode failure")}
+	srv.recordingTranscoder = failing
+	assertStatus(t, handler, http.MethodPost, "/api/admin/audit/offline-sessions/"+id+"/recording/transcode", nil, adminCookie, http.StatusAccepted)
+	waitForRecordingTranscodeStatus(t, srv, id, recordingTranscodeFailed)
+	failedRec := assertStatus(t, handler, http.MethodGet, "/api/admin/audit/offline-sessions/"+id+"/recording/transcode", nil, adminCookie, http.StatusOK)
+	if !strings.Contains(failedRec.Body.String(), `"status":"failed"`) || !strings.Contains(failedRec.Body.String(), "forced transcode failure") {
+		t.Fatalf("failed transcode status = %s", failedRec.Body.String())
+	}
+	assertStatus(t, handler, http.MethodGet, "/api/admin/audit/offline-sessions/"+id+"/recording/video", nil, adminCookie, http.StatusNotFound)
+}
+
+func TestRecordingTranscodeRestartReconciliation(t *testing.T) {
+	srv := newUnconfiguredTestServer(t, func(cfg *Config) {
+		cfg.RecordingTranscoder = &testRecordingTranscoder{available: true}
+	})
+	item, err := srv.cfg.Store.SavePlatformItem("offline_sessions", model.PlatformItem{
+		ID: "interrupted-transcode", Name: "interrupted", Protocol: model.ProtocolRDP,
+		Metadata: map[string]any{"recording_transcode_status": recordingTranscodeProcessing},
+	})
+	if err != nil {
+		t.Fatalf("save interrupted transcode: %v", err)
+	}
+	srv.reconcileInterruptedRecordingTranscodes()
+	reconciled, ok, err := srv.cfg.Store.GetPlatformItem("offline_sessions", item.ID)
+	if err != nil || !ok || firstMetadataString(reconciled.Metadata, "recording_transcode_status") != recordingTranscodeFailed || !strings.Contains(firstMetadataString(reconciled.Metadata, "recording_transcode_error"), "service restart") {
+		t.Fatalf("reconciled transcode = ok=%v item=%#v err=%v", ok, reconciled, err)
+	}
+}
+
+func TestGuacencTranscoderIntegration(t *testing.T) {
+	transcoder := newGuacencTranscoderFromEnvironment()
+	if available, detail := transcoder.Available(); !available {
+		t.Skip(detail)
+	}
+	dir := t.TempDir()
+	source := filepath.Join(dir, "recording.guac")
+	if err := os.WriteFile(source, []byte("4.size,1.0,3.640,3.384;4.sync,1.0;4.rect,1.0,1.0,1.0,3.640,3.384;5.cfill,2.14,1.0,3.255,1.0,1.0,3.255;4.sync,4.1000;4.sync,4.2000;"), 0o660); err != nil {
+		t.Fatalf("write guacenc integration recording: %v", err)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	result, err := transcoder.Transcode(ctx, source, dir)
+	if err != nil {
+		t.Fatalf("transcode Guacamole recording: %v", err)
+	}
+	data, err := os.ReadFile(result.Path)
+	if err != nil {
+		t.Fatalf("read transcoded Guacamole recording: %v", err)
+	}
+	if result.MimeType != "video/mp4" || filepath.Ext(result.Path) != ".mp4" || len(data) < 1024 || !bytes.Contains(data[:min(len(data), 64)], []byte("ftyp")) {
+		t.Fatalf("unexpected guacenc output: mime=%q size=%d header=%q", result.MimeType, len(data), data[:min(len(data), 32)])
+	}
+}
+
+func waitForRecordingTranscodeStatus(t *testing.T, srv *Server, id, expected string) model.PlatformItem {
+	t.Helper()
+	deadline := time.Now().Add(5 * time.Second)
+	for time.Now().Before(deadline) {
+		item, ok, err := srv.cfg.Store.GetPlatformItem("offline_sessions", id)
+		if err != nil {
+			t.Fatalf("load recording transcode status: %v", err)
+		}
+		if ok && firstMetadataString(item.Metadata, "recording_transcode_status") == expected {
+			return item
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	t.Fatalf("recording transcode %s did not reach status %s", id, expected)
+	return model.PlatformItem{}
 }
 
 func TestSSHSessionFilesThroughAgentRelay(t *testing.T) {

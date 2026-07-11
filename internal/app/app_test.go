@@ -219,6 +219,144 @@ func TestExpiredPersistedAuthSessionIsRejectedAndRemoved(t *testing.T) {
 	}
 }
 
+func TestMFAChallengePersistsAcrossRestartAndIsConsumedOnce(t *testing.T) {
+	srv, _ := newTestServer(t, nil)
+	admin, ok := srv.cfg.Store.AdminUser()
+	if !ok {
+		t.Fatal("admin user is missing")
+	}
+	secret := "JBSWY3DPEHPK3PXP"
+	if _, err := srv.cfg.Store.EnableUserMFA(admin.UserID, secret, []string{"ABCDE-FGHIJ"}); err != nil {
+		t.Fatalf("enable admin MFA: %v", err)
+	}
+
+	loginRec := assertStatus(t, srv, http.MethodPost, "/api/auth/login", map[string]any{"username": "admin", "password": "password123"}, nil, http.StatusAccepted)
+	var loginPayload map[string]any
+	decodeResponse(t, loginRec, &loginPayload)
+	token, _ := loginPayload["mfa_token"].(string)
+	if token == "" {
+		t.Fatalf("MFA login challenge is missing token: %v", loginPayload)
+	}
+	item, found, err := srv.cfg.Store.GetPlatformItem(mfaLoginChallengeCollection, authSessionRecordID(token))
+	if err != nil || !found {
+		t.Fatalf("load persisted MFA challenge: found=%v err=%v", found, err)
+	}
+	if item.ID == token || strings.Contains(firstMetadataString(item.Metadata, "payload"), token) {
+		t.Fatal("persisted MFA challenge contains the plaintext token")
+	}
+	bootstrap, err := srv.cfg.Store.PlatformBootstrap()
+	if err != nil {
+		t.Fatalf("platform bootstrap: %v", err)
+	}
+	if _, exposed := bootstrap[mfaLoginChallengeCollection]; exposed {
+		t.Fatal("private MFA challenge collection was exposed in bootstrap")
+	}
+
+	restarted := NewServer(srv.cfg)
+	completePayload := map[string]any{"token": token, "mfa_code": totpCode(secret, time.Now().UTC())}
+	completeRec := assertStatus(t, restarted, http.MethodPost, "/api/auth/mfa/complete-login", completePayload, nil, http.StatusOK)
+	if len(completeRec.Result().Cookies()) == 0 {
+		t.Fatal("MFA completion after restart did not set an auth cookie")
+	}
+	assertStatus(t, restarted, http.MethodPost, "/api/auth/mfa/complete-login", completePayload, nil, http.StatusUnauthorized)
+}
+
+func TestMFAChallengePersistenceAndConsumptionFailuresAreRetryable(t *testing.T) {
+	srv, _ := newTestServer(t, nil)
+	admin, _ := srv.cfg.Store.AdminUser()
+	challenge := mfaChallenge{User: admin, Username: admin.Username, ClientIP: "192.0.2.20", FailureKey: "failure-key"}
+
+	removeCreateBlocker := blockPlatformItemCreate(t, srv.cfg.Store, mfaLoginChallengeCollection)
+	if token, err := srv.auth.createMFAChallenge(challenge); err == nil || token != "" {
+		t.Fatalf("blocked MFA challenge creation = token %q err %v", token, err)
+	}
+	removeCreateBlocker()
+
+	token, err := srv.auth.createMFAChallenge(challenge)
+	if err != nil {
+		t.Fatalf("create MFA challenge: %v", err)
+	}
+	removeDeleteBlocker := blockPlatformItemDeletePayloadFragment(t, srv.cfg.Store, mfaLoginChallengeCollection, `"name":"mfa_login_challenges"`)
+	if _, ok, err := NewServer(srv.cfg).auth.consumeMFAChallenge(token); err == nil || ok {
+		t.Fatalf("blocked MFA challenge consumption = ok %v err %v", ok, err)
+	}
+	removeDeleteBlocker()
+	if _, ok, err := NewServer(srv.cfg).auth.consumeMFAChallenge(token); err != nil || !ok {
+		t.Fatalf("retry MFA challenge consumption = ok %v err %v", ok, err)
+	}
+}
+
+func TestPasskeyChallengesPersistAcrossRestart(t *testing.T) {
+	srv, adminCookie := newTestServer(t, nil)
+	optionsRec := assertStatus(t, srv, http.MethodPost, "/api/auth/passkeys/register/options", map[string]any{}, adminCookie, http.StatusOK)
+	var registrationOptions testPasskeyCreationOptionsResponse
+	decodeResponse(t, optionsRec, &registrationOptions)
+	privateKey, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	if err != nil {
+		t.Fatalf("generate passkey key: %v", err)
+	}
+	credentialID := []byte("restart-registration-challenge")
+	registrationPayload := testPasskeyRegistrationPayload(t, registrationOptions, "admin", credentialID, privateKey)
+	registrationItem, found, err := srv.cfg.Store.GetPlatformItem(passkeyRegistrationChallengeCollection, authSessionRecordID(registrationOptions.ChallengeID))
+	if err != nil || !found {
+		t.Fatalf("load persisted registration challenge: found=%v err=%v", found, err)
+	}
+	if registrationItem.ID == registrationOptions.ChallengeID || strings.Contains(firstMetadataString(registrationItem.Metadata, "payload"), registrationOptions.ChallengeID) {
+		t.Fatal("persisted passkey registration challenge contains the plaintext challenge ID")
+	}
+	restarted := NewServer(srv.cfg)
+	assertStatus(t, restarted, http.MethodPost, "/api/auth/passkeys/register/verify", registrationPayload, adminCookie, http.StatusCreated)
+	assertStatus(t, restarted, http.MethodPost, "/api/auth/passkeys/register/verify", registrationPayload, adminCookie, http.StatusUnauthorized)
+
+	loginOptions := testPasskeyLoginOptions(t, restarted, "admin")
+	assertionPayload := testPasskeyAssertionPayload(t, loginOptions.ChallengeID, loginOptions.PublicKey.Challenge, loginOptions.PublicKey.RPID, credentialID, privateKey, 2, false)
+	loginItem, found, err := srv.cfg.Store.GetPlatformItem(passkeyLoginChallengeCollection, authSessionRecordID(loginOptions.ChallengeID))
+	if err != nil || !found {
+		t.Fatalf("load persisted login challenge: found=%v err=%v", found, err)
+	}
+	if loginItem.ID == loginOptions.ChallengeID || strings.Contains(firstMetadataString(loginItem.Metadata, "payload"), loginOptions.ChallengeID) {
+		t.Fatal("persisted passkey login challenge contains the plaintext challenge ID")
+	}
+	restartedAgain := NewServer(srv.cfg)
+	assertStatus(t, restartedAgain, http.MethodPost, "/api/auth/passkeys/login/verify", assertionPayload, nil, http.StatusOK)
+	assertStatus(t, restartedAgain, http.MethodPost, "/api/auth/passkeys/login/verify", assertionPayload, nil, http.StatusUnauthorized)
+}
+
+func TestAccessMFAGrantPersistsAcrossRestartAndFollowsSessionRevocation(t *testing.T) {
+	srv, adminCookie := newTestServer(t, nil)
+	admin, _ := srv.cfg.Store.AdminUser()
+	if err := srv.auth.grantAccessMFA(adminCookie.Value, admin.UserID, 5*time.Minute); err != nil {
+		t.Fatalf("grant access MFA: %v", err)
+	}
+	item, found, err := srv.cfg.Store.GetPlatformItem(accessMFAGrantCollection, authSessionRecordID(adminCookie.Value))
+	if err != nil || !found {
+		t.Fatalf("load persisted access MFA grant: found=%v err=%v", found, err)
+	}
+	if item.ID == adminCookie.Value || strings.Contains(firstMetadataString(item.Metadata, "payload"), adminCookie.Value) {
+		t.Fatal("persisted access MFA grant contains the plaintext session token")
+	}
+	restarted := NewServer(srv.cfg)
+	if valid, err := restarted.auth.accessMFAValid(adminCookie.Value, admin.UserID); err != nil || !valid {
+		t.Fatalf("access MFA grant after restart = valid %v err %v", valid, err)
+	}
+	assertStatus(t, restarted, http.MethodPost, "/api/auth/logout", map[string]any{}, adminCookie, http.StatusOK)
+	if _, found, err := srv.cfg.Store.GetPlatformItem(accessMFAGrantCollection, authSessionRecordID(adminCookie.Value)); err != nil || found {
+		t.Fatalf("logout retained access MFA grant: found=%v err=%v", found, err)
+	}
+
+	expiredToken := "expired-access-mfa-session"
+	expired := accessMFAGrant{UserID: admin.UserID, ExpiresAt: time.Now().Add(-time.Minute).UTC()}
+	if err := srv.auth.persistAuthRuntimeState(accessMFAGrantCollection, expiredToken, expired, expired.ExpiresAt); err != nil {
+		t.Fatalf("persist expired access MFA grant: %v", err)
+	}
+	if valid, err := NewServer(srv.cfg).auth.accessMFAValid(expiredToken, admin.UserID); err != nil || valid {
+		t.Fatalf("expired access MFA grant = valid %v err %v", valid, err)
+	}
+	if _, found, err := srv.cfg.Store.GetPlatformItem(accessMFAGrantCollection, authSessionRecordID(expiredToken)); err != nil || found {
+		t.Fatalf("expired access MFA grant was not removed: found=%v err=%v", found, err)
+	}
+}
+
 func TestSetupSessionPersistenceFailureRollsBackAdminInitialization(t *testing.T) {
 	srv := newUnconfiguredTestServer(t, nil)
 	removeBlocker := blockPlatformItemCreate(t, srv.cfg.Store, "auth_sessions")
@@ -6291,7 +6429,8 @@ func TestLoginMFAFailuresAccumulateAcrossPasswordChallenges(t *testing.T) {
 }
 
 func TestForcedMFAEnrollmentDuringLogin(t *testing.T) {
-	handler, adminCookie := newTestHandler(t)
+	srv, adminCookie := newTestServer(t, nil)
+	handler := http.Handler(srv)
 
 	assertStatus(t, handler, http.MethodPost, "/api/admin/system-settings", map[string]any{
 		"name":   "Force MFA",
@@ -6310,16 +6449,17 @@ func TestForcedMFAEnrollmentDuringLogin(t *testing.T) {
 	}
 	token, _ := challenge["mfa_token"].(string)
 	secret, _ := challenge["secret"].(string)
-	assertStatus(t, handler, http.MethodPost, "/api/auth/mfa/complete-login", map[string]any{
+	restarted := NewServer(srv.cfg)
+	assertStatus(t, restarted, http.MethodPost, "/api/auth/mfa/complete-login", map[string]any{
 		"token":    token,
 		"mfa_code": totpCode(secret, time.Now().UTC()),
 	}, nil, http.StatusOK)
-	assertStatus(t, handler, http.MethodPost, "/api/auth/mfa/complete-login", map[string]any{
+	assertStatus(t, restarted, http.MethodPost, "/api/auth/mfa/complete-login", map[string]any{
 		"token":    token,
 		"mfa_code": totpCode(secret, time.Now().UTC()),
 	}, nil, http.StatusUnauthorized)
 
-	nextLoginRec := assertStatus(t, handler, http.MethodPost, "/api/auth/login", map[string]any{"username": "admin", "password": "password123"}, nil, http.StatusAccepted)
+	nextLoginRec := assertStatus(t, restarted, http.MethodPost, "/api/auth/login", map[string]any{"username": "admin", "password": "password123"}, nil, http.StatusAccepted)
 	if !strings.Contains(nextLoginRec.Body.String(), `"mfa_required":true`) {
 		t.Fatal("enrolled forced MFA account did not require MFA on next login")
 	}

@@ -72,7 +72,12 @@ func (s *Server) requireAccessMFA(w http.ResponseWriter, r *http.Request, input 
 		writeError(w, http.StatusUnauthorized, "authentication required")
 		return false
 	}
-	if s.auth.accessMFAValid(token, session.UserID) {
+	valid, err := s.auth.accessMFAValid(token, session.UserID)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err.Error())
+		return false
+	}
+	if valid {
 		return true
 	}
 	profile, _, err := s.cfg.Store.UserMFAProfile(session.UserID)
@@ -99,7 +104,10 @@ func (s *Server) requireAccessMFA(w http.ResponseWriter, r *http.Request, input 
 		writeError(w, http.StatusUnauthorized, "access MFA code is invalid")
 		return false
 	}
-	s.auth.grantAccessMFA(token, session.UserID, ttl)
+	if err := s.auth.grantAccessMFA(token, session.UserID, ttl); err != nil {
+		writeError(w, http.StatusInternalServerError, err.Error())
+		return false
+	}
 	_ = s.audit(r, "access.mfa.verify", session.UserID, "", "verified access MFA with "+method)
 	return true
 }

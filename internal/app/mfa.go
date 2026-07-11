@@ -86,12 +86,15 @@ func (s *Server) handleMFACompleteLogin(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 	token := strings.TrimSpace(req.Token)
-	challenge, ok := s.auth.mfaChallenge(token)
+	challenge, ok, err := s.auth.consumeMFAChallenge(token)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
 	if token == "" || !ok {
 		writeError(w, http.StatusUnauthorized, "MFA challenge expired")
 		return
 	}
-	defer s.auth.deleteMFAChallenge(token)
 	currentUser, userOK, err := s.authUserByID(challenge.User.UserID)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, err.Error())

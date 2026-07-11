@@ -20,8 +20,12 @@ import (
 )
 
 const (
-	authCookieName = "openwebservermanager_session"
-	authSessionTTL = 24 * time.Hour
+	authCookieName                         = "openwebservermanager_session"
+	authSessionTTL                         = 24 * time.Hour
+	mfaLoginChallengeCollection            = "mfa_login_challenges"
+	passkeyRegistrationChallengeCollection = "passkey_registration_challenges"
+	passkeyLoginChallengeCollection        = "passkey_login_challenges"
+	accessMFAGrantCollection               = "access_mfa_grants"
 )
 
 type authManager struct {
@@ -148,9 +152,14 @@ func (m *authManager) delete(token string) error {
 	delete(m.accessMFAGrants, token)
 	m.mu.Unlock()
 	if m.store != nil {
-		if err := m.store.DeletePlatformItem("auth_sessions", authSessionRecordID(token)); err != nil && !errors.Is(err, os.ErrNotExist) {
-			return err
+		id := authSessionRecordID(token)
+		var errs []error
+		for _, collection := range []string{accessMFAGrantCollection, "auth_sessions"} {
+			if err := m.store.DeletePlatformItem(collection, id); err != nil && !errors.Is(err, os.ErrNotExist) {
+				errs = append(errs, err)
+			}
 		}
+		return errors.Join(errs...)
 	}
 	return nil
 }
@@ -190,6 +199,9 @@ func (m *authManager) deleteUserSessionsExcept(userID, keepToken string) error {
 		for _, item := range items {
 			if item.OwnerID == userID && item.ID != keepID {
 				if err := m.store.DeletePlatformItem("auth_sessions", item.ID); err != nil && !errors.Is(err, os.ErrNotExist) {
+					return err
+				}
+				if err := m.store.DeletePlatformItem(accessMFAGrantCollection, item.ID); err != nil && !errors.Is(err, os.ErrNotExist) {
 					return err
 				}
 			}
@@ -388,7 +400,28 @@ func (m *authManager) consumeAuthRuntimeState(collection, token string, target a
 		return ok, err
 	}
 	if err := m.store.DeletePlatformItem(collection, id); err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return false, nil
+		}
 		return false, err
+	}
+	payload, _ := item.Metadata["payload"].(string)
+	if payload == "" {
+		return false, errors.New("persisted authentication state is missing payload")
+	}
+	if err := json.Unmarshal([]byte(payload), target); err != nil {
+		return false, fmt.Errorf("decode persisted authentication state: %w", err)
+	}
+	return true, nil
+}
+
+func (m *authManager) loadAuthRuntimeState(collection, token string, target any) (bool, error) {
+	if m.store == nil {
+		return false, nil
+	}
+	item, ok, err := m.store.GetPlatformItem(collection, authSessionRecordID(token))
+	if err != nil || !ok {
+		return ok, err
 	}
 	payload, _ := item.Metadata["payload"].(string)
 	if payload == "" {
@@ -495,47 +528,76 @@ func (m *authManager) clearSessions() error {
 	if m.store == nil {
 		return nil
 	}
-	items, err := m.store.ListPlatformItems("auth_sessions")
-	if err != nil {
-		return err
-	}
 	var errs []error
-	for _, item := range items {
-		if err := m.store.DeletePlatformItem("auth_sessions", item.ID); err != nil && !errors.Is(err, os.ErrNotExist) {
+	for _, collection := range []string{"auth_sessions", mfaLoginChallengeCollection, passkeyRegistrationChallengeCollection, passkeyLoginChallengeCollection, accessMFAGrantCollection} {
+		items, err := m.store.ListPlatformItems(collection)
+		if err != nil {
 			errs = append(errs, err)
+			continue
+		}
+		for _, item := range items {
+			if err := m.store.DeletePlatformItem(collection, item.ID); err != nil && !errors.Is(err, os.ErrNotExist) {
+				errs = append(errs, err)
+			}
 		}
 	}
 	return errors.Join(errs...)
 }
 
-func (m *authManager) grantAccessMFA(token, userID string, ttl time.Duration) {
+func (m *authManager) grantAccessMFA(token, userID string, ttl time.Duration) error {
 	if strings.TrimSpace(token) == "" || strings.TrimSpace(userID) == "" || ttl <= 0 {
-		return
+		return errors.New("access MFA grant requires a session, user, and positive TTL")
+	}
+	grant := accessMFAGrant{UserID: userID, ExpiresAt: time.Now().Add(ttl).UTC()}
+	if err := m.pruneAuthRuntimeStates(accessMFAGrantCollection); err != nil {
+		return err
+	}
+	if err := m.persistAuthRuntimeState(accessMFAGrantCollection, token, grant, grant.ExpiresAt); err != nil {
+		return err
 	}
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	m.accessMFAGrants[token] = accessMFAGrant{
-		UserID:    userID,
-		ExpiresAt: time.Now().Add(ttl).UTC(),
-	}
+	m.accessMFAGrants[token] = grant
+	return nil
 }
 
-func (m *authManager) accessMFAValid(token, userID string) bool {
+func (m *authManager) accessMFAValid(token, userID string) (bool, error) {
 	if strings.TrimSpace(token) == "" || strings.TrimSpace(userID) == "" {
-		return false
+		return false, nil
 	}
 	now := time.Now().UTC()
-	m.mu.Lock()
-	defer m.mu.Unlock()
+	m.mu.RLock()
 	grant, ok := m.accessMFAGrants[token]
+	m.mu.RUnlock()
+	if !ok && m.store != nil {
+		var persisted accessMFAGrant
+		var err error
+		ok, err = m.loadAuthRuntimeState(accessMFAGrantCollection, token, &persisted)
+		if err != nil {
+			return false, err
+		}
+		if ok {
+			grant = persisted
+			m.mu.Lock()
+			m.accessMFAGrants[token] = grant
+			m.mu.Unlock()
+		}
+	}
 	if !ok {
-		return false
+		return false, nil
 	}
-	if now.After(grant.ExpiresAt) {
+	if !now.Before(grant.ExpiresAt) {
+		if m.store != nil {
+			if err := m.store.DeletePlatformItem(accessMFAGrantCollection, authSessionRecordID(token)); err != nil && !errors.Is(err, os.ErrNotExist) {
+				return false, err
+			}
+		}
+		m.mu.Lock()
 		delete(m.accessMFAGrants, token)
-		return false
+		m.mu.Unlock()
+		return false, nil
 	}
-	return grant.UserID == userID
+	return grant.UserID == userID, nil
 }
 
 func (m *authManager) createMFAChallenge(challenge mfaChallenge) (string, error) {
@@ -544,30 +606,37 @@ func (m *authManager) createMFAChallenge(challenge mfaChallenge) (string, error)
 		return "", err
 	}
 	challenge.ExpiresAt = time.Now().Add(5 * time.Minute).UTC()
+	if err := m.pruneAuthRuntimeStates(mfaLoginChallengeCollection); err != nil {
+		return "", err
+	}
+	if err := m.persistAuthRuntimeState(mfaLoginChallengeCollection, token, challenge, challenge.ExpiresAt); err != nil {
+		return "", err
+	}
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	m.mfaChallenges[token] = challenge
 	return token, nil
 }
 
-func (m *authManager) mfaChallenge(token string) (mfaChallenge, bool) {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	challenge, ok := m.mfaChallenges[token]
-	if !ok {
-		return mfaChallenge{}, false
-	}
-	if time.Now().UTC().After(challenge.ExpiresAt) {
+func (m *authManager) consumeMFAChallenge(token string) (mfaChallenge, bool, error) {
+	var challenge mfaChallenge
+	ok, err := m.consumeAuthRuntimeState(mfaLoginChallengeCollection, token, &challenge)
+	if m.store == nil {
+		m.mu.Lock()
+		challenge, ok = m.mfaChallenges[token]
 		delete(m.mfaChallenges, token)
-		return mfaChallenge{}, false
+		m.mu.Unlock()
 	}
-	return challenge, true
-}
-
-func (m *authManager) deleteMFAChallenge(token string) {
 	m.mu.Lock()
-	defer m.mu.Unlock()
 	delete(m.mfaChallenges, token)
+	m.mu.Unlock()
+	if err != nil || !ok {
+		return mfaChallenge{}, ok, err
+	}
+	if !time.Now().UTC().Before(challenge.ExpiresAt) {
+		return mfaChallenge{}, false, nil
+	}
+	return challenge, true, nil
 }
 
 func (m *authManager) createPasskeyRegistrationChallenge(challenge passkeyChallenge) (string, error) {
@@ -576,30 +645,37 @@ func (m *authManager) createPasskeyRegistrationChallenge(challenge passkeyChalle
 		return "", err
 	}
 	challenge.ExpiresAt = time.Now().Add(5 * time.Minute).UTC()
+	if err := m.pruneAuthRuntimeStates(passkeyRegistrationChallengeCollection); err != nil {
+		return "", err
+	}
+	if err := m.persistAuthRuntimeState(passkeyRegistrationChallengeCollection, token, challenge, challenge.ExpiresAt); err != nil {
+		return "", err
+	}
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	m.passkeyRegistrations[token] = challenge
 	return token, nil
 }
 
-func (m *authManager) passkeyRegistrationChallenge(token string) (passkeyChallenge, bool) {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	challenge, ok := m.passkeyRegistrations[token]
-	if !ok {
-		return passkeyChallenge{}, false
-	}
-	if time.Now().UTC().After(challenge.ExpiresAt) {
+func (m *authManager) consumePasskeyRegistrationChallenge(token string) (passkeyChallenge, bool, error) {
+	var challenge passkeyChallenge
+	ok, err := m.consumeAuthRuntimeState(passkeyRegistrationChallengeCollection, token, &challenge)
+	if m.store == nil {
+		m.mu.Lock()
+		challenge, ok = m.passkeyRegistrations[token]
 		delete(m.passkeyRegistrations, token)
-		return passkeyChallenge{}, false
+		m.mu.Unlock()
 	}
-	return challenge, true
-}
-
-func (m *authManager) deletePasskeyRegistrationChallenge(token string) {
 	m.mu.Lock()
-	defer m.mu.Unlock()
 	delete(m.passkeyRegistrations, token)
+	m.mu.Unlock()
+	if err != nil || !ok {
+		return passkeyChallenge{}, ok, err
+	}
+	if !time.Now().UTC().Before(challenge.ExpiresAt) {
+		return passkeyChallenge{}, false, nil
+	}
+	return challenge, true, nil
 }
 
 func (m *authManager) createPasskeyLoginChallenge(challenge passkeyChallenge) (string, error) {
@@ -608,30 +684,37 @@ func (m *authManager) createPasskeyLoginChallenge(challenge passkeyChallenge) (s
 		return "", err
 	}
 	challenge.ExpiresAt = time.Now().Add(5 * time.Minute).UTC()
+	if err := m.pruneAuthRuntimeStates(passkeyLoginChallengeCollection); err != nil {
+		return "", err
+	}
+	if err := m.persistAuthRuntimeState(passkeyLoginChallengeCollection, token, challenge, challenge.ExpiresAt); err != nil {
+		return "", err
+	}
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	m.passkeyLogins[token] = challenge
 	return token, nil
 }
 
-func (m *authManager) passkeyLoginChallenge(token string) (passkeyChallenge, bool) {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	challenge, ok := m.passkeyLogins[token]
-	if !ok {
-		return passkeyChallenge{}, false
-	}
-	if time.Now().UTC().After(challenge.ExpiresAt) {
+func (m *authManager) consumePasskeyLoginChallenge(token string) (passkeyChallenge, bool, error) {
+	var challenge passkeyChallenge
+	ok, err := m.consumeAuthRuntimeState(passkeyLoginChallengeCollection, token, &challenge)
+	if m.store == nil {
+		m.mu.Lock()
+		challenge, ok = m.passkeyLogins[token]
 		delete(m.passkeyLogins, token)
-		return passkeyChallenge{}, false
+		m.mu.Unlock()
 	}
-	return challenge, true
-}
-
-func (m *authManager) deletePasskeyLoginChallenge(token string) {
 	m.mu.Lock()
-	defer m.mu.Unlock()
 	delete(m.passkeyLogins, token)
+	m.mu.Unlock()
+	if err != nil || !ok {
+		return passkeyChallenge{}, ok, err
+	}
+	if !time.Now().UTC().Before(challenge.ExpiresAt) {
+		return passkeyChallenge{}, false, nil
+	}
+	return challenge, true, nil
 }
 
 func (s *Server) requireAuth(w http.ResponseWriter, r *http.Request) bool {

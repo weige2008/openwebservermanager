@@ -258,12 +258,15 @@ func (s *Server) handlePasskeyRegisterVerify(w http.ResponseWriter, r *http.Requ
 	}
 	_, session, _ := s.authSession(r)
 	challengeID := strings.TrimSpace(req.ChallengeID)
-	challenge, ok := s.auth.passkeyRegistrationChallenge(challengeID)
+	challenge, ok, err := s.auth.consumePasskeyRegistrationChallenge(challengeID)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
 	if challengeID == "" || !ok || challenge.User.UserID != session.UserID {
 		writeError(w, http.StatusUnauthorized, "passkey registration challenge expired")
 		return
 	}
-	defer s.auth.deletePasskeyRegistrationChallenge(challengeID)
 	if strings.TrimSpace(req.Type) != "" && req.Type != "public-key" {
 		writeError(w, http.StatusBadRequest, "unsupported passkey credential type")
 		return
@@ -502,12 +505,15 @@ func (s *Server) handlePasskeyLoginVerify(w http.ResponseWriter, r *http.Request
 		return
 	}
 	challengeID := strings.TrimSpace(req.ChallengeID)
-	challenge, ok := s.auth.passkeyLoginChallenge(challengeID)
+	challenge, ok, err := s.auth.consumePasskeyLoginChallenge(challengeID)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
 	if challengeID == "" || !ok {
 		writeError(w, http.StatusUnauthorized, "passkey login challenge expired")
 		return
 	}
-	defer s.auth.deletePasskeyLoginChallenge(challengeID)
 	currentUser, ok, err := s.passkeyUserByID(challenge.User.UserID)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, err.Error())

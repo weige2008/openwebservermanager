@@ -5,17 +5,22 @@ import (
 	"crypto/rand"
 	"crypto/rsa"
 	"crypto/sha256"
+	"crypto/x509"
 	"encoding/base64"
 	"encoding/json"
+	"encoding/pem"
 	"errors"
+	"fmt"
 	"math/big"
 	"net/http"
 	"net/url"
+	"os"
 	"strings"
 	"sync"
 	"time"
 
 	"openwebservermanager/internal/model"
+	"openwebservermanager/internal/store"
 
 	"golang.org/x/crypto/bcrypt"
 )
@@ -31,6 +36,7 @@ type oidcManager struct {
 	keyID        string
 	codes        map[string]oidcAuthorizationCode
 	accessTokens map[string]oidcAccessToken
+	store        *store.Store
 }
 
 type oidcAuthorizationCode struct {
@@ -60,21 +66,82 @@ type oidcClientCredentials struct {
 	ClientSecret string
 }
 
-func newOIDCManager() *oidcManager {
-	key, err := rsa.GenerateKey(rand.Reader, 2048)
+func newOIDCManager(stores ...*store.Store) *oidcManager {
+	var st *store.Store
+	if len(stores) > 0 {
+		st = stores[0]
+	}
+	key, err := loadOrCreateOIDCSigningKey(st)
 	if err != nil {
 		panic(err)
 	}
-	kid, err := randomToken()
+	publicDER, err := x509.MarshalPKIXPublicKey(key.Public())
 	if err != nil {
 		panic(err)
 	}
+	keyHash := sha256.Sum256(publicDER)
 	return &oidcManager{
 		privateKey:   key,
-		keyID:        kid[:16],
+		keyID:        base64.RawURLEncoding.EncodeToString(keyHash[:12]),
 		codes:        map[string]oidcAuthorizationCode{},
 		accessTokens: map[string]oidcAccessToken{},
+		store:        st,
 	}
+}
+
+func loadOrCreateOIDCSigningKey(st *store.Store) (*rsa.PrivateKey, error) {
+	if st != nil {
+		item, ok, err := st.GetPlatformItem("oidc_runtime", "signing-key-v1")
+		if err != nil {
+			return nil, fmt.Errorf("load OIDC signing key: %w", err)
+		}
+		if ok {
+			encrypted := firstMetadataString(item.Metadata, "private_key_encrypted")
+			if encrypted == "" {
+				return nil, errors.New("persisted OIDC signing key is missing encrypted key material")
+			}
+			encoded, err := st.DecryptPlatformSecret(encrypted)
+			if err != nil {
+				return nil, fmt.Errorf("decrypt OIDC signing key: %w", err)
+			}
+			return parseOIDCSigningKey(encoded)
+		}
+	}
+	key, err := rsa.GenerateKey(rand.Reader, 2048)
+	if err != nil {
+		return nil, err
+	}
+	if st == nil {
+		return key, nil
+	}
+	encoded := string(pem.EncodeToMemory(&pem.Block{Type: "PRIVATE KEY", Bytes: x509.MarshalPKCS1PrivateKey(key)}))
+	encrypted, err := st.EncryptPlatformSecret(encoded)
+	if err != nil {
+		return nil, fmt.Errorf("encrypt OIDC signing key: %w", err)
+	}
+	_, err = st.SavePlatformItem("oidc_runtime", model.PlatformItem{
+		ID: "signing-key-v1", Name: "OIDC signing key", Type: "signing-key", Status: "active",
+		Metadata: map[string]any{"private_key_encrypted": encrypted, "created_at": time.Now().UTC().Format(time.RFC3339Nano)},
+	})
+	if err != nil {
+		return nil, fmt.Errorf("persist OIDC signing key: %w", err)
+	}
+	return key, nil
+}
+
+func parseOIDCSigningKey(encoded string) (*rsa.PrivateKey, error) {
+	block, _ := pem.Decode([]byte(encoded))
+	if block == nil {
+		return nil, errors.New("decode OIDC signing key: invalid PEM")
+	}
+	key, err := x509.ParsePKCS1PrivateKey(block.Bytes)
+	if err != nil {
+		return nil, fmt.Errorf("parse OIDC signing key: %w", err)
+	}
+	if err := key.Validate(); err != nil {
+		return nil, fmt.Errorf("validate OIDC signing key: %w", err)
+	}
+	return key, nil
 }
 
 func (s *Server) handleOIDCAPI(w http.ResponseWriter, r *http.Request) {
@@ -231,7 +298,17 @@ func (s *Server) handleOIDCToken(w http.ResponseWriter, r *http.Request) {
 		Description: "issued oidc tokens",
 		Metadata:    map[string]any{"client_ip": s.clientIP(r), "client_id": code.ClientID, "scope": code.Scope},
 	}); err != nil {
-		s.oidc.restoreAuthorizationCode(codeValue, code)
+		if restoreErr := s.oidc.restoreAuthorizationCode(codeValue, code); restoreErr != nil {
+			err = fmt.Errorf("%w; additionally restore authorization code: %v", err, restoreErr)
+		}
+		writeError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	idToken, err := s.oidc.signIDToken(issuer, code)
+	if err != nil {
+		if restoreErr := s.oidc.restoreAuthorizationCode(codeValue, code); restoreErr != nil {
+			err = fmt.Errorf("%w; additionally restore authorization code: %v", err, restoreErr)
+		}
 		writeError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
@@ -244,11 +321,9 @@ func (s *Server) handleOIDCToken(w http.ResponseWriter, r *http.Request) {
 		ExpiresAt: time.Now().UTC().Add(oidcAccessTokenTTL),
 	})
 	if err != nil {
-		writeError(w, http.StatusInternalServerError, err.Error())
-		return
-	}
-	idToken, err := s.oidc.signIDToken(issuer, code)
-	if err != nil {
+		if restoreErr := s.oidc.restoreAuthorizationCode(codeValue, code); restoreErr != nil {
+			err = fmt.Errorf("%w; additionally restore authorization code: %v", err, restoreErr)
+		}
 		writeError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
@@ -267,7 +342,11 @@ func (s *Server) handleOIDCUserInfo(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusUnauthorized, "bearer token required")
 		return
 	}
-	accessToken, ok := s.oidc.accessToken(token)
+	accessToken, ok, err := s.oidc.accessToken(token)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
 	if !ok {
 		writeError(w, http.StatusUnauthorized, "invalid bearer token")
 		return
@@ -461,20 +540,48 @@ func (m *oidcManager) createAuthorizationCode(code oidcAuthorizationCode) (strin
 	}
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	m.pruneLocked()
-	m.codes[token] = code
+	if err := m.pruneLocked(); err != nil {
+		return "", err
+	}
+	if m.store == nil {
+		m.codes[token] = code
+		return token, nil
+	}
+	if err := m.saveRuntimeRecord("oidc_authorization_codes", oidcRuntimeTokenID(token), code, code.ExpiresAt); err != nil {
+		return "", err
+	}
 	return token, nil
 }
 
 func (m *oidcManager) consumeAuthorizationCode(codeValue, clientID, redirectURI, verifier string) (oidcAuthorizationCode, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	m.pruneLocked()
-	code, ok := m.codes[codeValue]
+	if err := m.pruneLocked(); err != nil {
+		return oidcAuthorizationCode{}, err
+	}
+	var code oidcAuthorizationCode
+	var ok bool
+	if m.store == nil {
+		code, ok = m.codes[codeValue]
+		delete(m.codes, codeValue)
+	} else {
+		item, found, err := m.store.GetPlatformItem("oidc_authorization_codes", oidcRuntimeTokenID(codeValue))
+		if err != nil {
+			return oidcAuthorizationCode{}, err
+		}
+		ok = found
+		if found {
+			if err := decodeOIDCRuntimePayload(item, &code); err != nil {
+				return oidcAuthorizationCode{}, err
+			}
+			if err := m.store.DeletePlatformItem("oidc_authorization_codes", item.ID); err != nil {
+				return oidcAuthorizationCode{}, err
+			}
+		}
+	}
 	if !ok {
 		return oidcAuthorizationCode{}, errors.New("authorization code is invalid or already used")
 	}
-	delete(m.codes, codeValue)
 	if time.Now().UTC().After(code.ExpiresAt) {
 		return oidcAuthorizationCode{}, errors.New("authorization code expired")
 	}
@@ -487,20 +594,26 @@ func (m *oidcManager) consumeAuthorizationCode(codeValue, clientID, redirectURI,
 	return code, nil
 }
 
-func (m *oidcManager) restoreAuthorizationCode(codeValue string, code oidcAuthorizationCode) {
+func (m *oidcManager) restoreAuthorizationCode(codeValue string, code oidcAuthorizationCode) error {
 	codeValue = strings.TrimSpace(codeValue)
 	if codeValue == "" {
-		return
+		return nil
 	}
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	m.pruneLocked()
+	if err := m.pruneLocked(); err != nil {
+		return err
+	}
 	if time.Now().UTC().After(code.ExpiresAt) {
-		return
+		return nil
 	}
-	if _, exists := m.codes[codeValue]; !exists {
-		m.codes[codeValue] = code
+	if m.store == nil {
+		if _, exists := m.codes[codeValue]; !exists {
+			m.codes[codeValue] = code
+		}
+		return nil
 	}
+	return m.saveRuntimeRecord("oidc_authorization_codes", oidcRuntimeTokenID(codeValue), code, code.ExpiresAt)
 }
 
 func (m *oidcManager) createAccessToken(token oidcAccessToken) (string, error) {
@@ -510,21 +623,59 @@ func (m *oidcManager) createAccessToken(token oidcAccessToken) (string, error) {
 	}
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	m.pruneLocked()
-	m.accessTokens[value] = token
+	if err := m.pruneLocked(); err != nil {
+		return "", err
+	}
+	if m.store == nil {
+		m.accessTokens[value] = token
+		return value, nil
+	}
+	if err := m.saveRuntimeRecord("oidc_access_tokens", oidcRuntimeTokenID(value), token, token.ExpiresAt); err != nil {
+		return "", err
+	}
 	return value, nil
 }
 
-func (m *oidcManager) accessToken(value string) (oidcAccessToken, bool) {
+func (m *oidcManager) accessToken(value string) (oidcAccessToken, bool, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	m.pruneLocked()
-	token, ok := m.accessTokens[value]
-	return token, ok
+	if err := m.pruneLocked(); err != nil {
+		return oidcAccessToken{}, false, err
+	}
+	if m.store == nil {
+		token, ok := m.accessTokens[value]
+		return token, ok, nil
+	}
+	item, ok, err := m.store.GetPlatformItem("oidc_access_tokens", oidcRuntimeTokenID(value))
+	if err != nil || !ok {
+		return oidcAccessToken{}, ok, err
+	}
+	var token oidcAccessToken
+	if err := decodeOIDCRuntimePayload(item, &token); err != nil {
+		return oidcAccessToken{}, false, err
+	}
+	return token, true, nil
 }
 
-func (m *oidcManager) pruneLocked() {
+func (m *oidcManager) pruneLocked() error {
 	now := time.Now().UTC()
+	if m.store != nil {
+		for _, collection := range []string{"oidc_authorization_codes", "oidc_access_tokens"} {
+			items, err := m.store.ListPlatformItems(collection)
+			if err != nil {
+				return err
+			}
+			for _, item := range items {
+				expiresAt, ok := metadataTime(item.Metadata["expires_at"])
+				if ok && !now.Before(expiresAt) {
+					if err := m.store.DeletePlatformItem(collection, item.ID); err != nil && !errors.Is(err, os.ErrNotExist) {
+						return err
+					}
+				}
+			}
+		}
+		return nil
+	}
 	for key, code := range m.codes {
 		if now.After(code.ExpiresAt) {
 			delete(m.codes, key)
@@ -535,6 +686,35 @@ func (m *oidcManager) pruneLocked() {
 			delete(m.accessTokens, key)
 		}
 	}
+	return nil
+}
+
+func oidcRuntimeTokenID(value string) string {
+	sum := sha256.Sum256([]byte(strings.TrimSpace(value)))
+	return base64.RawURLEncoding.EncodeToString(sum[:])
+}
+
+func (m *oidcManager) saveRuntimeRecord(collection, id string, payload any, expiresAt time.Time) error {
+	encoded, err := json.Marshal(payload)
+	if err != nil {
+		return err
+	}
+	_, err = m.store.SavePlatformItem(collection, model.PlatformItem{
+		ID: id, Name: collection, Type: "oidc-runtime", Status: "active",
+		Metadata: map[string]any{"payload": string(encoded), "expires_at": expiresAt.UTC().Format(time.RFC3339Nano)},
+	})
+	return err
+}
+
+func decodeOIDCRuntimePayload(item model.PlatformItem, target any) error {
+	payload := firstMetadataString(item.Metadata, "payload")
+	if payload == "" {
+		return errors.New("persisted OIDC runtime record is missing payload")
+	}
+	if err := json.Unmarshal([]byte(payload), target); err != nil {
+		return fmt.Errorf("decode persisted OIDC runtime record: %w", err)
+	}
+	return nil
 }
 
 func oidcPKCEValid(code oidcAuthorizationCode, verifier string) bool {

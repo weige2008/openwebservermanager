@@ -585,6 +585,9 @@ var platformCollections = []string{
 	"authorized_database_assets",
 	"system_settings",
 	"notification_reads",
+	"oidc_runtime",
+	"oidc_authorization_codes",
+	"oidc_access_tokens",
 }
 
 func openPlatformDB(jsonPath string) (*sql.DB, error) {
@@ -1575,7 +1578,12 @@ func platformCollectionSet() map[string]bool {
 }
 
 func privatePlatformCollection(collection string) bool {
-	return collection == "notification_reads"
+	switch collection {
+	case "notification_reads", "oidc_runtime", "oidc_authorization_codes", "oidc_access_tokens":
+		return true
+	default:
+		return false
+	}
 }
 
 func collectionPrefix(collection string) string {
@@ -2171,6 +2179,10 @@ func (s *Store) SystemSettingProxyPrivateKey() (string, bool, error) {
 
 func (s *Store) DecryptPlatformSecret(encrypted string) (string, error) {
 	return s.cipher.DecryptString(encrypted)
+}
+
+func (s *Store) EncryptPlatformSecret(plain string) (string, error) {
+	return s.cipher.EncryptString(plain)
 }
 
 func (s *Store) GetPlatformCredentialSecret(id string) (model.PlatformItem, CredentialSecret, bool, error) {

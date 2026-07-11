@@ -6482,6 +6482,103 @@ func TestOIDCTokenOperationLogPersistenceFailure(t *testing.T) {
 	assertFormStatus(t, handler, "/api/oidc/token", tokenForm, nil, nil, http.StatusBadRequest)
 }
 
+func TestOIDCProviderStateSurvivesRestartWithoutPersistingPlainTokens(t *testing.T) {
+	srv, adminCookie := newTestServer(t, nil)
+	handler := http.Handler(srv)
+	clientRec := assertStatus(t, handler, http.MethodPost, "/api/admin/oidc-clients", map[string]any{
+		"name": "restart-client", "type": "confidential", "status": "enabled", "password": "restart-secret",
+		"metadata": map[string]any{"client_id": "restart-client", "redirect_uris": []string{"https://client.example/restart"}, "scopes": []string{"openid", "profile"}},
+	}, adminCookie, http.StatusCreated)
+	var client model.PlatformItem
+	decodeResponse(t, clientRec, &client)
+
+	jwksBefore := assertStatus(t, handler, http.MethodGet, "/api/oidc/jwks", nil, nil, http.StatusOK).Body.String()
+	authorizePath := "/api/oidc/authorize?" + url.Values{
+		"response_type": {"code"}, "client_id": {"restart-client"}, "redirect_uri": {"https://client.example/restart"},
+		"scope": {"openid profile"}, "nonce": {"restart-nonce"},
+	}.Encode()
+	authorizeRec := assertStatus(t, handler, http.MethodGet, authorizePath, nil, adminCookie, http.StatusFound)
+	location, err := url.Parse(authorizeRec.Header().Get("Location"))
+	if err != nil {
+		t.Fatalf("parse restart authorize location: %v", err)
+	}
+	code := location.Query().Get("code")
+	if code == "" {
+		t.Fatal("restart authorization did not issue code")
+	}
+	assertOIDCRuntimeSecretsNotPlaintext(t, srv.cfg.Store, code)
+
+	handler = NewServer(srv.cfg)
+	jwksAfterRestart := assertStatus(t, handler, http.MethodGet, "/api/oidc/jwks", nil, nil, http.StatusOK).Body.String()
+	if jwksAfterRestart != jwksBefore {
+		t.Fatalf("OIDC JWKS changed after restart: before=%s after=%s", jwksBefore, jwksAfterRestart)
+	}
+	tokenForm := url.Values{"grant_type": {"authorization_code"}, "code": {code}, "redirect_uri": {"https://client.example/restart"}}
+	tokenRec := assertFormStatus(t, handler, "/api/oidc/token", tokenForm, nil, map[string]string{
+		"Authorization": "Basic " + base64.StdEncoding.EncodeToString([]byte("restart-client:restart-secret")),
+	}, http.StatusOK)
+	var tokenResponse map[string]any
+	decodeResponse(t, tokenRec, &tokenResponse)
+	accessToken, _ := tokenResponse["access_token"].(string)
+	idToken, _ := tokenResponse["id_token"].(string)
+	if accessToken == "" || idToken == "" {
+		t.Fatalf("restart token exchange missing tokens: %#v", tokenResponse)
+	}
+	assertOIDCRuntimeSecretsNotPlaintext(t, srv.cfg.Store, code, accessToken, "BEGIN PRIVATE KEY", "BEGIN RSA PRIVATE KEY")
+	assertFormStatus(t, handler, "/api/oidc/token", tokenForm, nil, map[string]string{
+		"Authorization": "Basic " + base64.StdEncoding.EncodeToString([]byte("restart-client:restart-secret")),
+	}, http.StatusBadRequest)
+
+	handler = NewServer(srv.cfg)
+	userInfoRec := assertStatusWithHeaders(t, handler, http.MethodGet, "/api/oidc/userinfo", nil, nil, map[string]string{
+		"Authorization": "Bearer " + accessToken,
+	}, http.StatusOK)
+	if !strings.Contains(userInfoRec.Body.String(), `"preferred_username":"admin"`) {
+		t.Fatalf("persisted access token failed after restart: %s", userInfoRec.Body.String())
+	}
+	bootstrap, err := srv.cfg.Store.PlatformBootstrap()
+	if err != nil {
+		t.Fatalf("platform bootstrap after OIDC persistence: %v", err)
+	}
+	for _, privateCollection := range []string{"oidc_runtime", "oidc_authorization_codes", "oidc_access_tokens"} {
+		if _, exposed := bootstrap[privateCollection]; exposed {
+			t.Fatalf("private OIDC collection %s was exposed in bootstrap", privateCollection)
+		}
+	}
+	signingKey, ok, err := srv.cfg.Store.GetPlatformItem("oidc_runtime", "signing-key-v1")
+	if err != nil || !ok || firstMetadataString(signingKey.Metadata, "private_key_encrypted") == "" {
+		t.Fatalf("encrypted OIDC signing key missing: ok=%v err=%v item=%#v", ok, err, signingKey)
+	}
+}
+
+func assertOIDCRuntimeSecretsNotPlaintext(t *testing.T, st *store.Store, secrets ...string) {
+	t.Helper()
+	db, err := sql.Open("sqlite", st.DatabasePath())
+	if err != nil {
+		t.Fatalf("open OIDC runtime database: %v", err)
+	}
+	defer db.Close()
+	rows, err := db.Query(`SELECT id, payload FROM platform_records WHERE collection IN ('oidc_runtime', 'oidc_authorization_codes', 'oidc_access_tokens')`)
+	if err != nil {
+		t.Fatalf("query OIDC runtime records: %v", err)
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var id, payload string
+		if err := rows.Scan(&id, &payload); err != nil {
+			t.Fatalf("scan OIDC runtime record: %v", err)
+		}
+		for _, secret := range secrets {
+			if secret != "" && (strings.Contains(id, secret) || strings.Contains(payload, secret)) {
+				t.Fatalf("OIDC runtime record persisted plaintext secret %q", secret)
+			}
+		}
+	}
+	if err := rows.Err(); err != nil {
+		t.Fatalf("iterate OIDC runtime records: %v", err)
+	}
+}
+
 func TestOIDCUserInfoRejectsDisabledClientAndUser(t *testing.T) {
 	handler, adminCookie := newTestHandler(t)
 

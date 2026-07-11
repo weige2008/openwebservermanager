@@ -165,6 +165,13 @@ func (s *Server) handleCollection(w http.ResponseWriter, r *http.Request, collec
 		if collection == "gateway_groups" {
 			items = s.gatewayGroupsWithStatus(items)
 		}
+		if collection == "login_locks" {
+			items, err = s.currentLoginLocks(items)
+			if err != nil {
+				writeError(w, http.StatusInternalServerError, err.Error())
+				return
+			}
+		}
 		writeJSON(w, http.StatusOK, map[string]any{"items": items})
 	case id != "" && r.Method == http.MethodGet:
 		if collection == "agent_gateways" {

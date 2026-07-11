@@ -435,14 +435,28 @@ func (s *Server) handlePasskeyLoginOptions(w http.ResponseWriter, r *http.Reques
 		writeError(w, http.StatusForbidden, reason)
 		return
 	}
-	if retryAfter, locked := s.activeLoginLock(username, clientIP); locked {
+	retryAfter, locked, lockErr := s.activeLoginLock(username, clientIP)
+	if lockErr != nil {
+		writeError(w, http.StatusInternalServerError, lockErr.Error())
+		return
+	}
+	if locked {
 		w.Header().Set("Retry-After", strconv.Itoa(int(retryAfter.Seconds())))
 		writeError(w, http.StatusTooManyRequests, "account or client ip is locked; try again later")
 		return
 	}
 	failureKey := clientIP + ":" + strings.ToLower(username)
 	failurePolicy := s.loginFailurePolicy()
-	if retryAfter, ok := s.auth.checkLoginAllowed(failureKey, failurePolicy); !ok {
+	retryAfter, loginAllowed, failureErr := s.auth.checkLoginAllowed(failureKey, failurePolicy)
+	if failureErr != nil {
+		writeError(w, http.StatusInternalServerError, failureErr.Error())
+		return
+	}
+	if !loginAllowed {
+		if err := s.ensureLoginLock(username, clientIP, failureKey); err != nil {
+			writeError(w, http.StatusInternalServerError, "persist login lock failed: "+err.Error())
+			return
+		}
 		w.Header().Set("Retry-After", strconv.Itoa(int(retryAfter.Seconds())))
 		writeError(w, http.StatusTooManyRequests, "too many failed login attempts; try again later")
 		return
@@ -615,7 +629,10 @@ func (s *Server) handlePasskeyLoginVerify(w http.ResponseWriter, r *http.Request
 		writeError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
-	s.auth.resetLoginFailures(challenge.FailureKey)
+	if err := s.auth.resetLoginFailures(challenge.FailureKey); err != nil {
+		writeError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
 	token, session, err := s.auth.create(challenge.User)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, err.Error())
@@ -631,7 +648,11 @@ func (s *Server) handlePasskeyLoginVerify(w http.ResponseWriter, r *http.Request
 }
 
 func (s *Server) recordPasskeyLoginFailure(w http.ResponseWriter, r *http.Request, username, clientIP, failureKey, detail string) {
-	failure := s.auth.recordLoginFailure(failureKey, s.loginFailurePolicy())
+	failure, err := s.auth.recordLoginFailure(failureKey, s.loginFailurePolicy())
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
 	if !failure.LockedUntil.IsZero() {
 		if err := s.createLoginLock(username, clientIP, failure); err != nil {
 			lockDetail := "persist login lock failed: " + err.Error()

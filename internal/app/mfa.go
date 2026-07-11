@@ -168,7 +168,10 @@ func (s *Server) handleMFACompleteLogin(w http.ResponseWriter, r *http.Request) 
 		writeError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
-	s.auth.resetLoginFailures(challenge.FailureKey)
+	if err := s.auth.resetLoginFailures(challenge.FailureKey); err != nil {
+		writeError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
 	authToken, session, err := s.auth.create(challenge.User)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, err.Error())
@@ -466,7 +469,11 @@ func (s *Server) verifyMFAInput(userID string, profile store.MFAProfile, code, r
 }
 
 func (s *Server) recordMFAFailure(w http.ResponseWriter, r *http.Request, username, clientIP, failureKey, detail string) {
-	failure := s.auth.recordLoginFailure(failureKey, s.loginFailurePolicy())
+	failure, err := s.auth.recordLoginFailure(failureKey, s.loginFailurePolicy())
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
 	if !failure.LockedUntil.IsZero() {
 		if err := s.createLoginLock(username, clientIP, failure); err != nil {
 			lockDetail := "persist login lock failed: " + err.Error()

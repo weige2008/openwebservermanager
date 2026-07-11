@@ -12,8 +12,8 @@ import (
 const captchaTTL = 5 * time.Minute
 
 type captchaChallenge struct {
-	Answer    string
-	ExpiresAt time.Time
+	Answer    string    `json:"answer"`
+	ExpiresAt time.Time `json:"expires_at"`
 }
 
 func (s *Server) handleCaptcha(w http.ResponseWriter, _ *http.Request) {
@@ -43,36 +43,50 @@ func (m *authManager) createCaptcha() (string, string, time.Time, error) {
 		return "", "", time.Time{}, err
 	}
 	expiresAt := time.Now().Add(captchaTTL).UTC()
+	challenge := captchaChallenge{Answer: fmt.Sprintf("%d", left+right), ExpiresAt: expiresAt}
+	if err := m.pruneAuthRuntimeStates(captchaChallengeCollection); err != nil {
+		return "", "", time.Time{}, err
+	}
+	if err := m.persistAuthRuntimeState(captchaChallengeCollection, id, challenge, expiresAt); err != nil {
+		return "", "", time.Time{}, err
+	}
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	m.pruneCaptchasLocked(time.Now().UTC())
-	m.captchas[id] = captchaChallenge{Answer: fmt.Sprintf("%d", left+right), ExpiresAt: expiresAt}
+	m.captchas[id] = challenge
 	return id, fmt.Sprintf("%d + %d = ?", left, right), expiresAt, nil
 }
 
-func (s *Server) verifyCaptcha(id, answer string) bool {
+func (s *Server) verifyCaptcha(id, answer string) (bool, error) {
 	if !s.captchaRequired() {
-		return true
+		return true, nil
 	}
 	return s.auth.verifyCaptcha(id, answer)
 }
 
-func (m *authManager) verifyCaptcha(id, answer string) bool {
+func (m *authManager) verifyCaptcha(id, answer string) (bool, error) {
 	id = strings.TrimSpace(id)
 	answer = strings.TrimSpace(answer)
 	if id == "" || answer == "" {
-		return false
+		return false, nil
 	}
 	now := time.Now().UTC()
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	m.pruneCaptchasLocked(now)
-	challenge, ok := m.captchas[id]
-	if !ok {
-		return false
+	var challenge captchaChallenge
+	ok, err := m.consumeAuthRuntimeState(captchaChallengeCollection, id, &challenge)
+	if m.store == nil {
+		m.mu.Lock()
+		m.pruneCaptchasLocked(now)
+		challenge, ok = m.captchas[id]
+		delete(m.captchas, id)
+		m.mu.Unlock()
 	}
+	m.mu.Lock()
 	delete(m.captchas, id)
-	return now.Before(challenge.ExpiresAt) && strings.EqualFold(answer, challenge.Answer)
+	m.mu.Unlock()
+	if err != nil || !ok {
+		return false, err
+	}
+	return now.Before(challenge.ExpiresAt) && strings.EqualFold(answer, challenge.Answer), nil
 }
 
 func (m *authManager) pruneCaptchasLocked(now time.Time) {

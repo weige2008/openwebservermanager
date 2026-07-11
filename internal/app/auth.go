@@ -26,10 +26,13 @@ const (
 	passkeyRegistrationChallengeCollection = "passkey_registration_challenges"
 	passkeyLoginChallengeCollection        = "passkey_login_challenges"
 	accessMFAGrantCollection               = "access_mfa_grants"
+	captchaChallengeCollection             = "captcha_challenges"
+	loginFailureStateCollection            = "login_failure_states"
 )
 
 type authManager struct {
 	mu                   sync.RWMutex
+	failureMu            sync.Mutex
 	store                *store.Store
 	sessions             map[string]authSession
 	failures             map[string]loginFailure
@@ -60,9 +63,10 @@ type authUserPayload struct {
 }
 
 type loginFailure struct {
-	Count       int
-	LastFailure time.Time
-	LockedUntil time.Time
+	Key         string    `json:"key"`
+	Count       int       `json:"count"`
+	LastFailure time.Time `json:"last_failure"`
+	LockedUntil time.Time `json:"locked_until"`
 }
 
 type mfaChallenge struct {
@@ -454,41 +458,90 @@ func (m *authManager) pruneAuthRuntimeStates(collection string) error {
 	return nil
 }
 
-func (m *authManager) checkLoginAllowed(key string, policy loginFailurePolicy) (time.Duration, bool) {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	failure := m.failures[key]
+func (m *authManager) checkLoginAllowed(key string, policy loginFailurePolicy) (time.Duration, bool, error) {
+	m.failureMu.Lock()
+	defer m.failureMu.Unlock()
+	failure, ok, err := m.loadLoginFailure(key)
+	if err != nil {
+		return 0, false, err
+	}
 	now := time.Now().UTC()
 	if !failure.LockedUntil.IsZero() && now.Before(failure.LockedUntil) {
-		return time.Until(failure.LockedUntil).Round(time.Second), false
+		return time.Until(failure.LockedUntil).Round(time.Second), false, nil
 	}
-	if !failure.LastFailure.IsZero() && now.Sub(failure.LastFailure) > policy.Window {
-		delete(m.failures, key)
+	if ok && !failure.LastFailure.IsZero() && now.Sub(failure.LastFailure) > policy.Window {
+		if err := m.resetLoginFailuresUnlocked(key); err != nil {
+			return 0, false, err
+		}
 	}
-	return 0, true
+	return 0, true, nil
 }
 
-func (m *authManager) recordLoginFailure(key string, policy loginFailurePolicy) loginFailure {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	now := time.Now().UTC()
-	failure := m.failures[key]
-	if !failure.LastFailure.IsZero() && now.Sub(failure.LastFailure) > policy.Window {
-		failure = loginFailure{}
+func (m *authManager) recordLoginFailure(key string, policy loginFailurePolicy) (loginFailure, error) {
+	m.failureMu.Lock()
+	defer m.failureMu.Unlock()
+	failure, _, err := m.loadLoginFailure(key)
+	if err != nil {
+		return loginFailure{}, err
 	}
+	now := time.Now().UTC()
+	if !failure.LastFailure.IsZero() && now.Sub(failure.LastFailure) > policy.Window {
+		failure = loginFailure{Key: key}
+	}
+	failure.Key = key
 	failure.Count++
 	failure.LastFailure = now
 	if failure.Count >= policy.Threshold {
 		failure.LockedUntil = now.Add(policy.LockDuration)
 	}
+	expiresAt := failure.LastFailure.Add(policy.Window)
+	if failure.LockedUntil.After(expiresAt) {
+		expiresAt = failure.LockedUntil
+	}
+	if err := m.pruneAuthRuntimeStates(loginFailureStateCollection); err != nil {
+		return loginFailure{}, err
+	}
+	if err := m.persistAuthRuntimeState(loginFailureStateCollection, key, failure, expiresAt); err != nil {
+		return loginFailure{}, err
+	}
+	m.mu.Lock()
 	m.failures[key] = failure
-	return failure
+	m.mu.Unlock()
+	return failure, nil
 }
 
-func (m *authManager) resetLoginFailures(key string) {
+func (m *authManager) loadLoginFailure(key string) (loginFailure, bool, error) {
+	m.mu.RLock()
+	failure, ok := m.failures[key]
+	m.mu.RUnlock()
+	if ok || m.store == nil {
+		return failure, ok, nil
+	}
+	if ok, err := m.loadAuthRuntimeState(loginFailureStateCollection, key, &failure); err != nil || !ok {
+		return loginFailure{}, ok, err
+	}
 	m.mu.Lock()
-	defer m.mu.Unlock()
+	m.failures[key] = failure
+	m.mu.Unlock()
+	return failure, true, nil
+}
+
+func (m *authManager) resetLoginFailures(key string) error {
+	m.failureMu.Lock()
+	defer m.failureMu.Unlock()
+	return m.resetLoginFailuresUnlocked(key)
+}
+
+func (m *authManager) resetLoginFailuresUnlocked(key string) error {
+	if m.store != nil {
+		if err := m.store.DeletePlatformItem(loginFailureStateCollection, authSessionRecordID(key)); err != nil && !errors.Is(err, os.ErrNotExist) {
+			return err
+		}
+	}
+	m.mu.Lock()
 	delete(m.failures, key)
+	m.mu.Unlock()
+	return nil
 }
 
 func (m *authManager) resetLoginFailuresFor(username, clientIP string) {
@@ -497,26 +550,44 @@ func (m *authManager) resetLoginFailuresFor(username, clientIP string) {
 	if username == "" && clientIP == "" {
 		return
 	}
-	m.mu.Lock()
-	defer m.mu.Unlock()
 	if username != "" && clientIP != "" {
-		delete(m.failures, clientIP+":"+username)
+		_ = m.resetLoginFailures(clientIP + ":" + username)
 		return
 	}
+	keys := map[string]bool{}
+	if m.store != nil {
+		if items, err := m.store.ListPlatformItems(loginFailureStateCollection); err == nil {
+			for _, item := range items {
+				var failure loginFailure
+				payload, _ := item.Metadata["payload"].(string)
+				if json.Unmarshal([]byte(payload), &failure) == nil && failure.Key != "" {
+					keys[failure.Key] = true
+				}
+			}
+		}
+	}
+	m.mu.RLock()
 	for key := range m.failures {
+		keys[key] = true
+	}
+	m.mu.RUnlock()
+	for key := range keys {
 		if username != "" && strings.HasSuffix(key, ":"+username) {
-			delete(m.failures, key)
+			_ = m.resetLoginFailures(key)
 			continue
 		}
 		if clientIP != "" && strings.HasPrefix(key, clientIP+":") {
-			delete(m.failures, key)
+			_ = m.resetLoginFailures(key)
 		}
 	}
 }
 
 func (m *authManager) clearSessions() error {
+	m.failureMu.Lock()
+	defer m.failureMu.Unlock()
 	m.mu.Lock()
 	m.sessions = map[string]authSession{}
+	m.failures = map[string]loginFailure{}
 	m.mfaChallenges = map[string]mfaChallenge{}
 	m.captchas = map[string]captchaChallenge{}
 	m.accessMFAGrants = map[string]accessMFAGrant{}
@@ -529,7 +600,7 @@ func (m *authManager) clearSessions() error {
 		return nil
 	}
 	var errs []error
-	for _, collection := range []string{"auth_sessions", mfaLoginChallengeCollection, passkeyRegistrationChallengeCollection, passkeyLoginChallengeCollection, accessMFAGrantCollection} {
+	for _, collection := range []string{"auth_sessions", mfaLoginChallengeCollection, passkeyRegistrationChallengeCollection, passkeyLoginChallengeCollection, accessMFAGrantCollection, captchaChallengeCollection, loginFailureStateCollection} {
 		items, err := m.store.ListPlatformItems(collection)
 		if err != nil {
 			errs = append(errs, err)
@@ -941,7 +1012,12 @@ func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusForbidden, "password login is disabled")
 		return
 	}
-	if s.captchaRequired() && !s.verifyCaptcha(req.CaptchaID, req.CaptchaAnswer) {
+	captchaValid, captchaErr := s.verifyCaptcha(req.CaptchaID, req.CaptchaAnswer)
+	if captchaErr != nil {
+		writeError(w, http.StatusInternalServerError, captchaErr.Error())
+		return
+	}
+	if !captchaValid {
 		if err := s.createLoginLog(r, model.PlatformItemRequest{
 			Name:        username,
 			Type:        "captcha",
@@ -969,7 +1045,12 @@ func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusForbidden, reason)
 		return
 	}
-	if retryAfter, locked := s.activeLoginLock(username, clientIP); locked {
+	retryAfter, locked, lockErr := s.activeLoginLock(username, clientIP)
+	if lockErr != nil {
+		writeError(w, http.StatusInternalServerError, lockErr.Error())
+		return
+	}
+	if locked {
 		if err := s.createLoginLog(r, model.PlatformItemRequest{
 			Name:        username,
 			Type:        "lock",
@@ -986,7 +1067,16 @@ func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
 	}
 	failureKey := clientIP + ":" + strings.ToLower(username)
 	failurePolicy := s.loginFailurePolicy()
-	if retryAfter, ok := s.auth.checkLoginAllowed(failureKey, failurePolicy); !ok {
+	retryAfter, loginAllowed, failureErr := s.auth.checkLoginAllowed(failureKey, failurePolicy)
+	if failureErr != nil {
+		writeError(w, http.StatusInternalServerError, failureErr.Error())
+		return
+	}
+	if !loginAllowed {
+		if err := s.ensureLoginLock(username, clientIP, failureKey); err != nil {
+			writeError(w, http.StatusInternalServerError, "persist login lock failed: "+err.Error())
+			return
+		}
 		if err := s.createLoginLog(r, model.PlatformItemRequest{
 			Name:        username,
 			Type:        "lock",
@@ -1042,7 +1132,11 @@ func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	if !ok {
-		failure := s.auth.recordLoginFailure(failureKey, failurePolicy)
+		failure, failureErr := s.auth.recordLoginFailure(failureKey, failurePolicy)
+		if failureErr != nil {
+			writeError(w, http.StatusInternalServerError, failureErr.Error())
+			return
+		}
 		if !failure.LockedUntil.IsZero() {
 			if err := s.createLoginLock(username, clientIP, failure); err != nil {
 				detail := "persist login lock failed: " + err.Error()
@@ -1085,7 +1179,10 @@ func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
-	s.auth.resetLoginFailures(failureKey)
+	if err := s.auth.resetLoginFailures(failureKey); err != nil {
+		writeError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
 	token, session, err := s.auth.create(admin)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, err.Error())

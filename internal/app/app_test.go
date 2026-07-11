@@ -5765,11 +5765,134 @@ func TestLoginLockPersistenceFailureReturnsServerError(t *testing.T) {
 	if !strings.Contains(lockFailureRec.Body.String(), "persist login lock failed") {
 		t.Fatalf("login lock persistence failure was not reported: %s", lockFailureRec.Body.String())
 	}
+	retryRec := assertStatus(t, NewServer(srv.cfg), http.MethodPost, "/api/auth/login", map[string]any{"username": "persist-lock-user", "password": "wrong-password"}, nil, http.StatusTooManyRequests)
+	if retryRec.Header().Get("Retry-After") == "" {
+		t.Fatal("retry after login lock persistence failure did not return Retry-After")
+	}
+	locksRec := assertStatus(t, handler, http.MethodGet, "/api/admin/login-locked", nil, adminCookie, http.StatusOK)
+	if !strings.Contains(locksRec.Body.String(), "persist-lock-user") {
+		t.Fatalf("retry did not recreate the visible login lock: %s", locksRec.Body.String())
+	}
 
 	operationLogsRec := assertStatus(t, handler, http.MethodGet, "/api/admin/audit/operation-logs", nil, adminCookie, http.StatusOK)
 	if !strings.Contains(operationLogsRec.Body.String(), "auth.login.lock.persist_failed") {
 		t.Fatalf("login lock persistence failure was not audited: %s", operationLogsRec.Body.String())
 	}
+}
+
+func TestLoginFailureCountPersistsAcrossRestartAndUnlockClearsIt(t *testing.T) {
+	srv, adminCookie := newTestServer(t, nil)
+	assertStatus(t, srv, http.MethodPost, "/api/admin/system-settings", map[string]any{
+		"name": "Persistent login failures", "type": "security", "status": "enabled",
+		"metadata": map[string]any{"login_failure_threshold": 2, "login_failure_window_minutes": 30, "login_lock_minutes": 5},
+	}, adminCookie, http.StatusCreated)
+	assertStatus(t, srv, http.MethodPost, "/api/admin/users", map[string]any{
+		"name": "restart-lock-user", "type": "local", "status": "enabled", "password": "password123",
+		"metadata": map[string]any{"role": "user"},
+	}, adminCookie, http.StatusCreated)
+
+	failureKey := "192.0.2.1:restart-lock-user"
+	assertStatus(t, srv, http.MethodPost, "/api/auth/login", map[string]any{"username": "restart-lock-user", "password": "wrong-password"}, nil, http.StatusUnauthorized)
+	item, found, err := srv.cfg.Store.GetPlatformItem(loginFailureStateCollection, authSessionRecordID(failureKey))
+	if err != nil || !found {
+		t.Fatalf("load persisted login failure: found=%v err=%v", found, err)
+	}
+	if item.ID == failureKey {
+		t.Fatal("login failure state used the plaintext failure key as its record ID")
+	}
+	bootstrap, err := srv.cfg.Store.PlatformBootstrap()
+	if err != nil {
+		t.Fatalf("platform bootstrap: %v", err)
+	}
+	if _, exposed := bootstrap[loginFailureStateCollection]; exposed {
+		t.Fatal("private login failure state was exposed in bootstrap")
+	}
+
+	restarted := NewServer(srv.cfg)
+	assertStatus(t, restarted, http.MethodPost, "/api/auth/login", map[string]any{"username": "restart-lock-user", "password": "wrong-password"}, nil, http.StatusUnauthorized)
+	lockedRec := assertStatus(t, NewServer(srv.cfg), http.MethodPost, "/api/auth/login", map[string]any{"username": "restart-lock-user", "password": "password123"}, nil, http.StatusTooManyRequests)
+	if lockedRec.Header().Get("Retry-After") == "" {
+		t.Fatal("persisted login lock did not return Retry-After")
+	}
+	locksRec := assertStatus(t, restarted, http.MethodGet, "/api/admin/login-locked", nil, adminCookie, http.StatusOK)
+	var locks struct {
+		Items []model.PlatformItem `json:"items"`
+	}
+	decodeResponse(t, locksRec, &locks)
+	if len(locks.Items) != 1 {
+		t.Fatalf("login lock count = %d, want 1", len(locks.Items))
+	}
+	assertStatus(t, restarted, http.MethodDelete, "/api/admin/login-locked/"+locks.Items[0].ID, nil, adminCookie, http.StatusOK)
+	if _, found, err := srv.cfg.Store.GetPlatformItem(loginFailureStateCollection, authSessionRecordID(failureKey)); err != nil || found {
+		t.Fatalf("unlock retained login failure state: found=%v err=%v", found, err)
+	}
+	assertStatus(t, NewServer(srv.cfg), http.MethodPost, "/api/auth/login", map[string]any{"username": "restart-lock-user", "password": "password123"}, nil, http.StatusOK)
+}
+
+func TestLoginFailurePersistenceErrorsAreReportedAndRetryable(t *testing.T) {
+	srv, _ := newTestServer(t, nil)
+	removeCreateBlocker := blockPlatformItemCreate(t, srv.cfg.Store, loginFailureStateCollection)
+	failedRec := assertStatus(t, srv, http.MethodPost, "/api/auth/login", map[string]any{"username": "admin", "password": "wrong-password"}, nil, http.StatusInternalServerError)
+	removeCreateBlocker()
+	if !strings.Contains(failedRec.Body.String(), "forced platform item create failure") {
+		t.Fatalf("login failure persistence error was not reported: %s", failedRec.Body.String())
+	}
+	assertStatus(t, srv, http.MethodPost, "/api/auth/login", map[string]any{"username": "admin", "password": "wrong-password"}, nil, http.StatusUnauthorized)
+
+	removeDeleteBlocker := blockPlatformItemDeletePayloadFragment(t, srv.cfg.Store, loginFailureStateCollection, `"name":"login_failure_states"`)
+	resetRec := assertStatus(t, NewServer(srv.cfg), http.MethodPost, "/api/auth/login", map[string]any{"username": "admin", "password": "password123"}, nil, http.StatusInternalServerError)
+	removeDeleteBlocker()
+	if !strings.Contains(resetRec.Body.String(), "forced platform item payload delete failure") {
+		t.Fatalf("login failure reset error was not reported: %s", resetRec.Body.String())
+	}
+	loginRec := assertStatus(t, NewServer(srv.cfg), http.MethodPost, "/api/auth/login", map[string]any{"username": "admin", "password": "password123"}, nil, http.StatusOK)
+	if len(loginRec.Result().Cookies()) == 0 {
+		t.Fatal("login did not recover after removing failure-state delete blocker")
+	}
+}
+
+func TestConcurrentLoginFailuresAreCountedWithoutLoss(t *testing.T) {
+	srv, _ := newTestServer(t, nil)
+	const attempts = 20
+	results := make(chan error, attempts)
+	policy := loginFailurePolicy{Threshold: 100, Window: 30 * time.Minute, LockDuration: 5 * time.Minute}
+	for i := 0; i < attempts; i++ {
+		go func() {
+			_, err := srv.auth.recordLoginFailure("192.0.2.30:concurrent-user", policy)
+			results <- err
+		}()
+	}
+	for i := 0; i < attempts; i++ {
+		if err := <-results; err != nil {
+			t.Fatalf("record concurrent login failure: %v", err)
+		}
+	}
+	failure, ok, err := NewServer(srv.cfg).auth.loadLoginFailure("192.0.2.30:concurrent-user")
+	if err != nil || !ok {
+		t.Fatalf("load concurrent login failure: ok=%v err=%v", ok, err)
+	}
+	if failure.Count != attempts {
+		t.Fatalf("concurrent login failure count = %d, want %d", failure.Count, attempts)
+	}
+}
+
+func TestExpiredLoginLocksAreRemovedFromEnforcementAndAdminList(t *testing.T) {
+	srv, adminCookie := newTestServer(t, nil)
+	lock, err := srv.cfg.Store.CreatePlatformItem("login_locks", model.PlatformItemRequest{
+		Name: "admin", Type: "password", Status: "locked", Username: "admin", Host: "192.0.2.1",
+		Metadata: map[string]any{"account": "admin", "client_ip": "192.0.2.1", "locked_until": time.Now().Add(-time.Minute).UTC()},
+	})
+	if err != nil {
+		t.Fatalf("create expired login lock: %v", err)
+	}
+	listRec := assertStatus(t, srv, http.MethodGet, "/api/admin/login-locked", nil, adminCookie, http.StatusOK)
+	if strings.Contains(listRec.Body.String(), lock.ID) {
+		t.Fatalf("expired login lock remained in admin list: %s", listRec.Body.String())
+	}
+	if _, found, err := srv.cfg.Store.GetPlatformItem("login_locks", lock.ID); err != nil || found {
+		t.Fatalf("expired login lock was not deleted: found=%v err=%v", found, err)
+	}
+	assertStatus(t, srv, http.MethodPost, "/api/auth/login", map[string]any{"username": "admin", "password": "password123"}, nil, http.StatusOK)
 }
 
 func TestLoginCaptchaRequirement(t *testing.T) {
@@ -5829,6 +5952,64 @@ func TestLoginCaptchaRequirement(t *testing.T) {
 	logsRec := assertStatus(t, handler, http.MethodGet, "/api/admin/audit/login-logs", nil, adminCookie, http.StatusOK)
 	if !strings.Contains(logsRec.Body.String(), "invalid captcha") {
 		t.Fatal("invalid captcha was not written to login logs")
+	}
+}
+
+func TestCaptchaChallengePersistsAcrossRestartAndIsConsumedOnce(t *testing.T) {
+	srv, adminCookie := newTestServer(t, nil)
+	assertStatus(t, srv, http.MethodPost, "/api/admin/system-settings", map[string]any{
+		"name": "Login captcha", "type": "security", "status": "enabled",
+		"metadata": map[string]any{"captcha_enabled": true},
+	}, adminCookie, http.StatusCreated)
+
+	captchaRec := assertStatus(t, srv, http.MethodGet, "/api/auth/captcha", nil, nil, http.StatusOK)
+	var captcha map[string]any
+	decodeResponse(t, captchaRec, &captcha)
+	id := stringValueFromAny(captcha["captcha_id"])
+	answer := captchaAnswerFromQuestion(stringValueFromAny(captcha["question"]))
+	item, found, err := srv.cfg.Store.GetPlatformItem(captchaChallengeCollection, authSessionRecordID(id))
+	if err != nil || !found {
+		t.Fatalf("load persisted captcha: found=%v err=%v", found, err)
+	}
+	if item.ID == id || strings.Contains(firstMetadataString(item.Metadata, "payload"), id) {
+		t.Fatal("persisted captcha contains the plaintext challenge ID")
+	}
+	bootstrap, err := srv.cfg.Store.PlatformBootstrap()
+	if err != nil {
+		t.Fatalf("platform bootstrap: %v", err)
+	}
+	if _, exposed := bootstrap[captchaChallengeCollection]; exposed {
+		t.Fatal("private captcha collection was exposed in bootstrap")
+	}
+
+	restarted := NewServer(srv.cfg)
+	payload := map[string]any{"username": "admin", "password": "password123", "captcha_id": id, "captcha_answer": answer}
+	loginRec := assertStatus(t, restarted, http.MethodPost, "/api/auth/login", payload, nil, http.StatusOK)
+	if len(loginRec.Result().Cookies()) == 0 {
+		t.Fatal("captcha-protected login after restart did not set an auth cookie")
+	}
+	assertStatus(t, restarted, http.MethodPost, "/api/auth/login", payload, nil, http.StatusBadRequest)
+}
+
+func TestCaptchaPersistenceAndConsumptionFailuresAreRetryable(t *testing.T) {
+	srv, _ := newTestServer(t, nil)
+	removeCreateBlocker := blockPlatformItemCreate(t, srv.cfg.Store, captchaChallengeCollection)
+	if id, _, _, err := srv.auth.createCaptcha(); err == nil || id != "" {
+		t.Fatalf("blocked captcha creation = id %q err %v", id, err)
+	}
+	removeCreateBlocker()
+
+	id, question, _, err := srv.auth.createCaptcha()
+	if err != nil {
+		t.Fatalf("create captcha: %v", err)
+	}
+	removeDeleteBlocker := blockPlatformItemDeletePayloadFragment(t, srv.cfg.Store, captchaChallengeCollection, `"name":"captcha_challenges"`)
+	if valid, err := NewServer(srv.cfg).auth.verifyCaptcha(id, captchaAnswerFromQuestion(question)); err == nil || valid {
+		t.Fatalf("blocked captcha consumption = valid %v err %v", valid, err)
+	}
+	removeDeleteBlocker()
+	if valid, err := NewServer(srv.cfg).auth.verifyCaptcha(id, captchaAnswerFromQuestion(question)); err != nil || !valid {
+		t.Fatalf("retry captcha consumption = valid %v err %v", valid, err)
 	}
 }
 

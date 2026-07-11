@@ -4,6 +4,7 @@ import (
 	"errors"
 	"net"
 	"net/http"
+	"os"
 	"strings"
 	"time"
 
@@ -88,25 +89,48 @@ func (s *Server) loginPolicyAllows(username, clientIP string) (bool, string) {
 	return true, ""
 }
 
-func (s *Server) activeLoginLock(username, clientIP string) (time.Duration, bool) {
+func (s *Server) activeLoginLock(username, clientIP string) (time.Duration, bool, error) {
 	locks, err := s.cfg.Store.ListPlatformItems("login_locks")
 	if err != nil {
-		return 0, false
+		return 0, false, err
 	}
 	now := time.Now().UTC()
 	for _, lock := range locks {
-		if !platformItemEnabled(lock) || !loginLockMatches(lock, username, clientIP) {
+		if !platformItemEnabled(lock) {
 			continue
 		}
 		until, ok := metadataTime(lock.Metadata["locked_until"])
-		if !ok || now.Before(until) {
-			if ok {
-				return time.Until(until).Round(time.Second), true
+		if ok && !now.Before(until) {
+			if err := s.cfg.Store.DeletePlatformItem("login_locks", lock.ID); err != nil && !errors.Is(err, os.ErrNotExist) {
+				return 0, false, err
 			}
-			return 5 * time.Minute, true
+			continue
 		}
+		if !loginLockMatches(lock, username, clientIP) {
+			continue
+		}
+		if ok {
+			return time.Until(until).Round(time.Second), true, nil
+		}
+		return 5 * time.Minute, true, nil
 	}
-	return 0, false
+	return 0, false, nil
+}
+
+func (s *Server) currentLoginLocks(items []model.PlatformItem) ([]model.PlatformItem, error) {
+	now := time.Now().UTC()
+	result := make([]model.PlatformItem, 0, len(items))
+	for _, item := range items {
+		until, ok := metadataTime(item.Metadata["locked_until"])
+		if ok && !now.Before(until) {
+			if err := s.cfg.Store.DeletePlatformItem("login_locks", item.ID); err != nil && !errors.Is(err, os.ErrNotExist) {
+				return nil, err
+			}
+			continue
+		}
+		result = append(result, item)
+	}
+	return result, nil
 }
 
 func (s *Server) createLoginLock(username, clientIP string, failure loginFailure) error {
@@ -130,6 +154,14 @@ func (s *Server) createLoginLock(username, clientIP string, failure loginFailure
 		},
 	})
 	return err
+}
+
+func (s *Server) ensureLoginLock(username, clientIP, failureKey string) error {
+	failure, ok, err := s.auth.loadLoginFailure(failureKey)
+	if err != nil || !ok || failure.LockedUntil.IsZero() || !time.Now().UTC().Before(failure.LockedUntil) {
+		return err
+	}
+	return s.createLoginLock(username, clientIP, failure)
 }
 
 func (s *Server) createLoginLog(r *http.Request, req model.PlatformItemRequest) error {

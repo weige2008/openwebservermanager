@@ -622,6 +622,8 @@ var platformCollections = []string{
 	"passkey_registration_challenges",
 	"passkey_login_challenges",
 	"access_mfa_grants",
+	"captcha_challenges",
+	"login_failure_states",
 }
 
 func openPlatformDB(jsonPath string) (*sql.DB, error) {
@@ -1644,7 +1646,7 @@ func platformCollectionSet() map[string]bool {
 
 func privatePlatformCollection(collection string) bool {
 	switch collection {
-	case "notification_reads", "oidc_runtime", "oidc_authorization_codes", "oidc_access_tokens", "auth_sessions", "external_oidc_states", "external_wecom_states", "mfa_login_challenges", "passkey_registration_challenges", "passkey_login_challenges", "access_mfa_grants":
+	case "notification_reads", "oidc_runtime", "oidc_authorization_codes", "oidc_access_tokens", "auth_sessions", "external_oidc_states", "external_wecom_states", "mfa_login_challenges", "passkey_registration_challenges", "passkey_login_challenges", "access_mfa_grants", "captcha_challenges", "login_failure_states":
 		return true
 	default:
 		return false
@@ -1653,7 +1655,7 @@ func privatePlatformCollection(collection string) bool {
 
 func ephemeralPlatformCollection(collection string) bool {
 	switch collection {
-	case "auth_sessions", "oidc_authorization_codes", "oidc_access_tokens", "external_oidc_states", "external_wecom_states", "mfa_login_challenges", "passkey_registration_challenges", "passkey_login_challenges", "access_mfa_grants":
+	case "auth_sessions", "oidc_authorization_codes", "oidc_access_tokens", "external_oidc_states", "external_wecom_states", "mfa_login_challenges", "passkey_registration_challenges", "passkey_login_challenges", "access_mfa_grants", "captcha_challenges", "login_failure_states":
 		return true
 	default:
 		return false
@@ -1661,7 +1663,7 @@ func ephemeralPlatformCollection(collection string) bool {
 }
 
 func ephemeralPlatformCollections() []string {
-	return []string{"auth_sessions", "oidc_authorization_codes", "oidc_access_tokens", "external_oidc_states", "external_wecom_states", "mfa_login_challenges", "passkey_registration_challenges", "passkey_login_challenges", "access_mfa_grants"}
+	return []string{"auth_sessions", "oidc_authorization_codes", "oidc_access_tokens", "external_oidc_states", "external_wecom_states", "mfa_login_challenges", "passkey_registration_challenges", "passkey_login_challenges", "access_mfa_grants", "captcha_challenges", "login_failure_states"}
 }
 
 func collectionPrefix(collection string) string {

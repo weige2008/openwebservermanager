@@ -135,6 +135,7 @@ func NewServer(cfg Config) *Server {
 	}
 	server.migrateLegacyRecordingPaths()
 	server.reconcileInterruptedRecordingTranscodes()
+	server.reconcileInterruptedScheduledTaskLogs()
 	return server
 }
 

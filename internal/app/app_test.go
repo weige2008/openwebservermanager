@@ -12650,6 +12650,55 @@ func TestLogCleanupSkipsUnsafeRecordingPath(t *testing.T) {
 	}
 }
 
+func TestScheduledTaskSetupFailureFinalizesLog(t *testing.T) {
+	srv, _ := newTestServer(t, nil)
+	task, err := srv.cfg.Store.CreatePlatformItem("scheduled_tasks", model.PlatformItemRequest{
+		Name: "Snapshot failure", Type: "log-cleanup", Status: "enabled", Metadata: map[string]any{"retention_days": 30},
+	})
+	if err != nil {
+		t.Fatalf("create setup failure task: %v", err)
+	}
+	started := time.Now().UTC().Add(-time.Second)
+	logItem, err := srv.cfg.Store.CreatePlatformItem("operation_logs", model.PlatformItemRequest{
+		Name: task.Name, Type: "scheduled_task", Status: "running", TargetID: task.ID,
+		Metadata: map[string]any{"task_type": task.Type, "trigger": "scheduled", "ran_at": started},
+	})
+	if err != nil {
+		t.Fatalf("create running setup failure log: %v", err)
+	}
+	forcedErr := errors.New("forced cleanup snapshot failure")
+	updated, err := srv.finalizeScheduledTaskSetupFailure(nil, task, logItem, "scheduled", started, forcedErr)
+	if !errors.Is(err, forcedErr) || updated.Status != "failed" || firstMetadataString(updated.Metadata, "error") != forcedErr.Error() {
+		t.Fatalf("finalized setup failure = item %#v err %v", updated, err)
+	}
+	storedTask, ok, err := srv.cfg.Store.GetPlatformItem("scheduled_tasks", task.ID)
+	if err != nil || !ok || firstMetadataString(storedTask.Metadata, "last_run_status") != "failed" || firstMetadataString(storedTask.Metadata, "last_run_log_id") != logItem.ID {
+		t.Fatalf("setup failure task state = ok %v task %#v err %v", ok, storedTask, err)
+	}
+}
+
+func TestReconcileInterruptedScheduledTaskLogs(t *testing.T) {
+	var logID string
+	srv := newUnconfiguredTestServer(t, func(cfg *Config) {
+		item, err := cfg.Store.CreatePlatformItem("operation_logs", model.PlatformItemRequest{
+			Name: "Interrupted cleanup", Type: "scheduled_task", Status: "running", TargetID: "scheduled-interrupted",
+			Metadata: map[string]any{"trigger": "scheduled", "ran_at": time.Now().UTC().Add(-time.Minute)},
+		})
+		if err != nil {
+			t.Fatalf("create interrupted scheduled log: %v", err)
+		}
+		logID = item.ID
+	})
+	item, ok, err := srv.cfg.Store.GetPlatformItem("operation_logs", logID)
+	interrupted, _ := metadataBoolValue(item.Metadata["interrupted"])
+	if err != nil || !ok || item.Status != "failed" || !interrupted || !strings.Contains(item.Description, "service restart") {
+		t.Fatalf("reconciled scheduled log = ok %v item %#v err %v", ok, item, err)
+	}
+	if !coreAuditLogsContainAction(srv.cfg.Store, "scheduled_task.interrupted") {
+		t.Fatal("interrupted scheduled task reconciliation was not audited")
+	}
+}
+
 func TestScheduledTaskScheduleParsing(t *testing.T) {
 	now := time.Date(2026, 7, 6, 12, 4, 30, 0, time.UTC)
 	next, ok := nextCronRun("0 0/10 * * * ?", now)

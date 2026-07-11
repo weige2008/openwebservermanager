@@ -331,7 +331,7 @@ func (s *Server) executeLogCleanupScheduledTask(r *http.Request, task model.Plat
 
 	cleanupSnapshot, err := s.logCleanupSnapshot()
 	if err != nil {
-		return logItem, err
+		return s.finalizeScheduledTaskSetupFailure(r, task, logItem, trigger, started, err)
 	}
 	defer cleanupSnapshot.cleanup()
 	result := "log cleanup completed"
@@ -401,6 +401,75 @@ func (s *Server) executeLogCleanupScheduledTask(r *http.Request, task model.Plat
 		return logItem, runErr
 	}
 	return logItem, nil
+}
+
+func (s *Server) finalizeScheduledTaskSetupFailure(r *http.Request, task, logItem model.PlatformItem, trigger string, started time.Time, runErr error) (model.PlatformItem, error) {
+	completed := time.Now().UTC()
+	metadata := cloneMetadata(logItem.Metadata)
+	metadata["task_type"] = task.Type
+	metadata["trigger"] = trigger
+	metadata["ran_at"] = started
+	metadata["completed_at"] = completed
+	metadata["duration_ms"] = completed.Sub(started).Milliseconds()
+	metadata["error"] = runErr.Error()
+	if trigger == "scheduled" {
+		metadata["owner_id"] = "system"
+	}
+	updated, logErr := s.cfg.Store.UpdatePlatformItem("operation_logs", logItem.ID, model.PlatformItemRequest{
+		Status:      "failed",
+		Description: runErr.Error(),
+		Metadata:    metadata,
+	})
+	if logErr != nil {
+		detail := "persist scheduled task setup failure log failed: " + logErr.Error()
+		_ = s.audit(r, "scheduled_task.log.persist_failed", task.ID, "", detail)
+		return logItem, fmt.Errorf("%w; additionally %s", runErr, detail)
+	}
+	nextMetadata := cloneMetadata(task.Metadata)
+	nextMetadata["last_run_at"] = completed.Format(time.RFC3339Nano)
+	nextMetadata["last_run_status"] = "failed"
+	nextMetadata["last_run_message"] = runErr.Error()
+	nextMetadata["last_run_error"] = runErr.Error()
+	nextMetadata["last_run_log_id"] = updated.ID
+	nextMetadata["last_duration_ms"] = completed.Sub(started).Milliseconds()
+	nextMetadata["last_trigger"] = trigger
+	if nextRun, ok := nextScheduledTaskRunAfter(task, completed); ok {
+		nextMetadata["next_run_at"] = nextRun.Format(time.RFC3339Nano)
+	} else {
+		delete(nextMetadata, "next_run_at")
+	}
+	if _, updateErr := s.cfg.Store.UpdatePlatformItem("scheduled_tasks", task.ID, model.PlatformItemRequest{Metadata: nextMetadata}); updateErr != nil {
+		detail := "persist scheduled task setup failure state failed: " + updateErr.Error()
+		_ = s.audit(r, "scheduled_task.state.persist_failed", task.ID, "", detail)
+		return updated, fmt.Errorf("%w; additionally %s", runErr, detail)
+	}
+	return updated, runErr
+}
+
+func (s *Server) reconcileInterruptedScheduledTaskLogs() {
+	items, err := s.cfg.Store.ListPlatformItems("operation_logs")
+	if err != nil {
+		return
+	}
+	now := time.Now().UTC()
+	for _, item := range items {
+		if item.Type != "scheduled_task" || item.Status != "running" {
+			continue
+		}
+		item.Metadata = cloneMetadata(item.Metadata)
+		item.Status = "failed"
+		item.Description = "scheduled task interrupted by service restart"
+		item.Metadata["completed_at"] = now
+		item.Metadata["error"] = item.Description
+		item.Metadata["interrupted"] = true
+		if _, err := s.cfg.Store.SavePlatformItem("operation_logs", item); err != nil {
+			continue
+		}
+		_ = s.cfg.Store.Audit(model.AuditLog{
+			UserID: "system", Action: "scheduled_task.interrupted", TargetID: item.TargetID,
+			Detail: item.Description,
+		})
+	}
 }
 
 type logCleanupMutationSnapshot struct {

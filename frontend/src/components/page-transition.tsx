@@ -115,12 +115,14 @@ export function StaggerContainer(props: StaggerContainerProps) {
 interface StaggerItemProps {
   children: ReactNode
   className?: string
+  id?: string
   variants?: Variants
 }
 
 export function StaggerItem(props: StaggerItemProps) {
   return (
     <motion.div
+      id={props.id}
       variants={props.variants ?? STAGGER_ITEM_VARIANTS}
       className={props.className}
     >
@@ -177,7 +179,7 @@ export function CardStaggerContainer(props: StaggerContainerProps) {
 
 export function CardStaggerItem(props: StaggerItemProps) {
   return (
-    <motion.div variants={CARD_ITEM_VARIANTS} className={props.className}>
+    <motion.div id={props.id} variants={CARD_ITEM_VARIANTS} className={props.className}>
       {props.children}
     </motion.div>
   )

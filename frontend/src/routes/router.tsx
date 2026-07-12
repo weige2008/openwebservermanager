@@ -19,9 +19,9 @@ import { AuthPage } from '@/features/auth/auth-page'
 import { AuditPage } from '@/features/console/audit-page'
 import { OverviewPage } from '@/features/console/overview-page'
 import { ServersPage } from '@/features/console/servers-page'
-import { SettingsPage } from '@/features/console/settings-page'
 import { SessionsPage } from '@/features/console/sessions-page'
 import { AccessPortalPage, PlatformPage } from '@/features/console/platform-page'
+import { UnifiedSettingsPage, type SettingsSection } from '@/features/console/unified-settings-page'
 import { HomePage } from '@/features/home/home-page'
 import { ModalHost } from '@/features/modals/modal-host'
 import { WorkspaceView } from '@/features/workspace/workspace-view'
@@ -159,13 +159,13 @@ const auditRoute = createRoute({
 const settingsRoute = createRoute({
   getParentRoute: () => rootRoute,
   path: '/app/settings',
-  component: () => <ConsoleGate><SettingsPage /></ConsoleGate>,
+  component: () => <ConsoleGate><UnifiedSettingsPage /></ConsoleGate>,
 })
 
 const appAboutRoute = createRoute({
   getParentRoute: () => rootRoute,
   path: '/app/about',
-  component: () => <Navigate to='/app/settings' replace />,
+  component: () => <ConsoleGate><UnifiedSettingsPage initialSection='about' /></ConsoleGate>,
 })
 
 const legacyDashboardRoute = createRoute({
@@ -174,10 +174,25 @@ const legacyDashboardRoute = createRoute({
   component: () => <Navigate to='/app' replace />,
 })
 
+function settingsSectionForPage(page: PlatformPageConfig): SettingsSection | undefined {
+  if (page.collection === 'system_settings') return 'system'
+  if (page.collection === 'login_policies' || page.collection === 'login_locks') return 'login-security'
+  return undefined
+}
+
 const platformRoutes = platformPages.map((page) => createRoute({
   getParentRoute: () => rootRoute,
   path: page.route,
-  component: () => <ConsoleGate><RoleGate page={page}><PlatformPage config={page} /></RoleGate></ConsoleGate>,
+  component: () => {
+    const section = settingsSectionForPage(page)
+    return (
+      <ConsoleGate>
+        <RoleGate page={page}>
+          {section ? <UnifiedSettingsPage initialSection={section} /> : <PlatformPage config={page} />}
+        </RoleGate>
+      </ConsoleGate>
+    )
+  },
 }))
 
 const routeTree = rootRoute.addChildren([

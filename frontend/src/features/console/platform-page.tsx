@@ -4531,7 +4531,7 @@ function CheckboxRow({ checked, onChange, label }: { checked: boolean; onChange:
   )
 }
 
-export function PlatformSettingsPage({ config }: { config: PlatformPageConfig }) {
+export function PlatformSettingsPage({ config, sectionId }: { config: PlatformPageConfig; sectionId?: string }) {
   const app = useApp()
   const items = app.data.platform?.[config.collection] || []
   const label = platformLabel(config, app.locale)
@@ -4781,7 +4781,7 @@ export function PlatformSettingsPage({ config }: { config: PlatformPageConfig })
   }
   return (
     <CardStaggerContainer>
-      <CardStaggerItem>
+      <CardStaggerItem id={sectionId} className='scroll-mt-20'>
         <Card>
           <CardHeader className='gap-3 max-sm:grid-cols-1'>
             <div>

@@ -916,7 +916,7 @@ export function SettingsPage() {
 
   return (
     <CardStaggerContainer className='grid gap-4'>
-      <CardStaggerItem className='rounded-xl border border-border bg-card p-5 shadow-sm'>
+      <CardStaggerItem id='settings-profile' className='scroll-mt-20 rounded-xl border border-border bg-card p-5 shadow-sm'>
         <div className='flex flex-wrap items-start justify-between gap-3'>
           <div>
             <p className='text-xs font-medium tracking-[0.14em] text-muted-foreground uppercase'>{t('settings')}</p>
@@ -1397,7 +1397,7 @@ export function SettingsPage() {
       ) : null}
 
       {(canReadLoginPolicies || canReadLoginLocks) ? (
-      <CardStaggerItem className='grid gap-4 rounded-xl border border-border bg-card p-5 shadow-sm lg:grid-cols-[0.85fr_1.15fr]'>
+      <CardStaggerItem id='settings-login-security' className='scroll-mt-20 grid gap-4 rounded-xl border border-border bg-card p-5 shadow-sm lg:grid-cols-[0.85fr_1.15fr]'>
         <div className='flex min-w-0 items-start gap-3'>
           <span className='grid size-12 shrink-0 place-items-center rounded-full bg-primary text-primary-foreground'>
             <ShieldCheck className='size-5' />
@@ -1987,7 +1987,9 @@ export function SettingsPage() {
         </StaggerContainer>
       </CardStaggerItem>
 
-      <AboutContent />
+      <div id='settings-about' className='scroll-mt-20'>
+        <AboutContent />
+      </div>
       {confirmDialog}
     </CardStaggerContainer>
   )

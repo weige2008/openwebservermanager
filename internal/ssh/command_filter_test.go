@@ -1,9 +1,11 @@
 package sshsession
 
 import (
+	"database/sql"
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"openwebservermanager/internal/model"
 	"openwebservermanager/internal/security"
@@ -86,6 +88,116 @@ func TestCommandInterceptorAllowsUnmatchedCommandsAndLogs(t *testing.T) {
 	}
 	if len(logs) != 1 || logs[0].Status != "submitted" || logs[0].Name != "ls -la" {
 		t.Fatalf("logs = %#v, want submitted command log", logs)
+	}
+}
+
+func TestCommandInterceptorFailsClosedWhenCommandLogCannotPersist(t *testing.T) {
+	st := newTestStore(t)
+	unblock := blockPlatformCollectionInsert(t, st, "exec_command_logs")
+	defer unblock()
+	interceptor := newCommandInterceptor(st, model.ConnectionSession{
+		ID:       "sess_audit_failure",
+		Protocol: model.ProtocolSSH,
+		ServerID: "srv_audit_failure",
+		UserID:   "user_audit_failure",
+		ClientIP: "192.0.2.50",
+	})
+
+	filtered, events := interceptor.Process([]byte("whoami\rprintf skipped\r"))
+	if string(filtered) != "whoami\x15" {
+		t.Fatalf("filtered = %q, want first command cleared and remaining pasted input dropped", string(filtered))
+	}
+	if len(events) != 1 || !events[0].Blocked || !events[0].Fatal {
+		t.Fatalf("events = %#v, want one fatal blocked event", events)
+	}
+	if !strings.Contains(strings.ToLower(events[0].Notice), "audit") || !strings.Contains(strings.ToLower(events[0].Notice), "closed") {
+		t.Fatalf("notice = %q, want clear audit failure and session closure", events[0].Notice)
+	}
+	logs, err := st.ListPlatformItems("exec_command_logs")
+	if err != nil || len(logs) != 0 {
+		t.Fatalf("exec logs = %#v err=%v, want no forged success log", logs, err)
+	}
+	_, _, _, auditLogs := st.Bootstrap()
+	found := false
+	for _, item := range auditLogs {
+		if item.Action == "exec_command.log.persist_failed" && item.UserID == "user_audit_failure" && item.TargetID == "srv_audit_failure" {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("core audit logs = %#v, want exec command persistence failure", auditLogs)
+	}
+}
+
+func TestCommandInterceptorFailsClosedWhenApprovalCannotPersist(t *testing.T) {
+	st := newTestStore(t)
+	if _, err := st.CreatePlatformItem("command_filters", model.PlatformItemRequest{
+		Name:     "restart approval",
+		Type:     "approval",
+		Status:   "enabled",
+		Protocol: model.ProtocolSSH,
+		Metadata: map[string]any{"pattern": "systemctl restart", "risk": "critical"},
+	}); err != nil {
+		t.Fatalf("create approval filter: %v", err)
+	}
+	unblock := blockPlatformCollectionInsert(t, st, "command_approvals")
+	defer unblock()
+	interceptor := newCommandInterceptor(st, model.ConnectionSession{ID: "sess_approval_failure", Protocol: model.ProtocolSSH, ServerID: "srv_approval_failure", UserID: "user_approval_failure"})
+
+	filtered, events := interceptor.Process([]byte("systemctl restart nginx\r"))
+	if string(filtered) != "systemctl restart nginx\x15" || len(events) != 1 || !events[0].Fatal || !events[0].Blocked {
+		t.Fatalf("filtered = %q events = %#v, want fatal approval persistence block", string(filtered), events)
+	}
+	logs, err := st.ListPlatformItems("exec_command_logs")
+	if err != nil || len(logs) != 1 {
+		t.Fatalf("exec logs = %#v err=%v, want one approval-required audit record", logs, err)
+	}
+	if logs[0].Status != "approval_required" || !strings.Contains(firstString(logs[0].Metadata["approval_error"]), "blocked command_approvals insert") {
+		t.Fatalf("approval failure log = %#v", logs[0])
+	}
+	_, _, _, auditLogs := st.Bootstrap()
+	found := false
+	for _, item := range auditLogs {
+		if item.Action == "command_interceptor.persist_failed" {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("core audit logs = %#v, want approval persistence failure", auditLogs)
+	}
+}
+
+func TestCommandInterceptorFailsClosedWhenPoliciesCannotLoad(t *testing.T) {
+	st := newTestStore(t)
+	interceptor := newCommandInterceptor(st, model.ConnectionSession{ID: "sess_policy_failure", Protocol: model.ProtocolSSH, ServerID: "srv_policy_failure", UserID: "user_policy_failure"})
+	if err := st.Close(); err != nil {
+		t.Fatalf("close store: %v", err)
+	}
+
+	filtered, events := interceptor.Process([]byte("id\rnext-command\r"))
+	if string(filtered) != "id\x15" || len(events) != 1 || !events[0].Fatal || !events[0].Blocked {
+		t.Fatalf("filtered = %q events = %#v, want policy load failure to block and drop remaining input", string(filtered), events)
+	}
+}
+
+func TestExecCommandFailsClosedWhenPoliciesCannotLoad(t *testing.T) {
+	st := newTestStore(t)
+	if err := st.Close(); err != nil {
+		t.Fatalf("close store: %v", err)
+	}
+	result, err := (Runner{Store: st}).RunCommand(
+		model.ConnectionSession{ID: "sess_exec_policy_failure", Protocol: model.ProtocolSSH, ServerID: "srv_exec_policy_failure", UserID: "user_exec_policy_failure"},
+		model.Server{},
+		model.Credential{},
+		store.CredentialSecret{},
+		"whoami",
+		time.Second,
+	)
+	if err == nil {
+		t.Fatal("exec command policy load failure was allowed")
+	}
+	if !result.Blocked || result.Status != "failed" || result.Action != "deny" || !strings.Contains(result.Error, "load command filters") {
+		t.Fatalf("exec result = %#v err=%v, want fail-closed policy error", result, err)
 	}
 }
 
@@ -239,4 +351,54 @@ func newTestStore(t *testing.T) *store.Store {
 	}
 	t.Cleanup(func() { _ = st.Close() })
 	return st
+}
+
+func blockPlatformCollectionInsert(t *testing.T, st *store.Store, collection string) func() {
+	t.Helper()
+	db, err := sql.Open("sqlite", st.DatabasePath())
+	if err != nil {
+		t.Fatalf("open store database: %v", err)
+	}
+	trigger := "block_" + collection + "_insert"
+	statement := `CREATE TRIGGER ` + trigger + ` BEFORE INSERT ON platform_records WHEN NEW.collection = '` + collection + `' BEGIN SELECT RAISE(FAIL, 'blocked ` + collection + ` insert'); END`
+	if _, err := db.Exec(statement); err != nil {
+		_ = db.Close()
+		t.Fatalf("create %s blocker: %v", collection, err)
+	}
+	return func() {
+		_, _ = db.Exec(`DROP TRIGGER IF EXISTS ` + trigger)
+		_ = db.Close()
+	}
+}
+
+func blockPlatformCollectionPayloadInsert(t *testing.T, st *store.Store, collection, fragment string) func() {
+	t.Helper()
+	db, err := sql.Open("sqlite", st.DatabasePath())
+	if err != nil {
+		t.Fatalf("open store database: %v", err)
+	}
+	trigger := "block_" + collection + "_payload_insert"
+	statement := `CREATE TRIGGER ` + trigger + ` BEFORE INSERT ON platform_records WHEN NEW.collection = '` + collection + `' AND instr(NEW.payload, '` + fragment + `') > 0 BEGIN SELECT RAISE(FAIL, 'blocked ` + collection + ` payload insert'); END`
+	if _, err := db.Exec(statement); err != nil {
+		_ = db.Close()
+		t.Fatalf("create %s payload blocker: %v", collection, err)
+	}
+	return func() {
+		_, _ = db.Exec(`DROP TRIGGER IF EXISTS ` + trigger)
+		_ = db.Close()
+	}
+}
+
+func firstString(value any) string {
+	text, _ := value.(string)
+	return text
+}
+
+func auditLogActionExists(items []model.AuditLog, action string) bool {
+	for _, item := range items {
+		if item.Action == action {
+			return true
+		}
+	}
+	return false
 }

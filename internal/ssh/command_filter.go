@@ -1,6 +1,7 @@
 package sshsession
 
 import (
+	"errors"
 	"fmt"
 	"regexp"
 	"strings"
@@ -21,6 +22,7 @@ type commandInterceptor struct {
 type commandEvent struct {
 	Command    string
 	Blocked    bool
+	Fatal      bool
 	ApprovalID string
 	Notice     string
 }
@@ -57,8 +59,24 @@ func (i *commandInterceptor) Process(raw []byte) ([]byte, []commandEvent) {
 				filtered = append(filtered, b)
 				continue
 			}
-			decision := i.evaluate(command)
-			approvalID := i.record(command, decision)
+			decision, evaluateErr := i.evaluate(command)
+			if evaluateErr != nil {
+				i.auditFailure("command_filter.evaluate.failed", evaluateErr)
+				filtered = append(filtered, clearCurrentLine)
+				events = append(events, fatalCommandEvent(command, evaluateErr))
+				return filtered, events
+			}
+			approvalID, recordErr := i.record(command, decision)
+			if recordErr != nil {
+				action := "command_interceptor.persist_failed"
+				if errors.Is(recordErr, ErrExecCommandLogPersist) {
+					action = "exec_command.log.persist_failed"
+				}
+				i.auditFailure(action, recordErr)
+				filtered = append(filtered, clearCurrentLine)
+				events = append(events, fatalCommandEvent(command, recordErr))
+				return filtered, events
+			}
 			if decision.Blocked {
 				filtered = append(filtered, clearCurrentLine)
 				events = append(events, commandEvent{
@@ -92,14 +110,14 @@ func (i *commandInterceptor) Process(raw []byte) ([]byte, []commandEvent) {
 	return filtered, events
 }
 
-func (i *commandInterceptor) evaluate(command string) commandDecision {
+func (i *commandInterceptor) evaluate(command string) (commandDecision, error) {
 	decision := commandDecision{Action: "allow", Risk: "normal", RuleName: "default", Pattern: "", Status: "submitted"}
 	if i.store == nil {
-		return decision
+		return decision, nil
 	}
 	filters, err := i.store.ListPlatformItems("command_filters")
 	if err != nil {
-		return decision
+		return commandDecision{}, fmt.Errorf("load command filters: %w", err)
 	}
 	var approvalDecision commandDecision
 	hasApprovalDecision := false
@@ -127,7 +145,7 @@ func (i *commandInterceptor) evaluate(command string) commandDecision {
 			matched.Status = commandDecisionStatus(matched.Action, matched.Blocked)
 			switch matched.Status {
 			case "denied", "blocked":
-				return matched
+				return matched, nil
 			case "approval_required":
 				if !hasApprovalDecision {
 					approvalDecision = matched
@@ -142,17 +160,18 @@ func (i *commandInterceptor) evaluate(command string) commandDecision {
 		}
 	}
 	if hasApprovalDecision {
-		return approvalDecision
+		return approvalDecision, nil
 	}
 	if hasFallbackDecision {
-		return fallbackDecision
+		return fallbackDecision, nil
 	}
-	return decision
+	return decision, nil
 }
 
-func (i *commandInterceptor) record(command string, decision commandDecision) string {
+func (i *commandInterceptor) record(command string, decision commandDecision) (string, error) {
 	metadata := map[string]any{}
 	approvalID := ""
+	var approvalErr error
 	if commandDecisionStatus(decision.Action, decision.Blocked) == "approval_required" {
 		approval, err := i.createCommandApproval(command, decision, true, nil)
 		if err == nil && approval.ID != "" {
@@ -160,11 +179,35 @@ func (i *commandInterceptor) record(command string, decision commandDecision) st
 			metadata["approval_id"] = approval.ID
 			metadata["approval_status"] = approval.Status
 		} else if err != nil {
+			approvalErr = fmt.Errorf("persist command approval: %w", err)
 			metadata["approval_error"] = err.Error()
 		}
 	}
-	_ = i.recordCommand(command, decision, true, "interactive ssh command "+decision.Status, metadata)
-	return approvalID
+	recordErr := i.recordCommand(command, decision, true, "interactive ssh command "+decision.Status, metadata)
+	return approvalID, errors.Join(approvalErr, recordErr)
+}
+
+func fatalCommandEvent(command string, err error) commandEvent {
+	return commandEvent{
+		Command: command,
+		Blocked: true,
+		Fatal:   true,
+		Notice:  "\r\nCommand blocked because policy or audit state could not be loaded or persisted. The SSH session has been closed.\r\n",
+	}
+}
+
+func (i *commandInterceptor) auditFailure(action string, err error) {
+	if i.store == nil || err == nil {
+		return
+	}
+	_ = i.store.Audit(model.AuditLog{
+		UserID:   i.session.UserID,
+		Action:   action,
+		TargetID: i.session.ServerID,
+		Protocol: model.ProtocolSSH,
+		Detail:   err.Error(),
+		ClientIP: i.session.ClientIP,
+	})
 }
 
 func (i *commandInterceptor) recordExec(command string, decision commandDecision, description string, metadata map[string]any) error {

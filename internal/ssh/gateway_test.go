@@ -641,6 +641,8 @@ func TestNativeSSHGatewayCommandFilterBlocksTargetExecution(t *testing.T) {
 	}); err != nil {
 		t.Fatalf("create command filter: %v", err)
 	}
+	unblockAuditFailureCommand := blockPlatformCollectionPayloadInsert(t, st, "exec_command_logs", "printf audit-fail")
+	defer unblockAuditFailureCommand()
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
@@ -712,12 +714,25 @@ func TestNativeSSHGatewayCommandFilterBlocksTargetExecution(t *testing.T) {
 		t.Fatalf("recorded command = %q, want allowed command only", got)
 	}
 
+	if _, err := io.WriteString(stdin, "printf audit-fail\rprintf must-not-run\r"); err != nil {
+		t.Fatalf("write audit failure command: %v", err)
+	}
+	auditFailureNotice := readUntilContains(t, stdout, "policy or audit state could not be loaded or persisted", 5*time.Second)
+	if !strings.Contains(auditFailureNotice, "session has been closed") {
+		t.Fatalf("audit failure notice = %q", auditFailureNotice)
+	}
+	assertNoRecordedCommand(t, targetCommands, 300*time.Millisecond)
+
 	logs, err := st.ListPlatformItems("exec_command_logs")
 	if err != nil {
 		t.Fatalf("list command logs: %v", err)
 	}
 	if commandLogStatusByCommand(logs, "rm -rf /") != "denied" || commandLogStatusByCommand(logs, "printf ok") != "submitted" {
 		t.Fatalf("command logs = %#v, want denied blocked command and submitted allowed command", logs)
+	}
+	_, _, _, auditLogs := st.Bootstrap()
+	if !auditLogActionExists(auditLogs, "exec_command.log.persist_failed") {
+		t.Fatalf("core audit logs = %#v, want native gateway command log persistence failure", auditLogs)
 	}
 }
 

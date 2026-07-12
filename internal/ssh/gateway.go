@@ -709,16 +709,24 @@ func copyNativeInput(channel ssh.Channel, writer io.Writer, interceptor *command
 		n, err := channel.Read(buf)
 		if n > 0 {
 			filtered, events := interceptor.Process(buf[:n])
-			for _, event := range events {
-				if event.Blocked {
-					_, _ = channel.Write([]byte(event.Notice))
-				}
-			}
 			if len(filtered) > 0 {
 				if _, writeErr := writer.Write(filtered); writeErr != nil {
 					closeAll(writeErr.Error())
 					return
 				}
+			}
+			fatal := false
+			for _, event := range events {
+				if event.Blocked {
+					_, _ = channel.Write([]byte(event.Notice))
+				}
+				if event.Fatal {
+					fatal = true
+				}
+			}
+			if fatal {
+				closeAll("command audit unavailable")
+				return
 			}
 		}
 		if err != nil {

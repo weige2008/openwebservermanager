@@ -159,17 +159,25 @@ func (r Runner) Run(conn *ws.Conn, session model.ConnectionSession, server model
 				continue
 			}
 			filtered, events := interceptor.Process(raw)
-			for _, event := range events {
-				if event.Blocked {
-					notice := base64.StdEncoding.EncodeToString([]byte(event.Notice))
-					_ = conn.SendJSON(Message{Type: "stdout", Data: notice})
-				}
-			}
 			if len(filtered) > 0 {
 				if _, err := stdin.Write(filtered); err != nil {
 					closeAll()
 					return
 				}
+			}
+			fatal := false
+			for _, event := range events {
+				if event.Blocked {
+					notice := base64.StdEncoding.EncodeToString([]byte(event.Notice))
+					_ = conn.SendJSON(Message{Type: "stdout", Data: notice})
+				}
+				if event.Fatal {
+					fatal = true
+				}
+			}
+			if fatal {
+				closeAll()
+				return
 			}
 		case "resize":
 			if msg.Cols > 0 && msg.Rows > 0 {
@@ -219,7 +227,30 @@ func (r Runner) runCommand(session model.ConnectionSession, server model.Server,
 	}
 	started := time.Now()
 	interceptor := newCommandInterceptor(r.Store, session)
-	decision := interceptor.evaluate(command)
+	decision, evaluateErr := interceptor.evaluate(command)
+	if evaluateErr != nil {
+		decision = commandDecision{Action: "deny", Risk: "critical", RuleName: "policy_unavailable", Status: "failed", Blocked: true}
+		result := ExecResult{
+			SessionID:  session.ID,
+			Command:    command,
+			ExitCode:   -1,
+			Status:     "failed",
+			Action:     decision.Action,
+			Risk:       decision.Risk,
+			RuleName:   decision.RuleName,
+			Blocked:    true,
+			Error:      evaluateErr.Error(),
+			DurationMs: time.Since(started).Milliseconds(),
+		}
+		interceptor.auditFailure("command_filter.evaluate.failed", evaluateErr)
+		if logErr := interceptor.recordExec(command, decision, "ssh exec command policy evaluation failed", result.execMetadata()); logErr != nil {
+			interceptor.auditFailure("exec_command.log.persist_failed", logErr)
+			evaluateErr = errors.Join(evaluateErr, logErr)
+			result.Error = evaluateErr.Error()
+		}
+		r.finishExecSession(session.ID, model.SessionFailed, result.Error)
+		return result, evaluateErr
+	}
 	approvedExecution := approvalID != ""
 	if approvedExecution && commandDecisionStatus(decision.Action, decision.Blocked) == "approval_required" {
 		decision.Action = "approved"

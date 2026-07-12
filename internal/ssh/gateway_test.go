@@ -863,7 +863,7 @@ func TestNativeSSHGatewayChineseAdminDirectAssetLoginWithoutGrant(t *testing.T) 
 }
 
 func TestNativeSSHGatewayDirectTCPIPForwarding(t *testing.T) {
-	echoAddr, closeEcho := startTCPEchoServer(t)
+	echoAddr, accepted, closeEcho := startTCPEchoServer(t)
 	defer closeEcho()
 
 	st := newGatewayTestStore(t)
@@ -937,10 +937,29 @@ func TestNativeSSHGatewayDirectTCPIPForwarding(t *testing.T) {
 	}
 	defer client.Close()
 
+	unblockForwardAudit := blockPlatformCollectionPayloadInsert(t, st, "operation_logs", "ssh_gateway.forward.started")
+	if blocked, err := client.Dial("tcp", echoAddr); err == nil {
+		_ = blocked.Close()
+		unblockForwardAudit()
+		t.Fatal("expected direct-tcpip forwarding to fail when its initial audit cannot persist")
+	}
+	select {
+	case <-accepted:
+		unblockForwardAudit()
+		t.Fatal("direct-tcpip reached the target before its initial audit persisted")
+	case <-time.After(300 * time.Millisecond):
+	}
+	unblockForwardAudit()
+	_, _, _, auditLogs := st.Bootstrap()
+	if !auditLogActionExists(auditLogs, "ssh_gateway.forward.log.persist_failed") {
+		t.Fatalf("core audit logs = %#v, want forwarding audit persistence failure", auditLogs)
+	}
+
 	assetForward, err := client.Dial("tcp", net.JoinHostPort(assetRec.Name, strconv.Itoa(port)))
 	if err != nil {
 		t.Fatalf("dial authorized asset forward: %v", err)
 	}
+	assertTCPAccepted(t, accepted)
 	assertEchoRoundTrip(t, assetForward, "asset-forward")
 	_ = assetForward.Close()
 
@@ -948,6 +967,7 @@ func TestNativeSSHGatewayDirectTCPIPForwarding(t *testing.T) {
 	if err != nil {
 		t.Fatalf("dial allowlisted forward: %v", err)
 	}
+	assertTCPAccepted(t, accepted)
 	assertEchoRoundTrip(t, allowlistForward, "allowlist-forward")
 	_ = allowlistForward.Close()
 
@@ -1169,13 +1189,14 @@ func createGatewayUserAssetAndCredential(t *testing.T, st *store.Store, targetAd
 	return assetRec
 }
 
-func startTCPEchoServer(t *testing.T) (string, func()) {
+func startTCPEchoServer(t *testing.T) (string, <-chan struct{}, func()) {
 	t.Helper()
 	listener, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
 		t.Fatalf("listen echo server: %v", err)
 	}
 	done := make(chan struct{})
+	accepted := make(chan struct{}, 8)
 	go func() {
 		defer close(done)
 		for {
@@ -1183,15 +1204,25 @@ func startTCPEchoServer(t *testing.T) (string, func()) {
 			if err != nil {
 				return
 			}
+			accepted <- struct{}{}
 			go func() {
 				defer conn.Close()
 				_, _ = io.Copy(conn, conn)
 			}()
 		}
 	}()
-	return listener.Addr().String(), func() {
+	return listener.Addr().String(), accepted, func() {
 		_ = listener.Close()
 		<-done
+	}
+}
+
+func assertTCPAccepted(t *testing.T, accepted <-chan struct{}) {
+	t.Helper()
+	select {
+	case <-accepted:
+	case <-time.After(2 * time.Second):
+		t.Fatal("target TCP server did not accept forwarded connection")
 	}
 }
 

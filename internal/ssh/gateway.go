@@ -402,25 +402,38 @@ func (g *Gateway) handleDirectTCPIP(conn *ssh.ServerConn, newChannel ssh.NewChan
 	}
 	dialHost, dialPort, allowed, reason := g.forwardAllowed(user, host, port)
 	if !allowed {
-		g.auditForward(conn, user, host, port, "denied", reason)
+		if err := g.auditForward(conn, user, host, port, "denied", reason); err != nil {
+			g.auditForwardPersistFailure(conn, user, host, port, "denied", err)
+		}
 		_ = newChannel.Reject(ssh.Prohibited, reason)
+		return
+	}
+	if err := g.auditForward(conn, user, host, port, "started", "direct-tcpip"); err != nil {
+		g.auditForwardPersistFailure(conn, user, host, port, "started", err)
+		_ = newChannel.Reject(ssh.Prohibited, "forwarding audit is unavailable")
 		return
 	}
 	upstream, err := net.DialTimeout("tcp", net.JoinHostPort(dialHost, strconv.Itoa(dialPort)), 15*time.Second)
 	if err != nil {
-		g.auditForward(conn, user, host, port, "failed", err.Error())
+		if auditErr := g.auditForward(conn, user, host, port, "failed", err.Error()); auditErr != nil {
+			g.auditForwardPersistFailure(conn, user, host, port, "failed", auditErr)
+		}
 		_ = newChannel.Reject(ssh.ConnectionFailed, err.Error())
 		return
 	}
 	channel, requests, err := newChannel.Accept()
 	if err != nil {
 		_ = upstream.Close()
+		if auditErr := g.auditForward(conn, user, host, port, "failed", "accept direct-tcpip channel: "+err.Error()); auditErr != nil {
+			g.auditForwardPersistFailure(conn, user, host, port, "failed", auditErr)
+		}
 		return
 	}
 	go ssh.DiscardRequests(requests)
-	g.auditForward(conn, user, host, port, "started", "direct-tcpip")
 	go proxyTCPChannel(channel, upstream, func() {
-		g.auditForward(conn, user, host, port, "closed", "direct-tcpip")
+		if err := g.auditForward(conn, user, host, port, "closed", "direct-tcpip"); err != nil {
+			g.auditForwardPersistFailure(conn, user, host, port, "closed", err)
+		}
 	})
 }
 
@@ -566,9 +579,9 @@ func normalizeForwardHost(host string) string {
 	return host
 }
 
-func (g *Gateway) auditForward(conn *ssh.ServerConn, user gatewayUser, host string, port int, status, detail string) {
+func (g *Gateway) auditForward(conn *ssh.ServerConn, user gatewayUser, host string, port int, status, detail string) error {
 	if g == nil || g.cfg.Store == nil {
-		return
+		return errors.New("forwarding audit store is unavailable")
 	}
 	target := net.JoinHostPort(host, strconv.Itoa(port))
 	if strings.TrimSpace(detail) != "" {
@@ -576,12 +589,34 @@ func (g *Gateway) auditForward(conn *ssh.ServerConn, user gatewayUser, host stri
 	} else {
 		detail = target
 	}
+	_, err := g.cfg.Store.CreatePlatformItem("operation_logs", model.PlatformItemRequest{
+		Name:        "ssh_gateway.forward." + strings.TrimSpace(status),
+		Type:        "ssh_gateway",
+		Status:      strings.TrimSpace(status),
+		Protocol:    model.ProtocolSSH,
+		OwnerID:     user.UserID,
+		TargetID:    target,
+		Description: detail,
+		Metadata: map[string]any{
+			"client_ip": remoteIP(conn.RemoteAddr()),
+			"host":      host,
+			"port":      port,
+		},
+	})
+	return err
+}
+
+func (g *Gateway) auditForwardPersistFailure(conn *ssh.ServerConn, user gatewayUser, host string, port int, status string, err error) {
+	if g == nil || g.cfg.Store == nil || err == nil {
+		return
+	}
+	target := net.JoinHostPort(host, strconv.Itoa(port))
 	_ = g.cfg.Store.Audit(model.AuditLog{
 		UserID:   user.UserID,
-		Action:   "ssh_gateway.forward." + strings.TrimSpace(status),
+		Action:   "ssh_gateway.forward.log.persist_failed",
 		TargetID: target,
 		Protocol: model.ProtocolSSH,
-		Detail:   detail,
+		Detail:   "persist " + strings.TrimSpace(status) + " forwarding audit: " + err.Error(),
 		ClientIP: remoteIP(conn.RemoteAddr()),
 	})
 }

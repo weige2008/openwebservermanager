@@ -84,6 +84,8 @@ interface LoginPolicyFormState {
   action: 'allow' | 'deny'
   account: string
   cidr: string
+  priority: number
+  expiresAt: string
 }
 
 interface OIDCSettingsState {
@@ -191,7 +193,7 @@ const forceMFAKeys = ['force_mfa', 'forceMFA', 'mfa_required', 'require_mfa']
 const loginFailureThresholdKeys = ['login_failure_threshold', 'failure_threshold', 'max_login_failures', 'login_lock_threshold', 'lock_threshold']
 const loginFailureWindowKeys = ['login_failure_window_minutes', 'failure_window_minutes', 'login_lock_window_minutes', 'lock_window_minutes']
 const loginLockMinutesKeys = ['login_lock_minutes', 'lock_minutes', 'login_lock_duration_minutes', 'lock_duration_minutes']
-const defaultLoginPolicyForm: LoginPolicyFormState = { name: '', action: 'deny', account: '*', cidr: '' }
+const defaultLoginPolicyForm: LoginPolicyFormState = { name: '', action: 'deny', account: '*', cidr: '', priority: 0, expiresAt: '' }
 const oidcSettingKeys = ['oidc_login_enabled', 'external_oidc_enabled', 'oidc_issuer', 'oidc_jwks_uri', 'oidc_authorization_endpoint', 'oidc_token_endpoint', 'oidc_client_id', 'oidc_provider_id']
 const ldapSettingKeys = ['ldap_enabled', 'ldap_url', 'ldap_base_dn', 'ldap_bind_dn', 'ldap_user_filter', 'ldap_provider_id', 'ldap_provider_name']
 const wecomSettingKeys = ['wecom_enabled', 'wecom_corp_id', 'wecom_agent_id', 'wecom_provider_id', 'wecom_provider_name']
@@ -541,6 +543,7 @@ export function SettingsPage() {
     try {
       const action = loginPolicyForm.action === 'allow' ? 'allow' : 'deny'
       const account = loginPolicyForm.account.trim() || '*'
+      const expiresAt = loginPolicyForm.expiresAt.trim()
       await apiRequest<PlatformItem>('/api/admin/login-policies', {
         method: 'POST',
         body: JSON.stringify({
@@ -554,6 +557,8 @@ export function SettingsPage() {
             action,
             account,
             cidr,
+            priority: loginPolicyForm.priority,
+            ...(expiresAt ? { expires_at: new Date(expiresAt).toISOString() } : {}),
           },
         }),
       })
@@ -1414,35 +1419,69 @@ export function SettingsPage() {
                 <Field label={t('settingsPage.loginPolicyName')}>
                   <Input
                     value={loginPolicyForm.name}
-                    onChange={(event) => setLoginPolicyForm((current) => ({ ...current, name: event.currentTarget.value }))}
+                    onChange={(event) => {
+                      const value = event.currentTarget.value
+                      setLoginPolicyForm((current) => ({ ...current, name: value }))
+                    }}
                     placeholder={t('settingsPage.loginPolicyNamePlaceholder')}
                   />
                 </Field>
                 <Field label={t('settingsPage.loginPolicyAction')}>
                   <Select
                     value={loginPolicyForm.action}
-                    onChange={(event) => setLoginPolicyForm((current) => ({ ...current, action: event.currentTarget.value === 'allow' ? 'allow' : 'deny' }))}
+                    onChange={(event) => {
+                      const value = event.currentTarget.value
+                      setLoginPolicyForm((current) => ({ ...current, action: value === 'allow' ? 'allow' : 'deny' }))
+                    }}
                   >
                     <option value='deny'>{t('settingsPage.loginPolicyDeny')}</option>
                     <option value='allow'>{t('settingsPage.loginPolicyAllow')}</option>
                   </Select>
                 </Field>
               </div>
-              <div className='grid gap-3 sm:grid-cols-[0.7fr_1fr_auto] sm:items-end'>
+              <div className='grid gap-3 sm:grid-cols-2'>
                 <Field label={t('settingsPage.loginPolicyAccount')}>
                   <Input
                     value={loginPolicyForm.account}
-                    onChange={(event) => setLoginPolicyForm((current) => ({ ...current, account: event.currentTarget.value }))}
+                    onChange={(event) => {
+                      const value = event.currentTarget.value
+                      setLoginPolicyForm((current) => ({ ...current, account: value }))
+                    }}
                     placeholder='*'
                   />
                 </Field>
                 <Field label={t('settingsPage.loginPolicyCIDR')}>
                   <Input
                     value={loginPolicyForm.cidr}
-                    onChange={(event) => setLoginPolicyForm((current) => ({ ...current, cidr: event.currentTarget.value }))}
+                    onChange={(event) => {
+                      const value = event.currentTarget.value
+                      setLoginPolicyForm((current) => ({ ...current, cidr: value }))
+                    }}
                     placeholder='192.0.2.0/24'
                   />
                 </Field>
+                <Field label={t('settingsPage.loginPolicyPriority')}>
+                  <Input
+                    type='number'
+                    value={loginPolicyForm.priority}
+                    onChange={(event) => {
+                      const value = event.currentTarget.value
+                      setLoginPolicyForm((current) => ({ ...current, priority: numberInputValue(value, current.priority) }))
+                    }}
+                  />
+                </Field>
+                <Field label={t('settingsPage.loginPolicyExpiresAt')}>
+                  <Input
+                    type='datetime-local'
+                    value={loginPolicyForm.expiresAt}
+                    onInput={(event) => {
+                      const value = event.currentTarget.value
+                      setLoginPolicyForm((current) => ({ ...current, expiresAt: value }))
+                    }}
+                  />
+                </Field>
+              </div>
+              <div className='flex justify-end'>
                 <Button variant='primary' onClick={() => void createLoginPolicy()} disabled={loginPolicyBusy || !loginPolicyForm.cidr.trim()}>
                   {t('settingsPage.createLoginPolicy')}
                 </Button>
@@ -1475,6 +1514,8 @@ export function SettingsPage() {
                           <div className='mt-1 flex flex-wrap gap-x-4 gap-y-1 text-xs text-muted-foreground'>
                             <span>{t('settingsPage.loginPolicyAccount')}: {loginPolicyAccount(policy)}</span>
                             <span>{t('settingsPage.loginPolicyCIDR')}: {loginPolicyCIDR(policy)}</span>
+                            <span>{t('settingsPage.loginPolicyPriority')}: {loginPolicyPriority(policy)}</span>
+                            <span>{t('settingsPage.loginPolicyExpiresAt')}: {loginPolicyExpiresAt(policy)}</span>
                           </div>
                         </div>
                         {(canPatchPolicy || canRemovePolicy) ? (
@@ -2220,6 +2261,16 @@ function loginPolicyAccount(policy: PlatformItem) {
 
 function loginPolicyCIDR(policy: PlatformItem) {
   return metadataText(policy.metadata?.cidr) || metadataText(policy.metadata?.client_ip) || policy.host || policy.target_id || '*'
+}
+
+function loginPolicyPriority(policy: PlatformItem) {
+  const value = policy.metadata?.priority
+  return typeof value === 'number' || typeof value === 'string' ? String(value) : '0'
+}
+
+function loginPolicyExpiresAt(policy: PlatformItem) {
+  const value = metadataText(policy.metadata?.expires_at)
+  return value ? formatDate(value) : '-'
 }
 
 function loginLockAccount(lock: PlatformItem) {

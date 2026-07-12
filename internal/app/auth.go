@@ -1031,7 +1031,12 @@ func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "captcha is required or invalid")
 		return
 	}
-	if ok, reason := s.loginPolicyAllows(username, clientIP); !ok {
+	policyAllowed, reason, policyErr := s.loginPolicyAllows(username, clientIP)
+	if policyErr != nil {
+		writeError(w, http.StatusInternalServerError, policyErr.Error())
+		return
+	}
+	if !policyAllowed {
 		if err := s.createLoginLog(r, model.PlatformItemRequest{
 			Name:        username,
 			Type:        "policy",

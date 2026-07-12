@@ -5437,6 +5437,71 @@ func TestLoginPolicyAllowListRequiresMatchingClient(t *testing.T) {
 	}, nil, http.StatusOK)
 }
 
+func TestLoginPolicyPriorityExpiryAndValidation(t *testing.T) {
+	srv, adminCookie := newTestServer(t, nil)
+	assertStatus(t, srv, http.MethodPost, "/api/admin/users", map[string]any{
+		"name": "priority-user", "type": "local", "status": "enabled", "password": "password123", "metadata": map[string]any{"role": "user"},
+	}, adminCookie, http.StatusCreated)
+	create := func(name, action string, priority int, expiresAt string) model.PlatformItem {
+		t.Helper()
+		metadata := map[string]any{"action": action, "account": "priority-user", "cidr": "192.0.2.0/24", "priority": priority}
+		if expiresAt != "" {
+			metadata["expires_at"] = expiresAt
+		}
+		rec := assertStatus(t, srv, http.MethodPost, "/api/admin/login-policies", map[string]any{
+			"name": name, "type": action, "status": "enabled", "username": "priority-user", "host": "192.0.2.0/24", "metadata": metadata,
+		}, adminCookie, http.StatusCreated)
+		var item model.PlatformItem
+		decodeResponse(t, rec, &item)
+		return item
+	}
+
+	create("expired deny", "deny", 100, time.Now().Add(-time.Minute).UTC().Format(time.RFC3339))
+	create("expired allow", "allow", 100, time.Now().Add(-time.Minute).UTC().Format(time.RFC3339))
+	allowed, reason, err := srv.loginPolicyAllows("priority-user", "192.0.2.1")
+	if err != nil || !allowed || reason != "" {
+		t.Fatalf("expired policies affected login: allowed=%v reason=%q err=%v", allowed, reason, err)
+	}
+	assertStatus(t, srv, http.MethodPost, "/api/auth/login", map[string]any{"username": "priority-user", "password": "password123"}, nil, http.StatusOK)
+
+	create("low deny", "deny", 10, "")
+	create("high allow", "allow", 20, time.Now().Add(time.Hour).UTC().Format(time.RFC3339))
+	allowed, reason, err = srv.loginPolicyAllows("priority-user", "192.0.2.1")
+	if err != nil || !allowed || reason != "" {
+		t.Fatalf("higher-priority allow did not win: allowed=%v reason=%q err=%v", allowed, reason, err)
+	}
+	assertStatus(t, srv, http.MethodPost, "/api/auth/login", map[string]any{"username": "priority-user", "password": "password123"}, nil, http.StatusOK)
+	create("equal deny", "deny", 20, "")
+	allowed, reason, err = srv.loginPolicyAllows("priority-user", "192.0.2.1")
+	if err != nil || allowed || !strings.Contains(reason, "equal deny") {
+		t.Fatalf("equal-priority deny did not win: allowed=%v reason=%q err=%v", allowed, reason, err)
+	}
+	assertStatus(t, srv, http.MethodPost, "/api/auth/login", map[string]any{"username": "priority-user", "password": "password123"}, nil, http.StatusForbidden)
+
+	assertStatus(t, srv, http.MethodPost, "/api/admin/login-policies", map[string]any{
+		"name": "invalid expiry", "type": "deny", "status": "enabled", "metadata": map[string]any{"cidr": "192.0.2.0/24", "expires_at": "tomorrow"},
+	}, adminCookie, http.StatusBadRequest)
+	assertStatus(t, srv, http.MethodPost, "/api/admin/login-policies", map[string]any{
+		"name": "fractional priority", "type": "deny", "status": "enabled", "metadata": map[string]any{"cidr": "192.0.2.0/24", "priority": 1.5},
+	}, adminCookie, http.StatusBadRequest)
+}
+
+func TestLoginPolicyAllowListIsScopedToMatchingAccounts(t *testing.T) {
+	srv, adminCookie := newTestServer(t, nil)
+	assertStatus(t, srv, http.MethodPost, "/api/admin/login-policies", map[string]any{
+		"name": "user-a allowlist", "type": "allow", "status": "enabled", "username": "user-a", "host": "198.51.100.0/24",
+		"metadata": map[string]any{"action": "allow", "account": "user-a", "cidr": "198.51.100.0/24"},
+	}, adminCookie, http.StatusCreated)
+	allowed, reason, err := srv.loginPolicyAllows("user-b", "192.0.2.1")
+	if err != nil || !allowed || reason != "" {
+		t.Fatalf("another account's allowlist affected user-b: allowed=%v reason=%q err=%v", allowed, reason, err)
+	}
+	allowed, reason, err = srv.loginPolicyAllows("user-a", "192.0.2.1")
+	if err != nil || allowed || reason != "no allow login policy matched" {
+		t.Fatalf("user-a allowlist miss = allowed=%v reason=%q err=%v", allowed, reason, err)
+	}
+}
+
 func TestConfigurableLoginFailureLockPolicy(t *testing.T) {
 	handler, adminCookie := newTestHandler(t)
 

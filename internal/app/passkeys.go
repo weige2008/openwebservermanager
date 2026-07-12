@@ -421,7 +421,12 @@ func (s *Server) handlePasskeyLoginOptions(w http.ResponseWriter, r *http.Reques
 		writeError(w, http.StatusBadRequest, "username is required")
 		return
 	}
-	if ok, reason := s.loginPolicyAllows(username, clientIP); !ok {
+	policyAllowed, reason, policyErr := s.loginPolicyAllows(username, clientIP)
+	if policyErr != nil {
+		writeError(w, http.StatusInternalServerError, policyErr.Error())
+		return
+	}
+	if !policyAllowed {
 		if err := s.createLoginLog(r, model.PlatformItemRequest{
 			Name:        username,
 			Type:        "passkey",

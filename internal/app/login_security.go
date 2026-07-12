@@ -5,6 +5,7 @@ import (
 	"net"
 	"net/http"
 	"os"
+	"sort"
 	"strings"
 	"time"
 
@@ -55,38 +56,82 @@ func (s *Server) loginFailurePolicy() loginFailurePolicy {
 	return policy
 }
 
-func (s *Server) loginPolicyAllows(username, clientIP string) (bool, string) {
+func (s *Server) loginPolicyAllows(username, clientIP string) (bool, string, error) {
 	policies, err := s.cfg.Store.ListPlatformItems("login_policies")
 	if err != nil {
-		return true, ""
+		return false, "", err
 	}
-	hasAllowPolicy := false
-	allowMatched := false
+	now := time.Now().UTC()
+	active := make([]model.PlatformItem, 0, len(policies))
 	for _, policy := range policies {
-		if !platformItemEnabled(policy) || !loginPolicyMatches(policy, username, clientIP) {
+		if !platformItemEnabled(policy) || loginPolicyExpired(policy, now) {
 			continue
 		}
+		active = append(active, policy)
+	}
+	sort.SliceStable(active, func(i, j int) bool {
+		left, right := loginPolicyPriority(active[i]), loginPolicyPriority(active[j])
+		if left != right {
+			return left > right
+		}
+		if !active[i].CreatedAt.Equal(active[j].CreatedAt) {
+			return active[i].CreatedAt.Before(active[j].CreatedAt)
+		}
+		return active[i].ID < active[j].ID
+	})
+	hasAllowPolicy := false
+	highestMatchedPriority := 0
+	hasMatch := false
+	matched := []model.PlatformItem{}
+	for _, policy := range active {
+		if loginPolicyAction(policy) == "allow" && accountMatches(policy, username) {
+			hasAllowPolicy = true
+		}
+		if !loginPolicyMatches(policy, username, clientIP) {
+			continue
+		}
+		priority := loginPolicyPriority(policy)
+		if !hasMatch {
+			hasMatch = true
+			highestMatchedPriority = priority
+		}
+		if priority != highestMatchedPriority {
+			break
+		}
+		matched = append(matched, policy)
+	}
+	for _, policy := range matched {
 		action := loginPolicyAction(policy)
 		if action == "deny" || action == "reject" || action == "block" {
-			return false, "blocked by login policy " + policy.Name
-		}
-		if action == "allow" {
-			hasAllowPolicy = true
-			allowMatched = true
+			return false, "blocked by login policy " + policy.Name, nil
 		}
 	}
-	for _, policy := range policies {
-		if !platformItemEnabled(policy) {
+	if hasMatch {
+		return true, "", nil
+	}
+	if hasAllowPolicy {
+		return false, "no allow login policy matched", nil
+	}
+	return true, "", nil
+}
+
+func loginPolicyPriority(policy model.PlatformItem) int {
+	if value, ok := metadataIntByKeys(policy.Metadata, "priority", "order", "sort", "weight"); ok {
+		return clampInt(value, -1000000, 1000000, 0)
+	}
+	return 0
+}
+
+func loginPolicyExpired(policy model.PlatformItem, now time.Time) bool {
+	for _, key := range []string{"expires_at", "expire_at", "expiresAt", "expired_at", "valid_until", "not_after"} {
+		value, exists := policy.Metadata[key]
+		if !exists || metadataValueEmpty(value) {
 			continue
 		}
-		if loginPolicyAction(policy) == "allow" {
-			hasAllowPolicy = true
-		}
+		expiresAt, ok := metadataTime(value)
+		return ok && !now.Before(expiresAt)
 	}
-	if hasAllowPolicy && !allowMatched {
-		return false, "no allow login policy matched"
-	}
-	return true, ""
+	return false
 }
 
 func (s *Server) activeLoginLock(username, clientIP string) (time.Duration, bool, error) {

@@ -8,6 +8,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"math"
 	"net"
 	"net/http"
 	"net/http/httputil"
@@ -302,6 +303,24 @@ func (s *Server) createPlatformMutationOperationLog(r *http.Request, collection,
 }
 
 func validateAuthorizationRequest(collection string, req model.PlatformItemRequest) error {
+	if collection == "login_policies" {
+		if err := validateAuthorizationExpiryMetadata(req.Metadata); err != nil {
+			return err
+		}
+		if value, exists := req.Metadata["priority"]; exists && !metadataValueEmpty(value) {
+			priority, ok := metadataInt(value)
+			if number, isFloat := value.(float64); isFloat && number != math.Trunc(number) {
+				ok = false
+			}
+			if !ok {
+				return errors.New("priority must be an integer")
+			}
+			if priority < -1000000 || priority > 1000000 {
+				return errors.New("priority must be between -1000000 and 1000000")
+			}
+		}
+		return nil
+	}
 	if !isAuthorizationCollection(collection) {
 		return nil
 	}

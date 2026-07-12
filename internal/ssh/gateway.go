@@ -14,6 +14,7 @@ import (
 	"net"
 	"os"
 	"path/filepath"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -105,6 +106,28 @@ func GatewayConfigFromStore(st *store.Store, dataDir, overrideAddress string) (G
 	} else if strings.TrimSpace(privateKey) != "" {
 		cfg.HostKeyPEM = strings.TrimSpace(privateKey)
 	}
+	settings, err := st.ListPlatformItems("system_settings")
+	if err != nil {
+		return cfg, err
+	}
+	for _, item := range settings {
+		if !platformItemEnabled(item) || !strings.EqualFold(strings.TrimSpace(item.Type), "proxy") {
+			continue
+		}
+		if enabled, ok := gatewayMetadataBool(item.Metadata["ssh_gateway_enabled"]); ok {
+			cfg.Enabled = enabled
+		}
+		if address := firstMetadataString(item.Metadata, "ssh_listen_address", "ssh_gateway_listen_address"); address != "" {
+			cfg.Address = address
+		}
+		for _, key := range []string{"ssh_disable_password_auth", "disable_password_auth", "disable_password_login"} {
+			if disabled, ok := gatewayMetadataBool(item.Metadata[key]); ok {
+				cfg.DisablePasswordAuth = disabled
+				break
+			}
+		}
+		break
+	}
 	items, err := st.ListPlatformItems("ssh_gateways")
 	if err != nil {
 		return cfg, err
@@ -115,7 +138,9 @@ func GatewayConfigFromStore(st *store.Store, dataDir, overrideAddress string) (G
 		}
 		cfg.Enabled = true
 		cfg.Address = gatewayListenAddress(item, cfg.Address)
-		cfg.DisablePasswordAuth = gatewayDisablePasswordAuth(item)
+		if disabled, ok := gatewayDisablePasswordAuth(item); ok {
+			cfg.DisablePasswordAuth = disabled
+		}
 		return cfg, nil
 	}
 	return cfg, nil
@@ -203,6 +228,31 @@ func (g *Gateway) serve(ctx context.Context, signer ssh.Signer) {
 
 func (g *Gateway) passwordCallback(meta ssh.ConnMetadata, password []byte) (*ssh.Permissions, error) {
 	username, directAsset := splitGatewayUsername(strings.TrimSpace(meta.User()))
+	clientIP := remoteIP(meta.RemoteAddr())
+	allowed, reason, err := g.gatewayLoginPolicyAllows(username, clientIP)
+	if err != nil {
+		g.auditGatewayLoginFailure(meta, username, "ssh_gateway.login.policy_load_failed", err)
+		return nil, fmt.Errorf("load ssh gateway login policy: %w", err)
+	}
+	if !allowed {
+		if logErr := g.recordGatewayLoginDenied(meta, username, "policy", reason); logErr != nil {
+			g.auditGatewayLoginFailure(meta, username, "ssh_gateway.login.denied_log.persist_failed", logErr)
+			return nil, errors.Join(errors.New(reason), fmt.Errorf("persist denied login audit: %w", logErr))
+		}
+		return nil, errors.New(reason)
+	}
+	locked, reason, err := g.gatewayLoginLocked(username, clientIP)
+	if err != nil {
+		g.auditGatewayLoginFailure(meta, username, "ssh_gateway.login.lock_load_failed", err)
+		return nil, fmt.Errorf("load ssh gateway login lock: %w", err)
+	}
+	if locked {
+		if logErr := g.recordGatewayLoginDenied(meta, username, "lock", reason); logErr != nil {
+			g.auditGatewayLoginFailure(meta, username, "ssh_gateway.login.denied_log.persist_failed", logErr)
+			return nil, errors.Join(errors.New(reason), fmt.Errorf("persist denied login audit: %w", logErr))
+		}
+		return nil, errors.New(reason)
+	}
 	admin, ok, err := g.cfg.Store.VerifyAdmin(username, string(password))
 	if err != nil {
 		return nil, err
@@ -303,6 +353,212 @@ func (g *Gateway) recordGatewayLoginFailure(meta ssh.ConnMetadata, username, det
 		},
 	})
 	return err
+}
+
+func (g *Gateway) recordGatewayLoginDenied(meta ssh.ConnMetadata, username, denialType, detail string) error {
+	if g == nil || g.cfg.Store == nil {
+		return errors.New("gateway login store is unavailable")
+	}
+	_, err := g.cfg.Store.CreatePlatformItem("login_logs", model.PlatformItemRequest{
+		Name:        username,
+		Type:        denialType,
+		Status:      "denied",
+		Description: detail,
+		Metadata: map[string]any{
+			"client_ip":  remoteIP(meta.RemoteAddr()),
+			"account":    username,
+			"user_agent": "ssh-gateway",
+		},
+	})
+	return err
+}
+
+func (g *Gateway) gatewayLoginPolicyAllows(username, clientIP string) (bool, string, error) {
+	policies, err := g.cfg.Store.ListPlatformItems("login_policies")
+	if err != nil {
+		return false, "", err
+	}
+	now := time.Now().UTC()
+	active := make([]model.PlatformItem, 0, len(policies))
+	for _, policy := range policies {
+		if !platformItemEnabled(policy) || gatewayLoginPolicyExpired(policy, now) {
+			continue
+		}
+		active = append(active, policy)
+	}
+	sort.SliceStable(active, func(i, j int) bool {
+		left, right := gatewayLoginPolicyPriority(active[i]), gatewayLoginPolicyPriority(active[j])
+		if left != right {
+			return left > right
+		}
+		if !active[i].CreatedAt.Equal(active[j].CreatedAt) {
+			return active[i].CreatedAt.Before(active[j].CreatedAt)
+		}
+		return active[i].ID < active[j].ID
+	})
+	hasAllowPolicy := false
+	highestMatchedPriority := 0
+	hasMatch := false
+	matched := []model.PlatformItem{}
+	for _, policy := range active {
+		if gatewayLoginPolicyAction(policy) == "allow" && gatewayLoginAccountMatches(policy, username) {
+			hasAllowPolicy = true
+		}
+		if !gatewayLoginPolicyMatches(policy, username, clientIP) {
+			continue
+		}
+		priority := gatewayLoginPolicyPriority(policy)
+		if !hasMatch {
+			hasMatch = true
+			highestMatchedPriority = priority
+		}
+		if priority != highestMatchedPriority {
+			break
+		}
+		matched = append(matched, policy)
+	}
+	for _, policy := range matched {
+		action := gatewayLoginPolicyAction(policy)
+		if action == "deny" || action == "reject" || action == "block" {
+			return false, "blocked by login policy " + policy.Name, nil
+		}
+	}
+	if hasMatch {
+		return true, "", nil
+	}
+	if hasAllowPolicy {
+		return false, "no allow login policy matched", nil
+	}
+	return true, "", nil
+}
+
+func (g *Gateway) gatewayLoginLocked(username, clientIP string) (bool, string, error) {
+	locks, err := g.cfg.Store.ListPlatformItems("login_locks")
+	if err != nil {
+		return false, "", err
+	}
+	now := time.Now().UTC()
+	for _, lock := range locks {
+		if !gatewayLoginLockEnabled(lock) {
+			continue
+		}
+		until, hasExpiry := gatewayMetadataTime(lock.Metadata["locked_until"])
+		if hasExpiry && !now.Before(until) {
+			if err := g.cfg.Store.DeletePlatformItem("login_locks", lock.ID); err != nil && !errors.Is(err, os.ErrNotExist) {
+				return false, "", err
+			}
+			continue
+		}
+		if gatewayLoginAccountMatches(lock, username) && gatewayLoginIPCriteriaMatches(append([]string{lock.Host}, metadataStrings(lock.Metadata["client_ip"])...), clientIP) {
+			return true, "account or client ip is locked", nil
+		}
+	}
+	return false, "", nil
+}
+
+func gatewayLoginLockEnabled(lock model.PlatformItem) bool {
+	status := strings.ToLower(strings.TrimSpace(lock.Status))
+	return status == "" || status == "enabled" || status == "active" || status == "locked"
+}
+
+func gatewayLoginPolicyPriority(policy model.PlatformItem) int {
+	for _, key := range []string{"priority", "order", "sort", "weight"} {
+		if value, ok := gatewayMetadataInt(policy.Metadata[key]); ok {
+			return value
+		}
+	}
+	return 0
+}
+
+func gatewayLoginPolicyExpired(policy model.PlatformItem, now time.Time) bool {
+	for _, key := range []string{"expires_at", "expire_at", "expiresAt", "expired_at", "valid_until", "not_after"} {
+		if expiresAt, ok := gatewayMetadataTime(policy.Metadata[key]); ok {
+			return !now.Before(expiresAt)
+		}
+	}
+	return false
+}
+
+func gatewayLoginPolicyAction(policy model.PlatformItem) string {
+	action := strings.ToLower(strings.TrimSpace(policy.Type))
+	if value := firstMetadataString(policy.Metadata, "action"); value != "" {
+		action = strings.ToLower(value)
+	}
+	if action == "" {
+		return "allow"
+	}
+	return action
+}
+
+func gatewayLoginPolicyMatches(policy model.PlatformItem, username, clientIP string) bool {
+	if !gatewayLoginAccountMatches(policy, username) {
+		return false
+	}
+	values := []string{policy.Host, policy.TargetID, policy.Group}
+	for _, key := range []string{"ip", "cidr", "ip_range", "client_ip", "ips"} {
+		values = append(values, metadataStrings(policy.Metadata[key])...)
+	}
+	return gatewayLoginIPCriteriaMatches(values, clientIP)
+}
+
+func gatewayLoginAccountMatches(item model.PlatformItem, username string) bool {
+	candidates := []string{item.Username}
+	candidates = append(candidates, metadataStrings(item.Metadata["account"])...)
+	candidates = append(candidates, metadataStrings(item.Metadata["username"])...)
+	hasCriteria := false
+	for _, candidate := range candidates {
+		candidate = strings.TrimSpace(candidate)
+		if candidate == "" {
+			continue
+		}
+		hasCriteria = true
+		if candidate == "*" || strings.EqualFold(candidate, username) {
+			return true
+		}
+	}
+	return !hasCriteria
+}
+
+func gatewayLoginIPCriteriaMatches(values []string, clientIP string) bool {
+	hasCriteria := false
+	for _, value := range values {
+		for _, criterion := range splitCriteria(value) {
+			hasCriteria = true
+			if criterion == "*" || criterion == "0.0.0.0/0" || gatewayLoginIPMatches(criterion, clientIP) {
+				return true
+			}
+		}
+	}
+	return !hasCriteria
+}
+
+func gatewayLoginIPMatches(pattern, clientIP string) bool {
+	pattern = strings.TrimSpace(pattern)
+	clientIP = strings.TrimSpace(clientIP)
+	if pattern == clientIP {
+		return true
+	}
+	if _, network, err := net.ParseCIDR(pattern); err == nil {
+		ip := net.ParseIP(clientIP)
+		return ip != nil && network.Contains(ip)
+	}
+	return false
+}
+
+func gatewayMetadataInt(value any) (int, bool) {
+	switch typed := value.(type) {
+	case int:
+		return typed, true
+	case int64:
+		return int(typed), true
+	case float64:
+		return int(typed), true
+	case string:
+		parsed, err := strconv.Atoi(strings.TrimSpace(typed))
+		return parsed, err == nil
+	default:
+		return 0, false
+	}
 }
 
 func (g *Gateway) rollbackGatewayLoginRecords(meta ssh.ConnMetadata, userID string, records ...gatewayLoginRecord) error {
@@ -1176,13 +1432,13 @@ func gatewayListenAddress(item model.PlatformItem, fallback string) string {
 	return net.JoinHostPort(host, strconv.Itoa(port))
 }
 
-func gatewayDisablePasswordAuth(item model.PlatformItem) bool {
+func gatewayDisablePasswordAuth(item model.PlatformItem) (bool, bool) {
 	for _, key := range []string{"disable_password_auth", "disablePasswordAuth", "password_auth_disabled", "disable_password_login"} {
 		if value, ok := gatewayMetadataBool(item.Metadata[key]); ok {
-			return value
+			return value, true
 		}
 	}
-	return false
+	return false, false
 }
 
 func gatewayMetadataBool(value any) (bool, bool) {

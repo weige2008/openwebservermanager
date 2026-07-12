@@ -247,6 +247,126 @@ func TestNativeSSHGatewayLoginPersistenceFailuresRejectAuthentication(t *testing
 	}
 }
 
+func TestNativeSSHGatewayEnforcesLoginPoliciesAndLocks(t *testing.T) {
+	tests := []struct {
+		name       string
+		collection string
+		item       model.PlatformItemRequest
+		logType    string
+	}{
+		{
+			name:       "deny policy",
+			collection: "login_policies",
+			item: model.PlatformItemRequest{
+				Name:     "deny gateway user",
+				Type:     "deny",
+				Status:   "enabled",
+				Username: "gateway-user",
+				Host:     "127.0.0.1/32",
+				Metadata: map[string]any{"priority": 100},
+			},
+			logType: "policy",
+		},
+		{
+			name:       "allow policy did not match ip",
+			collection: "login_policies",
+			item: model.PlatformItemRequest{
+				Name:     "allow other network",
+				Type:     "allow",
+				Status:   "enabled",
+				Username: "gateway-user",
+				Host:     "192.0.2.0/24",
+			},
+			logType: "policy",
+		},
+		{
+			name:       "active login lock",
+			collection: "login_locks",
+			item: model.PlatformItemRequest{
+				Name:     "gateway-user",
+				Type:     "password",
+				Status:   "locked",
+				Username: "gateway-user",
+				Host:     "127.0.0.1",
+				Metadata: map[string]any{"locked_until": time.Now().UTC().Add(5 * time.Minute)},
+			},
+			logType: "lock",
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			st := newGatewayTestStore(t)
+			if _, err := st.CreatePlatformItem("users", model.PlatformItemRequest{
+				Name:     "gateway-user",
+				Type:     "local",
+				Status:   "enabled",
+				Password: "password123",
+				Metadata: map[string]any{"role": "user"},
+			}); err != nil {
+				t.Fatalf("create user: %v", err)
+			}
+			if _, err := st.CreatePlatformItem(test.collection, test.item); err != nil {
+				t.Fatalf("create %s: %v", test.collection, err)
+			}
+			gateway := startTestGateway(t, st)
+			if client, err := ssh.Dial("tcp", gateway.Address(), &ssh.ClientConfig{
+				User:            "gateway-user",
+				Auth:            []ssh.AuthMethod{ssh.Password("password123")},
+				HostKeyCallback: ssh.InsecureIgnoreHostKey(),
+				Timeout:         5 * time.Second,
+			}); err == nil {
+				_ = client.Close()
+				t.Fatalf("gateway ignored %s", test.name)
+			}
+			logs, err := st.ListPlatformItems("login_logs")
+			if err != nil {
+				t.Fatalf("list login logs: %v", err)
+			}
+			if !platformLogExists(logs, "gateway-user", "denied") || !platformLogTypeExists(logs, test.logType, "denied") {
+				t.Fatalf("login logs = %#v, want %s denial", logs, test.logType)
+			}
+		})
+	}
+}
+
+func TestNativeSSHGatewayRemovesExpiredLoginLock(t *testing.T) {
+	st := newGatewayTestStore(t)
+	if _, err := st.CreatePlatformItem("users", model.PlatformItemRequest{
+		Name:     "gateway-user",
+		Type:     "local",
+		Status:   "enabled",
+		Password: "password123",
+		Metadata: map[string]any{"role": "user"},
+	}); err != nil {
+		t.Fatalf("create user: %v", err)
+	}
+	lock, err := st.CreatePlatformItem("login_locks", model.PlatformItemRequest{
+		Name:     "gateway-user",
+		Type:     "password",
+		Status:   "locked",
+		Username: "gateway-user",
+		Host:     "127.0.0.1",
+		Metadata: map[string]any{"locked_until": time.Now().UTC().Add(-time.Minute)},
+	})
+	if err != nil {
+		t.Fatalf("create expired lock: %v", err)
+	}
+	gateway := startTestGateway(t, st)
+	client, err := ssh.Dial("tcp", gateway.Address(), &ssh.ClientConfig{
+		User:            "gateway-user",
+		Auth:            []ssh.AuthMethod{ssh.Password("password123")},
+		HostKeyCallback: ssh.InsecureIgnoreHostKey(),
+		Timeout:         5 * time.Second,
+	})
+	if err != nil {
+		t.Fatalf("expired lock blocked login: %v", err)
+	}
+	_ = client.Close()
+	if _, ok, err := st.GetPlatformItem("login_locks", lock.ID); err != nil || ok {
+		t.Fatalf("expired lock remains after login: ok=%v err=%v", ok, err)
+	}
+}
+
 func TestNativeSSHGatewayDoesNotDialAssetWhenConnectionAuditCannotPersist(t *testing.T) {
 	targetAddr, accepted, closeTarget := startTCPEchoServer(t)
 	defer closeTarget()
@@ -1243,6 +1363,81 @@ func TestGatewayConfigFromEnabledStoreItem(t *testing.T) {
 	}
 }
 
+func TestGatewayConfigUsesProxySystemSettings(t *testing.T) {
+	st := newGatewayTestStore(t)
+	if _, err := st.CreatePlatformItem("system_settings", model.PlatformItemRequest{
+		Name:   "proxy services",
+		Type:   "proxy",
+		Status: "enabled",
+		Metadata: map[string]any{
+			"ssh_gateway_enabled":       true,
+			"ssh_listen_address":        "127.0.0.1:24022",
+			"ssh_disable_password_auth": true,
+		},
+	}); err != nil {
+		t.Fatalf("create proxy settings: %v", err)
+	}
+	cfg, err := GatewayConfigFromStore(st, t.TempDir(), "")
+	if err != nil {
+		t.Fatalf("gateway config: %v", err)
+	}
+	if !cfg.Enabled || cfg.Address != "127.0.0.1:24022" || !cfg.DisablePasswordAuth {
+		t.Fatalf("gateway config did not use proxy settings: %#v", cfg)
+	}
+	if _, err := st.CreatePlatformItem("ssh_gateways", model.PlatformItemRequest{
+		Name:   "explicit gateway",
+		Status: "enabled",
+		Host:   "127.0.0.1",
+		Port:   25022,
+	}); err != nil {
+		t.Fatalf("create explicit gateway: %v", err)
+	}
+	cfg, err = GatewayConfigFromStore(st, t.TempDir(), "")
+	if err != nil {
+		t.Fatalf("gateway config with explicit gateway: %v", err)
+	}
+	if cfg.Address != "127.0.0.1:25022" || !cfg.DisablePasswordAuth {
+		t.Fatalf("explicit gateway did not preserve proxy password policy: %#v", cfg)
+	}
+}
+
+func TestNativeSSHGatewayDisablePasswordAuthentication(t *testing.T) {
+	st := newGatewayTestStore(t)
+	if _, err := st.CreatePlatformItem("users", model.PlatformItemRequest{
+		Name:     "gateway-user",
+		Type:     "local",
+		Status:   "enabled",
+		Password: "password123",
+	}); err != nil {
+		t.Fatalf("create user: %v", err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	gatewayDataDir := mustTempDir(t)
+	defer removeTempDir(gatewayDataDir)
+	gateway, err := StartGateway(ctx, GatewayConfig{
+		Enabled:             true,
+		Address:             "127.0.0.1:0",
+		DisablePasswordAuth: true,
+		DataDir:             gatewayDataDir,
+		KnownHostsPath:      filepath.Join(gatewayDataDir, "known_hosts"),
+		Store:               st,
+	})
+	if err != nil {
+		t.Fatalf("start gateway: %v", err)
+	}
+	defer gateway.Close()
+	if client, err := ssh.Dial("tcp", gateway.Address(), &ssh.ClientConfig{
+		User:            "gateway-user",
+		Auth:            []ssh.AuthMethod{ssh.Password("password123")},
+		HostKeyCallback: ssh.InsecureIgnoreHostKey(),
+		Timeout:         5 * time.Second,
+	}); err == nil {
+		_ = client.Close()
+		t.Fatal("gateway accepted password while password authentication was disabled")
+	}
+}
+
 func TestGatewayConfigUsesProxyServicePrivateKeyAsHostKey(t *testing.T) {
 	st := newGatewayTestStore(t)
 	hostKeyPEM, expectedSigner := testSSHHostKeyPEM(t)
@@ -1444,6 +1639,15 @@ func startTestGateway(t *testing.T, st *store.Store) *Gateway {
 func platformLogExists(items []model.PlatformItem, name, status string) bool {
 	for _, item := range items {
 		if item.Name == name && item.Status == status {
+			return true
+		}
+	}
+	return false
+}
+
+func platformLogTypeExists(items []model.PlatformItem, itemType, status string) bool {
+	for _, item := range items {
+		if item.Type == itemType && item.Status == status {
 			return true
 		}
 	}

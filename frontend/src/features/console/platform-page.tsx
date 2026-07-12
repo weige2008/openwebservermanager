@@ -219,6 +219,12 @@ interface SMTPIntegrationForm {
   from: string
   to: string
   testTo: string
+  notificationsEnabled: boolean
+  notifySecurity: boolean
+  notifyTasks: boolean
+  notifyGateways: boolean
+  notifyOperations: boolean
+  sendExistingNotifications: boolean
   llmProvider: string
   llmBaseUrl: string
   llmModel: string
@@ -5010,7 +5016,7 @@ export function PlatformSettingsPage({ config, sectionId }: { config: PlatformPa
                 <div>
                   <h3 className='text-sm font-semibold'>{app.t('smtpDelivery', 'SMTP delivery')}</h3>
                   <p className='mt-1 text-xs leading-5 text-muted-foreground'>
-                    {app.t('smtpDeliveryDescription', 'Configure the SMTP server used for test email and future notification delivery. Passwords are encrypted server-side and never returned by API responses.')}
+                    {app.t('smtpDeliveryDescription', 'Configure SMTP test delivery and automatic email alerts. New security, task, gateway, and operation failures are deduplicated before delivery.')}
                   </p>
                 </div>
                 <Badge tone={form.passwordSet ? 'success' : 'warning'}>{form.passwordSet ? app.t('passwordSaved', 'Password saved') : app.t('passwordNotSet', 'Password not set')}</Badge>
@@ -5063,6 +5069,14 @@ export function PlatformSettingsPage({ config, sectionId }: { config: PlatformPa
                     label={app.t('clearSMTPPassword', 'Clear saved SMTP password on save')}
                   />
                 ) : null}
+              </div>
+              <div className='grid gap-2 sm:grid-cols-2 xl:grid-cols-3'>
+                <CheckboxRow checked={form.notificationsEnabled} onChange={(notificationsEnabled) => patchForm({ notificationsEnabled })} label={app.t('smtpNotificationsEnabled', 'Send new alerts by email')} />
+                <CheckboxRow checked={form.notifySecurity} onChange={(notifySecurity) => patchForm({ notifySecurity })} label={app.t('smtpNotifySecurity', 'Login and security failures')} />
+                <CheckboxRow checked={form.notifyTasks} onChange={(notifyTasks) => patchForm({ notifyTasks })} label={app.t('smtpNotifyTasks', 'Scheduled task failures')} />
+                <CheckboxRow checked={form.notifyGateways} onChange={(notifyGateways) => patchForm({ notifyGateways })} label={app.t('smtpNotifyGateways', 'Offline gateway alerts')} />
+                <CheckboxRow checked={form.notifyOperations} onChange={(notifyOperations) => patchForm({ notifyOperations })} label={app.t('smtpNotifyOperations', 'Failed operation alerts')} />
+                <CheckboxRow checked={form.sendExistingNotifications} onChange={(sendExistingNotifications) => patchForm({ sendExistingNotifications })} label={app.t('smtpSendExistingNotifications', 'Send current alerts on first run')} />
               </div>
               <div className='flex flex-wrap justify-end gap-2'>
                 {canSaveIntegrationSettings ? (
@@ -5155,6 +5169,8 @@ function smtpIntegrationFormFromItem(item?: PlatformItem): SMTPIntegrationForm {
   const metadata = item?.metadata || {}
   const useTLS = metadataBool(metadata.smtp_use_tls) || metadataBool(metadata.smtp_ssl) || metadataBool(metadata.tls)
   const startTLS = metadataBool(metadata.smtp_start_tls) || metadataBool(metadata.smtp_starttls) || metadataBool(metadata.start_tls) || metadataBool(metadata.starttls)
+  const configuredCategories = metadataListText(metadata.smtp_notification_categories).split('\n').filter(Boolean)
+  const categories = new Set(configuredCategories.length > 0 ? configuredCategories : ['security', 'task', 'gateway', 'operation'])
   return {
     host: metadataText(metadata.smtp_host) || item?.host || '',
     port: metadataText(metadata.smtp_port) || (item?.port ? String(item.port) : '587'),
@@ -5168,6 +5184,12 @@ function smtpIntegrationFormFromItem(item?: PlatformItem): SMTPIntegrationForm {
     from: metadataText(metadata.smtp_from) || metadataText(metadata.from) || '',
     to: metadataText(metadata.smtp_to) || metadataText(metadata.to) || '',
     testTo: metadataText(metadata.smtp_test_to) || metadataText(metadata.test_to) || '',
+    notificationsEnabled: metadataBool(metadata.smtp_notifications_enabled),
+    notifySecurity: categories.has('security'),
+    notifyTasks: categories.has('task'),
+    notifyGateways: categories.has('gateway'),
+    notifyOperations: categories.has('operation'),
+    sendExistingNotifications: metadataBool(metadata.smtp_notifications_send_existing),
     llmProvider: metadataText(metadata.llm_provider),
     llmBaseUrl: metadataText(metadata.llm_base_url),
     llmModel: metadataText(metadata.llm_model),
@@ -5373,6 +5395,14 @@ function integrationMetadataFromForm(form: SMTPIntegrationForm, existing?: Recor
   metadata.smtp_start_tls = form.security === 'starttls'
   metadata.smtp_server_name = form.serverName.trim()
   metadata.smtp_insecure_skip_verify = form.insecureSkipVerify
+  metadata.smtp_notifications_enabled = form.notificationsEnabled
+  metadata.smtp_notification_categories = [
+    form.notifySecurity ? 'security' : '',
+    form.notifyTasks ? 'task' : '',
+    form.notifyGateways ? 'gateway' : '',
+    form.notifyOperations ? 'operation' : '',
+  ].filter(Boolean)
+  metadata.smtp_notifications_send_existing = form.sendExistingNotifications
   if (form.passwordClear) metadata.smtp_password_clear = true
   metadata.llm_provider = form.llmProvider.trim()
   metadata.llm_base_url = form.llmBaseUrl.trim()

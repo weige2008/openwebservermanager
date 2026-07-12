@@ -340,6 +340,13 @@ func agentGatewayNotifications(gateways []model.PlatformItem, now time.Time) []n
 	result := []notificationItem{}
 	for _, gateway := range gateways {
 		if strings.EqualFold(strings.TrimSpace(gateway.Status), "offline") {
+			createdAt := gateway.UpdatedAt
+			if offlineAt, ok := metadataTime(gateway.Metadata["last_offline_at"]); ok {
+				createdAt = offlineAt
+			}
+			if createdAt.IsZero() {
+				createdAt = now.Add(-2 * time.Second)
+			}
 			result = append(result, notificationItem{
 				ID:        "agent_gateway:" + gateway.ID + ":offline",
 				Type:      "warning",
@@ -348,7 +355,7 @@ func agentGatewayNotifications(gateways []model.PlatformItem, now time.Time) []n
 				Body:      gateway.Name,
 				Metadata:  map[string]any{"gateway": gateway.Name, "last_seen_at": firstMetadataString(gateway.Metadata, "last_seen_at")},
 				TargetID:  gateway.ID,
-				CreatedAt: latestTime(gateway.UpdatedAt, now.Add(-2*time.Second)),
+				CreatedAt: createdAt,
 			})
 		}
 	}

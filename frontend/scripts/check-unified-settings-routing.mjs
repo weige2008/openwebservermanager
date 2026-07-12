@@ -21,6 +21,7 @@ const requirements = [
   ['login security section anchor exists', sources.settings.includes("id='settings-login-security'")],
   ['about section anchor exists', sources.settings.includes("id='settings-about'")],
   ['system section anchor is forwarded', sources.unified.includes("sectionId='settings-system'") && sources.platform.includes('id={sectionId}')],
+  ['system settings are permission gated', sources.unified.includes("canUseAPI(app.auth?.role") && sources.unified.includes('systemSettingsConfig && canReadSystemSettings')],
 ]
 
 const failed = requirements.filter(([, passed]) => !passed)

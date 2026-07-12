@@ -93,6 +93,9 @@ func (s *TaskScheduler) scan() {
 			s.runTask(task)
 		}
 	}
+	if err := s.server.dispatchEmailNotifications(now); err != nil {
+		s.logger.Warn("email notification dispatch failed", "error", err)
+	}
 }
 
 func (s *TaskScheduler) persistNextRun(task model.PlatformItem, next time.Time) {

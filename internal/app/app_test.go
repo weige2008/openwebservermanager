@@ -9847,6 +9847,189 @@ func TestNotificationsReflectRuntimeAndFilterByUser(t *testing.T) {
 	}
 }
 
+func TestSMTPNotificationsDispatchNewAlertsOnce(t *testing.T) {
+	server, adminCookie := newTestServer(t, nil)
+	smtpServer := newFakeSMTPServer(t)
+	host, portText, err := net.SplitHostPort(smtpServer.addr)
+	if err != nil {
+		t.Fatalf("split smtp address: %v", err)
+	}
+	port, err := strconv.Atoi(portText)
+	if err != nil {
+		t.Fatalf("parse smtp port: %v", err)
+	}
+	settingRec := assertStatus(t, server, http.MethodPost, "/api/admin/system-settings", map[string]any{
+		"name":   "Notification integrations",
+		"type":   "integration",
+		"status": "enabled",
+		"host":   host,
+		"port":   port,
+		"metadata": map[string]any{
+			"smtp_host":                    host,
+			"smtp_port":                    port,
+			"smtp_from":                    "sender@example.test",
+			"smtp_to":                      "receiver@example.test",
+			"smtp_notifications_enabled":   true,
+			"smtp_notification_categories": []string{"security", "task", "gateway", "operation"},
+		},
+	}, adminCookie, http.StatusCreated)
+	var setting model.PlatformItem
+	decodeResponse(t, settingRec, &setting)
+
+	oldLogin, err := server.cfg.Store.CreatePlatformItem("login_logs", model.PlatformItemRequest{
+		Name: "old-user", Type: "password", Status: "failed", Description: "old invalid password",
+		Metadata: map[string]any{"account": "old-user"},
+	})
+	if err != nil {
+		t.Fatalf("create old login notification: %v", err)
+	}
+	now := time.Now().UTC()
+	defaultCandidates, err := server.emailNotificationCandidates(now, map[string]any{})
+	if err != nil || len(defaultCandidates) == 0 {
+		t.Fatalf("default notification categories should include alerts: count=%d err=%v", len(defaultCandidates), err)
+	}
+	emptyCandidates, err := server.emailNotificationCandidates(now, map[string]any{"smtp_notification_categories": []string{}})
+	if err != nil || len(emptyCandidates) != 0 {
+		t.Fatalf("explicit empty notification categories should suppress alerts: count=%d err=%v", len(emptyCandidates), err)
+	}
+	if err := server.dispatchEmailNotifications(now); err != nil {
+		t.Fatalf("initialize notification delivery: %v", err)
+	}
+	select {
+	case message := <-smtpServer.messages:
+		t.Fatalf("initial notification baseline sent historical email: %s", message)
+	case <-time.After(150 * time.Millisecond):
+	}
+	state, ok, err := server.cfg.Store.GetPlatformItem(notificationDeliveryCollection, setting.ID)
+	if err != nil || !ok {
+		t.Fatalf("notification delivery state missing: ok=%v err=%v", ok, err)
+	}
+	if !containsNotificationDeliveryKey(notificationDeliveryKeys(state.Metadata), "login:"+oldLogin.ID) {
+		t.Fatalf("historical notification was not baselined: %#v", state.Metadata)
+	}
+	bootstrap, err := server.cfg.Store.PlatformBootstrap()
+	if err != nil {
+		t.Fatalf("platform bootstrap: %v", err)
+	}
+	if _, exposed := bootstrap[notificationDeliveryCollection]; exposed {
+		t.Fatal("private notification delivery state was exposed in bootstrap")
+	}
+
+	newLogin, err := server.cfg.Store.CreatePlatformItem("login_logs", model.PlatformItemRequest{
+		Name: "new-user", Type: "password", Status: "failed", Description: "new invalid password",
+		Metadata: map[string]any{"account": "new-user", "client_ip": "198.51.100.20"},
+	})
+	if err != nil {
+		t.Fatalf("create new login notification: %v", err)
+	}
+	scheduler := server.StartScheduler(context.Background(), SchedulerConfig{PollInterval: 25 * time.Millisecond})
+	select {
+	case message := <-smtpServer.messages:
+		scheduler.Stop()
+		if !strings.Contains(message, "1 new alert(s)") || !strings.Contains(message, "new invalid password") || !strings.Contains(message, "Login failed") {
+			t.Fatalf("notification email missing alert details:\n%s", message)
+		}
+	case <-time.After(2 * time.Second):
+		scheduler.Stop()
+		t.Fatal("SMTP server did not receive notification email")
+	}
+	if err := server.dispatchEmailNotifications(now.Add(2 * time.Minute)); err != nil {
+		t.Fatalf("repeat notification dispatch: %v", err)
+	}
+	select {
+	case message := <-smtpServer.messages:
+		t.Fatalf("notification was delivered more than once: %s", message)
+	case <-time.After(150 * time.Millisecond):
+	}
+	state, ok, err = server.cfg.Store.GetPlatformItem(notificationDeliveryCollection, setting.ID)
+	if err != nil || !ok || !containsNotificationDeliveryKey(notificationDeliveryKeys(state.Metadata), "login:"+newLogin.ID) {
+		t.Fatalf("new notification delivery was not persisted: ok=%v err=%v state=%#v", ok, err, state.Metadata)
+	}
+	if !coreAuditLogsContainAction(server.cfg.Store, "notification.smtp.sent") {
+		t.Fatal("notification email delivery was not audited")
+	}
+}
+
+func TestSMTPNotificationFailureBackoffRedactsSecrets(t *testing.T) {
+	server, adminCookie := newTestServer(t, nil)
+	authPayload := base64.StdEncoding.EncodeToString([]byte("\x00smtp-user\x00smtp-secret"))
+	smtpServer := newFailingSMTPAuthServer(t, "5.7.8 invalid login smtp-secret "+authPayload)
+	host, portText, err := net.SplitHostPort(smtpServer.addr)
+	if err != nil {
+		t.Fatalf("split smtp address: %v", err)
+	}
+	port, err := strconv.Atoi(portText)
+	if err != nil {
+		t.Fatalf("parse smtp port: %v", err)
+	}
+	settingRec := assertStatus(t, server, http.MethodPost, "/api/admin/system-settings", map[string]any{
+		"name":     "Notification integrations",
+		"type":     "integration",
+		"status":   "enabled",
+		"host":     host,
+		"port":     port,
+		"username": "smtp-user",
+		"password": "smtp-secret",
+		"metadata": map[string]any{
+			"smtp_host":                        host,
+			"smtp_port":                        port,
+			"smtp_from":                        "sender@example.test",
+			"smtp_to":                          "receiver@example.test",
+			"smtp_username":                    "smtp-user",
+			"smtp_notifications_enabled":       true,
+			"smtp_notifications_send_existing": true,
+		},
+	}, adminCookie, http.StatusCreated)
+	var setting model.PlatformItem
+	decodeResponse(t, settingRec, &setting)
+	if _, err := server.cfg.Store.CreatePlatformItem("login_logs", model.PlatformItemRequest{
+		Name: "blocked-user", Type: "password", Status: "failed", Description: "invalid password",
+		Metadata: map[string]any{"account": "blocked-user"},
+	}); err != nil {
+		t.Fatalf("create login notification: %v", err)
+	}
+
+	now := time.Now().UTC()
+	sendErr := server.dispatchEmailNotifications(now)
+	if sendErr == nil {
+		t.Fatal("failing SMTP server did not fail notification delivery")
+	}
+	for _, leaked := range []string{"smtp-secret", authPayload} {
+		if strings.Contains(sendErr.Error(), leaked) {
+			t.Fatalf("notification delivery error leaked %q: %v", leaked, sendErr)
+		}
+	}
+	state, ok, err := server.cfg.Store.GetPlatformItem(notificationDeliveryCollection, setting.ID)
+	if err != nil || !ok {
+		t.Fatalf("notification failure state missing: ok=%v err=%v", ok, err)
+	}
+	stateJSON, _ := json.Marshal(state)
+	for _, leaked := range []string{"smtp-secret", authPayload} {
+		if strings.Contains(string(stateJSON), leaked) {
+			t.Fatalf("notification failure state leaked %q: %s", leaked, stateJSON)
+		}
+	}
+	if metadataIntDefault(state.Metadata["failure_count"], 0) != 1 {
+		t.Fatalf("notification failure count = %#v, want 1", state.Metadata["failure_count"])
+	}
+	if err := server.dispatchEmailNotifications(now.Add(30 * time.Second)); err != nil {
+		t.Fatalf("notification retry backoff should skip delivery: %v", err)
+	}
+	afterBackoff, ok, err := server.cfg.Store.GetPlatformItem(notificationDeliveryCollection, setting.ID)
+	if err != nil || !ok || metadataIntDefault(afterBackoff.Metadata["failure_count"], 0) != 1 {
+		t.Fatalf("notification retry backoff changed failure state: ok=%v err=%v metadata=%#v", ok, err, afterBackoff.Metadata)
+	}
+	_, _, _, auditLogs := server.cfg.Store.Bootstrap()
+	for _, log := range auditLogs {
+		raw, _ := json.Marshal(log)
+		for _, leaked := range []string{"smtp-secret", authPayload} {
+			if strings.Contains(string(raw), leaked) {
+				t.Fatalf("notification failure audit leaked %q: %s", leaked, raw)
+			}
+		}
+	}
+}
+
 func TestAgentGatewayRegistrationHeartbeatAndTimeout(t *testing.T) {
 	handler, adminCookie := newTestHandler(t)
 	srv := handler.(*Server)

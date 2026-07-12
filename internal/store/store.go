@@ -612,6 +612,7 @@ var platformCollections = []string{
 	"authorized_database_assets",
 	"system_settings",
 	"notification_reads",
+	"notification_deliveries",
 	"oidc_runtime",
 	"oidc_authorization_codes",
 	"oidc_access_tokens",
@@ -1646,7 +1647,7 @@ func platformCollectionSet() map[string]bool {
 
 func privatePlatformCollection(collection string) bool {
 	switch collection {
-	case "notification_reads", "oidc_runtime", "oidc_authorization_codes", "oidc_access_tokens", "auth_sessions", "external_oidc_states", "external_wecom_states", "mfa_login_challenges", "passkey_registration_challenges", "passkey_login_challenges", "access_mfa_grants", "captcha_challenges", "login_failure_states":
+	case "notification_reads", "notification_deliveries", "oidc_runtime", "oidc_authorization_codes", "oidc_access_tokens", "auth_sessions", "external_oidc_states", "external_wecom_states", "mfa_login_challenges", "passkey_registration_challenges", "passkey_login_challenges", "access_mfa_grants", "captcha_challenges", "login_failure_states":
 		return true
 	default:
 		return false

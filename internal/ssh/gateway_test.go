@@ -153,6 +153,100 @@ func TestNativeSSHGatewayConnectsAuthorizedAsset(t *testing.T) {
 	}
 }
 
+func TestNativeSSHGatewayRecordsFailedPasswordLogin(t *testing.T) {
+	st := newGatewayTestStore(t)
+	if _, err := st.CreatePlatformItem("users", model.PlatformItemRequest{
+		Name:     "gateway-user",
+		Type:     "local",
+		Status:   "enabled",
+		Password: "password123",
+		Metadata: map[string]any{"role": "user"},
+	}); err != nil {
+		t.Fatalf("create user: %v", err)
+	}
+	gateway := startTestGateway(t, st)
+	if client, err := ssh.Dial("tcp", gateway.Address(), &ssh.ClientConfig{
+		User:            "gateway-user",
+		Auth:            []ssh.AuthMethod{ssh.Password("wrong-password")},
+		HostKeyCallback: ssh.InsecureIgnoreHostKey(),
+		Timeout:         5 * time.Second,
+	}); err == nil {
+		_ = client.Close()
+		t.Fatal("gateway accepted invalid password")
+	}
+	logs, err := st.ListPlatformItems("login_logs")
+	if err != nil {
+		t.Fatalf("list login logs: %v", err)
+	}
+	if !platformLogExists(logs, "gateway-user", "failed") {
+		t.Fatalf("login logs = %#v, want failed ssh gateway password login", logs)
+	}
+}
+
+func TestNativeSSHGatewayLoginPersistenceFailuresRejectAuthentication(t *testing.T) {
+	tests := []struct {
+		name       string
+		collection string
+		fragment   string
+	}{
+		{name: "login log", collection: "login_logs", fragment: `"status":"success"`},
+		{name: "operation log", collection: "operation_logs", fragment: "ssh_gateway.login"},
+		{name: "user state", collection: "users", fragment: `"online":true`},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			st := newGatewayTestStore(t)
+			userRec, err := st.CreatePlatformItem("users", model.PlatformItemRequest{
+				Name:     "gateway-user",
+				Type:     "local",
+				Status:   "enabled",
+				Password: "password123",
+				Metadata: map[string]any{"role": "user"},
+			})
+			if err != nil {
+				t.Fatalf("create user: %v", err)
+			}
+			gateway := startTestGateway(t, st)
+			unblock := blockPlatformCollectionPayloadInsert(t, st, test.collection, test.fragment)
+			defer unblock()
+			if client, err := ssh.Dial("tcp", gateway.Address(), &ssh.ClientConfig{
+				User:            "gateway-user",
+				Auth:            []ssh.AuthMethod{ssh.Password("password123")},
+				HostKeyCallback: ssh.InsecureIgnoreHostKey(),
+				Timeout:         5 * time.Second,
+			}); err == nil {
+				_ = client.Close()
+				t.Fatalf("gateway authenticated user while %s persistence was blocked", test.name)
+			}
+			loginLogs, err := st.ListPlatformItems("login_logs")
+			if err != nil {
+				t.Fatalf("list login logs: %v", err)
+			}
+			if platformLogExists(loginLogs, "gateway-user", "success") {
+				t.Fatalf("successful login log survived rejected authentication: %#v", loginLogs)
+			}
+			operationLogs, err := st.ListPlatformItems("operation_logs")
+			if err != nil {
+				t.Fatalf("list operation logs: %v", err)
+			}
+			if platformLogExists(operationLogs, "ssh_gateway.login", "recorded") {
+				t.Fatalf("successful gateway operation log survived rejected authentication: %#v", operationLogs)
+			}
+			storedUser, ok, err := st.GetPlatformItem("users", userRec.ID)
+			if err != nil || !ok {
+				t.Fatalf("load user after rejected authentication: ok=%v err=%v", ok, err)
+			}
+			if online, _ := storedUser.Metadata["online"].(bool); online {
+				t.Fatalf("user remained online after rejected authentication: %#v", storedUser.Metadata)
+			}
+			_, _, _, auditLogs := st.Bootstrap()
+			if !auditLogActionExists(auditLogs, "ssh_gateway.login.persist_failed") {
+				t.Fatalf("core audit logs = %#v, want gateway login persistence failure", auditLogs)
+			}
+		})
+	}
+}
+
 func TestNativeSSHGatewayDoesNotDialAssetWhenConnectionAuditCannotPersist(t *testing.T) {
 	targetAddr, accepted, closeTarget := startTCPEchoServer(t)
 	defer closeTarget()
@@ -1325,6 +1419,35 @@ func createGatewayUserAssetAndCredential(t *testing.T, st *store.Store, targetAd
 		t.Fatalf("create authorization: %v", err)
 	}
 	return assetRec
+}
+
+func startTestGateway(t *testing.T, st *store.Store) *Gateway {
+	t.Helper()
+	ctx, cancel := context.WithCancel(context.Background())
+	t.Cleanup(cancel)
+	gatewayDataDir := mustTempDir(t)
+	t.Cleanup(func() { removeTempDir(gatewayDataDir) })
+	gateway, err := StartGateway(ctx, GatewayConfig{
+		Enabled:        true,
+		Address:        "127.0.0.1:0",
+		DataDir:        gatewayDataDir,
+		KnownHostsPath: filepath.Join(gatewayDataDir, "known_hosts"),
+		Store:          st,
+	})
+	if err != nil {
+		t.Fatalf("start gateway: %v", err)
+	}
+	t.Cleanup(func() { _ = gateway.Close() })
+	return gateway
+}
+
+func platformLogExists(items []model.PlatformItem, name, status string) bool {
+	for _, item := range items {
+		if item.Name == name && item.Status == status {
+			return true
+		}
+	}
+	return false
 }
 
 func startTCPEchoServer(t *testing.T) (string, <-chan struct{}, func()) {

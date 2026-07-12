@@ -52,6 +52,11 @@ type gatewayUser struct {
 	DirectAsset string
 }
 
+type gatewayLoginRecord struct {
+	Collection string
+	ID         string
+}
+
 type gatewayPTY struct {
 	Term string
 	Cols int
@@ -209,7 +214,12 @@ func (g *Gateway) passwordCallback(meta ssh.ConnMetadata, password []byte) (*ssh
 		}
 	}
 	if !ok {
-		return nil, errors.New("invalid username or password")
+		authErr := errors.New("invalid username or password")
+		if logErr := g.recordGatewayLoginFailure(meta, username, authErr.Error()); logErr != nil {
+			g.auditGatewayLoginFailure(meta, username, "ssh_gateway.login.failed_log.persist_failed", logErr)
+			return nil, errors.Join(authErr, fmt.Errorf("persist failed login audit: %w", logErr))
+		}
+		return nil, authErr
 	}
 	user := gatewayUser{
 		UserID:   admin.UserID,
@@ -217,8 +227,10 @@ func (g *Gateway) passwordCallback(meta ssh.ConnMetadata, password []byte) (*ssh
 		Role:     admin.Role,
 		IsAdmin:  gatewayRoleIsAdmin(admin.Role),
 	}
-	_ = g.cfg.Store.RecordUserLogin(user.UserID, remoteIP(meta.RemoteAddr()), "ssh-gateway")
-	_ = g.cfg.Store.Audit(model.AuditLog{UserID: user.UserID, Action: "ssh_gateway.login", TargetID: "ssh_gateway", Protocol: model.ProtocolSSH, Detail: "native ssh gateway login", ClientIP: remoteIP(meta.RemoteAddr())})
+	if err := g.recordGatewayLogin(meta, user); err != nil {
+		g.auditGatewayLoginFailure(meta, user.UserID, "ssh_gateway.login.persist_failed", err)
+		return nil, fmt.Errorf("persist ssh gateway login: %w", err)
+	}
 	return &ssh.Permissions{Extensions: map[string]string{
 		"user_id":      user.UserID,
 		"username":     user.Username,
@@ -228,6 +240,99 @@ func (g *Gateway) passwordCallback(meta ssh.ConnMetadata, password []byte) (*ssh
 		"login_time":   time.Now().UTC().Format(time.RFC3339Nano),
 		"direct_asset": directAsset,
 	}}, nil
+}
+
+func (g *Gateway) recordGatewayLogin(meta ssh.ConnMetadata, user gatewayUser) error {
+	if g == nil || g.cfg.Store == nil {
+		return errors.New("gateway login store is unavailable")
+	}
+	clientIP := remoteIP(meta.RemoteAddr())
+	loginLog, err := g.cfg.Store.CreatePlatformItem("login_logs", model.PlatformItemRequest{
+		Name:        user.Username,
+		Type:        "ssh_gateway",
+		Status:      "success",
+		OwnerID:     user.UserID,
+		Description: "signed in to native ssh gateway",
+		Metadata: map[string]any{
+			"client_ip":  clientIP,
+			"account":    user.Username,
+			"user_agent": "ssh-gateway",
+		},
+	})
+	if err != nil {
+		return fmt.Errorf("create gateway login log: %w", err)
+	}
+	operationLog, err := g.cfg.Store.CreatePlatformItem("operation_logs", model.PlatformItemRequest{
+		Name:        "ssh_gateway.login",
+		Type:        "ssh_gateway",
+		Status:      "recorded",
+		Protocol:    model.ProtocolSSH,
+		OwnerID:     user.UserID,
+		TargetID:    "ssh_gateway",
+		Description: "native ssh gateway login",
+		Metadata: map[string]any{
+			"client_ip": clientIP,
+			"account":   user.Username,
+		},
+	})
+	if err != nil {
+		return errors.Join(fmt.Errorf("create gateway operation log: %w", err), g.rollbackGatewayLoginRecords(meta, user.UserID, gatewayLoginRecord{Collection: "login_logs", ID: loginLog.ID}))
+	}
+	if err := g.cfg.Store.RecordUserLogin(user.UserID, clientIP, "ssh-gateway"); err != nil {
+		return errors.Join(fmt.Errorf("record gateway user login state: %w", err), g.rollbackGatewayLoginRecords(meta, user.UserID,
+			gatewayLoginRecord{Collection: "operation_logs", ID: operationLog.ID},
+			gatewayLoginRecord{Collection: "login_logs", ID: loginLog.ID},
+		))
+	}
+	return nil
+}
+
+func (g *Gateway) recordGatewayLoginFailure(meta ssh.ConnMetadata, username, detail string) error {
+	if g == nil || g.cfg.Store == nil {
+		return errors.New("gateway login store is unavailable")
+	}
+	_, err := g.cfg.Store.CreatePlatformItem("login_logs", model.PlatformItemRequest{
+		Name:        username,
+		Type:        "ssh_gateway",
+		Status:      "failed",
+		Description: detail,
+		Metadata: map[string]any{
+			"client_ip":  remoteIP(meta.RemoteAddr()),
+			"account":    username,
+			"user_agent": "ssh-gateway",
+		},
+	})
+	return err
+}
+
+func (g *Gateway) rollbackGatewayLoginRecords(meta ssh.ConnMetadata, userID string, records ...gatewayLoginRecord) error {
+	var rollbackErr error
+	for _, record := range records {
+		if strings.TrimSpace(record.Collection) == "" || strings.TrimSpace(record.ID) == "" {
+			continue
+		}
+		if err := g.cfg.Store.DeletePlatformItem(record.Collection, record.ID); err != nil && !errors.Is(err, os.ErrNotExist) {
+			rollbackErr = errors.Join(rollbackErr, err)
+		}
+	}
+	if rollbackErr != nil {
+		g.auditGatewayLoginFailure(meta, userID, "ssh_gateway.login.rollback_failed", rollbackErr)
+	}
+	return rollbackErr
+}
+
+func (g *Gateway) auditGatewayLoginFailure(meta ssh.ConnMetadata, userID, action string, err error) {
+	if g == nil || g.cfg.Store == nil || err == nil {
+		return
+	}
+	_ = g.cfg.Store.Audit(model.AuditLog{
+		UserID:   userID,
+		Action:   action,
+		TargetID: "ssh_gateway",
+		Protocol: model.ProtocolSSH,
+		Detail:   err.Error(),
+		ClientIP: remoteIP(meta.RemoteAddr()),
+	})
 }
 
 func (g *Gateway) handleConn(conn net.Conn, serverConfig *ssh.ServerConfig) {

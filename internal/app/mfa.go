@@ -1,11 +1,8 @@
 package app
 
 import (
-	"crypto/hmac"
 	"crypto/rand"
-	"crypto/sha1"
 	"encoding/base32"
-	"encoding/binary"
 	"fmt"
 	"net/http"
 	"net/url"
@@ -14,12 +11,13 @@ import (
 	"time"
 
 	"openwebservermanager/internal/model"
+	"openwebservermanager/internal/security"
 	"openwebservermanager/internal/store"
 )
 
 const (
-	totpDigits = 6
-	totpPeriod = 30
+	totpDigits = security.TOTPDigits
+	totpPeriod = security.TOTPPeriod
 )
 
 type mfaCompleteLoginRequest struct {
@@ -547,20 +545,11 @@ func generateTOTPSecret() (string, error) {
 }
 
 func normalizeTOTPSecret(secret string) string {
-	return strings.ToUpper(strings.ReplaceAll(strings.ReplaceAll(strings.TrimSpace(secret), " ", ""), "-", ""))
+	return security.NormalizeTOTPSecret(secret)
 }
 
 func verifyTOTP(secret, code string, now time.Time) bool {
-	code = strings.TrimSpace(strings.ReplaceAll(code, " ", ""))
-	if len(code) != totpDigits {
-		return false
-	}
-	for offset := -1; offset <= 1; offset++ {
-		if expected, ok := totpCodeAt(secret, now.Add(time.Duration(offset*totpPeriod)*time.Second)); ok && expected == code {
-			return true
-		}
-	}
-	return false
+	return security.VerifyTOTP(secret, code, now)
 }
 
 func totpCode(secret string, now time.Time) string {
@@ -569,26 +558,7 @@ func totpCode(secret string, now time.Time) string {
 }
 
 func totpCodeAt(secret string, now time.Time) (string, bool) {
-	key, err := base32.StdEncoding.WithPadding(base32.NoPadding).DecodeString(normalizeTOTPSecret(secret))
-	if err != nil || len(key) == 0 {
-		return "", false
-	}
-	counter := uint64(now.Unix() / totpPeriod)
-	var msg [8]byte
-	binary.BigEndian.PutUint64(msg[:], counter)
-	mac := hmac.New(sha1.New, key)
-	_, _ = mac.Write(msg[:])
-	sum := mac.Sum(nil)
-	offset := sum[len(sum)-1] & 0x0f
-	value := (uint32(sum[offset])&0x7f)<<24 |
-		(uint32(sum[offset+1])&0xff)<<16 |
-		(uint32(sum[offset+2])&0xff)<<8 |
-		(uint32(sum[offset+3]) & 0xff)
-	modulo := uint32(1)
-	for i := 0; i < totpDigits; i++ {
-		modulo *= 10
-	}
-	return fmt.Sprintf("%0"+strconv.Itoa(totpDigits)+"d", value%modulo), true
+	return security.TOTPCodeAt(secret, now)
 }
 
 func generateRecoveryCodes(count int) ([]string, error) {

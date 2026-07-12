@@ -9,6 +9,7 @@ import (
 	"encoding/json"
 	"encoding/pem"
 	"errors"
+	"fmt"
 	"io"
 	"net"
 	"os"
@@ -181,6 +182,199 @@ func TestNativeSSHGatewayRecordsFailedPasswordLogin(t *testing.T) {
 	}
 	if !platformLogExists(logs, "gateway-user", "failed") {
 		t.Fatalf("login logs = %#v, want failed ssh gateway password login", logs)
+	}
+}
+
+func TestNativeSSHGatewayRequiresMFAForEnrolledUser(t *testing.T) {
+	st := newGatewayTestStore(t)
+	userRec, err := st.CreatePlatformItem("users", model.PlatformItemRequest{
+		Name:     "gateway-user",
+		Type:     "local",
+		Status:   "enabled",
+		Password: "password123",
+		Metadata: map[string]any{"role": "user"},
+	})
+	if err != nil {
+		t.Fatalf("create user: %v", err)
+	}
+	secret := "JBSWY3DPEHPK3PXP"
+	if _, err := st.EnableUserMFA(userRec.ID, secret, []string{"RECOVERY-ONE"}); err != nil {
+		t.Fatalf("enable MFA: %v", err)
+	}
+	gateway := startTestGateway(t, st)
+	if client, err := dialGatewayWithPassword(gateway.Address(), "gateway-user", "password123"); err == nil {
+		_ = client.Close()
+		t.Fatal("gateway accepted password without required MFA")
+	}
+	logs, err := st.ListPlatformItems("login_logs")
+	if err != nil {
+		t.Fatalf("list login logs: %v", err)
+	}
+	if platformLogExists(logs, "gateway-user", "success") {
+		t.Fatalf("password-only attempt created a successful login: %#v", logs)
+	}
+	code, ok := security.TOTPCodeAt(secret, time.Now().UTC())
+	if !ok {
+		t.Fatal("generate TOTP code")
+	}
+	client, err := dialGatewayWithMFA(gateway.Address(), "gateway-user", "password123", code)
+	if err != nil {
+		t.Fatalf("dial gateway with TOTP: %v", err)
+	}
+	_ = client.Close()
+	logs, err = st.ListPlatformItems("login_logs")
+	if err != nil {
+		t.Fatalf("list login logs after MFA: %v", err)
+	}
+	if !platformLogExists(logs, "gateway-user", "success") {
+		t.Fatalf("successful MFA login was not audited: %#v", logs)
+	}
+}
+
+func TestNativeSSHGatewayConsumesMFARecoveryCodeOnce(t *testing.T) {
+	st := newGatewayTestStore(t)
+	userRec, err := st.CreatePlatformItem("users", model.PlatformItemRequest{
+		Name:     "gateway-user",
+		Type:     "local",
+		Status:   "enabled",
+		Password: "password123",
+	})
+	if err != nil {
+		t.Fatalf("create user: %v", err)
+	}
+	if _, err := st.EnableUserMFA(userRec.ID, "JBSWY3DPEHPK3PXP", []string{"RECOVERY-ONE"}); err != nil {
+		t.Fatalf("enable MFA: %v", err)
+	}
+	gateway := startTestGateway(t, st)
+	client, err := dialGatewayWithMFA(gateway.Address(), "gateway-user", "password123", "RECOVERY-ONE")
+	if err != nil {
+		t.Fatalf("dial gateway with recovery code: %v", err)
+	}
+	_ = client.Close()
+	if client, err := dialGatewayWithMFA(gateway.Address(), "gateway-user", "password123", "RECOVERY-ONE"); err == nil {
+		_ = client.Close()
+		t.Fatal("gateway accepted a consumed recovery code")
+	}
+	profile, ok, err := st.UserMFAProfile(userRec.ID)
+	if err != nil || !ok || profile.RecoveryCount != 0 {
+		t.Fatalf("MFA profile after recovery use = %#v, %v, %v", profile, ok, err)
+	}
+	logs, err := st.ListPlatformItems("login_logs")
+	if err != nil {
+		t.Fatalf("list login logs: %v", err)
+	}
+	if !platformLogTypeExists(logs, "mfa", "failed") {
+		t.Fatalf("reused recovery code was not audited: %#v", logs)
+	}
+}
+
+func TestNativeSSHGatewayMFAFailuresCreateLoginLock(t *testing.T) {
+	st := newGatewayTestStore(t)
+	userRec, err := st.CreatePlatformItem("users", model.PlatformItemRequest{
+		Name:     "gateway-user",
+		Type:     "local",
+		Status:   "enabled",
+		Password: "password123",
+	})
+	if err != nil {
+		t.Fatalf("create user: %v", err)
+	}
+	secret := "JBSWY3DPEHPK3PXP"
+	if _, err := st.EnableUserMFA(userRec.ID, secret, nil); err != nil {
+		t.Fatalf("enable MFA: %v", err)
+	}
+	if _, err := st.CreatePlatformItem("system_settings", model.PlatformItemRequest{
+		Name:   "login security",
+		Type:   "security",
+		Status: "enabled",
+		Metadata: map[string]any{
+			"login_failure_threshold": 2,
+			"login_lock_minutes":      1,
+		},
+	}); err != nil {
+		t.Fatalf("create login security settings: %v", err)
+	}
+	gateway := startTestGateway(t, st)
+	for attempt := 1; attempt <= 2; attempt++ {
+		if client, err := dialGatewayWithMFA(gateway.Address(), "gateway-user", "password123", "000000"); err == nil {
+			_ = client.Close()
+			t.Fatalf("invalid MFA attempt %d succeeded", attempt)
+		}
+	}
+	locks, err := st.ListPlatformItems("login_locks")
+	if err != nil || len(locks) != 1 || locks[0].Metadata["source"] != "ssh_gateway" {
+		t.Fatalf("MFA login locks = %#v err=%v", locks, err)
+	}
+	code, ok := security.TOTPCodeAt(secret, time.Now().UTC())
+	if !ok {
+		t.Fatal("generate TOTP code")
+	}
+	if client, err := dialGatewayWithMFA(gateway.Address(), "gateway-user", "password123", code); err == nil {
+		_ = client.Close()
+		t.Fatal("correct MFA code bypassed active login lock")
+	}
+}
+
+func TestNativeSSHGatewayForceMFARejectsUnenrolledUser(t *testing.T) {
+	st := newGatewayTestStore(t)
+	if _, err := st.CreatePlatformItem("users", model.PlatformItemRequest{
+		Name:     "gateway-user",
+		Type:     "local",
+		Status:   "enabled",
+		Password: "password123",
+	}); err != nil {
+		t.Fatalf("create user: %v", err)
+	}
+	if _, err := st.CreatePlatformItem("system_settings", model.PlatformItemRequest{
+		Name:     "MFA policy",
+		Type:     "security",
+		Status:   "enabled",
+		Metadata: map[string]any{"force_mfa": true},
+	}); err != nil {
+		t.Fatalf("create MFA policy: %v", err)
+	}
+	gateway := startTestGateway(t, st)
+	if client, err := dialGatewayWithPassword(gateway.Address(), "gateway-user", "password123"); err == nil {
+		_ = client.Close()
+		t.Fatal("force MFA accepted an unenrolled user")
+	}
+	logs, err := st.ListPlatformItems("login_logs")
+	if err != nil {
+		t.Fatalf("list login logs: %v", err)
+	}
+	if !platformLogTypeExists(logs, "mfa", "denied") {
+		t.Fatalf("unenrolled MFA denial was not audited: %#v", logs)
+	}
+}
+
+func TestNativeSSHGatewayMFAAuditPersistenceFailureIsFailClosed(t *testing.T) {
+	st := newGatewayTestStore(t)
+	userRec, err := st.CreatePlatformItem("users", model.PlatformItemRequest{
+		Name:     "gateway-user",
+		Type:     "local",
+		Status:   "enabled",
+		Password: "password123",
+	})
+	if err != nil {
+		t.Fatalf("create user: %v", err)
+	}
+	if _, err := st.EnableUserMFA(userRec.ID, "JBSWY3DPEHPK3PXP", nil); err != nil {
+		t.Fatalf("enable MFA: %v", err)
+	}
+	gateway := startTestGateway(t, st)
+	unblock := blockPlatformCollectionPayloadInsert(t, st, "login_logs", `"type":"mfa"`)
+	defer unblock()
+	if client, err := dialGatewayWithMFA(gateway.Address(), "gateway-user", "password123", "000000"); err == nil {
+		_ = client.Close()
+		t.Fatal("gateway authenticated while MFA audit persistence was blocked")
+	}
+	states, err := st.ListPlatformItems("login_failure_states")
+	if err != nil || len(states) != 0 {
+		t.Fatalf("MFA failure state advanced without its audit record: %#v err=%v", states, err)
+	}
+	_, _, _, auditLogs := st.Bootstrap()
+	if !auditLogActionExists(auditLogs, "ssh_gateway.login.mfa_failed_log.persist_failed") {
+		t.Fatalf("core audit logs = %#v, want MFA persistence failure", auditLogs)
 	}
 }
 
@@ -1824,6 +2018,23 @@ func dialGatewayWithPassword(address, username, password string) (*ssh.Client, e
 	return ssh.Dial("tcp", address, &ssh.ClientConfig{
 		User:            username,
 		Auth:            []ssh.AuthMethod{ssh.Password(password)},
+		HostKeyCallback: ssh.InsecureIgnoreHostKey(),
+		Timeout:         5 * time.Second,
+	})
+}
+
+func dialGatewayWithMFA(address, username, password, response string) (*ssh.Client, error) {
+	return ssh.Dial("tcp", address, &ssh.ClientConfig{
+		User: username,
+		Auth: []ssh.AuthMethod{
+			ssh.Password(password),
+			ssh.KeyboardInteractive(func(_ string, _ string, questions []string, echos []bool) ([]string, error) {
+				if len(questions) != 1 || len(echos) != 1 || echos[0] {
+					return nil, fmt.Errorf("unexpected MFA challenge: questions=%q echos=%v", questions, echos)
+				}
+				return []string{response}, nil
+			}),
+		},
 		HostKeyCallback: ssh.InsecureIgnoreHostKey(),
 		Timeout:         5 * time.Second,
 	})

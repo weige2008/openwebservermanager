@@ -27,6 +27,7 @@ import (
 
 	"openwebservermanager/internal/model"
 	"openwebservermanager/internal/roles"
+	"openwebservermanager/internal/security"
 	"openwebservermanager/internal/store"
 )
 
@@ -310,11 +311,97 @@ func (g *Gateway) passwordCallback(meta ssh.ConnMetadata, password []byte) (*ssh
 		return nil, authErr
 	}
 	user := gatewayUser{
-		UserID:   admin.UserID,
-		Username: admin.Username,
-		Role:     admin.Role,
-		IsAdmin:  gatewayRoleIsAdmin(admin.Role),
+		UserID:      admin.UserID,
+		Username:    admin.Username,
+		Role:        admin.Role,
+		IsAdmin:     gatewayRoleIsAdmin(admin.Role),
+		DirectAsset: directAsset,
 	}
+	forceMFA, err := g.gatewayForceMFAEnabled()
+	if err != nil {
+		g.auditGatewayLoginFailure(meta, user.UserID, "ssh_gateway.login.mfa_policy_load_failed", err)
+		return nil, fmt.Errorf("load ssh gateway MFA policy: %w", err)
+	}
+	profile, profileExists, err := g.cfg.Store.UserMFAProfile(user.UserID)
+	if err != nil {
+		g.auditGatewayLoginFailure(meta, user.UserID, "ssh_gateway.login.mfa_profile_load_failed", err)
+		return nil, fmt.Errorf("load ssh gateway MFA profile: %w", err)
+	}
+	if forceMFA || (profileExists && profile.Enabled) {
+		if !profileExists || !profile.Enabled || strings.TrimSpace(profile.Secret) == "" {
+			reason := "MFA registration is required; enroll MFA in the web console before using the SSH gateway"
+			if logErr := g.recordGatewayLoginDenied(meta, user.Username, "mfa", reason); logErr != nil {
+				g.auditGatewayLoginFailure(meta, user.UserID, "ssh_gateway.login.mfa_denied_log.persist_failed", logErr)
+				return nil, errors.Join(errors.New(reason), fmt.Errorf("persist MFA denial audit: %w", logErr))
+			}
+			return nil, &ssh.BannerError{Err: errors.New(reason), Message: reason + "\n"}
+		}
+		return nil, &ssh.PartialSuccessError{Next: ssh.ServerAuthCallbacks{
+			KeyboardInteractiveCallback: func(nextMeta ssh.ConnMetadata, challenge ssh.KeyboardInteractiveChallenge) (*ssh.Permissions, error) {
+				return g.keyboardInteractiveMFACallback(nextMeta, challenge, user, profile, failureKey, failurePolicy)
+			},
+		}}
+	}
+	return g.completeGatewayLogin(meta, user, failureKey)
+}
+
+func (g *Gateway) keyboardInteractiveMFACallback(meta ssh.ConnMetadata, challenge ssh.KeyboardInteractiveChallenge, user gatewayUser, profile store.MFAProfile, failureKey string, failurePolicy gatewayLoginFailurePolicy) (*ssh.Permissions, error) {
+	clientIP := remoteIP(meta.RemoteAddr())
+	if locked, reason, err := g.gatewayLoginLocked(user.Username, clientIP); err != nil {
+		g.auditGatewayLoginFailure(meta, user.UserID, "ssh_gateway.login.lock_load_failed", err)
+		return nil, fmt.Errorf("load ssh gateway login lock: %w", err)
+	} else if locked {
+		return nil, errors.New(reason)
+	}
+	if retryAfter, locked, err := g.gatewayRuntimeLoginLocked(failureKey, failurePolicy); err != nil {
+		g.auditGatewayLoginFailure(meta, user.UserID, "ssh_gateway.login.failure_state_load_failed", err)
+		return nil, fmt.Errorf("load ssh gateway login failure state: %w", err)
+	} else if locked {
+		return nil, fmt.Errorf("too many failed login attempts; retry after %s", retryAfter.Round(time.Second))
+	}
+	answers, err := challenge(user.Username, "Multi-factor authentication is required.", []string{"Verification code or recovery code: "}, []bool{false})
+	if err != nil {
+		return nil, fmt.Errorf("request SSH gateway MFA response: %w", err)
+	}
+	if len(answers) != 1 {
+		return g.rejectGatewayMFA(meta, user, failureKey, failurePolicy, "invalid MFA response")
+	}
+	code := strings.TrimSpace(answers[0])
+	method := "totp"
+	verified := security.VerifyTOTP(profile.Secret, code, time.Now().UTC())
+	if !verified {
+		method = "recovery_code"
+		verified, err = g.cfg.Store.ConsumeUserMFARecoveryCode(user.UserID, code)
+		if err != nil {
+			g.auditGatewayLoginFailure(meta, user.UserID, "ssh_gateway.login.mfa_recovery.persist_failed", err)
+			return nil, fmt.Errorf("consume SSH gateway MFA recovery code: %w", err)
+		}
+	}
+	if !verified {
+		return g.rejectGatewayMFA(meta, user, failureKey, failurePolicy, "invalid MFA code")
+	}
+	permissions, err := g.completeGatewayLogin(meta, user, failureKey)
+	if err != nil {
+		return nil, err
+	}
+	permissions.Extensions["mfa_method"] = method
+	return permissions, nil
+}
+
+func (g *Gateway) rejectGatewayMFA(meta ssh.ConnMetadata, user gatewayUser, failureKey string, failurePolicy gatewayLoginFailurePolicy, detail string) (*ssh.Permissions, error) {
+	authErr := errors.New(detail)
+	if logErr := g.recordGatewayMFAFailure(meta, user, detail); logErr != nil {
+		g.auditGatewayLoginFailure(meta, user.UserID, "ssh_gateway.login.mfa_failed_log.persist_failed", logErr)
+		return nil, errors.Join(authErr, fmt.Errorf("persist failed MFA audit: %w", logErr))
+	}
+	if _, failureErr := g.gatewayRecordLoginFailure(failureKey, user.Username, remoteIP(meta.RemoteAddr()), failurePolicy); failureErr != nil {
+		g.auditGatewayLoginFailure(meta, user.UserID, "ssh_gateway.login.failure_state.persist_failed", failureErr)
+		return nil, errors.Join(authErr, fmt.Errorf("persist login failure state: %w", failureErr))
+	}
+	return nil, authErr
+}
+
+func (g *Gateway) completeGatewayLogin(meta ssh.ConnMetadata, user gatewayUser, failureKey string) (*ssh.Permissions, error) {
 	if err := g.gatewayResetLoginFailure(failureKey); err != nil {
 		g.auditGatewayLoginFailure(meta, user.UserID, "ssh_gateway.login.failure_state.reset_failed", err)
 		return nil, fmt.Errorf("reset ssh gateway login failure state: %w", err)
@@ -330,8 +417,30 @@ func (g *Gateway) passwordCallback(meta ssh.ConnMetadata, password []byte) (*ssh
 		"is_admin":     strconv.FormatBool(user.IsAdmin),
 		"client_ip":    remoteIP(meta.RemoteAddr()),
 		"login_time":   time.Now().UTC().Format(time.RFC3339Nano),
-		"direct_asset": directAsset,
+		"direct_asset": user.DirectAsset,
 	}}, nil
+}
+
+func (g *Gateway) gatewayForceMFAEnabled() (bool, error) {
+	items, err := g.cfg.Store.ListPlatformItems("system_settings")
+	if err != nil {
+		return false, err
+	}
+	for _, item := range items {
+		if !platformItemEnabled(item) {
+			continue
+		}
+		itemType := strings.ToLower(strings.TrimSpace(item.Type))
+		if itemType != "security" && itemType != "identity" && itemType != "access" && itemType != "mfa" {
+			continue
+		}
+		for _, key := range []string{"force_mfa", "forceMFA", "mfa_required", "require_mfa", "access_mfa"} {
+			if enabled, ok := gatewayMetadataBool(item.Metadata[key]); ok && enabled {
+				return true, nil
+			}
+		}
+	}
+	return false, nil
 }
 
 func (g *Gateway) recordGatewayLogin(meta ssh.ConnMetadata, user gatewayUser) error {
@@ -391,6 +500,25 @@ func (g *Gateway) recordGatewayLoginFailure(meta ssh.ConnMetadata, username, det
 		Metadata: map[string]any{
 			"client_ip":  remoteIP(meta.RemoteAddr()),
 			"account":    username,
+			"user_agent": "ssh-gateway",
+		},
+	})
+	return err
+}
+
+func (g *Gateway) recordGatewayMFAFailure(meta ssh.ConnMetadata, user gatewayUser, detail string) error {
+	if g == nil || g.cfg.Store == nil {
+		return errors.New("gateway login store is unavailable")
+	}
+	_, err := g.cfg.Store.CreatePlatformItem("login_logs", model.PlatformItemRequest{
+		Name:        user.Username,
+		Type:        "mfa",
+		Status:      "failed",
+		OwnerID:     user.UserID,
+		Description: detail,
+		Metadata: map[string]any{
+			"client_ip":  remoteIP(meta.RemoteAddr()),
+			"account":    user.Username,
 			"user_agent": "ssh-gateway",
 		},
 	})

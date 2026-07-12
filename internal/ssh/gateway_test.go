@@ -185,6 +185,136 @@ func TestNativeSSHGatewayRecordsFailedPasswordLogin(t *testing.T) {
 	}
 }
 
+func TestNativeSSHGatewayPublicKeyAuthenticationWorksWithoutPassword(t *testing.T) {
+	st := newGatewayTestStore(t)
+	userRec, err := st.CreatePlatformItem("users", model.PlatformItemRequest{
+		Name: "gateway-user", Type: "local", Status: "enabled", Password: "password123", Metadata: map[string]any{"role": "user"},
+	})
+	if err != nil {
+		t.Fatalf("create user: %v", err)
+	}
+	clientSigner := testSSHSigner(t)
+	keyItem := registerGatewayPublicKey(t, st, userRec.ID, "gateway-user", clientSigner.PublicKey())
+	gateway := startTestGatewayWithConfig(t, st, func(cfg *GatewayConfig) { cfg.DisablePasswordAuth = true })
+	if client, err := dialGatewayWithPassword(gateway.Address(), "gateway-user", "password123"); err == nil {
+		_ = client.Close()
+		t.Fatal("password authentication remained enabled")
+	}
+	client, err := dialGatewayWithPublicKey(gateway.Address(), "gateway-user", clientSigner)
+	if err != nil {
+		t.Fatalf("dial gateway with public key: %v", err)
+	}
+	_ = client.Close()
+	logs, err := st.ListPlatformItems("login_logs")
+	if err != nil {
+		t.Fatalf("list login logs: %v", err)
+	}
+	found := false
+	for _, item := range logs {
+		if item.Name == "gateway-user" && item.Status == "success" && item.Metadata["auth_method"] == "public_key" && item.Metadata["ssh_key_id"] == keyItem.ID {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("public key login audit missing method/key id: %#v", logs)
+	}
+	wrongSigner := testSSHSigner(t)
+	if client, err := dialGatewayWithPublicKey(gateway.Address(), "gateway-user", wrongSigner); err == nil {
+		_ = client.Close()
+		t.Fatal("gateway accepted an unregistered public key")
+	}
+}
+
+func TestNativeSSHGatewayPublicKeyAgentCanOfferKeysBeforeMatch(t *testing.T) {
+	st := newGatewayTestStore(t)
+	userRec, err := st.CreatePlatformItem("users", model.PlatformItemRequest{
+		Name: "gateway-user", Type: "local", Status: "enabled", Password: "password123",
+	})
+	if err != nil {
+		t.Fatalf("create user: %v", err)
+	}
+	validSigner := testSSHSigner(t)
+	registerGatewayPublicKey(t, st, userRec.ID, "gateway-user", validSigner.PublicKey())
+	if _, err := st.CreatePlatformItem("system_settings", model.PlatformItemRequest{
+		Name: "login security", Type: "security", Status: "enabled", Metadata: map[string]any{"login_failure_threshold": 2},
+	}); err != nil {
+		t.Fatalf("create login security settings: %v", err)
+	}
+	gateway := startTestGatewayWithConfig(t, st, func(cfg *GatewayConfig) { cfg.DisablePasswordAuth = true })
+	client, err := dialGatewayWithPublicKeys(gateway.Address(), "gateway-user", testSSHSigner(t), testSSHSigner(t), validSigner)
+	if err != nil {
+		t.Fatalf("SSH agent-style key sequence did not reach registered key: %v", err)
+	}
+	_ = client.Close()
+	locks, err := st.ListPlatformItems("login_locks")
+	if err != nil || len(locks) != 0 {
+		t.Fatalf("public key probes created persistent login lock: %#v err=%v", locks, err)
+	}
+}
+
+func TestNativeSSHGatewayPublicKeyAuthenticationRequiresMFA(t *testing.T) {
+	st := newGatewayTestStore(t)
+	userRec, err := st.CreatePlatformItem("users", model.PlatformItemRequest{
+		Name: "gateway-user", Type: "local", Status: "enabled", Password: "password123",
+	})
+	if err != nil {
+		t.Fatalf("create user: %v", err)
+	}
+	clientSigner := testSSHSigner(t)
+	registerGatewayPublicKey(t, st, userRec.ID, "gateway-user", clientSigner.PublicKey())
+	secret := "JBSWY3DPEHPK3PXP"
+	if _, err := st.EnableUserMFA(userRec.ID, secret, nil); err != nil {
+		t.Fatalf("enable MFA: %v", err)
+	}
+	gateway := startTestGatewayWithConfig(t, st, func(cfg *GatewayConfig) { cfg.DisablePasswordAuth = true })
+	if client, err := dialGatewayWithPublicKey(gateway.Address(), "gateway-user", clientSigner); err == nil {
+		_ = client.Close()
+		t.Fatal("gateway accepted public key without required MFA")
+	}
+	code, ok := security.TOTPCodeAt(secret, time.Now().UTC())
+	if !ok {
+		t.Fatal("generate TOTP code")
+	}
+	client, err := dialGatewayWithPublicKeyMFA(gateway.Address(), "gateway-user", clientSigner, code)
+	if err != nil {
+		t.Fatalf("dial gateway with public key and MFA: %v", err)
+	}
+	_ = client.Close()
+}
+
+func TestNativeSSHGatewayPublicKeyRejectsDisabledUserAndAuditFailure(t *testing.T) {
+	t.Run("disabled user", func(t *testing.T) {
+		st := newGatewayTestStore(t)
+		userRec, err := st.CreatePlatformItem("users", model.PlatformItemRequest{Name: "gateway-user", Type: "local", Status: "disabled", Password: "password123"})
+		if err != nil {
+			t.Fatalf("create user: %v", err)
+		}
+		signer := testSSHSigner(t)
+		registerGatewayPublicKey(t, st, userRec.ID, "gateway-user", signer.PublicKey())
+		gateway := startTestGatewayWithConfig(t, st, func(cfg *GatewayConfig) { cfg.DisablePasswordAuth = true })
+		if client, err := dialGatewayWithPublicKey(gateway.Address(), "gateway-user", signer); err == nil {
+			_ = client.Close()
+			t.Fatal("gateway accepted public key for disabled user")
+		}
+	})
+	t.Run("success audit failure", func(t *testing.T) {
+		st := newGatewayTestStore(t)
+		userRec, err := st.CreatePlatformItem("users", model.PlatformItemRequest{Name: "gateway-user", Type: "local", Status: "enabled", Password: "password123"})
+		if err != nil {
+			t.Fatalf("create user: %v", err)
+		}
+		signer := testSSHSigner(t)
+		registerGatewayPublicKey(t, st, userRec.ID, "gateway-user", signer.PublicKey())
+		gateway := startTestGatewayWithConfig(t, st, func(cfg *GatewayConfig) { cfg.DisablePasswordAuth = true })
+		unblock := blockPlatformCollectionPayloadInsert(t, st, "login_logs", `"status":"success"`)
+		defer unblock()
+		if client, err := dialGatewayWithPublicKey(gateway.Address(), "gateway-user", signer); err == nil {
+			_ = client.Close()
+			t.Fatal("gateway authenticated public key while login audit persistence was blocked")
+		}
+	})
+}
+
 func TestNativeSSHGatewayRequiresMFAForEnrolledUser(t *testing.T) {
 	st := newGatewayTestStore(t)
 	userRec, err := st.CreatePlatformItem("users", model.PlatformItemRequest{
@@ -1995,23 +2125,72 @@ func createGatewayUserAssetAndCredential(t *testing.T, st *store.Store, targetAd
 }
 
 func startTestGateway(t *testing.T, st *store.Store) *Gateway {
+	return startTestGatewayWithConfig(t, st, nil)
+}
+
+func startTestGatewayWithConfig(t *testing.T, st *store.Store, mutate func(*GatewayConfig)) *Gateway {
 	t.Helper()
 	ctx, cancel := context.WithCancel(context.Background())
 	t.Cleanup(cancel)
 	gatewayDataDir := mustTempDir(t)
 	t.Cleanup(func() { removeTempDir(gatewayDataDir) })
-	gateway, err := StartGateway(ctx, GatewayConfig{
+	cfg := GatewayConfig{
 		Enabled:        true,
 		Address:        "127.0.0.1:0",
 		DataDir:        gatewayDataDir,
 		KnownHostsPath: filepath.Join(gatewayDataDir, "known_hosts"),
 		Store:          st,
-	})
+	}
+	if mutate != nil {
+		mutate(&cfg)
+	}
+	gateway, err := StartGateway(ctx, cfg)
 	if err != nil {
 		t.Fatalf("start gateway: %v", err)
 	}
 	t.Cleanup(func() { _ = gateway.Close() })
 	return gateway
+}
+
+func registerGatewayPublicKey(t *testing.T, st *store.Store, userID, username string, key ssh.PublicKey) model.PlatformItem {
+	t.Helper()
+	item, err := st.CreatePlatformItem("ssh_public_keys", model.PlatformItemRequest{
+		Name: "test key", Type: key.Type(), Status: "enabled", OwnerID: userID, Username: username,
+		Metadata: map[string]any{
+			"public_key":  strings.TrimSpace(string(ssh.MarshalAuthorizedKey(key))),
+			"fingerprint": ssh.FingerprintSHA256(key),
+		},
+	})
+	if err != nil {
+		t.Fatalf("register gateway public key: %v", err)
+	}
+	return item
+}
+
+func dialGatewayWithPublicKey(address, username string, signer ssh.Signer) (*ssh.Client, error) {
+	return dialGatewayWithPublicKeys(address, username, signer)
+}
+
+func dialGatewayWithPublicKeys(address, username string, signers ...ssh.Signer) (*ssh.Client, error) {
+	return ssh.Dial("tcp", address, &ssh.ClientConfig{
+		User: username, Auth: []ssh.AuthMethod{ssh.PublicKeys(signers...)}, HostKeyCallback: ssh.InsecureIgnoreHostKey(), Timeout: 5 * time.Second,
+	})
+}
+
+func dialGatewayWithPublicKeyMFA(address, username string, signer ssh.Signer, response string) (*ssh.Client, error) {
+	return ssh.Dial("tcp", address, &ssh.ClientConfig{
+		User: username,
+		Auth: []ssh.AuthMethod{
+			ssh.PublicKeys(signer),
+			ssh.KeyboardInteractive(func(_ string, _ string, questions []string, echos []bool) ([]string, error) {
+				if len(questions) != 1 || len(echos) != 1 || echos[0] {
+					return nil, fmt.Errorf("unexpected MFA challenge: questions=%q echos=%v", questions, echos)
+				}
+				return []string{response}, nil
+			}),
+		},
+		HostKeyCallback: ssh.InsecureIgnoreHostKey(), Timeout: 5 * time.Second,
+	})
 }
 
 func dialGatewayWithPassword(address, username, password string) (*ssh.Client, error) {

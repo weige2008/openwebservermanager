@@ -1932,6 +1932,89 @@ func TestPasskeyLoginLogFailureRollsBackUsage(t *testing.T) {
 	}
 }
 
+func TestSSHPublicKeyAccountManagement(t *testing.T) {
+	handler, adminCookie := newTestHandler(t)
+	srv := handler.(*Server)
+	_, privateKey, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatalf("generate SSH key: %v", err)
+	}
+	publicKey, err := cryptossh.NewPublicKey(privateKey.Public())
+	if err != nil {
+		t.Fatalf("create SSH public key: %v", err)
+	}
+	authorizedKey := strings.TrimSpace(string(cryptossh.MarshalAuthorizedKey(publicKey))) + " workstation\n"
+	fingerprint := cryptossh.FingerprintSHA256(publicKey)
+
+	assertStatus(t, handler, http.MethodGet, "/api/auth/ssh-keys", nil, nil, http.StatusUnauthorized)
+	assertStatus(t, handler, http.MethodPost, "/api/auth/ssh-keys", map[string]any{"public_key": "invalid"}, adminCookie, http.StatusBadRequest)
+	createRec := assertStatus(t, handler, http.MethodPost, "/api/auth/ssh-keys", map[string]any{
+		"name":       "Admin workstation",
+		"public_key": authorizedKey,
+	}, adminCookie, http.StatusCreated)
+	var created sshPublicKeyItem
+	decodeResponse(t, createRec, &created)
+	if created.ID == "" || created.Name != "Admin workstation" || created.Fingerprint != fingerprint || created.Comment != "workstation" || created.PublicKey == "" {
+		t.Fatalf("unexpected SSH public key response: %#v", created)
+	}
+	if strings.Contains(createRec.Body.String(), "PRIVATE") {
+		t.Fatalf("SSH public key response leaked private material: %s", createRec.Body.String())
+	}
+	assertStatus(t, handler, http.MethodPost, "/api/auth/ssh-keys", map[string]any{"public_key": authorizedKey}, adminCookie, http.StatusConflict)
+	listRec := assertStatus(t, handler, http.MethodGet, "/api/auth/ssh-keys", nil, adminCookie, http.StatusOK)
+	if !strings.Contains(listRec.Body.String(), created.ID) || !strings.Contains(listRec.Body.String(), fingerprint) {
+		t.Fatalf("SSH public key list missing registered key: %s", listRec.Body.String())
+	}
+
+	userRec := assertStatus(t, handler, http.MethodPost, "/api/admin/users", map[string]any{
+		"name": "ssh-key-user", "type": "local", "status": "enabled", "password": "password123",
+	}, adminCookie, http.StatusCreated)
+	var user model.PlatformItem
+	decodeResponse(t, userRec, &user)
+	loginRec := assertStatus(t, handler, http.MethodPost, "/api/auth/login", map[string]any{"username": user.Name, "password": "password123"}, nil, http.StatusOK)
+	userCookie := loginRec.Result().Cookies()[0]
+	userListRec := assertStatus(t, handler, http.MethodGet, "/api/auth/ssh-keys", nil, userCookie, http.StatusOK)
+	if strings.Contains(userListRec.Body.String(), created.ID) {
+		t.Fatalf("user SSH key list leaked another account's key: %s", userListRec.Body.String())
+	}
+	assertStatus(t, handler, http.MethodDelete, "/api/auth/ssh-keys/"+created.ID, nil, userCookie, http.StatusNotFound)
+
+	removeCreateBlocker := blockOperationLogName(t, srv.cfg.Store, "auth.ssh_key.register")
+	blockedCreateRec := assertStatus(t, handler, http.MethodPost, "/api/auth/ssh-keys", map[string]any{
+		"name": "Blocked key", "public_key": authorizedKey,
+	}, userCookie, http.StatusInternalServerError)
+	removeCreateBlocker()
+	if !strings.Contains(blockedCreateRec.Body.String(), "operation") {
+		t.Fatalf("SSH key operation failure did not explain persistence error: %s", blockedCreateRec.Body.String())
+	}
+	blockedListRec := assertStatus(t, handler, http.MethodGet, "/api/auth/ssh-keys", nil, userCookie, http.StatusOK)
+	if strings.Contains(blockedListRec.Body.String(), "Blocked key") {
+		t.Fatalf("SSH public key survived failed operation audit: %s", blockedListRec.Body.String())
+	}
+
+	removeDeleteBlocker := blockOperationLogName(t, srv.cfg.Store, "auth.ssh_key.delete")
+	blockedDeleteRec := assertStatus(t, handler, http.MethodDelete, "/api/auth/ssh-keys/"+created.ID, nil, adminCookie, http.StatusInternalServerError)
+	removeDeleteBlocker()
+	if !strings.Contains(blockedDeleteRec.Body.String(), "operation") {
+		t.Fatalf("SSH key delete failure did not explain persistence error: %s", blockedDeleteRec.Body.String())
+	}
+	restoredRec := assertStatus(t, handler, http.MethodGet, "/api/auth/ssh-keys", nil, adminCookie, http.StatusOK)
+	if !strings.Contains(restoredRec.Body.String(), created.ID) {
+		t.Fatalf("SSH public key was not restored after delete audit failure: %s", restoredRec.Body.String())
+	}
+	assertStatus(t, handler, http.MethodDelete, "/api/auth/ssh-keys/"+created.ID, nil, adminCookie, http.StatusOK)
+	deletedRec := assertStatus(t, handler, http.MethodGet, "/api/auth/ssh-keys", nil, adminCookie, http.StatusOK)
+	if strings.Contains(deletedRec.Body.String(), created.ID) {
+		t.Fatalf("deleted SSH public key remained listed: %s", deletedRec.Body.String())
+	}
+	operationRec := assertStatus(t, handler, http.MethodGet, "/api/admin/audit/operation-logs", nil, adminCookie, http.StatusOK)
+	for _, want := range []string{"auth.ssh_key.register", "auth.ssh_key.delete", fingerprint} {
+		if !strings.Contains(operationRec.Body.String(), want) {
+			t.Fatalf("SSH public key operation logs missing %q: %s", want, operationRec.Body.String())
+		}
+	}
+}
+
 func TestUserImportCreatesSkipsAndUpdatesLoginUsers(t *testing.T) {
 	handler, adminCookie := newTestHandler(t)
 

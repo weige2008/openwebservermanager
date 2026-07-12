@@ -329,6 +329,46 @@ func (s *Store) VerifyPlatformUser(username, password string) (AdminPublic, bool
 	return AdminPublic{}, false, nil
 }
 
+func (s *Store) PlatformUser(username string) (AdminPublic, bool, error) {
+	username = strings.TrimSpace(username)
+	if username == "" {
+		return AdminPublic{}, false, nil
+	}
+	rows, err := s.db.Query(`SELECT payload FROM platform_records WHERE collection = ?`, "users")
+	if err != nil {
+		return AdminPublic{}, false, err
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var payload string
+		if err := rows.Scan(&payload); err != nil {
+			return AdminPublic{}, false, err
+		}
+		var item model.PlatformItem
+		if err := json.Unmarshal([]byte(payload), &item); err != nil {
+			return AdminPublic{}, false, err
+		}
+		if item.Name != username || strings.EqualFold(strings.TrimSpace(item.Status), "disabled") {
+			continue
+		}
+		role, _ := item.Metadata["role"].(string)
+		if role == "" {
+			role = "user"
+		}
+		return AdminPublic{
+			UserID:    item.ID,
+			Username:  item.Name,
+			Role:      role,
+			CreatedAt: item.CreatedAt,
+			UpdatedAt: item.UpdatedAt,
+		}, true, nil
+	}
+	if err := rows.Err(); err != nil {
+		return AdminPublic{}, false, err
+	}
+	return AdminPublic{}, false, nil
+}
+
 func (s *Store) VerifyUserPassword(userID, password string) (bool, error) {
 	userID = strings.TrimSpace(userID)
 	if userID == "" || strings.TrimSpace(password) == "" {
@@ -577,6 +617,7 @@ func (s *Store) ensureMaps() {
 var platformCollections = []string{
 	"users",
 	"passkeys",
+	"ssh_public_keys",
 	"roles",
 	"departments",
 	"login_policies",

@@ -147,6 +147,17 @@ interface PasskeyItem {
   updated_at: string
 }
 
+interface SSHPublicKeyItem {
+  id: string
+  name: string
+  type: string
+  status: string
+  public_key: string
+  fingerprint: string
+  comment?: string
+  created_at: string
+}
+
 interface LocalLicenseModule {
   key: string
   name: string
@@ -230,6 +241,9 @@ export function SettingsPage() {
   const [mfaBusy, setMFABusy] = useState(false)
   const [passkeys, setPasskeys] = useState<PasskeyItem[]>([])
   const [passkeyBusy, setPasskeyBusy] = useState(false)
+  const [sshPublicKeys, setSSHPublicKeys] = useState<SSHPublicKeyItem[]>([])
+  const [sshPublicKeyForm, setSSHPublicKeyForm] = useState({ name: '', publicKey: '' })
+  const [sshPublicKeyBusy, setSSHPublicKeyBusy] = useState(false)
   const [loginSecurity, setLoginSecurity] = useState<LoginSecurityState>({
     captchaEnabled: app.captchaRequired,
     passwordLoginDisabled: app.passwordLoginDisabled,
@@ -271,6 +285,11 @@ export function SettingsPage() {
     setPasskeys(result.items || [])
   }
 
+  const loadSSHPublicKeys = async () => {
+    const result = await apiRequest<{ items: SSHPublicKeyItem[] }>('/api/auth/ssh-keys')
+    setSSHPublicKeys(result.items || [])
+  }
+
   const loadLoginSecurity = async () => {
     const result = await apiRequest<{ items: PlatformItem[] }>('/api/admin/system-settings')
     setLoginSecurity(loginSecurityFromSettings(result.items, app.captchaRequired, app.passwordLoginDisabled))
@@ -298,6 +317,7 @@ export function SettingsPage() {
   useEffect(() => {
     void loadMFAStatus().catch(() => undefined)
     void loadPasskeys().catch(() => undefined)
+    void loadSSHPublicKeys().catch(() => undefined)
     if (canReadSystemSettings) {
       void loadLoginSecurity().catch(() => undefined)
     }
@@ -467,6 +487,44 @@ export function SettingsPage() {
       app.handleApiError(error)
     } finally {
       setPasskeyBusy(false)
+    }
+  }
+
+  const registerSSHPublicKey = async () => {
+    if (!sshPublicKeyForm.publicKey.trim()) return
+    setSSHPublicKeyBusy(true)
+    try {
+      await apiRequest<SSHPublicKeyItem>('/api/auth/ssh-keys', {
+        method: 'POST',
+        body: JSON.stringify({ name: sshPublicKeyForm.name, public_key: sshPublicKeyForm.publicKey }),
+      })
+      setSSHPublicKeyForm({ name: '', publicKey: '' })
+      await loadSSHPublicKeys()
+      app.showToast(t('settingsPage.sshPublicKeyRegistered', { defaultValue: 'SSH public key registered.' }))
+    } catch (error) {
+      app.handleApiError(error)
+    } finally {
+      setSSHPublicKeyBusy(false)
+    }
+  }
+
+  const deleteSSHPublicKey = async (item: SSHPublicKeyItem) => {
+    const confirmed = await confirm({
+      title: t('settingsPage.sshPublicKeyDeleteConfirm', { defaultValue: 'Delete this SSH public key?' }),
+      description: t('settingsPage.sshPublicKeyDeleteDescription', { defaultValue: 'Clients using this key can no longer sign in to the native SSH gateway.' }),
+      confirmText: t('settingsPage.deleteSSHPublicKey', { defaultValue: 'Delete SSH key' }),
+      destructive: true,
+    })
+    if (!confirmed) return
+    setSSHPublicKeyBusy(true)
+    try {
+      await apiRequest(`/api/auth/ssh-keys/${item.id}`, { method: 'DELETE' })
+      await loadSSHPublicKeys()
+      app.showToast(t('settingsPage.sshPublicKeyDeleted', { defaultValue: 'SSH public key deleted.' }))
+    } catch (error) {
+      app.handleApiError(error)
+    } finally {
+      setSSHPublicKeyBusy(false)
     }
   }
 
@@ -927,6 +985,72 @@ export function SettingsPage() {
             <RotateCcw className='size-4' />
             {t('reset')}
           </Button>
+        </div>
+      </CardStaggerItem>
+
+      <CardStaggerItem className='grid gap-4 rounded-xl border border-border bg-card p-5 shadow-sm lg:grid-cols-[0.85fr_1.15fr]'>
+        <div className='flex min-w-0 items-start gap-3'>
+          <span className='grid size-12 shrink-0 place-items-center rounded-full bg-primary text-primary-foreground'>
+            <KeyRound className='size-5' />
+          </span>
+          <div className='min-w-0'>
+            <div className='flex flex-wrap items-center gap-2'>
+              <h2 className='truncate text-base font-semibold'>{t('settingsPage.sshPublicKeysTitle', { defaultValue: 'SSH public keys' })}</h2>
+              <Badge tone={sshPublicKeys.length > 0 ? 'success' : 'warning'}>
+                {sshPublicKeys.length > 0
+                  ? t('settingsPage.sshPublicKeysCount', { defaultValue: '{{count}} registered', count: sshPublicKeys.length })
+                  : t('settingsPage.sshPublicKeysEmptyStatus', { defaultValue: 'Not registered' })}
+              </Badge>
+            </div>
+            <p className='mt-1 max-w-lg text-sm leading-6 text-muted-foreground'>
+              {t('settingsPage.sshPublicKeysDescription', { defaultValue: 'Register OpenSSH public keys for native SSH gateway login. Private keys remain on your device.' })}
+            </p>
+          </div>
+        </div>
+        <div className='grid gap-3'>
+          {sshPublicKeys.length ? (
+            <div className='grid gap-2'>
+              {sshPublicKeys.map((item) => (
+                <div key={item.id} className='flex min-w-0 flex-wrap items-center justify-between gap-3 rounded-lg border border-border bg-background/70 p-3'>
+                  <div className='min-w-0 flex-1'>
+                    <div className='flex flex-wrap items-center gap-2'>
+                      <span className='truncate text-sm font-medium'>{item.name}</span>
+                      <Badge>{item.type}</Badge>
+                    </div>
+                    <div className='mt-1 truncate font-mono text-xs text-muted-foreground' title={item.fingerprint}>{item.fingerprint}</div>
+                    <div className='mt-1 text-xs text-muted-foreground'>{t('createdAt')}: {formatDate(item.created_at)}</div>
+                  </div>
+                  <Button type='button' variant='ghost' size='icon-sm' onClick={() => void deleteSSHPublicKey(item)} disabled={sshPublicKeyBusy} aria-label={t('settingsPage.deleteSSHPublicKey', { defaultValue: 'Delete SSH key' })}>
+                    <Trash2 className='size-4' />
+                  </Button>
+                </div>
+              ))}
+            </div>
+          ) : (
+            <div className='rounded-lg border border-dashed border-border bg-background/70 p-3 text-sm text-muted-foreground'>
+              {t('settingsPage.sshPublicKeysEmpty', { defaultValue: 'No SSH public keys are registered for this account.' })}
+            </div>
+          )}
+          <div className='grid gap-3 rounded-lg border border-border bg-background/70 p-3'>
+            <Field label={t('settingsPage.sshPublicKeyName', { defaultValue: 'Key name' })}>
+              <Input value={sshPublicKeyForm.name} onChange={(event) => {
+                const value = event.currentTarget.value
+                setSSHPublicKeyForm((current) => ({ ...current, name: value }))
+              }} placeholder={t('settingsPage.sshPublicKeyNamePlaceholder', { defaultValue: 'Work laptop' })} />
+            </Field>
+            <Field label={t('settingsPage.sshPublicKeyValue', { defaultValue: 'OpenSSH public key' })}>
+              <Textarea className='min-h-24 font-mono text-xs' value={sshPublicKeyForm.publicKey} onChange={(event) => {
+                const value = event.currentTarget.value
+                setSSHPublicKeyForm((current) => ({ ...current, publicKey: value }))
+              }} placeholder='ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAA... user@host' />
+            </Field>
+            <div className='flex justify-end'>
+              <Button variant='primary' onClick={() => void registerSSHPublicKey()} disabled={sshPublicKeyBusy || !sshPublicKeyForm.publicKey.trim()}>
+                <KeyRound className='size-4' />
+                {sshPublicKeyBusy ? t('saving') : t('settingsPage.registerSSHPublicKey', { defaultValue: 'Register SSH key' })}
+              </Button>
+            </div>
+          </div>
         </div>
       </CardStaggerItem>
 

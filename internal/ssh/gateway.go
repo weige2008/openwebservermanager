@@ -2,6 +2,7 @@ package sshsession
 
 import (
 	"bufio"
+	"bytes"
 	"context"
 	"crypto/ed25519"
 	"crypto/rand"
@@ -56,6 +57,14 @@ type gatewayUser struct {
 	Role        string
 	IsAdmin     bool
 	DirectAsset string
+}
+
+type gatewayAuthentication struct {
+	Username      string
+	DirectAsset   string
+	ClientIP      string
+	FailureKey    string
+	FailurePolicy gatewayLoginFailurePolicy
 }
 
 type gatewayLoginRecord struct {
@@ -221,6 +230,8 @@ func (g *Gateway) serve(ctx context.Context, signer ssh.Signer) {
 	if !g.cfg.DisablePasswordAuth {
 		serverConfig.PasswordCallback = g.passwordCallback
 	}
+	serverConfig.PublicKeyCallback = g.publicKeyCallback
+	serverConfig.VerifiedPublicKeyCallback = g.verifiedPublicKeyCallback
 	serverConfig.AddHostKey(signer)
 	go func() {
 		<-ctx.Done()
@@ -245,67 +256,28 @@ func (g *Gateway) serve(ctx context.Context, signer ssh.Signer) {
 }
 
 func (g *Gateway) passwordCallback(meta ssh.ConnMetadata, password []byte) (*ssh.Permissions, error) {
-	username, directAsset := splitGatewayUsername(strings.TrimSpace(meta.User()))
-	clientIP := remoteIP(meta.RemoteAddr())
-	failureKey := clientIP + ":" + strings.ToLower(username)
-	failurePolicy, err := g.gatewayLoginFailurePolicy()
+	auth, err := g.prepareGatewayAuthentication(meta)
 	if err != nil {
-		g.auditGatewayLoginFailure(meta, username, "ssh_gateway.login.failure_policy_load_failed", err)
-		return nil, fmt.Errorf("load ssh gateway failure policy: %w", err)
+		return nil, err
 	}
-	allowed, reason, err := g.gatewayLoginPolicyAllows(username, clientIP)
-	if err != nil {
-		g.auditGatewayLoginFailure(meta, username, "ssh_gateway.login.policy_load_failed", err)
-		return nil, fmt.Errorf("load ssh gateway login policy: %w", err)
-	}
-	if !allowed {
-		if logErr := g.recordGatewayLoginDenied(meta, username, "policy", reason); logErr != nil {
-			g.auditGatewayLoginFailure(meta, username, "ssh_gateway.login.denied_log.persist_failed", logErr)
-			return nil, errors.Join(errors.New(reason), fmt.Errorf("persist denied login audit: %w", logErr))
-		}
-		return nil, errors.New(reason)
-	}
-	locked, reason, err := g.gatewayLoginLocked(username, clientIP)
-	if err != nil {
-		g.auditGatewayLoginFailure(meta, username, "ssh_gateway.login.lock_load_failed", err)
-		return nil, fmt.Errorf("load ssh gateway login lock: %w", err)
-	}
-	if locked {
-		if logErr := g.recordGatewayLoginDenied(meta, username, "lock", reason); logErr != nil {
-			g.auditGatewayLoginFailure(meta, username, "ssh_gateway.login.denied_log.persist_failed", logErr)
-			return nil, errors.Join(errors.New(reason), fmt.Errorf("persist denied login audit: %w", logErr))
-		}
-		return nil, errors.New(reason)
-	}
-	if retryAfter, locked, err := g.gatewayRuntimeLoginLocked(failureKey, failurePolicy); err != nil {
-		g.auditGatewayLoginFailure(meta, username, "ssh_gateway.login.failure_state_load_failed", err)
-		return nil, fmt.Errorf("load ssh gateway login failure state: %w", err)
-	} else if locked {
-		reason := "too many failed login attempts; retry after " + retryAfter.Round(time.Second).String()
-		if logErr := g.recordGatewayLoginDenied(meta, username, "lock", reason); logErr != nil {
-			g.auditGatewayLoginFailure(meta, username, "ssh_gateway.login.denied_log.persist_failed", logErr)
-			return nil, errors.Join(errors.New(reason), fmt.Errorf("persist denied login audit: %w", logErr))
-		}
-		return nil, errors.New(reason)
-	}
-	admin, ok, err := g.cfg.Store.VerifyAdmin(username, string(password))
+	admin, ok, err := g.cfg.Store.VerifyAdmin(auth.Username, string(password))
 	if err != nil {
 		return nil, err
 	}
 	if !ok {
-		admin, ok, err = g.cfg.Store.VerifyPlatformUser(username, string(password))
+		admin, ok, err = g.cfg.Store.VerifyPlatformUser(auth.Username, string(password))
 		if err != nil {
 			return nil, err
 		}
 	}
 	if !ok {
 		authErr := errors.New("invalid username or password")
-		if logErr := g.recordGatewayLoginFailure(meta, username, authErr.Error()); logErr != nil {
-			g.auditGatewayLoginFailure(meta, username, "ssh_gateway.login.failed_log.persist_failed", logErr)
+		if logErr := g.recordGatewayLoginFailure(meta, auth.Username, authErr.Error()); logErr != nil {
+			g.auditGatewayLoginFailure(meta, auth.Username, "ssh_gateway.login.failed_log.persist_failed", logErr)
 			return nil, errors.Join(authErr, fmt.Errorf("persist failed login audit: %w", logErr))
 		}
-		if _, failureErr := g.gatewayRecordLoginFailure(failureKey, username, clientIP, failurePolicy); failureErr != nil {
-			g.auditGatewayLoginFailure(meta, username, "ssh_gateway.login.failure_state.persist_failed", failureErr)
+		if _, failureErr := g.gatewayRecordLoginFailure(auth.FailureKey, auth.Username, auth.ClientIP, auth.FailurePolicy); failureErr != nil {
+			g.auditGatewayLoginFailure(meta, auth.Username, "ssh_gateway.login.failure_state.persist_failed", failureErr)
 			return nil, errors.Join(authErr, fmt.Errorf("persist login failure state: %w", failureErr))
 		}
 		return nil, authErr
@@ -315,8 +287,132 @@ func (g *Gateway) passwordCallback(meta ssh.ConnMetadata, password []byte) (*ssh
 		Username:    admin.Username,
 		Role:        admin.Role,
 		IsAdmin:     gatewayRoleIsAdmin(admin.Role),
-		DirectAsset: directAsset,
+		DirectAsset: auth.DirectAsset,
 	}
+	return g.continueGatewayAuthentication(meta, user, auth, "password", nil)
+}
+
+func (g *Gateway) prepareGatewayAuthentication(meta ssh.ConnMetadata) (gatewayAuthentication, error) {
+	username, directAsset := splitGatewayUsername(strings.TrimSpace(meta.User()))
+	clientIP := remoteIP(meta.RemoteAddr())
+	auth := gatewayAuthentication{Username: username, DirectAsset: directAsset, ClientIP: clientIP, FailureKey: clientIP + ":" + strings.ToLower(username)}
+	policy, err := g.gatewayLoginFailurePolicy()
+	if err != nil {
+		g.auditGatewayLoginFailure(meta, username, "ssh_gateway.login.failure_policy_load_failed", err)
+		return gatewayAuthentication{}, fmt.Errorf("load ssh gateway failure policy: %w", err)
+	}
+	auth.FailurePolicy = policy
+	allowed, reason, err := g.gatewayLoginPolicyAllows(username, clientIP)
+	if err != nil {
+		g.auditGatewayLoginFailure(meta, username, "ssh_gateway.login.policy_load_failed", err)
+		return gatewayAuthentication{}, fmt.Errorf("load ssh gateway login policy: %w", err)
+	}
+	if !allowed {
+		if logErr := g.recordGatewayLoginDenied(meta, username, "policy", reason); logErr != nil {
+			g.auditGatewayLoginFailure(meta, username, "ssh_gateway.login.denied_log.persist_failed", logErr)
+			return gatewayAuthentication{}, errors.Join(errors.New(reason), fmt.Errorf("persist denied login audit: %w", logErr))
+		}
+		return gatewayAuthentication{}, errors.New(reason)
+	}
+	locked, reason, err := g.gatewayLoginLocked(username, clientIP)
+	if err != nil {
+		g.auditGatewayLoginFailure(meta, username, "ssh_gateway.login.lock_load_failed", err)
+		return gatewayAuthentication{}, fmt.Errorf("load ssh gateway login lock: %w", err)
+	}
+	if locked {
+		if logErr := g.recordGatewayLoginDenied(meta, username, "lock", reason); logErr != nil {
+			g.auditGatewayLoginFailure(meta, username, "ssh_gateway.login.denied_log.persist_failed", logErr)
+			return gatewayAuthentication{}, errors.Join(errors.New(reason), fmt.Errorf("persist denied login audit: %w", logErr))
+		}
+		return gatewayAuthentication{}, errors.New(reason)
+	}
+	if retryAfter, locked, err := g.gatewayRuntimeLoginLocked(auth.FailureKey, policy); err != nil {
+		g.auditGatewayLoginFailure(meta, username, "ssh_gateway.login.failure_state_load_failed", err)
+		return gatewayAuthentication{}, fmt.Errorf("load ssh gateway login failure state: %w", err)
+	} else if locked {
+		reason := "too many failed login attempts; retry after " + retryAfter.Round(time.Second).String()
+		if logErr := g.recordGatewayLoginDenied(meta, username, "lock", reason); logErr != nil {
+			g.auditGatewayLoginFailure(meta, username, "ssh_gateway.login.denied_log.persist_failed", logErr)
+			return gatewayAuthentication{}, errors.Join(errors.New(reason), fmt.Errorf("persist denied login audit: %w", logErr))
+		}
+		return gatewayAuthentication{}, errors.New(reason)
+	}
+	return auth, nil
+}
+
+func (g *Gateway) publicKeyCallback(meta ssh.ConnMetadata, key ssh.PublicKey) (*ssh.Permissions, error) {
+	auth, err := g.prepareGatewayAuthentication(meta)
+	if err != nil {
+		return nil, err
+	}
+	account, ok, err := g.cfg.Store.PlatformUser(auth.Username)
+	if err != nil {
+		return nil, err
+	}
+	keyItem, matched, err := g.gatewayPublicKey(account.UserID, key)
+	if err != nil {
+		return nil, err
+	}
+	if !ok || !matched {
+		authErr := errors.New("invalid SSH public key")
+		if logErr := g.recordGatewayLoginFailure(meta, auth.Username, authErr.Error()); logErr != nil {
+			g.auditGatewayLoginFailure(meta, auth.Username, "ssh_gateway.login.failed_log.persist_failed", logErr)
+			return nil, errors.Join(authErr, fmt.Errorf("persist failed login audit: %w", logErr))
+		}
+		return nil, authErr
+	}
+	return &ssh.Permissions{Extensions: map[string]string{
+		"provisional_user_id":      account.UserID,
+		"provisional_direct_asset": auth.DirectAsset,
+		"ssh_key_id":               keyItem.ID,
+		"ssh_key_fingerprint":      firstMetadataString(keyItem.Metadata, "fingerprint"),
+	}}, nil
+}
+
+func (g *Gateway) verifiedPublicKeyCallback(meta ssh.ConnMetadata, _ ssh.PublicKey, permissions *ssh.Permissions, _ string) (*ssh.Permissions, error) {
+	if permissions == nil || permissions.Extensions == nil {
+		return nil, errors.New("SSH public key authentication state is unavailable")
+	}
+	auth, err := g.prepareGatewayAuthentication(meta)
+	if err != nil {
+		return nil, err
+	}
+	account, ok, err := g.cfg.Store.PlatformUser(auth.Username)
+	if err != nil {
+		return nil, err
+	}
+	if !ok || account.UserID != permissions.Extensions["provisional_user_id"] {
+		return nil, errors.New("SSH public key account is no longer available")
+	}
+	auth.DirectAsset = permissions.Extensions["provisional_direct_asset"]
+	user := gatewayUser{UserID: account.UserID, Username: account.Username, Role: account.Role, IsAdmin: gatewayRoleIsAdmin(account.Role), DirectAsset: auth.DirectAsset}
+	return g.continueGatewayAuthentication(meta, user, auth, "public_key", map[string]string{
+		"ssh_key_id":          permissions.Extensions["ssh_key_id"],
+		"ssh_key_fingerprint": permissions.Extensions["ssh_key_fingerprint"],
+	})
+}
+
+func (g *Gateway) gatewayPublicKey(userID string, offered ssh.PublicKey) (model.PlatformItem, bool, error) {
+	if strings.TrimSpace(userID) == "" || offered == nil {
+		return model.PlatformItem{}, false, nil
+	}
+	items, err := g.cfg.Store.ListPlatformItems("ssh_public_keys")
+	if err != nil {
+		return model.PlatformItem{}, false, err
+	}
+	for _, item := range items {
+		if item.OwnerID != userID || !platformItemEnabled(item) {
+			continue
+		}
+		stored, _, _, _, err := ssh.ParseAuthorizedKey([]byte(firstMetadataString(item.Metadata, "public_key")))
+		if err == nil && stored != nil && bytes.Equal(stored.Marshal(), offered.Marshal()) {
+			return item, true, nil
+		}
+	}
+	return model.PlatformItem{}, false, nil
+}
+
+func (g *Gateway) continueGatewayAuthentication(meta ssh.ConnMetadata, user gatewayUser, auth gatewayAuthentication, authMethod string, authMetadata map[string]string) (*ssh.Permissions, error) {
 	forceMFA, err := g.gatewayForceMFAEnabled()
 	if err != nil {
 		g.auditGatewayLoginFailure(meta, user.UserID, "ssh_gateway.login.mfa_policy_load_failed", err)
@@ -338,14 +434,14 @@ func (g *Gateway) passwordCallback(meta ssh.ConnMetadata, password []byte) (*ssh
 		}
 		return nil, &ssh.PartialSuccessError{Next: ssh.ServerAuthCallbacks{
 			KeyboardInteractiveCallback: func(nextMeta ssh.ConnMetadata, challenge ssh.KeyboardInteractiveChallenge) (*ssh.Permissions, error) {
-				return g.keyboardInteractiveMFACallback(nextMeta, challenge, user, profile, failureKey, failurePolicy)
+				return g.keyboardInteractiveMFACallback(nextMeta, challenge, user, profile, auth, authMethod, authMetadata)
 			},
 		}}
 	}
-	return g.completeGatewayLogin(meta, user, failureKey)
+	return g.completeGatewayLogin(meta, user, auth.FailureKey, authMethod, authMetadata)
 }
 
-func (g *Gateway) keyboardInteractiveMFACallback(meta ssh.ConnMetadata, challenge ssh.KeyboardInteractiveChallenge, user gatewayUser, profile store.MFAProfile, failureKey string, failurePolicy gatewayLoginFailurePolicy) (*ssh.Permissions, error) {
+func (g *Gateway) keyboardInteractiveMFACallback(meta ssh.ConnMetadata, challenge ssh.KeyboardInteractiveChallenge, user gatewayUser, profile store.MFAProfile, auth gatewayAuthentication, authMethod string, authMetadata map[string]string) (*ssh.Permissions, error) {
 	clientIP := remoteIP(meta.RemoteAddr())
 	if locked, reason, err := g.gatewayLoginLocked(user.Username, clientIP); err != nil {
 		g.auditGatewayLoginFailure(meta, user.UserID, "ssh_gateway.login.lock_load_failed", err)
@@ -353,7 +449,7 @@ func (g *Gateway) keyboardInteractiveMFACallback(meta ssh.ConnMetadata, challeng
 	} else if locked {
 		return nil, errors.New(reason)
 	}
-	if retryAfter, locked, err := g.gatewayRuntimeLoginLocked(failureKey, failurePolicy); err != nil {
+	if retryAfter, locked, err := g.gatewayRuntimeLoginLocked(auth.FailureKey, auth.FailurePolicy); err != nil {
 		g.auditGatewayLoginFailure(meta, user.UserID, "ssh_gateway.login.failure_state_load_failed", err)
 		return nil, fmt.Errorf("load ssh gateway login failure state: %w", err)
 	} else if locked {
@@ -364,7 +460,7 @@ func (g *Gateway) keyboardInteractiveMFACallback(meta ssh.ConnMetadata, challeng
 		return nil, fmt.Errorf("request SSH gateway MFA response: %w", err)
 	}
 	if len(answers) != 1 {
-		return g.rejectGatewayMFA(meta, user, failureKey, failurePolicy, "invalid MFA response")
+		return g.rejectGatewayMFA(meta, user, auth.FailureKey, auth.FailurePolicy, "invalid MFA response")
 	}
 	code := strings.TrimSpace(answers[0])
 	method := "totp"
@@ -378,9 +474,9 @@ func (g *Gateway) keyboardInteractiveMFACallback(meta ssh.ConnMetadata, challeng
 		}
 	}
 	if !verified {
-		return g.rejectGatewayMFA(meta, user, failureKey, failurePolicy, "invalid MFA code")
+		return g.rejectGatewayMFA(meta, user, auth.FailureKey, auth.FailurePolicy, "invalid MFA code")
 	}
-	permissions, err := g.completeGatewayLogin(meta, user, failureKey)
+	permissions, err := g.completeGatewayLogin(meta, user, auth.FailureKey, authMethod, authMetadata)
 	if err != nil {
 		return nil, err
 	}
@@ -401,12 +497,12 @@ func (g *Gateway) rejectGatewayMFA(meta ssh.ConnMetadata, user gatewayUser, fail
 	return nil, authErr
 }
 
-func (g *Gateway) completeGatewayLogin(meta ssh.ConnMetadata, user gatewayUser, failureKey string) (*ssh.Permissions, error) {
+func (g *Gateway) completeGatewayLogin(meta ssh.ConnMetadata, user gatewayUser, failureKey, authMethod string, authMetadata map[string]string) (*ssh.Permissions, error) {
 	if err := g.gatewayResetLoginFailure(failureKey); err != nil {
 		g.auditGatewayLoginFailure(meta, user.UserID, "ssh_gateway.login.failure_state.reset_failed", err)
 		return nil, fmt.Errorf("reset ssh gateway login failure state: %w", err)
 	}
-	if err := g.recordGatewayLogin(meta, user); err != nil {
+	if err := g.recordGatewayLogin(meta, user, authMethod, authMetadata); err != nil {
 		g.auditGatewayLoginFailure(meta, user.UserID, "ssh_gateway.login.persist_failed", err)
 		return nil, fmt.Errorf("persist ssh gateway login: %w", err)
 	}
@@ -418,6 +514,7 @@ func (g *Gateway) completeGatewayLogin(meta ssh.ConnMetadata, user gatewayUser, 
 		"client_ip":    remoteIP(meta.RemoteAddr()),
 		"login_time":   time.Now().UTC().Format(time.RFC3339Nano),
 		"direct_asset": user.DirectAsset,
+		"auth_method":  authMethod,
 	}}, nil
 }
 
@@ -443,25 +540,38 @@ func (g *Gateway) gatewayForceMFAEnabled() (bool, error) {
 	return false, nil
 }
 
-func (g *Gateway) recordGatewayLogin(meta ssh.ConnMetadata, user gatewayUser) error {
+func (g *Gateway) recordGatewayLogin(meta ssh.ConnMetadata, user gatewayUser, authMethod string, authMetadata map[string]string) error {
 	if g == nil || g.cfg.Store == nil {
 		return errors.New("gateway login store is unavailable")
 	}
 	clientIP := remoteIP(meta.RemoteAddr())
+	loginMetadata := map[string]any{
+		"client_ip":   clientIP,
+		"account":     user.Username,
+		"user_agent":  "ssh-gateway",
+		"auth_method": authMethod,
+	}
+	for key, value := range authMetadata {
+		if strings.TrimSpace(value) != "" {
+			loginMetadata[key] = value
+		}
+	}
 	loginLog, err := g.cfg.Store.CreatePlatformItem("login_logs", model.PlatformItemRequest{
 		Name:        user.Username,
 		Type:        "ssh_gateway",
 		Status:      "success",
 		OwnerID:     user.UserID,
 		Description: "signed in to native ssh gateway",
-		Metadata: map[string]any{
-			"client_ip":  clientIP,
-			"account":    user.Username,
-			"user_agent": "ssh-gateway",
-		},
+		Metadata:    loginMetadata,
 	})
 	if err != nil {
 		return fmt.Errorf("create gateway login log: %w", err)
+	}
+	operationMetadata := map[string]any{"client_ip": clientIP, "account": user.Username, "auth_method": authMethod}
+	for key, value := range authMetadata {
+		if strings.TrimSpace(value) != "" {
+			operationMetadata[key] = value
+		}
 	}
 	operationLog, err := g.cfg.Store.CreatePlatformItem("operation_logs", model.PlatformItemRequest{
 		Name:        "ssh_gateway.login",
@@ -471,10 +581,7 @@ func (g *Gateway) recordGatewayLogin(meta ssh.ConnMetadata, user gatewayUser) er
 		OwnerID:     user.UserID,
 		TargetID:    "ssh_gateway",
 		Description: "native ssh gateway login",
-		Metadata: map[string]any{
-			"client_ip": clientIP,
-			"account":   user.Username,
-		},
+		Metadata:    operationMetadata,
 	})
 	if err != nil {
 		return errors.Join(fmt.Errorf("create gateway operation log: %w", err), g.rollbackGatewayLoginRecords(meta, user.UserID, gatewayLoginRecord{Collection: "login_logs", ID: loginLog.ID}))

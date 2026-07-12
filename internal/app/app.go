@@ -249,6 +249,8 @@ func (s *Server) serveAPI(w http.ResponseWriter, r *http.Request) {
 		s.handleAuthenticatedMFA(w, r)
 	case strings.HasPrefix(r.URL.Path, "/api/auth/passkeys"):
 		s.handleAuthenticatedPasskeys(w, r)
+	case strings.HasPrefix(r.URL.Path, "/api/auth/ssh-keys"):
+		s.handleAuthenticatedSSHPublicKeys(w, r)
 	case r.Method == http.MethodPost && r.URL.Path == "/api/auth/password":
 		s.handlePasswordChange(w, r)
 	case !s.authorizeAPI(w, r):

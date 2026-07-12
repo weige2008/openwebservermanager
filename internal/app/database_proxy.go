@@ -157,10 +157,21 @@ func (m *DatabaseProxyManager) acceptLoop(listener net.Listener, target string) 
 func (m *DatabaseProxyManager) handleConnection(client net.Conn, target string) {
 	started := time.Now()
 	remote := client.RemoteAddr().String()
+	auditItem, err := beginProxyConnectionAudit(m.store, proxyConnectionAuditSpec{
+		Name:        "database_proxy.connect",
+		Type:        "database_proxy",
+		Description: "proxied database TCP connection",
+		Protocol:    model.ProtocolDatabase,
+	}, target, remote)
+	if err != nil {
+		_ = client.Close()
+		auditProxyLogPersistFailure(m.store, "database_proxy.log.persist_failed", model.ProtocolDatabase, target, remote, "persist initial database proxy connection log failed: "+err.Error())
+		return
+	}
 	upstream, err := net.DialTimeout("tcp", target, 15*time.Second)
 	if err != nil {
 		_ = client.Close()
-		m.auditConnection("failed", remote, target, 0, 0, time.Since(started), err.Error())
+		m.finishAuditConnection(auditItem, "failed", remote, target, 0, 0, time.Since(started), err.Error())
 		return
 	}
 	atomic.AddInt64(&m.active, 1)
@@ -185,29 +196,12 @@ func (m *DatabaseProxyManager) handleConnection(client net.Conn, target string) 
 	_ = client.Close()
 	_ = upstream.Close()
 	<-done
-	m.auditConnection("success", remote, target, atomic.LoadInt64(&clientToTarget), atomic.LoadInt64(&targetToClient), time.Since(started), "")
+	m.finishAuditConnection(auditItem, "success", remote, target, atomic.LoadInt64(&clientToTarget), atomic.LoadInt64(&targetToClient), time.Since(started), "")
 }
 
-func (m *DatabaseProxyManager) auditConnection(status, remote, target string, clientToTarget, targetToClient int64, duration time.Duration, errorText string) {
-	if m.store == nil {
-		return
-	}
-	if _, err := m.store.CreatePlatformItem("operation_logs", model.PlatformItemRequest{
-		Name:        "database_proxy.connect",
-		Type:        "database_proxy",
-		Status:      status,
-		TargetID:    target,
-		Description: "proxied database TCP connection",
-		Metadata: map[string]any{
-			"client":                 remote,
-			"target":                 target,
-			"client_to_target_bytes": clientToTarget,
-			"target_to_client_bytes": targetToClient,
-			"duration_ms":            duration.Milliseconds(),
-			"error":                  errorText,
-		},
-	}); err != nil {
-		auditProxyLogPersistFailure(m.store, "database_proxy.log.persist_failed", model.ProtocolDatabase, target, remote, "persist database proxy connection log failed: "+err.Error())
+func (m *DatabaseProxyManager) finishAuditConnection(item model.PlatformItem, status, remote, target string, clientToTarget, targetToClient int64, duration time.Duration, errorText string) {
+	if err := finishProxyConnectionAudit(m.store, item, status, clientToTarget, targetToClient, duration, errorText); err != nil {
+		auditProxyLogPersistFailure(m.store, "database_proxy.log.finalize_failed", model.ProtocolDatabase, target, remote, "finalize database proxy connection log failed: "+err.Error())
 	}
 }
 

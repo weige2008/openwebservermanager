@@ -12522,19 +12522,48 @@ func TestRDPProxyRuntimeForwardsAllowedTarget(t *testing.T) {
 		if _, err := blockedConn.Write([]byte("audit blocked rdp\n")); err != nil {
 			t.Fatalf("write rdp proxy with blocked audit log: %v", err)
 		}
+		_ = blockedConn.SetReadDeadline(time.Now().Add(2 * time.Second))
 		blockedLine, err := bufio.NewReader(blockedConn).ReadString('\n')
-		if err != nil {
-			t.Fatalf("read rdp proxy response with blocked audit log: %v", err)
-		}
 		if err := blockedConn.Close(); err != nil {
 			t.Fatalf("close rdp proxy conn with blocked audit log: %v", err)
 		}
-		if blockedLine != "echo:audit blocked rdp\n" {
-			t.Fatalf("rdp proxy response with blocked audit log = %q", blockedLine)
+		if err == nil || blockedLine != "" {
+			t.Fatalf("rdp proxy remained usable with blocked audit log: line=%q err=%v", blockedLine, err)
+		}
+		select {
+		case got := <-received:
+			t.Fatalf("rdp proxy reached upstream before audit persisted: %q", got)
+		case <-time.After(300 * time.Millisecond):
 		}
 		waitForCondition(t, 2*time.Second, func() bool {
 			return coreAuditLogsContainAction(handler.cfg.Store, "rdp_proxy.log.persist_failed")
 		})
+	}()
+
+	func() {
+		removeFinalizeBlocker := blockPlatformItemCollectionStatusUpdate(t, handler.cfg.Store, "operation_logs", "success")
+		defer removeFinalizeBlocker()
+		finalizeConn, err := net.DialTimeout("tcp", rdpProxy.Address(), 2*time.Second)
+		if err != nil {
+			t.Fatalf("dial rdp proxy with blocked audit finalization: %v", err)
+		}
+		if _, err := finalizeConn.Write([]byte("audit finalize rdp\n")); err != nil {
+			t.Fatalf("write rdp proxy with blocked audit finalization: %v", err)
+		}
+		finalizeLine, err := bufio.NewReader(finalizeConn).ReadString('\n')
+		if err != nil || finalizeLine != "echo:audit finalize rdp\n" {
+			t.Fatalf("rdp proxy finalization test response = %q err=%v", finalizeLine, err)
+		}
+		if err := finalizeConn.Close(); err != nil {
+			t.Fatalf("close rdp proxy with blocked audit finalization: %v", err)
+		}
+		waitForCondition(t, 2*time.Second, func() bool {
+			return coreAuditLogsContainAction(handler.cfg.Store, "rdp_proxy.log.finalize_failed")
+		})
+		logsRec := assertStatus(t, handler, http.MethodGet, "/api/admin/audit/operation-logs", nil, cookie, http.StatusOK)
+		if !strings.Contains(logsRec.Body.String(), `"name":"rdp_proxy.connect"`) || !strings.Contains(logsRec.Body.String(), `"status":"pending"`) {
+			t.Fatalf("rdp proxy finalization failure did not retain pending audit record: %s", logsRec.Body.String())
+		}
 	}()
 
 	assertStatus(t, handler, http.MethodPost, "/api/admin/proxy-services", map[string]any{
@@ -12625,19 +12654,48 @@ func TestDatabaseProxyRuntimeForwardsAllowedTarget(t *testing.T) {
 		if _, err := blockedConn.Write([]byte("audit blocked database\n")); err != nil {
 			t.Fatalf("write database proxy with blocked audit log: %v", err)
 		}
+		_ = blockedConn.SetReadDeadline(time.Now().Add(2 * time.Second))
 		blockedLine, err := bufio.NewReader(blockedConn).ReadString('\n')
-		if err != nil {
-			t.Fatalf("read database proxy response with blocked audit log: %v", err)
-		}
 		if err := blockedConn.Close(); err != nil {
 			t.Fatalf("close database proxy conn with blocked audit log: %v", err)
 		}
-		if blockedLine != "echo:audit blocked database\n" {
-			t.Fatalf("database proxy response with blocked audit log = %q", blockedLine)
+		if err == nil || blockedLine != "" {
+			t.Fatalf("database proxy remained usable with blocked audit log: line=%q err=%v", blockedLine, err)
+		}
+		select {
+		case got := <-received:
+			t.Fatalf("database proxy reached upstream before audit persisted: %q", got)
+		case <-time.After(300 * time.Millisecond):
 		}
 		waitForCondition(t, 2*time.Second, func() bool {
 			return coreAuditLogsContainAction(handler.cfg.Store, "database_proxy.log.persist_failed")
 		})
+	}()
+
+	func() {
+		removeFinalizeBlocker := blockPlatformItemCollectionStatusUpdate(t, handler.cfg.Store, "operation_logs", "success")
+		defer removeFinalizeBlocker()
+		finalizeConn, err := net.DialTimeout("tcp", databaseProxy.Address(), 2*time.Second)
+		if err != nil {
+			t.Fatalf("dial database proxy with blocked audit finalization: %v", err)
+		}
+		if _, err := finalizeConn.Write([]byte("audit finalize database\n")); err != nil {
+			t.Fatalf("write database proxy with blocked audit finalization: %v", err)
+		}
+		finalizeLine, err := bufio.NewReader(finalizeConn).ReadString('\n')
+		if err != nil || finalizeLine != "echo:audit finalize database\n" {
+			t.Fatalf("database proxy finalization test response = %q err=%v", finalizeLine, err)
+		}
+		if err := finalizeConn.Close(); err != nil {
+			t.Fatalf("close database proxy with blocked audit finalization: %v", err)
+		}
+		waitForCondition(t, 2*time.Second, func() bool {
+			return coreAuditLogsContainAction(handler.cfg.Store, "database_proxy.log.finalize_failed")
+		})
+		logsRec := assertStatus(t, handler, http.MethodGet, "/api/admin/audit/operation-logs", nil, cookie, http.StatusOK)
+		if !strings.Contains(logsRec.Body.String(), `"name":"database_proxy.connect"`) || !strings.Contains(logsRec.Body.String(), `"status":"pending"`) {
+			t.Fatalf("database proxy finalization failure did not retain pending audit record: %s", logsRec.Body.String())
+		}
 	}()
 
 	assertStatus(t, handler, http.MethodPost, "/api/admin/proxy-services", map[string]any{

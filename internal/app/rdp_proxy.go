@@ -157,10 +157,21 @@ func (m *RDPProxyManager) acceptLoop(listener net.Listener, target string) {
 func (m *RDPProxyManager) handleConnection(client net.Conn, target string) {
 	started := time.Now()
 	remote := client.RemoteAddr().String()
+	auditItem, err := beginProxyConnectionAudit(m.store, proxyConnectionAuditSpec{
+		Name:        "rdp_proxy.connect",
+		Type:        "rdp_proxy",
+		Description: "proxied rdp TCP connection",
+		Protocol:    model.ProtocolRDP,
+	}, target, remote)
+	if err != nil {
+		_ = client.Close()
+		auditProxyLogPersistFailure(m.store, "rdp_proxy.log.persist_failed", model.ProtocolRDP, target, remote, "persist initial rdp proxy connection log failed: "+err.Error())
+		return
+	}
 	upstream, err := net.DialTimeout("tcp", target, 15*time.Second)
 	if err != nil {
 		_ = client.Close()
-		m.auditConnection("failed", remote, target, 0, 0, time.Since(started), err.Error())
+		m.finishAuditConnection(auditItem, "failed", remote, target, 0, 0, time.Since(started), err.Error())
 		return
 	}
 	atomic.AddInt64(&m.active, 1)
@@ -185,30 +196,12 @@ func (m *RDPProxyManager) handleConnection(client net.Conn, target string) {
 	_ = client.Close()
 	_ = upstream.Close()
 	<-done
-	m.auditConnection("success", remote, target, atomic.LoadInt64(&clientToTarget), atomic.LoadInt64(&targetToClient), time.Since(started), "")
+	m.finishAuditConnection(auditItem, "success", remote, target, atomic.LoadInt64(&clientToTarget), atomic.LoadInt64(&targetToClient), time.Since(started), "")
 }
 
-func (m *RDPProxyManager) auditConnection(status, remote, target string, clientToTarget, targetToClient int64, duration time.Duration, errorText string) {
-	if m.store == nil {
-		return
-	}
-	if _, err := m.store.CreatePlatformItem("operation_logs", model.PlatformItemRequest{
-		Name:        "rdp_proxy.connect",
-		Type:        "rdp_proxy",
-		Status:      status,
-		Protocol:    model.ProtocolRDP,
-		TargetID:    target,
-		Description: "proxied rdp TCP connection",
-		Metadata: map[string]any{
-			"client":                 remote,
-			"target":                 target,
-			"client_to_target_bytes": clientToTarget,
-			"target_to_client_bytes": targetToClient,
-			"duration_ms":            duration.Milliseconds(),
-			"error":                  errorText,
-		},
-	}); err != nil {
-		auditProxyLogPersistFailure(m.store, "rdp_proxy.log.persist_failed", model.ProtocolRDP, target, remote, "persist rdp proxy connection log failed: "+err.Error())
+func (m *RDPProxyManager) finishAuditConnection(item model.PlatformItem, status, remote, target string, clientToTarget, targetToClient int64, duration time.Duration, errorText string) {
+	if err := finishProxyConnectionAudit(m.store, item, status, clientToTarget, targetToClient, duration, errorText); err != nil {
+		auditProxyLogPersistFailure(m.store, "rdp_proxy.log.finalize_failed", model.ProtocolRDP, target, remote, "finalize rdp proxy connection log failed: "+err.Error())
 	}
 }
 

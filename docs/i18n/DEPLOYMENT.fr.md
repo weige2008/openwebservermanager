@@ -99,6 +99,8 @@ sudo systemctl enable --now guacd
 
 Configurez `OPENWEBSERVERMANAGER_GUACD_HOST=127.0.0.1` et `OPENWEBSERVERMANAGER_GUACD_PORT=4822`.
 
+Les versions Linux amd64 et Windows amd64 incluent aussi des runtimes testés dans `runtime/guacd/linux/bin/guacd` et `runtime/guacd/windows/bin/guacd.exe`. Les DLL Cygwin requises sont déjà incluses dans le paquet Windows.
+
 ## Première initialisation
 
 Ouvrez `http://<server-ip>:23876/login` et créez le premier mot de passe administrateur.

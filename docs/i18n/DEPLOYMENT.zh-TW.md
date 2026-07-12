@@ -95,6 +95,8 @@ sudo systemctl enable --now guacd
 
 配置 `OPENWEBSERVERMANAGER_GUACD_HOST=127.0.0.1` 與 `OPENWEBSERVERMANAGER_GUACD_PORT=4822`。
 
+Linux amd64 與 Windows amd64 發行包也內建通過測試的 `runtime/guacd/linux/bin/guacd` 和 `runtime/guacd/windows/bin/guacd.exe`。Windows 所需的 Cygwin DLL 已包含在發行包中。
+
 ## 首次初始化
 
 開啟：

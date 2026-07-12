@@ -211,10 +211,12 @@ OPENWEBSERVERMANAGER_GUACD_HOST=127.0.0.1
 OPENWEBSERVERMANAGER_GUACD_PORT=4822
 ```
 
-如果使用内置运行时，需要放到：
+Linux amd64 和 Windows amd64 Release 包默认包含内置运行时：
 
-- Linux：`runtime/guacd/linux/guacd`
-- Windows：`runtime/guacd/windows/guacd.exe`
+- Linux：`runtime/guacd/linux/bin/guacd`
+- Windows：`runtime/guacd/windows/bin/guacd.exe`
+
+其他架构或自行构建的精简包可继续配置外部 guacd。Windows 内置运行时基于 Cygwin POSIX 兼容层，所需 DLL 已随 Release 一并发布，不需要单独安装 Cygwin。
 
 ## 首次初始化
 

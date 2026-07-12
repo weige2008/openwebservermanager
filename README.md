@@ -73,12 +73,14 @@ RDP 连接依赖 Apache Guacamole `guacd`。
 查找顺序：
 
 1. 如果设置了 `OPENWEBSERVERMANAGER_GUACD_HOST` 和 `OPENWEBSERVERMANAGER_GUACD_PORT`，优先连接外部 guacd。
-2. 否则尝试使用 `runtime/guacd/<goos>/guacd` 或 `guacd.exe`。
+2. 否则尝试使用 `runtime/guacd/<goos>/bin/guacd` 或 `guacd.exe`，同时兼容旧的运行时根目录布局。
 
 预期内置路径：
 
-- Linux：`runtime/guacd/linux/guacd`
-- Windows：`runtime/guacd/windows/guacd.exe`
+- Linux amd64：`runtime/guacd/linux/bin/guacd`
+- Windows amd64：`runtime/guacd/windows/bin/guacd.exe`
+
+官方 Linux amd64 和 Windows amd64 Release 包已内置通过 RDP/VNC 握手测试的运行时。其他架构可通过 `OPENWEBSERVERMANAGER_GUACD_HOST` 和 `OPENWEBSERVERMANAGER_GUACD_PORT` 使用外部 guacd。
 
 RDP 录屏保存到 `data/recordings/{session_id}/`。文件传输 drive 目录保存到 `data/drives/{session_id}/`。
 

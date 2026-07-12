@@ -1,0 +1,503 @@
+diff --git a/src/guacd/connection.c b/src/guacd/connection.c
+index 2c8c00d..64d1419 100644
+--- a/src/guacd/connection.c
++++ b/src/guacd/connection.c
+@@ -32,6 +32,7 @@
+ #include <guacamole/plugin.h>
+ #include <guacamole/protocol.h>
+ #include <guacamole/socket.h>
++#include <guacamole/string.h>
+ #include <guacamole/user.h>
+ 
+ #ifdef ENABLE_SSL
+@@ -321,6 +322,8 @@ static int guacd_route_connection(guacd_proc_map* map, guac_socket* socket) {
+         /* The new process will only be active if the user was added */
+         if (!add_user_failed) {
+ 
++            char* connection_id = guac_strdup(proc->client->connection_id);
++
+             /* Log connection ID */
+             guacd_log(GUAC_LOG_INFO, "Connection ID is \"%s\"",
+                     proc->client->connection_id);
+@@ -329,16 +332,18 @@ static int guacd_route_connection(guacd_proc_map* map, guac_socket* socket) {
+             guacd_proc_map_add(map, proc);
+ 
+             /* Wait for child to finish */
+-            waitpid(proc->pid, NULL, 0);
++            guacd_proc_wait(proc);
+ 
+             /* Remove client */
+-            if (guacd_proc_map_remove(map, proc->client->connection_id) == NULL)
++            if (guacd_proc_map_remove(map, connection_id) == NULL)
+                 guacd_log(GUAC_LOG_ERROR, "Internal failure removing "
+                         "client \"%s\". Client record will never be freed.",
+-                        proc->client->connection_id);
++                        connection_id);
+             else
+                 guacd_log(GUAC_LOG_INFO, "Connection \"%s\" removed.",
+-                        proc->client->connection_id);
++                        connection_id);
++
++            guac_mem_free(connection_id);
+ 
+         }
+ 
+@@ -350,7 +355,8 @@ static int guacd_route_connection(guacd_proc_map* map, guac_socket* socket) {
+         guacd_proc_stop(proc);
+ 
+         /* Free skeleton client */
+-        guac_client_free(proc->client);
++        if (proc->client != NULL)
++            guac_client_free(proc->client);
+ 
+         /* Clean up */
+         close(proc->fd_socket);
+@@ -402,4 +408,3 @@ void* guacd_connection_thread(void* data) {
+     return NULL;
+ 
+ }
+-
+diff --git a/src/guacd/move-fd.c b/src/guacd/move-fd.c
+index 74c98e5..0a995e2 100644
+--- a/src/guacd/move-fd.c
++++ b/src/guacd/move-fd.c
+@@ -21,7 +21,9 @@
+ #include "move-fd.h"
+ 
+ /* Required for CMSG_* macros on BSD */
++#ifndef __CYGWIN__
+ #define __BSD_VISIBLE 1
++#endif
+ 
+ #include <errno.h>
+ #include <fcntl.h>
+@@ -33,6 +35,19 @@
+ 
+ int guacd_send_fd(int sock, int fd) {
+ 
++#ifdef __CYGWIN__
++    /* Cygwin threads share one descriptor table. Passing the descriptor
++     * number is therefore sufficient and avoids unsupported SCM_RIGHTS. */
++    int shared_fd = dup(fd);
++    if (shared_fd < 0)
++        return 0;
++    if (send(sock, &shared_fd, sizeof(shared_fd), 0) != sizeof(shared_fd)) {
++        close(shared_fd);
++        return 0;
++    }
++    return 1;
++#else
++
+     struct msghdr message = {0};
+     char message_data[] = {'G'};
+ 
+@@ -60,12 +75,18 @@ int guacd_send_fd(int sock, int fd) {
+     /* Send file descriptor */
+     return (sendmsg(sock, &message, 0) == sizeof(message_data));
+ 
++#endif
++
+ }
+ 
+ int guacd_recv_fd(int sock) {
+ 
+     int fd;
+ 
++#ifdef __CYGWIN__
++    return recv(sock, &fd, sizeof(fd), 0) == sizeof(fd) ? fd : -1;
++#else
++
+     struct msghdr message = {0};
+     char message_data[1];
+ 
+@@ -107,5 +128,6 @@ int guacd_recv_fd(int sock) {
+     /* Failed to receive file descriptor */
+     return -1;
+ 
+-}
++#endif
+ 
++}
+diff --git a/src/guacd/proc.c b/src/guacd/proc.c
+index 986d359..4a85c42 100644
+--- a/src/guacd/proc.c
++++ b/src/guacd/proc.c
+@@ -31,6 +31,7 @@
+ #include <guacamole/plugin.h>
+ #include <guacamole/protocol.h>
+ #include <guacamole/socket.h>
++#include <guacamole/string.h>
+ #include <guacamole/user.h>
+ 
+ #include <errno.h>
+@@ -99,16 +100,26 @@ static void* guacd_user_thread(void* data) {
+     guac_user_handle_connection(user, GUACD_USEC_TIMEOUT);
+ 
+     /* Stop client and prevent future users if all users are disconnected */
+-    if (client->connected_users == 0) {
++    int last_user = client->connected_users == 0;
++#ifndef __CYGWIN__
++    if (last_user) {
+         guacd_log(GUAC_LOG_INFO, "Last user of connection \"%s\" disconnected", client->connection_id);
+         guacd_proc_stop(proc);
+     }
++#endif
+ 
+     /* Clean up */
+     guac_socket_free(socket);
+     guac_user_free(user);
+     guac_mem_free(params);
+ 
++#ifdef __CYGWIN__
++    if (last_user) {
++        guacd_log(GUAC_LOG_INFO, "Last user of connection \"%s\" disconnected", client->connection_id);
++        guacd_proc_stop(proc);
++    }
++#endif
++
+     return NULL;
+ 
+ }
+@@ -150,6 +161,7 @@ static void guacd_proc_add_user(guacd_proc* proc, int fd, int owner) {
+  * a process which does not have a PGID separate from the main guacd process
+  * can result in guacd itself being terminated.
+  */
++#ifndef __CYGWIN__
+ static void guacd_kill_current_proc_group() {
+ 
+     /* Forcibly kill all children within process group */
+@@ -158,7 +170,9 @@ static void guacd_kill_current_proc_group() {
+                 "client process: %s ", strerror(errno));
+ 
+ }
++#endif
+ 
++#ifndef __CYGWIN__
+ /**
+  * The current status of a background attempt to free a guac_client instance.
+  */
+@@ -287,12 +301,20 @@ static int guacd_timed_client_free(guac_client* client, int timeout) {
+     /* Return status of free operation */
+     return !free_operation.completed;
+ }
++#endif
+ 
+ /**
+  * A reference to the current guacd process.
+  */
+ guacd_proc* guacd_proc_self = NULL;
+ 
++#ifdef __CYGWIN__
++typedef struct guacd_proc_thread_params {
++    guacd_proc* proc;
++    char* protocol;
++} guacd_proc_thread_params;
++#endif
++
+ /**
+  * A signal handler that will be invoked when a signal is caught telling this
+  * guacd process to immediately exit.
+@@ -301,12 +323,14 @@ guacd_proc* guacd_proc_self = NULL;
+  *     The signal that was received. Unused in this function since only
+  *     signals that should result in stopping the proc should invoke this.
+  */
++#ifndef __CYGWIN__
+ static void signal_stop_handler(int signal) {
+ 
+     /* Stop the current guacd proc */
+     guacd_proc_stop(guacd_proc_self);
+ 
+ }
++#endif
+ 
+ /**
+  * Starts protocol-specific handling on the given process by loading the client
+@@ -324,14 +348,18 @@ static void signal_stop_handler(int signal) {
+  */
+ static void guacd_exec_proc(guacd_proc* proc, const char* protocol) {
+ 
++#ifndef __CYGWIN__
+     int result = 1;
++#endif
+    
+     /* Set process group ID to match PID */ 
++#ifndef __CYGWIN__
+     if (setpgid(0, 0)) {
+         guacd_log(GUAC_LOG_ERROR, "Cannot set PGID for connection process: %s",
+                 strerror(errno));
+         goto cleanup_process;
+     }
++#endif
+ 
+     /* Init client for selected protocol */
+     guac_client* client = proc->client;
+@@ -354,16 +382,24 @@ static void guacd_exec_proc(guacd_proc* proc, const char* protocol) {
+     /* Enable keep alive on the broadcast socket */
+     guac_socket_require_keep_alive(client->socket);
+ 
++#ifndef __CYGWIN__
+     guacd_proc_self = proc;
+ 
+     /* Clean up and exit if SIGINT or SIGTERM signals are caught */
+     struct sigaction signal_stop_action = { .sa_handler = signal_stop_handler };
+     sigaction(SIGINT, &signal_stop_action, NULL);
+     sigaction(SIGTERM, &signal_stop_action, NULL);
++#endif
+ 
+     /* Add each received file descriptor as a new user */
+     int received_fd;
+-    while ((received_fd = guacd_recv_fd(proc->fd_socket)) != -1) {
++    while ((received_fd = guacd_recv_fd(
++#ifdef __CYGWIN__
++                    proc->child_fd_socket
++#else
++                    proc->fd_socket
++#endif
++                    )) != -1) {
+ 
+         guacd_proc_add_user(proc, received_fd, owner);
+ 
+@@ -377,6 +413,7 @@ cleanup_client:
+     /* Request client to stop/disconnect */
+     guac_client_stop(client);
+ 
++#ifndef __CYGWIN__
+     /* Attempt to free client cleanly */
+     guacd_log(GUAC_LOG_DEBUG, "Requesting termination of client...");
+     result = guacd_timed_client_free(client, GUACD_CLIENT_FREE_TIMEOUT);
+@@ -386,7 +423,9 @@ cleanup_client:
+         guacd_log(GUAC_LOG_WARNING, "Client did not terminate in a timely "
+                 "manner. Forcibly terminating client and any child "
+                 "processes.");
++#ifndef __CYGWIN__
+         guacd_kill_current_proc_group();
++#endif
+     }
+     else
+         guacd_log(GUAC_LOG_DEBUG, "Client terminated successfully.");
+@@ -403,19 +442,42 @@ cleanup_client:
+         guacd_log(GUAC_LOG_WARNING, "Client reported successful termination, "
+                 "but child processes remain. Forcibly terminating client and "
+                 "child processes.");
++#ifndef __CYGWIN__
+         guacd_kill_current_proc_group();
++#endif
+     }
++#endif
+ 
++#ifndef __CYGWIN__
+ cleanup_process:
++#endif
+ 
+     /* Free up all internal resources outside the client */
++#ifdef __CYGWIN__
++    close(proc->child_fd_socket);
++    proc->child_fd_socket = -1;
++    return;
++#else
+     close(proc->fd_socket);
+     guac_mem_free(proc);
+ 
+     exit(result);
++#endif
+ 
+ }
+ 
++#ifdef __CYGWIN__
++static void* guacd_exec_proc_thread(void* data) {
++
++    guacd_proc_thread_params* params = (guacd_proc_thread_params*) data;
++    guacd_exec_proc(params->proc, params->protocol);
++    guac_mem_free(params->protocol);
++    guac_mem_free(params);
++    return NULL;
++
++}
++#endif
++
+ guacd_proc* guacd_create_proc(const char* protocol) {
+ 
+     int sockets[2];
+@@ -450,6 +512,33 @@ guacd_proc* guacd_create_proc(const char* protocol) {
+     /* Init logging */
+     proc->client->log_handler = guacd_client_log;
+ 
++#ifdef __CYGWIN__
++    proc->fd_socket = child_socket;
++    proc->child_fd_socket = parent_socket;
++
++    guacd_proc_thread_params* params = guac_mem_alloc(sizeof(guacd_proc_thread_params));
++    if (params == NULL) {
++        close(parent_socket);
++        close(child_socket);
++        guac_client_free(proc->client);
++        guac_mem_free(proc);
++        return NULL;
++    }
++    params->proc = proc;
++    params->protocol = guac_strdup(protocol);
++    if (params->protocol == NULL || pthread_create(&proc->thread, NULL,
++                guacd_exec_proc_thread, params)) {
++        guac_mem_free(params->protocol);
++        guac_mem_free(params);
++        close(parent_socket);
++        close(child_socket);
++        guac_client_free(proc->client);
++        guac_mem_free(proc);
++        return NULL;
++    }
++    proc->thread_started = 1;
++    return proc;
++#else
+     /* Fork */
+     proc->pid = fork();
+     if (proc->pid < 0) {
+@@ -483,6 +572,7 @@ guacd_proc* guacd_create_proc(const char* protocol) {
+     }
+ 
+     return proc;
++#endif
+ 
+ }
+ 
+@@ -494,6 +584,7 @@ guacd_proc* guacd_create_proc(const char* protocol) {
+  * @param proc
+  *     The child guacd process to kill.
+  */
++#ifndef __CYGWIN__
+ static void guacd_proc_kill(guacd_proc* proc) {
+ 
+     /* Request orderly termination of process */
+@@ -512,9 +603,16 @@ static void guacd_proc_kill(guacd_proc* proc) {
+         proc->client->connection_id);
+ 
+ }
++#endif
+ 
+ void guacd_proc_stop(guacd_proc* proc) {
+ 
++#ifdef __CYGWIN__
++    if (proc->child_fd_socket != -1)
++        shutdown(proc->child_fd_socket, SHUT_RDWR);
++    return;
++#else
++
+     /* A non-zero PID means that this is the parent process */
+     if (proc->pid != 0) {
+         guacd_proc_kill(proc);
+@@ -535,4 +633,19 @@ void guacd_proc_stop(guacd_proc* proc) {
+     /* Clean up our end of the socket */
+     close(proc->fd_socket);
+ 
++#endif
++
++}
++
++void guacd_proc_wait(guacd_proc* proc) {
++
++#ifdef __CYGWIN__
++    if (proc->thread_started && !proc->thread_joined) {
++        pthread_join(proc->thread, NULL);
++        proc->thread_joined = 1;
++    }
++#else
++    waitpid(proc->pid, NULL, 0);
++#endif
++
+ }
+diff --git a/src/guacd/proc.h b/src/guacd/proc.h
+index f6def1e..be72a34 100644
+--- a/src/guacd/proc.h
++++ b/src/guacd/proc.h
+@@ -25,6 +25,10 @@
+ #include <guacamole/client.h>
+ #include <guacamole/parser.h>
+ 
++#ifdef __CYGWIN__
++#include <pthread.h>
++#endif
++
+ #include <unistd.h>
+ 
+ /**
+@@ -59,6 +63,18 @@ typedef struct guacd_proc {
+      */
+     pid_t pid;
+ 
++#ifdef __CYGWIN__
++    /** Thread replacing the per-connection child process on Cygwin. */
++    pthread_t thread;
++
++    /** Whether the Cygwin connection thread has started and been joined. */
++    int thread_started;
++    int thread_joined;
++
++    /** Socket read by the Cygwin connection thread. */
++    int child_fd_socket;
++#endif
++
+     /**
+      * The file descriptor of the UNIX domain socket to use for sending and
+      * receiving file descriptors of new users. This parent will see this
+@@ -105,5 +121,7 @@ guacd_proc* guacd_create_proc(const char* protocol);
+  */
+ void guacd_proc_stop(guacd_proc* proc);
+ 
+-#endif
++/** Waits for the process or thread associated with the connection. */
++void guacd_proc_wait(guacd_proc* proc);
+ 
++#endif
+diff --git a/src/protocols/rdp/Makefile.am b/src/protocols/rdp/Makefile.am
+index 89c094b..6371f83 100644
+--- a/src/protocols/rdp/Makefile.am
++++ b/src/protocols/rdp/Makefile.am
+@@ -139,6 +139,7 @@ libguac_client_rdp_la_CFLAGS = \
+     @RDP_CFLAGS@
+ 
+ libguac_client_rdp_la_LDFLAGS = \
++    -no-undefined              \
+     -version-info 0:0:0         \
+     @CAIRO_LIBS@                \
+     @PTHREAD_LIBS@              \
+@@ -171,7 +172,8 @@ libguac_common_svc_client_la_CFLAGS = \
+     @RDP_CFLAGS@
+ 
+ libguac_common_svc_client_la_LDFLAGS = \
+-    -module -avoid-version -shared     \
++    -no-undefined                       \
++    -module -avoid-version -shared      \
+     @RDP_LIBS@
+ 
+ libguac_common_svc_client_la_LIBADD = \
+@@ -195,6 +197,7 @@ libguacai_client_la_CFLAGS = \
+     @RDP_CFLAGS@
+ 
+ libguacai_client_la_LDFLAGS =      \
++    -no-undefined                  \
+     -module -avoid-version -shared \
+     @PTHREAD_LIBS@                 \
+     @RDP_LIBS@
+@@ -257,4 +260,3 @@ EXTRA_DIST =                           \
+     $(rdp_keymaps)                     \
+     keymaps/generate.pl                \
+     plugins/generate-entry-wrappers.pl
+-
+diff --git a/src/protocols/vnc/Makefile.am b/src/protocols/vnc/Makefile.am
+index 64e8147..090416f 100644
+--- a/src/protocols/vnc/Makefile.am
++++ b/src/protocols/vnc/Makefile.am
+@@ -62,6 +62,8 @@ libguac_client_vnc_la_CFLAGS =        \
+     @PULSE_INCLUDE@
+ 
+ libguac_client_vnc_la_LDFLAGS = \
++    -no-undefined              \
++    -lgcrypt                   \
+     -version-info 0:0:0         \
+     @CAIRO_LIBS@                \
+     @VNC_LIBS@ 
+@@ -81,4 +83,3 @@ endif
+ if ENABLE_PULSE
+ libguac_client_vnc_la_LIBADD += @PULSE_LTLIB@
+ endif
+-

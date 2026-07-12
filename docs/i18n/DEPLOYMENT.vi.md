@@ -95,6 +95,8 @@ sudo systemctl enable --now guacd
 
 Cấu hình `OPENWEBSERVERMANAGER_GUACD_HOST=127.0.0.1` và `OPENWEBSERVERMANAGER_GUACD_PORT=4822`.
 
+Bản phát hành Linux amd64 và Windows amd64 cũng kèm runtime đã kiểm thử tại `runtime/guacd/linux/bin/guacd` và `runtime/guacd/windows/bin/guacd.exe`. Các DLL Cygwin cần thiết đã có sẵn trong gói Windows.
+
 ## Khởi tạo lần đầu
 
 Mở `http://<server-ip>:23876/login` và tạo mật khẩu quản trị viên đầu tiên.

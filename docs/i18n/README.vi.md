@@ -37,7 +37,7 @@ Lần chạy đầu tiên, mở `/login` để tạo mật khẩu quản trị v
 
 ## RDP và guacd
 
-RDP cần Apache Guacamole `guacd`. Cấu hình `OPENWEBSERVERMANAGER_GUACD_HOST` và `OPENWEBSERVERMANAGER_GUACD_PORT`, hoặc đặt binary vào `runtime/guacd/<goos>/`.
+RDP cần Apache Guacamole `guacd`. Bản phát hành Linux amd64 và Windows amd64 đã kèm runtime RDP/VNC được kiểm thử tại `runtime/guacd/<goos>/bin/`. Với kiến trúc khác, hãy cấu hình `OPENWEBSERVERMANAGER_GUACD_HOST` và `OPENWEBSERVERMANAGER_GUACD_PORT`.
 
 Bản ghi nằm trong `data/recordings/{session_id}/`; thư mục truyền tệp nằm trong `data/drives/{session_id}/`.
 

@@ -37,7 +37,7 @@ go run ./cmd/openwebservermanager
 
 ## RDP и guacd
 
-Для RDP нужен Apache Guacamole `guacd`. Укажите `OPENWEBSERVERMANAGER_GUACD_HOST` и `OPENWEBSERVERMANAGER_GUACD_PORT` или поместите бинарный файл в `runtime/guacd/<goos>/`.
+Для RDP нужен Apache Guacamole `guacd`. Выпуски Linux amd64 и Windows amd64 содержат проверенную среду RDP/VNC в `runtime/guacd/<goos>/bin/`. Для других архитектур укажите `OPENWEBSERVERMANAGER_GUACD_HOST` и `OPENWEBSERVERMANAGER_GUACD_PORT`.
 
 Записи сохраняются в `data/recordings/{session_id}/`; каталоги передачи файлов — в `data/drives/{session_id}/`.
 

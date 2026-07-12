@@ -37,7 +37,7 @@ go run ./cmd/openwebservermanager
 
 ## RDP と guacd
 
-RDP には Apache Guacamole `guacd` が必要です。`OPENWEBSERVERMANAGER_GUACD_HOST` と `OPENWEBSERVERMANAGER_GUACD_PORT` を設定するか、`runtime/guacd/<goos>/` にバイナリを配置してください。
+RDP には Apache Guacamole `guacd` が必要です。Linux amd64 / Windows amd64 リリースには、`runtime/guacd/<goos>/bin/` に検証済みの RDP/VNC ランタイムが含まれます。その他のアーキテクチャでは `OPENWEBSERVERMANAGER_GUACD_HOST` と `OPENWEBSERVERMANAGER_GUACD_PORT` を設定してください。
 
 録画は `data/recordings/{session_id}/`、ファイル転送用 drive は `data/drives/{session_id}/` に保存されます。
 

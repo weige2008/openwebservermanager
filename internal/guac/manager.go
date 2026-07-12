@@ -10,6 +10,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"runtime"
+	"strings"
 	"time"
 )
 
@@ -54,6 +55,7 @@ func (m *Manager) Ensure(ctx context.Context) error {
 
 	cmd := exec.CommandContext(ctx, exe, "-b", "127.0.0.1", "-l", m.cfg.Port, "-f")
 	cmd.Dir = filepath.Dir(exe)
+	cmd.Env = m.runtimeEnvironment(exe)
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr
 	m.cmd = cmd
@@ -95,15 +97,75 @@ func (m *Manager) runtimePath() (string, error) {
 	if runtime.GOOS == "windows" {
 		name += ".exe"
 	}
-	path := filepath.Join(m.cfg.RuntimeDir, runtime.GOOS, name)
-	info, err := os.Stat(path)
-	if err != nil {
-		return "", fmt.Errorf("guacd not found at %s; set OPENWEBSERVERMANAGER_GUACD_HOST or place bundled guacd runtime: %w", path, err)
+	root := filepath.Join(m.cfg.RuntimeDir, runtime.GOOS)
+	candidates := []string{
+		filepath.Join(root, name),
+		filepath.Join(root, "bin", name),
+		filepath.Join(root, "sbin", name),
 	}
-	if info.IsDir() {
-		return "", fmt.Errorf("guacd path is a directory: %s", path)
+	for _, path := range candidates {
+		info, err := os.Stat(path)
+		if err != nil {
+			if errors.Is(err, os.ErrNotExist) {
+				continue
+			}
+			return "", fmt.Errorf("inspect guacd runtime %s: %w", path, err)
+		}
+		if info.IsDir() {
+			return "", fmt.Errorf("guacd path is a directory: %s", path)
+		}
+		return path, nil
 	}
-	return path, nil
+	return "", fmt.Errorf("guacd not found under %s; set OPENWEBSERVERMANAGER_GUACD_HOST or install a bundled runtime containing %s", root, name)
+}
+
+func (m *Manager) runtimeEnvironment(exe string) []string {
+	env := os.Environ()
+	exeDir := filepath.Dir(exe)
+	runtimeRoot := exeDir
+	if base := strings.ToLower(filepath.Base(exeDir)); base == "bin" || base == "sbin" {
+		runtimeRoot = filepath.Dir(exeDir)
+	}
+	env = prependEnvironmentPath(env, "PATH", exeDir)
+	if runtime.GOOS == "windows" {
+		home := filepath.Join(runtimeRoot, "home")
+		_ = os.MkdirAll(home, 0o700)
+		env = setEnvironmentValue(env, "HOME", home)
+	}
+	if runtime.GOOS == "linux" {
+		env = prependEnvironmentPath(env, "LD_LIBRARY_PATH", filepath.Join(runtimeRoot, "lib"))
+		env = setEnvironmentValue(env, "FREERDP_PLUGIN_PATH", filepath.Join(runtimeRoot, "usr", "lib", "freerdp2"))
+	}
+	return env
+}
+
+func prependEnvironmentPath(env []string, key, value string) []string {
+	current := environmentValue(env, key)
+	if current != "" {
+		value += string(os.PathListSeparator) + current
+	}
+	return setEnvironmentValue(env, key, value)
+}
+
+func environmentValue(env []string, key string) string {
+	prefix := strings.ToUpper(key) + "="
+	for _, item := range env {
+		if strings.HasPrefix(strings.ToUpper(item), prefix) {
+			return item[len(prefix):]
+		}
+	}
+	return ""
+}
+
+func setEnvironmentValue(env []string, key, value string) []string {
+	prefix := strings.ToUpper(key) + "="
+	next := make([]string, 0, len(env)+1)
+	for _, item := range env {
+		if !strings.HasPrefix(strings.ToUpper(item), prefix) {
+			next = append(next, item)
+		}
+	}
+	return append(next, key+"="+value)
 }
 
 func (m *Manager) wait(ctx context.Context) error {

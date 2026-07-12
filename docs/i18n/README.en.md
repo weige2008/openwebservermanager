@@ -53,7 +53,9 @@ RDP requires Apache Guacamole `guacd`.
 Lookup order:
 
 1. `OPENWEBSERVERMANAGER_GUACD_HOST` and `OPENWEBSERVERMANAGER_GUACD_PORT`.
-2. Bundled `runtime/guacd/<goos>/guacd` or `guacd.exe`.
+2. Bundled `runtime/guacd/<goos>/bin/guacd` or `guacd.exe` (legacy root layouts remain supported).
+
+Linux amd64 and Windows amd64 releases include tested RDP/VNC runtimes. Other architectures can use an external guacd through the same environment variables.
 
 Recordings are stored under `data/recordings/{session_id}/`; file transfer drives are stored under `data/drives/{session_id}/`.
 

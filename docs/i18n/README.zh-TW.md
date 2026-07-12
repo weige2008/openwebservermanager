@@ -37,7 +37,7 @@ go run ./cmd/openwebservermanager
 
 ## RDP 與 guacd
 
-RDP 需要 Apache Guacamole `guacd`。系統會優先使用外部 `OPENWEBSERVERMANAGER_GUACD_HOST` / `OPENWEBSERVERMANAGER_GUACD_PORT`，否則查找 `runtime/guacd/<goos>/guacd` 或 `guacd.exe`。
+RDP 需要 Apache Guacamole `guacd`。Linux amd64 與 Windows amd64 發行包已內建通過 RDP/VNC 測試的 `runtime/guacd/<goos>/bin/` 執行環境；其他架構可設定外部 `OPENWEBSERVERMANAGER_GUACD_HOST` / `OPENWEBSERVERMANAGER_GUACD_PORT`。
 
 錄影保存於 `data/recordings/{session_id}/`，檔案傳輸 drive 目錄保存於 `data/drives/{session_id}/`。
 

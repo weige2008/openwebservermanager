@@ -124,6 +124,8 @@ sudo systemctl enable --now guacd
 
 Then configure `OPENWEBSERVERMANAGER_GUACD_HOST=127.0.0.1` and `OPENWEBSERVERMANAGER_GUACD_PORT=4822`.
 
+Linux amd64 and Windows amd64 releases also include tested bundled runtimes at `runtime/guacd/linux/bin/guacd` and `runtime/guacd/windows/bin/guacd.exe`. The Windows package includes its Cygwin compatibility DLLs and does not require a separate Cygwin installation. Other architectures can continue using an external guacd.
+
 ## First Run
 
 Open:

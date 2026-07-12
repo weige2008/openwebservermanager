@@ -95,6 +95,8 @@ sudo systemctl enable --now guacd
 
 `OPENWEBSERVERMANAGER_GUACD_HOST=127.0.0.1` と `OPENWEBSERVERMANAGER_GUACD_PORT=4822` を設定します。
 
+Linux amd64 / Windows amd64 リリースには、`runtime/guacd/linux/bin/guacd` と `runtime/guacd/windows/bin/guacd.exe` に検証済みランタイムが含まれます。Windows に必要な Cygwin DLL も同梱されています。
+
 ## 初回初期化
 
 `http://<server-ip>:23876/login` を開き、最初の管理者パスワードを作成します。

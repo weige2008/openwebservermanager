@@ -37,7 +37,7 @@ Ouvrez `/login` au premier lancement pour créer le mot de passe administrateur.
 
 ## RDP et guacd
 
-RDP nécessite Apache Guacamole `guacd`. Configurez `OPENWEBSERVERMANAGER_GUACD_HOST` et `OPENWEBSERVERMANAGER_GUACD_PORT`, ou placez le binaire dans `runtime/guacd/<goos>/`.
+RDP nécessite Apache Guacamole `guacd`. Les versions Linux amd64 et Windows amd64 incluent un runtime RDP/VNC testé dans `runtime/guacd/<goos>/bin/`. Pour les autres architectures, configurez `OPENWEBSERVERMANAGER_GUACD_HOST` et `OPENWEBSERVERMANAGER_GUACD_PORT`.
 
 Les enregistrements sont dans `data/recordings/{session_id}/`; les dossiers de transfert dans `data/drives/{session_id}/`.
 

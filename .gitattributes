@@ -5,3 +5,4 @@
 *.css text eol=lf
 *.html text eol=lf
 *.md text eol=lf
+scripts/guacd/*.patch text eol=lf whitespace=-trailing-space

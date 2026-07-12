@@ -13,9 +13,62 @@ permissions:
   contents: write
 
 jobs:
+  guacd-linux-amd64:
+    name: build bundled guacd linux-amd64
+    runs-on: ubuntu-22.04
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install guacd build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            autoconf automake build-essential curl git libtool pkg-config \
+            libcairo2-dev freerdp2-dev libgcrypt20-dev libjpeg-turbo8-dev \
+            libpng-dev libssl-dev libuuid1 uuid-dev libvncserver-dev libwebp-dev
+
+      - name: Build portable guacd runtime
+        run: bash scripts/guacd/build-linux.sh runtime/guacd/linux
+
+      - name: Smoke test RDP and VNC plugins
+        run: bash scripts/guacd/test-linux-runtime.sh runtime/guacd/linux
+
+      - name: Upload guacd runtime
+        uses: actions/upload-artifact@v4
+        with:
+          name: guacd-linux-amd64
+          path: runtime/guacd/linux
+          if-no-files-found: error
+
+  guacd-windows-amd64:
+    name: build bundled guacd windows-amd64
+    runs-on: windows-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Build portable guacd runtime
+        shell: pwsh
+        run: ./scripts/guacd/build-windows-cygwin.ps1 -OutputDir runtime/guacd/windows -WorkDir "$env:RUNNER_TEMP/openwebservermanager-guacd-windows"
+
+      - name: Smoke test RDP and VNC plugins
+        shell: pwsh
+        run: ./scripts/guacd/test-windows-runtime.ps1 -RuntimeDir runtime/guacd/windows
+
+      - name: Upload guacd runtime
+        uses: actions/upload-artifact@v4
+        with:
+          name: guacd-windows-amd64
+          path: runtime/guacd/windows
+          if-no-files-found: error
+
   build:
     name: build ${{ matrix.goos }}-${{ matrix.goarch }}
     runs-on: ubuntu-latest
+    needs:
+      - guacd-linux-amd64
+      - guacd-windows-amd64
     strategy:
       fail-fast: false
       matrix:
@@ -75,6 +128,20 @@ jobs:
       - name: Test Go packages
         run: go test ./...
 
+      - name: Download Linux guacd runtime
+        if: matrix.goos == 'linux' && matrix.goarch == 'amd64'
+        uses: actions/download-artifact@v4
+        with:
+          name: guacd-linux-amd64
+          path: runtime/guacd/linux
+
+      - name: Download Windows guacd runtime
+        if: matrix.goos == 'windows' && matrix.goarch == 'amd64'
+        uses: actions/download-artifact@v4
+        with:
+          name: guacd-windows-amd64
+          path: runtime/guacd/windows
+
       - name: Scan Go vulnerabilities
         if: matrix.goos == 'linux' && matrix.goarch == 'amd64'
         run: go run golang.org/x/vuln/cmd/govulncheck@v1.5.0 ./...
@@ -105,6 +172,16 @@ jobs:
           cp README.md DEPLOYMENT.md VERSION "${stage}/"
           cp -R docs "${stage}/docs"
           cp -R runtime "${stage}/runtime"
+          if [[ "${GOOS}-${GOARCH}" == "linux-amd64" ]]; then
+            test -x "${stage}/runtime/guacd/linux/bin/guacd"
+            test -f "${stage}/runtime/guacd/linux/lib/libguac-client-rdp.so"
+            test -f "${stage}/runtime/guacd/linux/lib/libguac-client-vnc.so"
+          fi
+          if [[ "${GOOS}-${GOARCH}" == "windows-amd64" ]]; then
+            test -f "${stage}/runtime/guacd/windows/bin/guacd.exe"
+            test -f "${stage}/runtime/guacd/windows/bin/libguac-client-rdp.so"
+            test -f "${stage}/runtime/guacd/windows/bin/libguac-client-vnc.so"
+          fi
           if [[ "${{ matrix.archive }}" == "zip" ]]; then
             export STAGE="${stage}"
             python - <<'PY'
@@ -156,7 +233,8 @@ jobs:
 
           - Cross-platform openwebservermanager manager and Agent binaries for Linux, Windows, and macOS.
           - Bundled static web frontend.
-          - Runtime guacd directory placeholder is included; place native guacd builds under runtime/guacd/<platform>/ when needed.
+          - Linux amd64 and Windows amd64 packages include tested Apache Guacamole guacd runtimes with RDP and VNC plugins.
+          - Other architectures can use an externally managed guacd through OPENWEBSERVERMANAGER_GUACD_HOST and OPENWEBSERVERMANAGER_GUACD_PORT.
           EOF
 
       - name: Publish release

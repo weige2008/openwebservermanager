@@ -4,7 +4,12 @@ set -euo pipefail
 GUACAMOLE_VERSION="${GUACAMOLE_VERSION:-1.5.5}"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
-OUTPUT_DIR="${1:-$REPO_ROOT/runtime/guacd/linux}"
+OUTPUT_ARG="${1:-runtime/guacd/linux}"
+if [[ "$OUTPUT_ARG" = /* ]]; then
+  OUTPUT_DIR="$OUTPUT_ARG"
+else
+  OUTPUT_DIR="$REPO_ROOT/$OUTPUT_ARG"
+fi
 WORK_DIR="${GUACD_WORK_DIR:-${RUNNER_TEMP:-/tmp}/openwebservermanager-guacd-linux}"
 SOURCE_DIR="$WORK_DIR/guacamole-server-$GUACAMOLE_VERSION"
 ARCHIVE="$WORK_DIR/guacamole-server-$GUACAMOLE_VERSION.tar.gz"

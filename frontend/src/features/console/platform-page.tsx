@@ -97,6 +97,7 @@ type ResourceOperation =
   | { type: 'user-import' }
   | { type: 'bulk-authorize'; collection: string; items: PlatformItem[] }
   | { type: 'agent-token'; item: PlatformItem }
+  | { type: 'gateway-status'; collection: 'agent_gateways' | 'gateway_groups'; item: PlatformItem }
   | { type: 'certificate-create' }
   | { type: 'certificate-upload' }
   | { type: 'certificate-acme' }
@@ -141,6 +142,52 @@ interface RecordingTranscodeStatus {
   video_url?: string
   started_at?: string
   finished_at?: string
+}
+
+interface AgentGatewayStatusResponse {
+  items?: PlatformItem[]
+  online?: number
+  offline?: number
+  checked_at?: string
+}
+
+interface GatewayGroupMemberStatus {
+  id: string
+  name: string
+  collection: string
+  type?: string
+  status: string
+  online: boolean
+  host?: string
+  port?: number
+  tags?: string[]
+  latency_ms?: number
+  active_sessions?: number
+  capabilities?: string[]
+  last_heartbeat_at?: string
+  metadata?: Record<string, unknown>
+}
+
+interface GatewayGroupRuntimeStatus {
+  id: string
+  name: string
+  type: string
+  status: string
+  selection_mode: string
+  member_ids?: string[]
+  required_labels?: string[]
+  required_capabilities?: string[]
+  members?: GatewayGroupMemberStatus[]
+  online?: number
+  offline?: number
+  selected_gateway_id?: string
+  selected_gateway?: GatewayGroupMemberStatus
+  checked_at?: string
+}
+
+interface GatewayGroupStatusResponse {
+  items?: GatewayGroupRuntimeStatus[]
+  checked_at?: string
 }
 
 interface DepartmentTreeNode {
@@ -1500,11 +1547,33 @@ function ResourceRowActions({
   }
 
   if (config.collection === 'agent_gateways') {
-    if (!canUsePath('POST', `/api/admin/agent-gateways/${item.id}/token`)) return null
+    const canReadStatus = canUsePath('GET', '/api/admin/agent-gateways/status')
+    const canIssueToken = canUsePath('POST', `/api/admin/agent-gateways/${item.id}/token`)
+    if (!canReadStatus && !canIssueToken) return null
     return (
-      <Button size='sm' variant='outline' onClick={() => onOperation({ type: 'agent-token', item })}>
-        <Copy className='size-3.5' />
-        令牌
+      <>
+        {canReadStatus ? (
+          <Button size='sm' variant='outline' onClick={() => onOperation({ type: 'gateway-status', collection: 'agent_gateways', item })}>
+            <FileSearch className='size-3.5' />
+            {app.t('gatewayStatus', 'Status')}
+          </Button>
+        ) : null}
+        {canIssueToken ? (
+          <Button size='sm' variant='outline' onClick={() => onOperation({ type: 'agent-token', item })}>
+            <Copy className='size-3.5' />
+            令牌
+          </Button>
+        ) : null}
+      </>
+    )
+  }
+
+  if (config.collection === 'gateway_groups') {
+    if (!canUsePath('GET', '/api/admin/gateway-groups/status')) return null
+    return (
+      <Button size='sm' variant='outline' onClick={() => onOperation({ type: 'gateway-status', collection: 'gateway_groups', item })}>
+        <FileSearch className='size-3.5' />
+        {app.t('gatewayStatus', 'Status')}
       </Button>
     )
   }
@@ -1619,6 +1688,10 @@ function ResourceOperationDialog({
   if (operation.type === 'user-import') return <UserImportDialog onClose={() => onOpenChange(null)} canSubmit={canUsePath('POST', '/api/admin/users/import')} />
   if (operation.type === 'bulk-authorize') return <BulkAuthorizeDialog collection={operation.collection} items={operation.items} onClose={() => onOpenChange(null)} canSubmit={canUsePath('POST', `/api/admin/authorizations/${authorizationBulkRoute(operation.collection)}/bulk`)} />
   if (operation.type === 'agent-token') return <AgentGatewayTokenDialog item={operation.item} onClose={() => onOpenChange(null)} canIssueToken={canUsePath('POST', `/api/admin/agent-gateways/${operation.item.id}/token`)} />
+  if (operation.type === 'gateway-status') {
+    const path = operation.collection === 'agent_gateways' ? '/api/admin/agent-gateways/status' : '/api/admin/gateway-groups/status'
+    return <GatewayStatusDialog collection={operation.collection} item={operation.item} onClose={() => onOpenChange(null)} canRead={canUsePath('GET', path)} />
+  }
   if (operation.type === 'certificate-create') return <CertificateCreateDialog onClose={() => onOpenChange(null)} canSubmit={canUsePath('POST', '/api/admin/certificates/self-signed')} />
   if (operation.type === 'certificate-upload') return <CertificateUploadDialog onClose={() => onOpenChange(null)} canUpload={canUsePath('POST', '/api/admin/certificates/upload')} />
   if (operation.type === 'certificate-acme') return <CertificateACMEDialog onClose={() => onOpenChange(null)} canUsePath={canUsePath} />
@@ -2120,6 +2193,189 @@ function quotePOSIXShell(value: string) {
 
 function quotePowerShell(value: string) {
   return `'${value.replaceAll("'", "''")}'`
+}
+
+function GatewayStatusDialog({
+  collection,
+  item,
+  onClose,
+  canRead,
+}: {
+  collection: 'agent_gateways' | 'gateway_groups'
+  item: PlatformItem
+  onClose: () => void
+  canRead: boolean
+}) {
+  const app = useApp()
+  const isAgent = collection === 'agent_gateways'
+  const endpoint = isAgent ? '/api/admin/agent-gateways/status' : '/api/admin/gateway-groups/status'
+  const statusQuery = useQuery<AgentGatewayStatusResponse | GatewayGroupStatusResponse>({
+    queryKey: ['gateway-runtime-status', collection],
+    queryFn: () => isAgent
+      ? apiRequest<AgentGatewayStatusResponse>(endpoint)
+      : apiRequest<GatewayGroupStatusResponse>(endpoint),
+    enabled: canRead,
+    refetchInterval: 5_000,
+  })
+  const agentPayload = isAgent ? statusQuery.data as AgentGatewayStatusResponse | undefined : undefined
+  const groupPayload = !isAgent ? statusQuery.data as GatewayGroupStatusResponse | undefined : undefined
+  const agent = agentPayload?.items?.find((candidate) => candidate.id === item.id)
+  const group = groupPayload?.items?.find((candidate) => candidate.id === item.id)
+  const checkedAt = agentPayload?.checked_at || groupPayload?.checked_at || group?.checked_at
+
+  return (
+    <DialogShell
+      open
+      onOpenChange={(open) => { if (!open) onClose() }}
+      title={`${item.name || item.id} · ${app.t('gatewayStatus', 'Gateway status')}`}
+      description={app.t('gatewayStatusDescription', 'Live heartbeat, resource, routing, and member status. Data refreshes every five seconds.')}
+    >
+      <div className='grid gap-4'>
+        <div className='flex flex-wrap items-center justify-between gap-3'>
+          <div className='flex flex-wrap items-center gap-2'>
+            <Badge tone={statusTone(agent?.status || group?.status || item.status)}>{agent?.status || group?.status || item.status || '-'}</Badge>
+            {checkedAt ? <span className='text-xs text-muted-foreground'>{app.t('checkedAt', 'Checked')}: {formatDate(checkedAt)}</span> : null}
+          </div>
+          <Button size='sm' variant='outline' onClick={() => void statusQuery.refetch()} disabled={!canRead || statusQuery.isFetching}>
+            <RefreshCw className={statusQuery.isFetching ? 'size-3.5 animate-spin' : 'size-3.5'} />
+            {app.t('refresh', 'Refresh')}
+          </Button>
+        </div>
+
+        {!canRead ? <p className='text-sm text-destructive'>{app.t('permissionDenied', 'Permission denied')}</p> : null}
+        {statusQuery.isLoading ? <p className='text-sm text-muted-foreground'>{app.t('loading', 'Loading...')}</p> : null}
+        {statusQuery.error ? <p className='text-sm text-destructive'>{statusQuery.error instanceof Error ? statusQuery.error.message : String(statusQuery.error)}</p> : null}
+
+        {agent ? <AgentGatewayStatusContent item={agent} summary={agentPayload} /> : null}
+        {group ? <GatewayGroupStatusContent status={group} /> : null}
+        {canRead && !statusQuery.isLoading && !statusQuery.error && !agent && !group ? (
+          <p className='text-sm text-muted-foreground'>{app.t('gatewayStatusMissing', 'Gateway status is not available.')}</p>
+        ) : null}
+      </div>
+    </DialogShell>
+  )
+}
+
+function AgentGatewayStatusContent({ item, summary }: { item: PlatformItem; summary?: AgentGatewayStatusResponse }) {
+  const app = useApp()
+  const metadata = item.metadata || {}
+  const identityRows = [
+    [app.t('hostname', 'Hostname'), metadataText(metadata.hostname) || item.host || '-'],
+    [app.t('version', 'Version'), metadataText(metadata.version) || '-'],
+    [app.t('operatingSystem', 'Operating system'), [metadataText(metadata.os), metadataText(metadata.arch)].filter(Boolean).join(' / ') || '-'],
+    [app.t('ipAddresses', 'IP addresses'), metadataInlineListText(metadata.ip_addresses) || metadataText(metadata.last_client_ip) || '-'],
+    [app.t('capabilities', 'Capabilities'), metadataInlineListText(metadata.capabilities) || '-'],
+    [app.t('labels', 'Labels'), metadataInlineListText(metadata.labels) || metadataInlineListText(item.tags) || '-'],
+  ]
+  const metricRows = [
+    [app.t('latency', 'Latency'), `${formatNumberValue(metadata.latency_ms)} ms`],
+    ['CPU', formatPercentValueFromWhole(metadata.cpu_percent)],
+    [app.t('memory', 'Memory'), `${formatBytesValue(metadata.memory_used_bytes)} / ${formatBytesValue(metadata.memory_total_bytes)} (${formatPercentValueFromWhole(metadata.memory_percent)})`],
+    [app.t('disk', 'Disk'), `${formatBytesValue(metadata.disk_used_bytes)} / ${formatBytesValue(metadata.disk_total_bytes)} (${formatPercentValueFromWhole(metadata.disk_percent)})`],
+    [app.t('networkReceive', 'Network received'), formatBytesValue(metadata.network_rx_bytes)],
+    [app.t('networkTransmit', 'Network sent'), formatBytesValue(metadata.network_tx_bytes)],
+    [app.t('activeSessions', 'Active sessions'), formatNumberValue(metadata.active_sessions)],
+    [app.t('heartbeatCount', 'Heartbeat count'), formatNumberValue(metadata.heartbeat_count)],
+  ]
+  return (
+    <>
+      <div className='grid gap-3 sm:grid-cols-3'>
+        <GatewayMetric label={app.t('online', 'Online')} value={formatNumberValue(summary?.online)} />
+        <GatewayMetric label={app.t('offline', 'Offline')} value={formatNumberValue(summary?.offline)} />
+        <GatewayMetric label={app.t('lastHeartbeat', 'Last heartbeat')} value={formatDate(metadataText(metadata.last_heartbeat_at))} />
+      </div>
+      <GatewayDetailSection title={app.t('gatewayIdentity', 'Gateway identity')} rows={identityRows} />
+      <GatewayDetailSection title={app.t('resourceMetrics', 'Resource metrics')} rows={metricRows} />
+      {metadataText(metadata.offline_reason) ? (
+        <div className='rounded-lg border border-destructive/30 bg-destructive/5 p-3 text-sm text-destructive'>
+          {app.t('offlineReason', 'Offline reason')}: {metadataText(metadata.offline_reason)}
+        </div>
+      ) : null}
+    </>
+  )
+}
+
+function GatewayGroupStatusContent({ status }: { status: GatewayGroupRuntimeStatus }) {
+  const app = useApp()
+  const members = status.members || []
+  return (
+    <>
+      <div className='grid gap-3 sm:grid-cols-4'>
+        <GatewayMetric label={app.t('selectionMode', 'Selection mode')} value={status.selection_mode || '-'} />
+        <GatewayMetric label={app.t('members', 'Members')} value={formatNumberValue(members.length)} />
+        <GatewayMetric label={app.t('online', 'Online')} value={formatNumberValue(status.online)} />
+        <GatewayMetric label={app.t('offline', 'Offline')} value={formatNumberValue(status.offline)} />
+      </div>
+      <GatewayDetailSection
+        title={app.t('routingRequirements', 'Routing requirements')}
+        rows={[
+          [app.t('selectedGateway', 'Selected gateway'), status.selected_gateway?.name || status.selected_gateway_id || '-'],
+          [app.t('requiredLabels', 'Required labels'), (status.required_labels || []).join(', ') || '-'],
+          [app.t('requiredCapabilities', 'Required capabilities'), (status.required_capabilities || []).join(', ') || '-'],
+          [app.t('configuredMembers', 'Configured members'), (status.member_ids || []).join(', ') || '-'],
+        ]}
+      />
+      <section className='grid gap-2'>
+        <h3 className='text-sm font-semibold'>{app.t('gatewayMembers', 'Gateway members')}</h3>
+        <div className='overflow-x-auto rounded-lg border border-border'>
+          <table className='w-full min-w-[680px] text-left text-xs'>
+            <thead className='bg-muted/50 text-muted-foreground'>
+              <tr>
+                <th className='px-3 py-2 font-medium'>{app.t('name', 'Name')}</th>
+                <th className='px-3 py-2 font-medium'>{app.t('status', 'Status')}</th>
+                <th className='px-3 py-2 font-medium'>{app.t('address', 'Address')}</th>
+                <th className='px-3 py-2 font-medium'>{app.t('latency', 'Latency')}</th>
+                <th className='px-3 py-2 font-medium'>{app.t('activeSessions', 'Active sessions')}</th>
+                <th className='px-3 py-2 font-medium'>{app.t('capabilities', 'Capabilities')}</th>
+                <th className='px-3 py-2 font-medium'>{app.t('lastHeartbeat', 'Last heartbeat')}</th>
+              </tr>
+            </thead>
+            <tbody className='divide-y divide-border'>
+              {members.map((member) => (
+                <tr key={`${member.collection}:${member.id}`} className={member.id === status.selected_gateway_id ? 'bg-primary/5' : undefined}>
+                  <td className='px-3 py-2 font-medium'>{member.name || member.id}</td>
+                  <td className='px-3 py-2'><Badge tone={member.online ? 'success' : 'warning'}>{member.status || (member.online ? 'online' : 'offline')}</Badge></td>
+                  <td className='px-3 py-2 font-mono'>{member.host ? `${member.host}${member.port ? `:${member.port}` : ''}` : '-'}</td>
+                  <td className='px-3 py-2 font-mono'>{formatNumberValue(member.latency_ms)} ms</td>
+                  <td className='px-3 py-2 font-mono'>{formatNumberValue(member.active_sessions)}</td>
+                  <td className='px-3 py-2'>{(member.capabilities || []).join(', ') || '-'}</td>
+                  <td className='px-3 py-2'>{formatDate(member.last_heartbeat_at || '')}</td>
+                </tr>
+              ))}
+              {members.length === 0 ? (
+                <tr><td colSpan={7} className='px-3 py-6 text-center text-muted-foreground'>{app.t('noData', 'No data')}</td></tr>
+              ) : null}
+            </tbody>
+          </table>
+        </div>
+      </section>
+    </>
+  )
+}
+
+function GatewayMetric({ label, value }: { label: string; value: string }) {
+  return (
+    <div className='min-w-0 rounded-lg border border-border bg-muted/20 p-3'>
+      <div className='text-xs text-muted-foreground'>{label}</div>
+      <div className='mt-1 truncate text-sm font-semibold' title={value}>{value || '-'}</div>
+    </div>
+  )
+}
+
+function GatewayDetailSection({ title, rows }: { title: string; rows: string[][] }) {
+  return (
+    <section className='grid gap-2'>
+      <h3 className='text-sm font-semibold'>{title}</h3>
+      <dl className='grid gap-x-4 gap-y-2 rounded-lg border border-border bg-muted/20 p-3 sm:grid-cols-2'>
+        {rows.map(([label, value]) => (
+          <div key={label} className='grid min-w-0 grid-cols-[minmax(7rem,auto)_minmax(0,1fr)] gap-3 text-xs'>
+            <dt className='text-muted-foreground'>{label}</dt>
+            <dd className='break-words text-right font-medium'>{value || '-'}</dd>
+          </div>
+        ))}
+      </dl>
+    </section>
+  )
 }
 
 function AgentGatewayTokenDialog({ item, onClose, canIssueToken }: { item: PlatformItem; onClose: () => void; canIssueToken: boolean }) {

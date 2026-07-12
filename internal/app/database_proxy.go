@@ -2,6 +2,7 @@ package app
 
 import (
 	"context"
+	"fmt"
 	"io"
 	"log/slog"
 	"net"
@@ -20,12 +21,10 @@ type DatabaseProxyManager struct {
 	store  *store.Store
 	logger *slog.Logger
 
-	mu       sync.Mutex
-	listener net.Listener
-	address  string
-	target   string
-	lastErr  string
-	active   int64
+	mu      sync.Mutex
+	routes  []proxyListenerRoute
+	lastErr string
+	active  int64
 }
 
 func NewDatabaseProxyManager(ctx context.Context, st *store.Store, logger *slog.Logger) *DatabaseProxyManager {
@@ -49,13 +48,25 @@ func (m *DatabaseProxyManager) Close() error {
 func (m *DatabaseProxyManager) Address() string {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	return m.address
+	if len(m.routes) == 0 {
+		return ""
+	}
+	return m.routes[0].ListenAddress
 }
 
 func (m *DatabaseProxyManager) Target() string {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	return m.target
+	if len(m.routes) == 0 {
+		return ""
+	}
+	return m.routes[0].Target
+}
+
+func (m *DatabaseProxyManager) Routes() []proxyRouteStatus {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return proxyRouteStatuses(m.routes)
 }
 
 func (m *DatabaseProxyManager) LastError() string {
@@ -85,46 +96,68 @@ func (m *DatabaseProxyManager) Reload() error {
 		m.mu.Lock()
 		defer m.mu.Unlock()
 		m.lastErr = ""
-		m.target = ""
 		return m.stopLocked()
 	}
 	if err := validateDatabaseProxyConfig(listenAddress, allowlist); err != nil {
 		m.mu.Lock()
 		defer m.mu.Unlock()
 		m.lastErr = err.Error()
-		m.target = ""
 		return m.stopLocked()
 	}
-	target := strings.TrimSpace(allowlist[0])
-
-	m.mu.Lock()
-	if m.listener != nil && m.address == listenAddress && m.target == target {
-		m.lastErr = ""
-		m.mu.Unlock()
-		return nil
-	}
-	m.mu.Unlock()
-
-	listener, err := net.Listen("tcp", listenAddress)
+	desired, err := buildSequentialProxyRoutes(listenAddress, allowlist)
 	if err != nil {
 		m.mu.Lock()
 		defer m.mu.Unlock()
 		m.lastErr = err.Error()
-		m.target = target
 		return m.stopLocked()
 	}
 
 	m.mu.Lock()
+	defer m.mu.Unlock()
+	if proxyRoutesEqual(m.routes, desired) {
+		m.lastErr = ""
+		return nil
+	}
+	previous := proxyRouteStatuses(m.routes)
 	_ = m.stopLocked()
-	m.listener = listener
-	m.address = listener.Addr().String()
-	m.target = target
+	started, err := m.startRoutesLocked(desired)
+	if err != nil {
+		m.lastErr = err.Error()
+		if len(previous) > 0 {
+			restored, restoreErr := m.startRoutesLocked(previous)
+			if restoreErr != nil {
+				m.lastErr += "; restore previous routes: " + restoreErr.Error()
+			} else {
+				m.routes = restored
+				for _, route := range restored {
+					go m.acceptLoop(route.listener, route.Target)
+				}
+			}
+		}
+		return nil
+	}
+	m.routes = started
 	m.lastErr = ""
-	m.mu.Unlock()
-
-	m.logger.Info("database proxy listening", "addr", listener.Addr().String(), "target", target)
-	go m.acceptLoop(listener, target)
+	for _, route := range started {
+		m.logger.Info("database proxy listening", "addr", route.ListenAddress, "target", route.Target)
+		go m.acceptLoop(route.listener, route.Target)
+	}
 	return nil
+}
+
+func (m *DatabaseProxyManager) startRoutesLocked(routes []proxyRouteStatus) ([]proxyListenerRoute, error) {
+	started := make([]proxyListenerRoute, 0, len(routes))
+	for _, route := range routes {
+		listener, err := net.Listen("tcp", route.ListenAddress)
+		if err != nil {
+			for _, item := range started {
+				_ = item.listener.Close()
+			}
+			return nil, fmt.Errorf("listen database proxy route %s -> %s: %w", route.ListenAddress, route.Target, err)
+		}
+		started = append(started, proxyListenerRoute{proxyRouteStatus: proxyRouteStatus{ListenAddress: listener.Addr().String(), Target: route.Target}, listener: listener})
+	}
+	return started, nil
 }
 
 func (m *DatabaseProxyManager) proxySetting() (model.PlatformItem, bool, error) {
@@ -212,11 +245,12 @@ func (m *DatabaseProxyManager) setLastError(value string) {
 }
 
 func (m *DatabaseProxyManager) stopLocked() error {
-	var err error
-	if m.listener != nil {
-		err = m.listener.Close()
+	var result error
+	for _, route := range m.routes {
+		if err := route.listener.Close(); err != nil && result == nil {
+			result = err
+		}
 	}
-	m.listener = nil
-	m.address = ""
-	return err
+	m.routes = nil
+	return result
 }

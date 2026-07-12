@@ -297,11 +297,19 @@ func (s *Server) proxyServicesResponse(item model.PlatformItem) map[string]any {
 	rdpAllowlist := metadataStrings(metadata["rdp_forward_allowlist"])
 	rdpLiveAddress := s.rdpProxyAddress()
 	rdpTarget := firstNonEmpty(s.rdpProxyTarget(), firstString(rdpAllowlist))
+	rdpRoutes := s.rdpProxyRoutes()
+	if len(rdpRoutes) == 0 {
+		rdpRoutes, _ = buildSequentialProxyRoutes(rdpListen, rdpAllowlist)
+	}
 	rdpLastError := s.rdpProxyLastError()
 	databaseListen := firstMetadataString(metadata, "database_listen_address")
 	databaseAllowlist := metadataStrings(metadata["database_forward_allowlist"])
 	databaseLiveAddress := s.databaseProxyAddress()
 	databaseTarget := firstNonEmpty(s.databaseProxyTarget(), firstString(databaseAllowlist))
+	databaseRoutes := s.databaseProxyRoutes()
+	if len(databaseRoutes) == 0 {
+		databaseRoutes, _ = buildSequentialProxyRoutes(databaseListen, databaseAllowlist)
+	}
 	databaseLastError := s.databaseProxyLastError()
 	return map[string]any{
 		"settings": item,
@@ -318,6 +326,7 @@ func (s *Server) proxyServicesResponse(item model.PlatformItem) map[string]any {
 				"listen_address":  rdpListen,
 				"live_address":    rdpLiveAddress,
 				"target":          rdpTarget,
+				"routes":          rdpRoutes,
 				"active":          s.rdpProxyActiveConnections(),
 				"allowlist_count": len(rdpAllowlist),
 				"guacd_address":   guacdAddress,
@@ -329,6 +338,7 @@ func (s *Server) proxyServicesResponse(item model.PlatformItem) map[string]any {
 				"listen_address":  databaseListen,
 				"live_address":    databaseLiveAddress,
 				"target":          databaseTarget,
+				"routes":          databaseRoutes,
 				"active":          s.databaseProxyActiveConnections(),
 				"allowlist_count": len(databaseAllowlist),
 				"state":           databaseProxyRuntimeState(databaseEnabled, databaseListen, databaseAllowlist, databaseLiveAddress, databaseLastError),
@@ -387,6 +397,13 @@ func (s *Server) rdpProxyTarget() string {
 	return ""
 }
 
+func (s *Server) rdpProxyRoutes() []proxyRouteStatus {
+	if s.cfg.RDPProxy != nil {
+		return s.cfg.RDPProxy.Routes()
+	}
+	return nil
+}
+
 func (s *Server) rdpProxyLastError() string {
 	if s.cfg.RDPProxy != nil {
 		return s.cfg.RDPProxy.LastError()
@@ -413,6 +430,13 @@ func (s *Server) databaseProxyTarget() string {
 		return s.cfg.DatabaseProxy.Target()
 	}
 	return ""
+}
+
+func (s *Server) databaseProxyRoutes() []proxyRouteStatus {
+	if s.cfg.DatabaseProxy != nil {
+		return s.cfg.DatabaseProxy.Routes()
+	}
+	return nil
 }
 
 func (s *Server) databaseProxyLastError() string {
@@ -541,6 +565,9 @@ func sshGatewayProxyRuntimeState(enabled bool, listenAddress, liveAddress, lastE
 		return "invalid_config"
 	}
 	if strings.TrimSpace(lastError) != "" {
+		if isProxyListenError(lastError) {
+			return "port_unavailable"
+		}
 		return "error"
 	}
 	if strings.TrimSpace(liveAddress) != "" {
@@ -579,6 +606,9 @@ func rdpProxyRuntimeState(enabled bool, listenAddress string, allowlist []string
 		return "invalid_config"
 	}
 	if strings.TrimSpace(lastError) != "" {
+		if isProxyListenError(lastError) {
+			return "port_unavailable"
+		}
 		return "error"
 	}
 	if strings.TrimSpace(liveAddress) != "" {
@@ -617,6 +647,9 @@ func databaseProxyRuntimeState(enabled bool, listenAddress string, allowlist []s
 		return "invalid_config"
 	}
 	if strings.TrimSpace(lastError) != "" {
+		if isProxyListenError(lastError) {
+			return "port_unavailable"
+		}
 		return "error"
 	}
 	if strings.TrimSpace(liveAddress) != "" {
@@ -626,6 +659,19 @@ func databaseProxyRuntimeState(enabled bool, listenAddress string, allowlist []s
 		return "port_unavailable"
 	}
 	return "ready"
+}
+
+func isProxyListenError(value string) bool {
+	value = strings.ToLower(strings.TrimSpace(value))
+	if value == "" || !strings.Contains(value, "listen") {
+		return false
+	}
+	for _, marker := range []string{"bind:", "address already in use", "only one usage", "permission denied", "access is denied"} {
+		if strings.Contains(value, marker) {
+			return true
+		}
+	}
+	return false
 }
 
 func databaseProxyRuntimeError(enabled bool, listenAddress string, allowlist []string, liveAddress, lastError string) string {
@@ -659,6 +705,9 @@ func validateDatabaseProxyConfig(listenAddress string, allowlist []string) error
 			return fmt.Errorf("invalid database proxy allowlist entry %q: %w", entry, err)
 		}
 	}
+	if _, err := buildSequentialProxyRoutes(listenAddress, allowlist); err != nil {
+		return fmt.Errorf("invalid database proxy listener range: %w", err)
+	}
 	return nil
 }
 
@@ -673,6 +722,9 @@ func validateRDPProxyConfig(listenAddress string, allowlist []string) error {
 		if err := validateHostPort(entry); err != nil {
 			return fmt.Errorf("invalid rdp proxy allowlist entry %q: %w", entry, err)
 		}
+	}
+	if _, err := buildSequentialProxyRoutes(listenAddress, allowlist); err != nil {
+		return fmt.Errorf("invalid rdp proxy listener range: %w", err)
 	}
 	return nil
 }

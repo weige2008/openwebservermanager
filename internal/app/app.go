@@ -52,6 +52,7 @@ type sshGatewayRuntime interface {
 type databaseProxyRuntime interface {
 	Address() string
 	Target() string
+	Routes() []proxyRouteStatus
 	Reload() error
 	LastError() string
 	ActiveConnections() int
@@ -60,6 +61,7 @@ type databaseProxyRuntime interface {
 type rdpProxyRuntime interface {
 	Address() string
 	Target() string
+	Routes() []proxyRouteStatus
 	Reload() error
 	LastError() string
 	ActiveConnections() int

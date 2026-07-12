@@ -322,6 +322,11 @@ interface ProxyServicesStatus {
   database_proxy?: Record<string, unknown>
 }
 
+interface ProxyRouteStatus {
+  listen_address: string
+  target: string
+}
+
 interface BrandingForm {
   siteName: string
   logoUrl: string
@@ -5213,6 +5218,7 @@ export function PlatformSettingsPage({ config, sectionId }: { config: PlatformPa
                   <Field label={app.t('forwardAllowlist', 'Forward allowlist')}>
                     <Textarea className='min-h-24 font-mono text-xs' value={proxyForm.rdpForwardAllowlist} onChange={(event) => patchProxyForm({ rdpForwardAllowlist: event.currentTarget.value })} placeholder={'windows.internal:3389\n10.0.0.20:3389'} />
                   </Field>
+                  <p className='text-xs leading-5 text-muted-foreground'>{app.t('sequentialProxyRoutesDescription', 'Targets are mapped in order to the base port, base port + 1, and subsequent ports.')}</p>
                   <div className='rounded-lg border border-border bg-background/60 p-3 text-xs text-muted-foreground'>
                     <div>{app.t('guacdAddress', 'guacd address')}: {metadataText(proxyStatus.rdp_proxy?.guacd_address) || '-'}</div>
                     <div>{app.t('state', 'State')}: {metadataText(proxyStatus.rdp_proxy?.state) || '-'}</div>
@@ -5221,6 +5227,7 @@ export function PlatformSettingsPage({ config, sectionId }: { config: PlatformPa
                     <div>{app.t('target', 'Target')}: {metadataText(proxyStatus.rdp_proxy?.target) || '-'}</div>
                     <div>{app.t('activeConnections', 'Active connections')}: {metadataText(proxyStatus.rdp_proxy?.active) || '0'}</div>
                     <div>{app.t('forwardAllowlist', 'Forward allowlist')}: {metadataText(proxyStatus.rdp_proxy?.allowlist_count) || '0'}</div>
+                    <ProxyRouteList routes={proxyRoutes(proxyStatus.rdp_proxy?.routes)} />
                     {metadataText(proxyStatus.rdp_proxy?.last_error) ? <div className='text-destructive'>{metadataText(proxyStatus.rdp_proxy?.last_error)}</div> : null}
                   </div>
                 </div>
@@ -5232,6 +5239,7 @@ export function PlatformSettingsPage({ config, sectionId }: { config: PlatformPa
                   <Field label={app.t('forwardAllowlist', 'Forward allowlist')}>
                     <Textarea className='min-h-24 font-mono text-xs' value={proxyForm.databaseForwardAllowlist} onChange={(event) => patchProxyForm({ databaseForwardAllowlist: event.currentTarget.value })} placeholder={'db.internal:3306\n10.0.0.10:5432'} />
                   </Field>
+                  <p className='text-xs leading-5 text-muted-foreground'>{app.t('sequentialProxyRoutesDescription', 'Targets are mapped in order to the base port, base port + 1, and subsequent ports.')}</p>
                   <div className='rounded-lg border border-border bg-background/60 p-3 text-xs text-muted-foreground'>
                     <div>{app.t('state', 'State')}: {metadataText(proxyStatus.database_proxy?.state) || '-'}</div>
                     <div>{app.t('listenAddress', 'Listen address')}: {metadataText(proxyStatus.database_proxy?.listen_address) || '-'}</div>
@@ -5239,6 +5247,7 @@ export function PlatformSettingsPage({ config, sectionId }: { config: PlatformPa
                     <div>{app.t('target', 'Target')}: {metadataText(proxyStatus.database_proxy?.target) || '-'}</div>
                     <div>{app.t('activeConnections', 'Active connections')}: {metadataText(proxyStatus.database_proxy?.active) || '0'}</div>
                     <div>{app.t('forwardAllowlist', 'Forward allowlist')}: {metadataText(proxyStatus.database_proxy?.allowlist_count) || '0'}</div>
+                    <ProxyRouteList routes={proxyRoutes(proxyStatus.database_proxy?.routes)} />
                     {metadataText(proxyStatus.database_proxy?.last_error) ? <div className='text-destructive'>{metadataText(proxyStatus.database_proxy?.last_error)}</div> : null}
                   </div>
                 </div>
@@ -5567,6 +5576,34 @@ function proxyServicesPayloadFromForm(form: ProxyServicesForm) {
     proxy_private_key: form.proxyPrivateKey.trim() || undefined,
     proxy_private_key_clear: form.proxyPrivateKeyClear || undefined,
   }
+}
+
+function proxyRoutes(value: unknown): ProxyRouteStatus[] {
+  if (!Array.isArray(value)) return []
+  return value.flatMap((item) => {
+    if (!item || typeof item !== 'object') return []
+    const record = item as Record<string, unknown>
+    const listenAddress = metadataText(record.listen_address)
+    const target = metadataText(record.target)
+    return listenAddress && target ? [{ listen_address: listenAddress, target }] : []
+  })
+}
+
+function ProxyRouteList({ routes }: { routes: ProxyRouteStatus[] }) {
+  const app = useApp()
+  if (!routes.length) return null
+  return (
+    <div className='mt-2 grid gap-1.5 border-t border-border pt-2'>
+      <div className='font-medium text-foreground'>{app.t('listenerMappings', 'Listener mappings')}</div>
+      {routes.map((route) => (
+        <div key={`${route.listen_address}-${route.target}`} className='grid min-w-0 grid-cols-[minmax(0,1fr)_auto_minmax(0,1fr)] items-center gap-2 rounded-md border border-border px-2 py-1.5 font-mono'>
+          <span className='min-w-0 break-all text-foreground'>{route.listen_address}</span>
+          <MoveRight className='size-3.5 shrink-0' aria-hidden='true' />
+          <span className='min-w-0 break-all text-foreground'>{route.target}</span>
+        </div>
+      ))}
+    </div>
+  )
 }
 
 function metadataListText(value: unknown) {

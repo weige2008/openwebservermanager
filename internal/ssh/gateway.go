@@ -5,7 +5,10 @@ import (
 	"context"
 	"crypto/ed25519"
 	"crypto/rand"
+	"crypto/sha256"
 	"crypto/x509"
+	"encoding/base64"
+	"encoding/json"
 	"encoding/pem"
 	"errors"
 	"fmt"
@@ -39,10 +42,11 @@ type GatewayConfig struct {
 }
 
 type Gateway struct {
-	cfg      GatewayConfig
-	listener net.Listener
-	done     chan struct{}
-	once     sync.Once
+	cfg       GatewayConfig
+	listener  net.Listener
+	done      chan struct{}
+	once      sync.Once
+	failureMu sync.Mutex
 }
 
 type gatewayUser struct {
@@ -56,6 +60,19 @@ type gatewayUser struct {
 type gatewayLoginRecord struct {
 	Collection string
 	ID         string
+}
+
+type gatewayLoginFailurePolicy struct {
+	Threshold    int
+	Window       time.Duration
+	LockDuration time.Duration
+}
+
+type gatewayLoginFailure struct {
+	Key         string    `json:"key"`
+	Count       int       `json:"count"`
+	LastFailure time.Time `json:"last_failure"`
+	LockedUntil time.Time `json:"locked_until"`
 }
 
 type gatewayPTY struct {
@@ -229,6 +246,12 @@ func (g *Gateway) serve(ctx context.Context, signer ssh.Signer) {
 func (g *Gateway) passwordCallback(meta ssh.ConnMetadata, password []byte) (*ssh.Permissions, error) {
 	username, directAsset := splitGatewayUsername(strings.TrimSpace(meta.User()))
 	clientIP := remoteIP(meta.RemoteAddr())
+	failureKey := clientIP + ":" + strings.ToLower(username)
+	failurePolicy, err := g.gatewayLoginFailurePolicy()
+	if err != nil {
+		g.auditGatewayLoginFailure(meta, username, "ssh_gateway.login.failure_policy_load_failed", err)
+		return nil, fmt.Errorf("load ssh gateway failure policy: %w", err)
+	}
 	allowed, reason, err := g.gatewayLoginPolicyAllows(username, clientIP)
 	if err != nil {
 		g.auditGatewayLoginFailure(meta, username, "ssh_gateway.login.policy_load_failed", err)
@@ -253,6 +276,17 @@ func (g *Gateway) passwordCallback(meta ssh.ConnMetadata, password []byte) (*ssh
 		}
 		return nil, errors.New(reason)
 	}
+	if retryAfter, locked, err := g.gatewayRuntimeLoginLocked(failureKey, failurePolicy); err != nil {
+		g.auditGatewayLoginFailure(meta, username, "ssh_gateway.login.failure_state_load_failed", err)
+		return nil, fmt.Errorf("load ssh gateway login failure state: %w", err)
+	} else if locked {
+		reason := "too many failed login attempts; retry after " + retryAfter.Round(time.Second).String()
+		if logErr := g.recordGatewayLoginDenied(meta, username, "lock", reason); logErr != nil {
+			g.auditGatewayLoginFailure(meta, username, "ssh_gateway.login.denied_log.persist_failed", logErr)
+			return nil, errors.Join(errors.New(reason), fmt.Errorf("persist denied login audit: %w", logErr))
+		}
+		return nil, errors.New(reason)
+	}
 	admin, ok, err := g.cfg.Store.VerifyAdmin(username, string(password))
 	if err != nil {
 		return nil, err
@@ -269,6 +303,10 @@ func (g *Gateway) passwordCallback(meta ssh.ConnMetadata, password []byte) (*ssh
 			g.auditGatewayLoginFailure(meta, username, "ssh_gateway.login.failed_log.persist_failed", logErr)
 			return nil, errors.Join(authErr, fmt.Errorf("persist failed login audit: %w", logErr))
 		}
+		if _, failureErr := g.gatewayRecordLoginFailure(failureKey, username, clientIP, failurePolicy); failureErr != nil {
+			g.auditGatewayLoginFailure(meta, username, "ssh_gateway.login.failure_state.persist_failed", failureErr)
+			return nil, errors.Join(authErr, fmt.Errorf("persist login failure state: %w", failureErr))
+		}
 		return nil, authErr
 	}
 	user := gatewayUser{
@@ -276,6 +314,10 @@ func (g *Gateway) passwordCallback(meta ssh.ConnMetadata, password []byte) (*ssh
 		Username: admin.Username,
 		Role:     admin.Role,
 		IsAdmin:  gatewayRoleIsAdmin(admin.Role),
+	}
+	if err := g.gatewayResetLoginFailure(failureKey); err != nil {
+		g.auditGatewayLoginFailure(meta, user.UserID, "ssh_gateway.login.failure_state.reset_failed", err)
+		return nil, fmt.Errorf("reset ssh gateway login failure state: %w", err)
 	}
 	if err := g.recordGatewayLogin(meta, user); err != nil {
 		g.auditGatewayLoginFailure(meta, user.UserID, "ssh_gateway.login.persist_failed", err)
@@ -454,6 +496,207 @@ func (g *Gateway) gatewayLoginLocked(username, clientIP string) (bool, string, e
 		}
 	}
 	return false, "", nil
+}
+
+func (g *Gateway) gatewayLoginFailurePolicy() (gatewayLoginFailurePolicy, error) {
+	policy := gatewayLoginFailurePolicy{Threshold: 5, Window: 15 * time.Minute, LockDuration: 5 * time.Minute}
+	items, err := g.cfg.Store.ListPlatformItems("system_settings")
+	if err != nil {
+		return policy, err
+	}
+	for _, item := range items {
+		if !platformItemEnabled(item) {
+			continue
+		}
+		itemType := strings.ToLower(strings.TrimSpace(item.Type))
+		if itemType != "security" && itemType != "identity" && itemType != "login" && itemType != "password" && itemType != "mfa" {
+			continue
+		}
+		if value, ok := gatewayMetadataIntByKeys(item.Metadata, "login_failure_threshold", "failure_threshold", "max_login_failures", "login_lock_threshold", "lock_threshold"); ok {
+			policy.Threshold = gatewayClampInt(value, 1, 50, 5)
+		}
+		if value, ok := gatewayMetadataIntByKeys(item.Metadata, "login_failure_window_minutes", "failure_window_minutes", "login_lock_window_minutes", "lock_window_minutes"); ok {
+			policy.Window = time.Duration(gatewayClampInt(value, 1, 1440, 15)) * time.Minute
+		}
+		if value, ok := gatewayMetadataIntByKeys(item.Metadata, "login_lock_minutes", "lock_minutes", "login_lock_duration_minutes", "lock_duration_minutes"); ok {
+			policy.LockDuration = time.Duration(gatewayClampInt(value, 1, 1440, 5)) * time.Minute
+		}
+	}
+	return policy, nil
+}
+
+func (g *Gateway) gatewayRuntimeLoginLocked(key string, policy gatewayLoginFailurePolicy) (time.Duration, bool, error) {
+	g.failureMu.Lock()
+	defer g.failureMu.Unlock()
+	failure, ok, err := g.gatewayLoadLoginFailure(key)
+	if err != nil {
+		return 0, false, err
+	}
+	now := time.Now().UTC()
+	if !failure.LockedUntil.IsZero() && now.Before(failure.LockedUntil) {
+		return time.Until(failure.LockedUntil), true, nil
+	}
+	if ok && !failure.LastFailure.IsZero() && now.Sub(failure.LastFailure) > policy.Window {
+		if err := g.gatewayResetLoginFailureUnlocked(key); err != nil {
+			return 0, false, err
+		}
+	}
+	return 0, false, nil
+}
+
+func (g *Gateway) gatewayRecordLoginFailure(key, username, clientIP string, policy gatewayLoginFailurePolicy) (gatewayLoginFailure, error) {
+	g.failureMu.Lock()
+	defer g.failureMu.Unlock()
+	failure, hadPrevious, err := g.gatewayLoadLoginFailure(key)
+	if err != nil {
+		return gatewayLoginFailure{}, err
+	}
+	previous := failure
+	now := time.Now().UTC()
+	if !failure.LastFailure.IsZero() && now.Sub(failure.LastFailure) > policy.Window {
+		failure = gatewayLoginFailure{Key: key}
+	}
+	failure.Key = key
+	failure.Count++
+	failure.LastFailure = now
+	if failure.Count >= policy.Threshold {
+		failure.LockedUntil = now.Add(policy.LockDuration)
+	}
+	expiresAt := failure.LastFailure.Add(policy.Window)
+	if failure.LockedUntil.After(expiresAt) {
+		expiresAt = failure.LockedUntil
+	}
+	payload, err := json.Marshal(failure)
+	if err != nil {
+		return gatewayLoginFailure{}, err
+	}
+	_, err = g.cfg.Store.SavePlatformItem("login_failure_states", model.PlatformItem{
+		ID:     gatewayLoginFailureRecordID(key),
+		Name:   "login_failure_states",
+		Type:   "auth-runtime",
+		Status: "active",
+		Metadata: map[string]any{
+			"payload":    string(payload),
+			"expires_at": expiresAt.UTC().Format(time.RFC3339Nano),
+		},
+	})
+	if err != nil {
+		return gatewayLoginFailure{}, err
+	}
+	if !failure.LockedUntil.IsZero() {
+		if err := g.gatewayCreateLoginLock(username, clientIP, failure); err != nil {
+			rollbackErr := g.gatewayRestoreLoginFailure(key, previous, hadPrevious, policy)
+			if rollbackErr != nil {
+				return gatewayLoginFailure{}, errors.Join(err, fmt.Errorf("restore previous login failure state: %w", rollbackErr))
+			}
+			return gatewayLoginFailure{}, err
+		}
+	}
+	return failure, nil
+}
+
+func (g *Gateway) gatewayRestoreLoginFailure(key string, previous gatewayLoginFailure, existed bool, policy gatewayLoginFailurePolicy) error {
+	if !existed {
+		if err := g.cfg.Store.DeletePlatformItem("login_failure_states", gatewayLoginFailureRecordID(key)); err != nil && !errors.Is(err, os.ErrNotExist) {
+			return err
+		}
+		return nil
+	}
+	expiresAt := previous.LastFailure.Add(policy.Window)
+	if previous.LockedUntil.After(expiresAt) {
+		expiresAt = previous.LockedUntil
+	}
+	payload, err := json.Marshal(previous)
+	if err != nil {
+		return err
+	}
+	_, err = g.cfg.Store.SavePlatformItem("login_failure_states", model.PlatformItem{
+		ID:     gatewayLoginFailureRecordID(key),
+		Name:   "login_failure_states",
+		Type:   "auth-runtime",
+		Status: "active",
+		Metadata: map[string]any{
+			"payload":    string(payload),
+			"expires_at": expiresAt.UTC().Format(time.RFC3339Nano),
+		},
+	})
+	return err
+}
+
+func (g *Gateway) gatewayLoadLoginFailure(key string) (gatewayLoginFailure, bool, error) {
+	item, ok, err := g.cfg.Store.GetPlatformItem("login_failure_states", gatewayLoginFailureRecordID(key))
+	if err != nil || !ok {
+		return gatewayLoginFailure{}, ok, err
+	}
+	if expiresAt, ok := gatewayMetadataTime(item.Metadata["expires_at"]); ok && !time.Now().UTC().Before(expiresAt) {
+		if err := g.cfg.Store.DeletePlatformItem("login_failure_states", item.ID); err != nil && !errors.Is(err, os.ErrNotExist) {
+			return gatewayLoginFailure{}, false, err
+		}
+		return gatewayLoginFailure{}, false, nil
+	}
+	payload, _ := item.Metadata["payload"].(string)
+	if strings.TrimSpace(payload) == "" {
+		return gatewayLoginFailure{}, false, errors.New("persisted login failure state is missing payload")
+	}
+	var failure gatewayLoginFailure
+	if err := json.Unmarshal([]byte(payload), &failure); err != nil {
+		return gatewayLoginFailure{}, false, fmt.Errorf("decode login failure state: %w", err)
+	}
+	return failure, true, nil
+}
+
+func (g *Gateway) gatewayResetLoginFailure(key string) error {
+	g.failureMu.Lock()
+	defer g.failureMu.Unlock()
+	return g.gatewayResetLoginFailureUnlocked(key)
+}
+
+func (g *Gateway) gatewayResetLoginFailureUnlocked(key string) error {
+	if err := g.cfg.Store.DeletePlatformItem("login_failure_states", gatewayLoginFailureRecordID(key)); err != nil && !errors.Is(err, os.ErrNotExist) {
+		return err
+	}
+	return nil
+}
+
+func (g *Gateway) gatewayCreateLoginLock(username, clientIP string, failure gatewayLoginFailure) error {
+	_, err := g.cfg.Store.CreatePlatformItem("login_locks", model.PlatformItemRequest{
+		Name:        username,
+		Type:        "password",
+		Status:      "locked",
+		Username:    username,
+		Host:        clientIP,
+		Description: "too many failed login attempts",
+		Metadata: map[string]any{
+			"account":       username,
+			"client_ip":     clientIP,
+			"failure_count": failure.Count,
+			"locked_until":  failure.LockedUntil.UTC(),
+			"last_failure":  failure.LastFailure.UTC(),
+			"source":        "ssh_gateway",
+		},
+	})
+	return err
+}
+
+func gatewayLoginFailureRecordID(key string) string {
+	sum := sha256.Sum256([]byte(strings.TrimSpace(key)))
+	return base64.RawURLEncoding.EncodeToString(sum[:])
+}
+
+func gatewayMetadataIntByKeys(metadata map[string]any, keys ...string) (int, bool) {
+	for _, key := range keys {
+		if value, ok := gatewayMetadataInt(metadata[key]); ok {
+			return value, true
+		}
+	}
+	return 0, false
+}
+
+func gatewayClampInt(value, minimum, maximum, fallback int) int {
+	if value < minimum || value > maximum {
+		return fallback
+	}
+	return value
 }
 
 func gatewayLoginLockEnabled(lock model.PlatformItem) bool {

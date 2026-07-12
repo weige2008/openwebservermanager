@@ -6,6 +6,7 @@ import (
 	"crypto/ed25519"
 	"crypto/rand"
 	"crypto/x509"
+	"encoding/json"
 	"encoding/pem"
 	"errors"
 	"io"
@@ -364,6 +365,189 @@ func TestNativeSSHGatewayRemovesExpiredLoginLock(t *testing.T) {
 	_ = client.Close()
 	if _, ok, err := st.GetPlatformItem("login_locks", lock.ID); err != nil || ok {
 		t.Fatalf("expired lock remains after login: ok=%v err=%v", ok, err)
+	}
+}
+
+func TestNativeSSHGatewayFailureThresholdCreatesLoginLock(t *testing.T) {
+	st := newGatewayTestStore(t)
+	if _, err := st.CreatePlatformItem("users", model.PlatformItemRequest{
+		Name:     "gateway-user",
+		Type:     "local",
+		Status:   "enabled",
+		Password: "password123",
+		Metadata: map[string]any{"role": "user"},
+	}); err != nil {
+		t.Fatalf("create user: %v", err)
+	}
+	if _, err := st.CreatePlatformItem("system_settings", model.PlatformItemRequest{
+		Name:   "login security",
+		Type:   "security",
+		Status: "enabled",
+		Metadata: map[string]any{
+			"login_failure_threshold":      2,
+			"login_failure_window_minutes": 30,
+			"login_lock_minutes":           1,
+		},
+	}); err != nil {
+		t.Fatalf("create login security settings: %v", err)
+	}
+	gateway := startTestGateway(t, st)
+	for attempt := 1; attempt <= 2; attempt++ {
+		if client, err := dialGatewayWithPassword(gateway.Address(), "gateway-user", "wrong-password"); err == nil {
+			_ = client.Close()
+			t.Fatalf("invalid password attempt %d succeeded", attempt)
+		}
+	}
+	locks, err := st.ListPlatformItems("login_locks")
+	if err != nil {
+		t.Fatalf("list login locks: %v", err)
+	}
+	if len(locks) != 1 || locks[0].Status != "locked" || locks[0].Username != "gateway-user" || locks[0].Metadata["source"] != "ssh_gateway" {
+		t.Fatalf("login locks = %#v, want one ssh gateway lock", locks)
+	}
+	if client, err := dialGatewayWithPassword(gateway.Address(), "gateway-user", "password123"); err == nil {
+		_ = client.Close()
+		t.Fatal("correct password bypassed ssh gateway login lock")
+	}
+	logs, err := st.ListPlatformItems("login_logs")
+	if err != nil {
+		t.Fatalf("list login logs: %v", err)
+	}
+	if !platformLogTypeExists(logs, "lock", "denied") {
+		t.Fatalf("login logs = %#v, want lock denial after threshold", logs)
+	}
+}
+
+func TestNativeSSHGatewaySuccessfulLoginResetsFailureCount(t *testing.T) {
+	st := newGatewayTestStore(t)
+	if _, err := st.CreatePlatformItem("users", model.PlatformItemRequest{
+		Name:     "gateway-user",
+		Type:     "local",
+		Status:   "enabled",
+		Password: "password123",
+		Metadata: map[string]any{"role": "user"},
+	}); err != nil {
+		t.Fatalf("create user: %v", err)
+	}
+	if _, err := st.CreatePlatformItem("system_settings", model.PlatformItemRequest{
+		Name:   "login security",
+		Type:   "security",
+		Status: "enabled",
+		Metadata: map[string]any{
+			"login_failure_threshold":      2,
+			"login_failure_window_minutes": 30,
+			"login_lock_minutes":           1,
+		},
+	}); err != nil {
+		t.Fatalf("create login security settings: %v", err)
+	}
+	gateway := startTestGateway(t, st)
+	if client, err := dialGatewayWithPassword(gateway.Address(), "gateway-user", "wrong-password"); err == nil {
+		_ = client.Close()
+		t.Fatal("invalid password succeeded")
+	}
+	client, err := dialGatewayWithPassword(gateway.Address(), "gateway-user", "password123")
+	if err != nil {
+		t.Fatalf("correct password after one failure: %v", err)
+	}
+	_ = client.Close()
+	if client, err := dialGatewayWithPassword(gateway.Address(), "gateway-user", "wrong-password"); err == nil {
+		_ = client.Close()
+		t.Fatal("invalid password after successful reset succeeded")
+	}
+	locks, err := st.ListPlatformItems("login_locks")
+	if err != nil {
+		t.Fatalf("list login locks: %v", err)
+	}
+	if len(locks) != 0 {
+		t.Fatalf("successful login did not reset failure count: %#v", locks)
+	}
+	states, err := st.ListPlatformItems("login_failure_states")
+	if err != nil || len(states) != 1 {
+		t.Fatalf("login failure states = %#v err=%v, want one post-reset failure", states, err)
+	}
+	var failure gatewayLoginFailure
+	payload, _ := states[0].Metadata["payload"].(string)
+	if err := json.Unmarshal([]byte(payload), &failure); err != nil || failure.Count != 1 || !failure.LockedUntil.IsZero() {
+		t.Fatalf("post-reset failure state = %#v err=%v", failure, err)
+	}
+}
+
+func TestNativeSSHGatewayFailureStatePersistenceErrorsAreAudited(t *testing.T) {
+	st := newGatewayTestStore(t)
+	if _, err := st.CreatePlatformItem("users", model.PlatformItemRequest{
+		Name:     "gateway-user",
+		Type:     "local",
+		Status:   "enabled",
+		Password: "password123",
+	}); err != nil {
+		t.Fatalf("create user: %v", err)
+	}
+	gateway := startTestGateway(t, st)
+	unblock := blockPlatformCollectionInsert(t, st, "login_failure_states")
+	defer unblock()
+	if client, err := dialGatewayWithPassword(gateway.Address(), "gateway-user", "wrong-password"); err == nil {
+		_ = client.Close()
+		t.Fatal("invalid password succeeded while failure state persistence was blocked")
+	}
+	states, err := st.ListPlatformItems("login_failure_states")
+	if err != nil || len(states) != 0 {
+		t.Fatalf("login failure states = %#v err=%v, want none after persistence failure", states, err)
+	}
+	_, _, _, auditLogs := st.Bootstrap()
+	if !auditLogActionExists(auditLogs, "ssh_gateway.login.failure_state.persist_failed") {
+		t.Fatalf("core audit logs = %#v, want login failure state persistence failure", auditLogs)
+	}
+}
+
+func TestNativeSSHGatewayLoginLockPersistenceFailureRollsBackState(t *testing.T) {
+	st := newGatewayTestStore(t)
+	if _, err := st.CreatePlatformItem("users", model.PlatformItemRequest{
+		Name:     "gateway-user",
+		Type:     "local",
+		Status:   "enabled",
+		Password: "password123",
+	}); err != nil {
+		t.Fatalf("create user: %v", err)
+	}
+	if _, err := st.CreatePlatformItem("system_settings", model.PlatformItemRequest{
+		Name:   "login security",
+		Type:   "security",
+		Status: "enabled",
+		Metadata: map[string]any{
+			"login_failure_threshold": 2,
+			"login_lock_minutes":      1,
+		},
+	}); err != nil {
+		t.Fatalf("create login security settings: %v", err)
+	}
+	gateway := startTestGateway(t, st)
+	if client, err := dialGatewayWithPassword(gateway.Address(), "gateway-user", "wrong-password"); err == nil {
+		_ = client.Close()
+		t.Fatal("first invalid password succeeded")
+	}
+	unblock := blockPlatformCollectionInsert(t, st, "login_locks")
+	defer unblock()
+	if client, err := dialGatewayWithPassword(gateway.Address(), "gateway-user", "wrong-password"); err == nil {
+		_ = client.Close()
+		t.Fatal("invalid password succeeded while login lock persistence was blocked")
+	}
+	states, err := st.ListPlatformItems("login_failure_states")
+	if err != nil || len(states) != 1 {
+		t.Fatalf("previous login failure state was not restored: states=%#v err=%v", states, err)
+	}
+	var failure gatewayLoginFailure
+	payload, _ := states[0].Metadata["payload"].(string)
+	if err := json.Unmarshal([]byte(payload), &failure); err != nil || failure.Count != 1 || !failure.LockedUntil.IsZero() {
+		t.Fatalf("restored login failure state = %#v err=%v", failure, err)
+	}
+	locks, err := st.ListPlatformItems("login_locks")
+	if err != nil || len(locks) != 0 {
+		t.Fatalf("login locks = %#v err=%v, want none after blocked insert", locks, err)
+	}
+	_, _, _, auditLogs := st.Bootstrap()
+	if !auditLogActionExists(auditLogs, "ssh_gateway.login.failure_state.persist_failed") {
+		t.Fatalf("core audit logs = %#v, want lock persistence failure", auditLogs)
 	}
 }
 
@@ -1634,6 +1818,15 @@ func startTestGateway(t *testing.T, st *store.Store) *Gateway {
 	}
 	t.Cleanup(func() { _ = gateway.Close() })
 	return gateway
+}
+
+func dialGatewayWithPassword(address, username, password string) (*ssh.Client, error) {
+	return ssh.Dial("tcp", address, &ssh.ClientConfig{
+		User:            username,
+		Auth:            []ssh.AuthMethod{ssh.Password(password)},
+		HostKeyCallback: ssh.InsecureIgnoreHostKey(),
+		Timeout:         5 * time.Second,
+	})
 }
 
 func platformLogExists(items []model.PlatformItem, name, status string) bool {

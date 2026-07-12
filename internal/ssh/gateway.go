@@ -371,20 +371,66 @@ func (g *Gateway) runGatewayShell(conn *ssh.ServerConn, channel ssh.Channel, pty
 		_, _ = fmt.Fprintf(channel, "\r\nSession error: %v\r\n", err)
 		return nil
 	}
-	_ = g.cfg.Store.Audit(model.AuditLog{UserID: user.UserID, Action: "ssh_gateway.connect", TargetID: asset.ID, Protocol: model.ProtocolSSH, Detail: "native ssh gateway selected asset " + asset.Name, ClientIP: remoteIP(conn.RemoteAddr())})
+	if err := g.recordGatewayConnection(conn, user, session, asset); err != nil {
+		if rollbackErr := g.cfg.Store.DeleteSession(session.ID); rollbackErr != nil {
+			g.auditGatewayConnectionFailure(conn, user, session, asset, "ssh_gateway.connect.rollback_failed", rollbackErr)
+			err = errors.Join(err, fmt.Errorf("roll back unaudited session: %w", rollbackErr))
+		}
+		g.auditGatewayConnectionFailure(conn, user, session, asset, "ssh_gateway.connect.log.persist_failed", err)
+		_, _ = fmt.Fprintf(channel, "\r\nSession error: connection audit is unavailable: %v\r\n", err)
+		return nil
+	}
 	_, _ = fmt.Fprintf(channel, "\r\nConnecting to %s...\r\n", asset.Name)
 	targetSession, err := g.proxySSHSession(channel, session, asset, credential, secret, pty)
 	if err != nil {
 		now := time.Now().UTC()
-		_, _ = g.cfg.Store.UpdateSession(session.ID, func(item *model.ConnectionSession) {
+		if _, stateErr := g.cfg.Store.UpdateSession(session.ID, func(item *model.ConnectionSession) {
 			item.Status = model.SessionFailed
 			item.Error = err.Error()
 			item.EndedAt = &now
-		})
+		}); stateErr != nil {
+			g.auditGatewayConnectionFailure(conn, user, session, asset, "ssh_gateway.session.failure_state.persist_failed", stateErr)
+			err = errors.Join(err, fmt.Errorf("persist failed session state: %w", stateErr))
+		}
 		_, _ = fmt.Fprintf(channel, "\r\nConnection failed: %v\r\n", err)
 		return nil
 	}
 	return targetSession
+}
+
+func (g *Gateway) recordGatewayConnection(conn *ssh.ServerConn, user gatewayUser, session model.ConnectionSession, asset model.PlatformItem) error {
+	if g == nil || g.cfg.Store == nil {
+		return errors.New("gateway connection audit store is unavailable")
+	}
+	_, err := g.cfg.Store.CreatePlatformItem("operation_logs", model.PlatformItemRequest{
+		Name:        "ssh_gateway.connect",
+		Type:        "ssh_gateway",
+		Status:      "started",
+		Protocol:    model.ProtocolSSH,
+		OwnerID:     user.UserID,
+		TargetID:    asset.ID,
+		Description: "native ssh gateway selected asset " + asset.Name,
+		Metadata: map[string]any{
+			"client_ip":     remoteIP(conn.RemoteAddr()),
+			"session_id":    session.ID,
+			"credential_id": session.CredentialID,
+		},
+	})
+	return err
+}
+
+func (g *Gateway) auditGatewayConnectionFailure(conn *ssh.ServerConn, user gatewayUser, session model.ConnectionSession, asset model.PlatformItem, action string, err error) {
+	if g == nil || g.cfg.Store == nil || err == nil {
+		return
+	}
+	_ = g.cfg.Store.Audit(model.AuditLog{
+		UserID:   user.UserID,
+		Action:   action,
+		TargetID: asset.ID,
+		Protocol: model.ProtocolSSH,
+		Detail:   "session " + session.ID + ": " + err.Error(),
+		ClientIP: remoteIP(conn.RemoteAddr()),
+	})
 }
 
 func (g *Gateway) handleDirectTCPIP(conn *ssh.ServerConn, newChannel ssh.NewChannel) {
@@ -696,22 +742,35 @@ func (g *Gateway) proxySSHSession(channel ssh.Channel, session model.ConnectionS
 		_ = client.Close()
 		return nil, err
 	}
-	_, _ = g.cfg.Store.UpdateSession(session.ID, func(item *model.ConnectionSession) {
+	if _, err := g.cfg.Store.UpdateSession(session.ID, func(item *model.ConnectionSession) {
 		item.Status = model.SessionActive
-	})
+	}); err != nil {
+		_ = targetSession.Close()
+		_ = client.Close()
+		return nil, fmt.Errorf("mark session active: %w", err)
+	}
 	var once sync.Once
 	closeAll := func(reason string) {
 		once.Do(func() {
 			_ = targetSession.Close()
 			_ = client.Close()
 			now := time.Now().UTC()
-			_, _ = g.cfg.Store.UpdateSession(session.ID, func(item *model.ConnectionSession) {
+			if _, err := g.cfg.Store.UpdateSession(session.ID, func(item *model.ConnectionSession) {
 				item.Status = model.SessionClosed
 				item.EndedAt = &now
 				if reason != "" {
 					item.Error = reason
 				}
-			})
+			}); err != nil {
+				_ = g.cfg.Store.Audit(model.AuditLog{
+					UserID:   session.UserID,
+					Action:   "ssh_gateway.session.close_state.persist_failed",
+					TargetID: session.ServerID,
+					Protocol: model.ProtocolSSH,
+					Detail:   "session " + session.ID + ": " + err.Error(),
+					ClientIP: session.ClientIP,
+				})
+			}
 		})
 	}
 	go copyNativeOutput(channel, session.ID, stdout, g.cfg.Store, closeAll)

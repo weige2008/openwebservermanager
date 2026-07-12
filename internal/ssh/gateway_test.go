@@ -153,6 +153,144 @@ func TestNativeSSHGatewayConnectsAuthorizedAsset(t *testing.T) {
 	}
 }
 
+func TestNativeSSHGatewayDoesNotDialAssetWhenConnectionAuditCannotPersist(t *testing.T) {
+	targetAddr, accepted, closeTarget := startTCPEchoServer(t)
+	defer closeTarget()
+
+	st := newGatewayTestStore(t)
+	assetRec := createGatewayUserAssetAndCredential(t, st, targetAddr)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	gatewayDataDir := mustTempDir(t)
+	defer removeTempDir(gatewayDataDir)
+	gateway, err := StartGateway(ctx, GatewayConfig{
+		Enabled:        true,
+		Address:        "127.0.0.1:0",
+		DataDir:        gatewayDataDir,
+		KnownHostsPath: filepath.Join(gatewayDataDir, "known_hosts"),
+		Store:          st,
+	})
+	if err != nil {
+		t.Fatalf("start gateway: %v", err)
+	}
+	defer gateway.Close()
+
+	unblockConnectionAudit := blockPlatformCollectionPayloadInsert(t, st, "operation_logs", "ssh_gateway.connect")
+	defer unblockConnectionAudit()
+	client, err := ssh.Dial("tcp", gateway.Address(), &ssh.ClientConfig{
+		User:            "gateway-user#" + assetRec.Name,
+		Auth:            []ssh.AuthMethod{ssh.Password("password123")},
+		HostKeyCallback: ssh.InsecureIgnoreHostKey(),
+		Timeout:         5 * time.Second,
+	})
+	if err != nil {
+		t.Fatalf("dial gateway: %v", err)
+	}
+	defer client.Close()
+	session, err := client.NewSession()
+	if err != nil {
+		t.Fatalf("new gateway session: %v", err)
+	}
+	defer session.Close()
+	stdout, err := session.StdoutPipe()
+	if err != nil {
+		t.Fatalf("stdout pipe: %v", err)
+	}
+	if err := session.RequestPty("xterm-256color", 24, 80, ssh.TerminalModes{ssh.ECHO: 1}); err != nil {
+		t.Fatalf("request pty: %v", err)
+	}
+	if err := session.Shell(); err != nil {
+		t.Fatalf("start gateway shell: %v", err)
+	}
+	output := readUntilContains(t, stdout, "connection audit is unavailable", 5*time.Second)
+	if strings.Contains(output, "Connecting to "+assetRec.Name) {
+		t.Fatalf("gateway started target connection before audit persisted: %q", output)
+	}
+	select {
+	case <-accepted:
+		t.Fatal("gateway dialed target before connection audit persisted")
+	case <-time.After(300 * time.Millisecond):
+	}
+	_, _, sessions, auditLogs := st.Bootstrap()
+	for _, storedSession := range sessions {
+		if storedSession.ServerID == assetRec.ID {
+			t.Fatalf("unaudited gateway session was not rolled back: %#v", storedSession)
+		}
+	}
+	if !auditLogActionExists(auditLogs, "ssh_gateway.connect.log.persist_failed") {
+		t.Fatalf("core audit logs = %#v, want gateway connection log persistence failure", auditLogs)
+	}
+}
+
+func TestNativeSSHGatewayClosesTargetWhenActiveSessionStateCannotPersist(t *testing.T) {
+	targetAddr, closeTarget := startFakeSSHServer(t, "remote", "target-secret")
+	defer closeTarget()
+
+	st := newGatewayTestStore(t)
+	assetRec := createGatewayUserAssetAndCredential(t, st, targetAddr)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	gatewayDataDir := mustTempDir(t)
+	defer removeTempDir(gatewayDataDir)
+	gateway, err := StartGateway(ctx, GatewayConfig{
+		Enabled:        true,
+		Address:        "127.0.0.1:0",
+		DataDir:        gatewayDataDir,
+		KnownHostsPath: filepath.Join(gatewayDataDir, "known_hosts"),
+		Store:          st,
+	})
+	if err != nil {
+		t.Fatalf("start gateway: %v", err)
+	}
+	defer gateway.Close()
+
+	client, err := ssh.Dial("tcp", gateway.Address(), &ssh.ClientConfig{
+		User:            "gateway-user#" + assetRec.Name,
+		Auth:            []ssh.AuthMethod{ssh.Password("password123")},
+		HostKeyCallback: ssh.InsecureIgnoreHostKey(),
+		Timeout:         5 * time.Second,
+	})
+	if err != nil {
+		t.Fatalf("dial gateway: %v", err)
+	}
+	defer client.Close()
+	unblockActiveState := blockPlatformCollectionPayloadInsert(t, st, "online_sessions", `"status":"active"`)
+	defer unblockActiveState()
+	session, err := client.NewSession()
+	if err != nil {
+		t.Fatalf("new gateway session: %v", err)
+	}
+	defer session.Close()
+	stdout, err := session.StdoutPipe()
+	if err != nil {
+		t.Fatalf("stdout pipe: %v", err)
+	}
+	if err := session.RequestPty("xterm-256color", 24, 80, ssh.TerminalModes{ssh.ECHO: 1}); err != nil {
+		t.Fatalf("request pty: %v", err)
+	}
+	if err := session.Shell(); err != nil {
+		t.Fatalf("start gateway shell: %v", err)
+	}
+	output := readUntilContains(t, stdout, "mark session active", 5*time.Second)
+	if strings.Contains(output, "target-shell") {
+		t.Fatalf("gateway proxied target output before active session state persisted: %q", output)
+	}
+	_, _, sessions, _ := st.Bootstrap()
+	foundFailed := false
+	for _, storedSession := range sessions {
+		if storedSession.ServerID != assetRec.ID {
+			continue
+		}
+		foundFailed = true
+		if storedSession.Status != model.SessionFailed || storedSession.EndedAt == nil || !strings.Contains(storedSession.Error, "mark session active") {
+			t.Fatalf("gateway session after active-state failure = %#v", storedSession)
+		}
+	}
+	if !foundFailed {
+		t.Fatal("gateway active-state failure did not retain a failed session audit record")
+	}
+}
+
 func TestNativeSSHGatewayDirectAssetLogin(t *testing.T) {
 	targetAddr, closeTarget := startFakeSSHServer(t, "remote", "target-secret")
 	defer closeTarget()

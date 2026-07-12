@@ -34,11 +34,14 @@ jobs:
       - name: Smoke test RDP and VNC plugins
         run: bash scripts/guacd/test-linux-runtime.sh runtime/guacd/linux
 
+      - name: Package guacd runtime
+        run: tar -C runtime/guacd/linux -czf "${RUNNER_TEMP}/guacd-linux-amd64.tar.gz" .
+
       - name: Upload guacd runtime
         uses: actions/upload-artifact@v4
         with:
           name: guacd-linux-amd64
-          path: runtime/guacd/linux
+          path: ${{ runner.temp }}/guacd-linux-amd64.tar.gz
           if-no-files-found: error
 
   guacd-windows-amd64:
@@ -133,7 +136,13 @@ jobs:
         uses: actions/download-artifact@v4
         with:
           name: guacd-linux-amd64
-          path: runtime/guacd/linux
+          path: ${{ runner.temp }}/guacd-linux-amd64
+
+      - name: Extract Linux guacd runtime
+        if: matrix.goos == 'linux' && matrix.goarch == 'amd64'
+        run: |
+          mkdir -p runtime/guacd/linux
+          tar -xzf "${RUNNER_TEMP}/guacd-linux-amd64/guacd-linux-amd64.tar.gz" -C runtime/guacd/linux
 
       - name: Download Windows guacd runtime
         if: matrix.goos == 'windows' && matrix.goarch == 'amd64'

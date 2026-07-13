@@ -67,6 +67,22 @@ if (sqlDialogDefinitions.length !== 7) {
   process.exit(1)
 }
 
+const sshExecDefinitions = resourcesSource.match(/sshExecDialog:\s*\{/g) || []
+if (sshExecDefinitions.length !== 7) {
+  console.error(`sshExecDialog locale definitions = ${sshExecDefinitions.length}, want 7`)
+  process.exit(1)
+}
+
+const sshExecStart = platformPageSource.indexOf('function SSHExecDialog(')
+const sshExecEnd = platformPageSource.indexOf('function SQLWorkOrderDecisionDialog(', sshExecStart)
+const sshExecSource = sshExecStart >= 0 && sshExecEnd > sshExecStart ? platformPageSource.slice(sshExecStart, sshExecEnd) : ''
+const sshExecHardcodedText = ['SSH command executed', "label='Command'", "label='Timeout seconds'", '>Close</Button>', "'Running...' : 'Run'", '(stdout empty)', '(stderr empty)']
+const sshExecHardcodedFound = sshExecHardcodedText.filter((fragment) => sshExecSource.includes(fragment))
+if (sshExecHardcodedFound.length > 0) {
+  console.error(`SSH Exec dialog contains hardcoded locale text: ${sshExecHardcodedFound.join(', ')}`)
+  process.exit(1)
+}
+
 const sqlDialogHardcodedText = [
   "label='申请原因'",
   '>关闭</Button>',

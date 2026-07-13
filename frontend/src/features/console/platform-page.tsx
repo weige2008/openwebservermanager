@@ -3414,6 +3414,7 @@ function TaskLogsDialog({ item, onClose, canRead }: { item: PlatformItem; onClos
 
 function SSHExecDialog({ item, onClose, requestAccessMFACode }: { item: PlatformItem; onClose: () => void; requestAccessMFACode: RequestAccessMFACode }) {
   const app = useApp()
+  const { t } = useTranslation()
   const [command, setCommand] = useState(stringValue(item.metadata?.command) || 'uptime')
   const [timeoutSeconds, setTimeoutSeconds] = useState('30')
   const [result, setResult] = useState<SSHExecResult | null>(null)
@@ -3441,7 +3442,7 @@ function SSHExecDialog({ item, onClose, requestAccessMFACode }: { item: Platform
       }
       setResult(data)
       await app.refresh(true)
-      app.showToast('SSH command executed')
+      app.showToast(t('sshExecDialog.executed'))
     } catch (error) {
       if (error instanceof ApiError && error.status === 403 && error.data) {
         setResult(error.data as SSHExecResult)
@@ -3455,10 +3456,10 @@ function SSHExecDialog({ item, onClose, requestAccessMFACode }: { item: Platform
   }
 
   return (
-    <DialogShell open onOpenChange={(open) => !open && onClose()} title={`${item.name} Exec`} description='Run a non-interactive SSH command. Output, exit code, risk level, and duration are written to remote command logs.'>
+    <DialogShell open onOpenChange={(open) => !open && onClose()} title={t('sshExecDialog.title', { name: item.name })} description={t('sshExecDialog.description')}>
       <div className='grid gap-4'>
-        <Field label='Command'><Textarea className='min-h-32 font-mono text-xs' value={command} onChange={(event) => setCommand(event.currentTarget.value)} /></Field>
-        <Field label='Timeout seconds'><Input type='number' min={1} max={600} value={timeoutSeconds} onChange={(event) => setTimeoutSeconds(event.currentTarget.value)} /></Field>
+        <Field label={t('sshExecDialog.command')}><Textarea className='min-h-32 font-mono text-xs' value={command} onChange={(event) => setCommand(event.currentTarget.value)} /></Field>
+        <Field label={t('sshExecDialog.timeoutSeconds')}><Input type='number' min={1} max={600} value={timeoutSeconds} onChange={(event) => setTimeoutSeconds(event.currentTarget.value)} /></Field>
         {result ? (
           <div className='rounded-xl border border-border bg-background/60 p-3'>
             <div className='flex flex-wrap items-center justify-between gap-2 text-sm'>
@@ -3466,21 +3467,21 @@ function SSHExecDialog({ item, onClose, requestAccessMFACode }: { item: Platform
               <div className='flex flex-wrap items-center gap-2'>
                 <Badge tone={result.blocked ? 'danger' : statusTone(result.status)}>{result.action || result.status}</Badge>
                 <Badge tone={result.risk === 'high' ? 'danger' : result.risk === 'normal' ? 'neutral' : 'warning'}>{result.risk || 'normal'}</Badge>
-                <span className='font-mono text-xs text-muted-foreground'>exit {result.exit_code} / {result.duration_ms} ms</span>
+                <span className='font-mono text-xs text-muted-foreground'>{t('sshExecDialog.exitSummary', { code: result.exit_code, duration: result.duration_ms })}</span>
               </div>
             </div>
             {result.error ? <p className='mt-2 text-xs text-destructive'>{result.error}</p> : null}
             <div className='mt-3 grid gap-3 md:grid-cols-2'>
-              <pre className='min-h-28 overflow-auto rounded-lg bg-muted p-2 text-xs'>{result.stdout || '(stdout empty)'}</pre>
-              <pre className='min-h-28 overflow-auto rounded-lg bg-muted p-2 text-xs'>{result.stderr || '(stderr empty)'}</pre>
+              <pre className='min-h-28 overflow-auto rounded-lg bg-muted p-2 text-xs'>{result.stdout || t('sshExecDialog.stdoutEmpty')}</pre>
+              <pre className='min-h-28 overflow-auto rounded-lg bg-muted p-2 text-xs'>{result.stderr || t('sshExecDialog.stderrEmpty')}</pre>
             </div>
           </div>
         ) : null}
         <div className='flex justify-end gap-2'>
-          <Button variant='outline' onClick={onClose}>Close</Button>
+          <Button variant='outline' onClick={onClose}>{t('sshExecDialog.close')}</Button>
           <Button variant='primary' onClick={() => void execute()} disabled={running || !command.trim()}>
             <TerminalSquare className='size-4' />
-            {running ? 'Running...' : 'Run'}
+            {running ? t('sshExecDialog.running') : t('sshExecDialog.run')}
           </Button>
         </div>
       </div>

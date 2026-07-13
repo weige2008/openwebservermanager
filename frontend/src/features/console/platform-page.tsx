@@ -16,8 +16,8 @@ import { DialogShell } from '@/components/ui/dialog'
 import { Field, Input, Select, Textarea } from '@/components/ui/field'
 import { ApiError, apiRequest } from '@/lib/api'
 import { copyText } from '@/lib/clipboard'
-import { platformDescription, platformLabel, platformPages, type PlatformPageConfig } from '@/lib/platform'
-import { canUseAPI } from '@/lib/rbac'
+import { platformDescription, platformLabel, platformPageByRoute, platformPages, type PlatformPageConfig } from '@/lib/platform'
+import { canUseAPI, canViewPlatformPage } from '@/lib/rbac'
 import { cn, formatDate } from '@/lib/utils'
 import type { ConnectionSession, PlatformItem, Protocol, PublicConfig } from '@/types'
 
@@ -5735,19 +5735,23 @@ export function AccessPortalPage() {
   const desktopAssets = accessAssetsQuery.data?.desktop || []
   const webAssets = accessAssetsQuery.data?.web || []
   const databaseAssets = accessAssetsQuery.data?.database || []
+  const assetsPage = platformPageByRoute('/app/assets')
+  const canManageAssets = assetsPage ? canViewPlatformPage(app.auth?.role, assetsPage, app.auth?.menu_permissions) : false
   return (
     <div className='grid gap-4'>
       <section className='rounded-2xl border border-border bg-card p-5'>
         <div className='flex flex-wrap items-start justify-between gap-3'>
           <div>
-            <p className='text-xs font-medium tracking-[0.14em] text-muted-foreground uppercase'>Access</p>
-            <h1 className='mt-2 text-2xl font-semibold tracking-tight'>接入门户</h1>
-            <p className='mt-2 max-w-2xl text-sm leading-6 text-muted-foreground'>普通用户在这里访问被授权的文本协议、图形协议、Web 资产和数据库资产。</p>
+            <p className='text-xs font-medium tracking-[0.14em] text-muted-foreground uppercase'>{app.t('accessPage.eyebrow')}</p>
+            <h1 className='mt-2 text-2xl font-semibold tracking-tight'>{app.t('accessPage.title')}</h1>
+            <p className='mt-2 max-w-2xl text-sm leading-6 text-muted-foreground'>{app.t('accessPage.description')}</p>
           </div>
-          <Link to={'/app/assets' as never} className='inline-flex h-8 items-center gap-2 rounded-lg border border-border px-3 text-sm hover:bg-muted'>
-            管理资产
-            <ArrowUpRight className='size-4' />
-          </Link>
+          {canManageAssets ? (
+            <Link to={'/app/assets' as never} className='inline-flex h-8 items-center gap-2 rounded-lg border border-border px-3 text-sm hover:bg-muted'>
+              {app.t('accessPage.manageAssets')}
+              <ArrowUpRight className='size-4' />
+            </Link>
+          ) : null}
         </div>
       </section>
       {accessAssetsQuery.isLoading ? (
@@ -5760,10 +5764,10 @@ export function AccessPortalPage() {
         </div>
       ) : (
         <>
-          <AccessSection title='文本协议' items={textAssets} requestAccessMFACode={requestAccessMFACode} />
-          <AccessSection title='图形协议' items={desktopAssets} requestAccessMFACode={requestAccessMFACode} />
-          <AccessSection title='Web资产' items={webAssets} protocol='http' requestAccessMFACode={requestAccessMFACode} />
-          <AccessSection title='数据库资产' items={databaseAssets} protocol='database' onDatabaseQuery={setDatabaseQueryItem} requestAccessMFACode={requestAccessMFACode} />
+          <AccessSection title={app.t('accessPage.textProtocols')} items={textAssets} requestAccessMFACode={requestAccessMFACode} />
+          <AccessSection title={app.t('accessPage.desktopProtocols')} items={desktopAssets} requestAccessMFACode={requestAccessMFACode} />
+          <AccessSection title={app.t('accessPage.webAssets')} items={webAssets} protocol='http' requestAccessMFACode={requestAccessMFACode} />
+          <AccessSection title={app.t('accessPage.databaseAssets')} items={databaseAssets} protocol='database' onDatabaseQuery={setDatabaseQueryItem} requestAccessMFACode={requestAccessMFACode} />
         </>
       )}
       {databaseQueryItem ? (
@@ -5773,9 +5777,9 @@ export function AccessPortalPage() {
           endpoint={`/api/access/database/${databaseQueryItem.id}/query`}
           workOrderEndpoint={`/api/access/database/${databaseQueryItem.id}/work-orders`}
           initialSQL={stringValue(databaseQueryItem.metadata?.sql) || 'SELECT name FROM sqlite_master WHERE type = "table";'}
-          successMessage='SQL 已执行'
-          workOrderMessage='SQL 工单已提交'
-          description='在授权数据库资产上执行 SQL，结果会写入 SQL 日志；SELECT 查询按资产配置的 row_limit 返回。'
+          successMessage={app.t('accessPage.sqlExecuted')}
+          workOrderMessage={app.t('accessPage.sqlWorkOrderSubmitted')}
+          description={app.t('accessPage.sqlDescription')}
           onClose={() => setDatabaseQueryItem(null)}
         />
       ) : null}
@@ -5843,7 +5847,7 @@ function AccessSection({
         app.setWorkspace({ type: accessProtocol, session, status: 'connecting' })
       } else {
         await app.refresh(true)
-        app.showToast('已创建接入会话')
+        app.showToast(app.t('accessPage.sessionCreated'))
       }
     } catch (error) {
       app.handleApiError(error)
@@ -5866,7 +5870,7 @@ function AccessSection({
               <p className='mt-3 line-clamp-2 text-xs leading-5 text-muted-foreground'>{item.description || item.group || item.id}</p>
               <Button className='mt-4 w-full' variant='primary' size='sm' onClick={() => void connect(item)}>
                 <Play className='size-4' />
-                接入
+                {app.t('accessPage.connect')}
               </Button>
               {(protocol || item.protocol) === 'ssh' ? (
                 <Button className='mt-2 w-full' variant='outline' size='sm' onClick={() => setSSHExecItem(item)}>
@@ -5878,7 +5882,7 @@ function AccessSection({
           ))}
         </div>
       ) : (
-        <div className='rounded-xl border border-dashed border-border p-6 text-sm text-muted-foreground'>暂无授权资源。</div>
+        <div className='rounded-xl border border-dashed border-border p-6 text-sm text-muted-foreground'>{app.t('accessPage.noAuthorizedResources')}</div>
       )}
       {sshExecItem ? <SSHExecDialog item={sshExecItem} onClose={() => setSSHExecItem(null)} requestAccessMFACode={requestAccessMFACode} /> : null}
     </section>

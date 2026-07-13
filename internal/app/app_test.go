@@ -10388,6 +10388,158 @@ func TestAgentGatewayRegistrationHeartbeatAndTimeout(t *testing.T) {
 	}
 }
 
+func TestAgentClientReportsMetricsAndRelaysTCP(t *testing.T) {
+	handler, adminCookie := newTestHandler(t)
+	srv := handler.(*Server)
+	gatewayRec := assertStatus(t, handler, http.MethodPost, "/api/admin/agent-gateways", map[string]any{
+		"name":   "real-agent-client",
+		"type":   "agent",
+		"status": "offline",
+	}, adminCookie, http.StatusCreated)
+	var gateway model.PlatformItem
+	decodeResponse(t, gatewayRec, &gateway)
+	tokenRec := assertStatus(t, handler, http.MethodPost, "/api/admin/agent-gateways/"+gateway.ID+"/token", nil, adminCookie, http.StatusOK)
+	var tokenPayload map[string]any
+	decodeResponse(t, tokenRec, &tokenPayload)
+	registrationToken, _ := tokenPayload["registration_token"].(string)
+	if registrationToken == "" {
+		t.Fatal("agent gateway token response did not include registration_token")
+	}
+
+	managerHTTP := httptest.NewServer(handler)
+	defer managerHTTP.Close()
+	agent, err := agentrelay.NewClient(agentrelay.ClientConfig{
+		ServerURL:         managerHTTP.URL,
+		RegistrationToken: registrationToken,
+		Name:              "real-agent-client",
+		Version:           "agent-e2e",
+		Capabilities:      []string{"tcp", "ssh", "rdp", "vnc", "http", "database"},
+		Workers:           2,
+		HeartbeatInterval: 25 * time.Millisecond,
+		Logger:            slog.New(slog.NewTextHandler(io.Discard, nil)),
+		MetricsCollector: func(context.Context) (agentrelay.HostMetrics, error) {
+			return agentrelay.HostMetrics{
+				CPUPercent:       23.5,
+				MemoryUsedBytes:  3 << 30,
+				MemoryTotalBytes: 8 << 30,
+				DiskUsedBytes:    20 << 30,
+				DiskTotalBytes:   100 << 30,
+				Details:          map[string]any{"collector": "agent-e2e", "uptime_seconds": 3600},
+			}, nil
+		},
+	})
+	if err != nil {
+		t.Fatalf("new agent client: %v", err)
+	}
+	agentCtx, cancelAgent := context.WithCancel(context.Background())
+	agentDone := make(chan error, 1)
+	go func() { agentDone <- agent.Run(agentCtx) }()
+	defer func() {
+		cancelAgent()
+		select {
+		case runErr := <-agentDone:
+			if runErr != nil {
+				t.Errorf("agent client stopped with error: %v", runErr)
+			}
+		case <-time.After(3 * time.Second):
+			t.Error("agent client did not stop")
+		}
+	}()
+
+	waitForCondition(t, 3*time.Second, func() bool {
+		stored, ok, loadErr := srv.cfg.Store.GetPlatformItem("agent_gateways", gateway.ID)
+		if loadErr != nil || !ok || stored.Status != "online" {
+			return false
+		}
+		cpuPercent, _ := stored.Metadata["cpu_percent"].(float64)
+		metrics, _ := stored.Metadata["metrics"].(map[string]any)
+		return cpuPercent == 23.5 &&
+			metadataIntDefault(stored.Metadata["memory_used_bytes"], 0) == 3<<30 &&
+			metadataIntDefault(stored.Metadata["memory_total_bytes"], 0) == 8<<30 &&
+			metadataIntDefault(stored.Metadata["disk_used_bytes"], 0) == 20<<30 &&
+			metadataIntDefault(stored.Metadata["disk_total_bytes"], 0) == 100<<30 &&
+			metadataIntDefault(stored.Metadata["latency_ms"], 0) > 0 &&
+			metrics["collector"] == "agent-e2e"
+	})
+
+	targetAddress, received, closeTarget := startEchoTCPServerWithDeadline(t, 20*time.Second)
+	defer closeTarget()
+	dialCtx, cancelDial := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancelDial()
+	relayConn, err := srv.agentRelay.Dial(dialCtx, agentrelay.DialRequest{
+		GatewayID: gateway.ID,
+		SessionID: "agent-e2e-session",
+		UserID:    "agent-e2e-user",
+		Target:    targetAddress,
+		Protocol:  model.ProtocolSSH,
+		Timeout:   5 * time.Second,
+	})
+	if err != nil {
+		t.Fatalf("dial through real agent client: %v", err)
+	}
+	waitForCondition(t, 2*time.Second, func() bool {
+		stored, ok, loadErr := srv.cfg.Store.GetPlatformItem("agent_gateways", gateway.ID)
+		return loadErr == nil && ok && metadataIntDefault(stored.Metadata["active_sessions"], 0) == 1
+	})
+	connectedLogs, err := srv.cfg.Store.ListPlatformItems("operation_logs")
+	if err != nil {
+		t.Fatalf("list connected agent relay logs: %v", err)
+	}
+	connectedLogged := false
+	for _, item := range connectedLogs {
+		if item.Name == "agent.relay" && item.Status == "connected" && item.Metadata["gateway_id"] == gateway.ID {
+			connectedLogged = true
+			break
+		}
+	}
+	if !connectedLogged {
+		t.Fatal("agent relay did not persist connected operation state")
+	}
+	if _, err := io.WriteString(relayConn, "agent-relay-ok\n"); err != nil {
+		t.Fatalf("write through agent relay: %v", err)
+	}
+	response, err := bufio.NewReader(relayConn).ReadString('\n')
+	if err != nil {
+		t.Fatalf("read through agent relay: %v", err)
+	}
+	if response != "echo:agent-relay-ok\n" {
+		t.Fatalf("agent relay response = %q", response)
+	}
+	select {
+	case payload := <-received:
+		if payload != "agent-relay-ok\n" {
+			t.Fatalf("agent relay target received %q", payload)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("agent relay target did not receive payload")
+	}
+	if err := relayConn.Close(); err != nil {
+		t.Fatalf("close agent relay: %v", err)
+	}
+	waitForCondition(t, 3*time.Second, func() bool {
+		stored, ok, loadErr := srv.cfg.Store.GetPlatformItem("agent_gateways", gateway.ID)
+		return loadErr == nil && ok &&
+			metadataIntDefault(stored.Metadata["active_sessions"], -1) == 0 &&
+			metadataIntDefault(stored.Metadata["network_rx_bytes"], 0) > 0 &&
+			metadataIntDefault(stored.Metadata["network_tx_bytes"], 0) > 0
+	})
+
+	relayLogs, err := srv.cfg.Store.ListPlatformItems("operation_logs")
+	if err != nil {
+		t.Fatalf("list agent relay logs: %v", err)
+	}
+	closedLogged := false
+	for _, item := range relayLogs {
+		if item.Name == "agent.relay" && item.Status == "closed" && item.Metadata["gateway_id"] == gateway.ID {
+			closedLogged = true
+			break
+		}
+	}
+	if !closedLogged {
+		t.Fatal("agent relay operation log missing closed state")
+	}
+}
+
 func TestAgentGatewayOperationLogPersistenceFailures(t *testing.T) {
 	srv, adminCookie := newTestServer(t, nil)
 	handler := http.Handler(srv)

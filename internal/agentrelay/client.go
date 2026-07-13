@@ -31,6 +31,7 @@ type ClientConfig struct {
 	InsecureSkipVerify bool
 	Logger             *slog.Logger
 	DialContext        func(context.Context, string, string) (net.Conn, error)
+	MetricsCollector   MetricsCollector
 }
 type Client struct {
 	cfg       ClientConfig
@@ -40,6 +41,7 @@ type Client struct {
 	active    atomic.Int64
 	rx        atomic.Int64
 	tx        atomic.Int64
+	latencyMS atomic.Int64
 	hostname  string
 	closeOnce sync.Once
 }
@@ -67,6 +69,9 @@ func NewClient(cfg ClientConfig) (*Client, error) {
 	if cfg.DialContext == nil {
 		dialer := &net.Dialer{Timeout: 15 * time.Second, KeepAlive: 30 * time.Second}
 		cfg.DialContext = dialer.DialContext
+	}
+	if cfg.MetricsCollector == nil {
+		cfg.MetricsCollector = CollectHostMetrics
 	}
 	transport := http.DefaultTransport.(*http.Transport).Clone()
 	transport.TLSClientConfig = &tls.Config{MinVersion: tls.VersionTLS12, InsecureSkipVerify: cfg.InsecureSkipVerify}
@@ -109,31 +114,88 @@ func (c *Client) register(ctx context.Context) error {
 		Arch:         runtime.GOARCH,
 		Capabilities: c.cfg.Capabilities,
 	}
-	return c.doJSON(ctx, http.MethodPost, "/api/agent/gateways/register", payload, nil)
+	started := time.Now()
+	if err := c.doJSON(ctx, http.MethodPost, "/api/agent/gateways/register", payload, nil); err != nil {
+		return err
+	}
+	c.latencyMS.Store(durationMilliseconds(time.Since(started)))
+	return nil
 }
 
 func (c *Client) heartbeatLoop(ctx context.Context) error {
 	ticker := time.NewTicker(c.cfg.HeartbeatInterval)
 	defer ticker.Stop()
+	c.sendHeartbeat(ctx)
 	for {
 		select {
 		case <-ctx.Done():
 			return nil
 		case <-ticker.C:
-			payload := HeartbeatRequest{
-				Hostname:       c.hostname,
-				Version:        c.cfg.Version,
-				ActiveSessions: int(c.active.Load()),
-				NetworkRXBytes: c.rx.Load(),
-				NetworkTXBytes: c.tx.Load(),
-			}
-			if err := c.doJSON(ctx, http.MethodPost, "/api/agent/gateways/heartbeat", payload, nil); err != nil {
-				if ctx.Err() == nil {
-					c.cfg.Logger.Warn("agent heartbeat failed", "error", err)
-				}
-			}
+			c.sendHeartbeat(ctx)
 		}
 	}
+}
+
+func (c *Client) sendHeartbeat(ctx context.Context) {
+	metricsCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
+	metrics, metricsErr := c.cfg.MetricsCollector(metricsCtx)
+	cancel()
+	if metricsErr != nil && ctx.Err() == nil {
+		c.cfg.Logger.Warn("agent host metrics collection incomplete", "error", metricsErr)
+	}
+	relayRX := c.rx.Load()
+	relayTX := c.tx.Load()
+	details := make(map[string]any, len(metrics.Details)+4)
+	for key, value := range metrics.Details {
+		details[key] = value
+	}
+	details["host_network_rx_bytes"] = metrics.NetworkRXBytes
+	details["host_network_tx_bytes"] = metrics.NetworkTXBytes
+	details["relay_rx_bytes"] = relayRX
+	details["relay_tx_bytes"] = relayTX
+	payload := HeartbeatRequest{
+		Hostname:         c.hostname,
+		Version:          c.cfg.Version,
+		LatencyMS:        int(c.latencyMS.Load()),
+		CPUPercent:       metrics.CPUPercent,
+		MemoryUsedBytes:  metrics.MemoryUsedBytes,
+		MemoryTotalBytes: metrics.MemoryTotalBytes,
+		DiskUsedBytes:    metrics.DiskUsedBytes,
+		DiskTotalBytes:   metrics.DiskTotalBytes,
+		ActiveSessions:   int(c.active.Load()),
+		NetworkRXBytes:   maxMetricCounter(metrics.NetworkRXBytes, relayRX),
+		NetworkTXBytes:   maxMetricCounter(metrics.NetworkTXBytes, relayTX),
+		Metrics:          details,
+	}
+	started := time.Now()
+	if err := c.doJSON(ctx, http.MethodPost, "/api/agent/gateways/heartbeat", payload, nil); err != nil {
+		if ctx.Err() == nil {
+			c.cfg.Logger.Warn("agent heartbeat failed", "error", err)
+		}
+		return
+	}
+	c.latencyMS.Store(durationMilliseconds(time.Since(started)))
+}
+
+func durationMilliseconds(duration time.Duration) int64 {
+	milliseconds := duration.Milliseconds()
+	if milliseconds <= 0 && duration > 0 {
+		return 1
+	}
+	return milliseconds
+}
+
+func maxMetricCounter(hostValue, relayValue int64) int64 {
+	if hostValue < 0 {
+		hostValue = 0
+	}
+	if relayValue < 0 {
+		relayValue = 0
+	}
+	if hostValue >= relayValue {
+		return hostValue
+	}
+	return relayValue
 }
 
 func (c *Client) claimLoop(ctx context.Context) error {

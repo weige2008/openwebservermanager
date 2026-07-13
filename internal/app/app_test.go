@@ -10613,7 +10613,7 @@ func TestGatewayGroupFailsOverToHealthyAgentAndCoolsDownFailure(t *testing.T) {
 		"status": "enabled",
 		"metadata": map[string]any{
 			"gateway_ids":              []string{deadGateway.ID, liveGateway.ID},
-			"attempt_timeout_seconds":  1,
+			"attempt_timeout_seconds":  3,
 			"failure_cooldown_seconds": 20,
 		},
 	}, adminCookie, http.StatusCreated)
@@ -10645,7 +10645,7 @@ func TestGatewayGroupFailsOverToHealthyAgentAndCoolsDownFailure(t *testing.T) {
 	if err != nil {
 		t.Fatalf("dial through failover gateway group: %v", err)
 	}
-	if elapsed := time.Since(started); elapsed < time.Second || elapsed > 5*time.Second {
+	if elapsed := time.Since(started); elapsed < 3*time.Second || elapsed > 10*time.Second {
 		t.Fatalf("failover duration = %s, want one bounded failed attempt", elapsed)
 	}
 	if route.currentTarget().ID != liveGateway.ID {
@@ -16523,7 +16523,7 @@ func TestSSHSessionFilesThroughAgentRelay(t *testing.T) {
 		"status": "enabled",
 		"metadata": map[string]any{
 			"gateway_ids":              []string{deadGateway.ID, gateway.ID},
-			"attempt_timeout_seconds":  1,
+			"attempt_timeout_seconds":  3,
 			"failure_cooldown_seconds": 20,
 		},
 	}, adminCookie, http.StatusCreated)

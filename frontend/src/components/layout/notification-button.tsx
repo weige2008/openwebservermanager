@@ -7,6 +7,7 @@ import { useTranslation } from 'react-i18next'
 import { useApp } from '@/app/app-provider'
 import { apiRequest } from '@/lib/api'
 import { isAdminRole, isAuditorRole } from '@/lib/rbac'
+import { isGuacdReady } from '@/lib/runtime-status'
 import { cn } from '@/lib/utils'
 import { useNotificationStore } from '@/stores/notification-store'
 
@@ -81,7 +82,7 @@ export function NotificationButton({
       },
     ]
     if (!canSeeRuntime) return items
-    const gatewayReady = Boolean(data.guacd?.address)
+    const gatewayReady = isGuacdReady(data.guacd)
     return [
       {
         id: `gateway:${gatewayReady ? 'online' : 'offline'}`,
@@ -92,7 +93,7 @@ export function NotificationButton({
       },
       ...items,
     ]
-  }, [canSeeRuntime, data.guacd?.address, t])
+  }, [canSeeRuntime, data.guacd, t])
   const notifications = auth && notificationQuery.data?.items?.length ? notificationQuery.data.items : fallbackNotifications
 
   const noticeKey = 'notice:connection-workspace'

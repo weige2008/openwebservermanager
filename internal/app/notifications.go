@@ -214,18 +214,17 @@ func normalizeNotificationReadKey(key string) string {
 }
 
 func (s *Server) runtimeNotifications(now time.Time) []notificationItem {
-	guacdAddress := ""
-	if s.cfg.Guacd != nil {
-		guacdAddress = strings.TrimSpace(s.cfg.Guacd.Address())
-	}
+	guacdStatus := s.currentGuacdStatus()
+	guacdAddress := strings.TrimSpace(guacdStatus.Address)
 	result := []notificationItem{}
-	if guacdAddress == "" {
+	if guacdStatus.Status != "running" {
 		result = append(result, notificationItem{
 			ID:        "runtime:guacd:offline",
 			Type:      "warning",
 			Category:  "runtime",
 			TitleKey:  "rdpGatewayOffline",
 			BodyKey:   "rdpGatewayOfflineBody",
+			Metadata:  map[string]any{"address": guacdAddress, "status": guacdStatus.Status, "last_error": guacdStatus.LastError},
 			CreatedAt: now,
 		})
 	} else {

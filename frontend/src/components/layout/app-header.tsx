@@ -6,6 +6,7 @@ import { useEffect, useState } from 'react'
 import { useApp } from '@/app/app-provider'
 import { platformLabel, platformNavGroups, platformPageByRoute } from '@/lib/platform'
 import { canViewPlatformPage, isAdminRole } from '@/lib/rbac'
+import { isGuacdReady } from '@/lib/runtime-status'
 import { cn } from '@/lib/utils'
 
 import { Badge } from '../ui/badge'
@@ -152,6 +153,7 @@ function MobileNavDrawer({
   const visiblePlatformGroups = platformNavGroups
     .map((group) => ({ ...group, items: group.items.filter((item) => canViewPlatformPage(role, item, app.auth?.menu_permissions)) }))
     .filter((group) => group.items.length > 0)
+  const gatewayReady = isGuacdReady(app.data.guacd)
 
   const close = () => onOpenChange(false)
 
@@ -283,7 +285,7 @@ function MobileNavDrawer({
           <div className='m-3 grid gap-3 rounded-lg border border-sidebar-border bg-card/70 p-3 text-xs'>
             <div className='flex items-center justify-between gap-2'>
               <span className='text-muted-foreground'>{app.t('gateway')}</span>
-              <Badge tone={app.data.guacd?.address ? 'success' : 'warning'}>{app.data.guacd?.address ? app.t('gatewayReady') : app.t('gatewayOffline')}</Badge>
+              <Badge tone={gatewayReady ? 'success' : 'warning'}>{gatewayReady ? app.t('gatewayReady') : app.t('gatewayOffline')}</Badge>
             </div>
             <div className='truncate text-muted-foreground'>{app.data.guacd?.address || app.t('guacdOffline')}</div>
             <div className='grid grid-cols-4 gap-2'>

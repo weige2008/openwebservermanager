@@ -128,7 +128,14 @@ export interface BootstrapData {
   sessions: ConnectionSession[]
   audit_logs: AuditLog[]
   platform?: PlatformData
-  guacd?: { address: string }
+  guacd?: GuacdRuntimeStatus
+}
+
+export interface GuacdRuntimeStatus {
+  address?: string
+  status: 'running' | 'error' | 'unavailable'
+  last_error?: string
+  checked_at?: string
 }
 
 export interface PublicNavLink {

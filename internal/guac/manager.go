@@ -11,6 +11,7 @@ import (
 	"path/filepath"
 	"runtime"
 	"strings"
+	"sync"
 	"time"
 )
 
@@ -22,9 +23,18 @@ type ManagerConfig struct {
 }
 
 type Manager struct {
-	cfg     ManagerConfig
-	cmd     *exec.Cmd
-	address string
+	cfg       ManagerConfig
+	cmd       *exec.Cmd
+	mu        sync.RWMutex
+	address   string
+	lastError string
+}
+
+type RuntimeStatus struct {
+	Address   string    `json:"address,omitempty"`
+	Status    string    `json:"status"`
+	LastError string    `json:"last_error,omitempty"`
+	CheckedAt time.Time `json:"checked_at"`
 }
 
 func NewManager(cfg ManagerConfig) *Manager {
@@ -39,17 +49,24 @@ func NewManager(cfg ManagerConfig) *Manager {
 
 func (m *Manager) Ensure(ctx context.Context) error {
 	if m.cfg.Host != "" {
-		m.address = net.JoinHostPort(m.cfg.Host, m.cfg.Port)
-		return m.wait(ctx)
+		m.setAddress(net.JoinHostPort(m.cfg.Host, m.cfg.Port))
+		if err := m.wait(ctx); err != nil {
+			m.setLastError(err)
+			return err
+		}
+		m.setLastError(nil)
+		return nil
 	}
 
 	exe, err := m.runtimePath()
 	if err != nil {
+		m.setLastError(err)
 		return err
 	}
 
-	m.address = net.JoinHostPort("127.0.0.1", m.cfg.Port)
+	m.setAddress(net.JoinHostPort("127.0.0.1", m.cfg.Port))
 	if err := m.waitWithTimeout(300 * time.Millisecond); err == nil {
+		m.setLastError(nil)
 		return nil
 	}
 
@@ -61,7 +78,9 @@ func (m *Manager) Ensure(ctx context.Context) error {
 	m.cmd = cmd
 
 	if err := cmd.Start(); err != nil {
-		return fmt.Errorf("start guacd %s: %w", exe, err)
+		err = fmt.Errorf("start guacd %s: %w", exe, err)
+		m.setLastError(err)
+		return err
 	}
 	go func() {
 		if err := cmd.Wait(); err != nil && m.cfg.Logger != nil {
@@ -69,17 +88,24 @@ func (m *Manager) Ensure(ctx context.Context) error {
 		}
 	}()
 
-	return m.wait(ctx)
+	if err := m.wait(ctx); err != nil {
+		m.setLastError(err)
+		return err
+	}
+	m.setLastError(nil)
+	return nil
 }
 
 func (m *Manager) Dial(ctx context.Context) (net.Conn, error) {
-	if m.address == "" {
+	if m.Address() == "" {
 		if err := m.Ensure(ctx); err != nil {
 			return nil, err
 		}
 	}
 	var d net.Dialer
-	return d.DialContext(ctx, "tcp", m.address)
+	conn, err := d.DialContext(ctx, "tcp", m.Address())
+	m.setLastError(err)
+	return conn, err
 }
 
 func (m *Manager) Stop() {
@@ -89,7 +115,56 @@ func (m *Manager) Stop() {
 }
 
 func (m *Manager) Address() string {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
 	return m.address
+}
+
+func (m *Manager) Status(timeout time.Duration) RuntimeStatus {
+	if timeout <= 0 {
+		timeout = 300 * time.Millisecond
+	}
+	status := RuntimeStatus{
+		Address:   m.Address(),
+		Status:    "unavailable",
+		LastError: m.LastError(),
+		CheckedAt: time.Now().UTC(),
+	}
+	if status.Address == "" {
+		return status
+	}
+	if err := m.waitWithTimeout(timeout); err != nil {
+		m.setLastError(err)
+		status.Status = "error"
+		status.LastError = err.Error()
+		return status
+	}
+	m.setLastError(nil)
+	status.Status = "running"
+	status.LastError = ""
+	return status
+}
+
+func (m *Manager) LastError() string {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	return m.lastError
+}
+
+func (m *Manager) setAddress(address string) {
+	m.mu.Lock()
+	m.address = address
+	m.mu.Unlock()
+}
+
+func (m *Manager) setLastError(err error) {
+	m.mu.Lock()
+	if err == nil {
+		m.lastError = ""
+	} else {
+		m.lastError = err.Error()
+	}
+	m.mu.Unlock()
 }
 
 func (m *Manager) runtimePath() (string, error) {
@@ -187,10 +262,11 @@ func (m *Manager) wait(ctx context.Context) error {
 }
 
 func (m *Manager) waitWithTimeout(timeout time.Duration) error {
-	if m.address == "" {
+	address := m.Address()
+	if address == "" {
 		return errors.New("guacd address is empty")
 	}
-	conn, err := net.DialTimeout("tcp", m.address, timeout)
+	conn, err := net.DialTimeout("tcp", address, timeout)
 	if err != nil {
 		return err
 	}

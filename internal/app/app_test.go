@@ -9815,6 +9815,59 @@ func TestToolsAndMonitoringEndpoints(t *testing.T) {
 	}
 }
 
+func TestGuacdRuntimeEndpointsReportReachability(t *testing.T) {
+	address := freeLocalTCPAddress(t)
+	host, port, err := net.SplitHostPort(address)
+	if err != nil {
+		t.Fatalf("split guacd address: %v", err)
+	}
+	manager := guac.NewManager(guac.ManagerConfig{Host: host, Port: port})
+	ctx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
+	defer cancel()
+	if err := manager.Ensure(ctx); err == nil {
+		t.Fatal("guacd Ensure succeeded for an unavailable address")
+	}
+
+	handler, cookie := newTestServer(t, func(cfg *Config) {
+		cfg.Guacd = manager
+	})
+	bootstrapRec := assertStatus(t, handler, http.MethodGet, "/api/bootstrap", nil, cookie, http.StatusOK)
+	var bootstrap struct {
+		Guacd guac.RuntimeStatus `json:"guacd"`
+	}
+	decodeResponse(t, bootstrapRec, &bootstrap)
+	if bootstrap.Guacd.Address != address || bootstrap.Guacd.Status != "error" || bootstrap.Guacd.LastError == "" {
+		t.Fatalf("bootstrap guacd status = %#v", bootstrap.Guacd)
+	}
+
+	monitorRec := assertStatus(t, handler, http.MethodGet, "/api/system/monitoring", nil, cookie, http.StatusOK)
+	var monitor struct {
+		Guacd guac.RuntimeStatus `json:"guacd"`
+	}
+	decodeResponse(t, monitorRec, &monitor)
+	if monitor.Guacd.Status != "error" || monitor.Guacd.Address != address {
+		t.Fatalf("monitoring guacd status = %#v", monitor.Guacd)
+	}
+	notificationsRec := assertStatus(t, handler, http.MethodGet, "/api/notifications", nil, cookie, http.StatusOK)
+	if body := notificationsRec.Body.String(); !strings.Contains(body, "rdpGatewayOffline") || !strings.Contains(body, `"status":"error"`) {
+		t.Fatalf("offline notification missing guacd health: %s", body)
+	}
+
+	listener, err := net.Listen("tcp", address)
+	if err != nil {
+		t.Fatalf("start guacd test listener: %v", err)
+	}
+	defer listener.Close()
+	bootstrapRec = assertStatus(t, handler, http.MethodGet, "/api/bootstrap", nil, cookie, http.StatusOK)
+	bootstrap = struct {
+		Guacd guac.RuntimeStatus `json:"guacd"`
+	}{}
+	decodeResponse(t, bootstrapRec, &bootstrap)
+	if bootstrap.Guacd.Status != "running" || bootstrap.Guacd.LastError != "" {
+		t.Fatalf("recovered bootstrap guacd status = %#v", bootstrap.Guacd)
+	}
+}
+
 func TestNotificationsReflectRuntimeAndFilterByUser(t *testing.T) {
 	handler, adminCookie := newTestHandler(t)
 	srv := handler.(*Server)

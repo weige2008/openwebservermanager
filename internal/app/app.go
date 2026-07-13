@@ -330,11 +330,16 @@ func (s *Server) handleBootstrap(w http.ResponseWriter, r *http.Request) {
 		"platform":    platform,
 	}
 	if notificationCanSeeSystem(decision) {
-		payload["guacd"] = map[string]any{
-			"address": s.cfg.Guacd.Address(),
-		}
+		payload["guacd"] = s.currentGuacdStatus()
 	}
 	writeJSON(w, http.StatusOK, payload)
+}
+
+func (s *Server) currentGuacdStatus() guac.RuntimeStatus {
+	if s.cfg.Guacd == nil {
+		return guac.RuntimeStatus{Status: "unavailable", CheckedAt: time.Now().UTC()}
+	}
+	return s.cfg.Guacd.Status(300 * time.Millisecond)
 }
 
 func (s *Server) handleCreateServer(w http.ResponseWriter, r *http.Request) {

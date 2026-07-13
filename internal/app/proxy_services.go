@@ -286,10 +286,8 @@ func (s *Server) proxyServicesResponse(item model.PlatformItem) map[string]any {
 	sshEnabled := proxyMetadataBool(metadata["ssh_gateway_enabled"])
 	rdpEnabled := proxyMetadataBool(metadata["rdp_proxy_enabled"])
 	databaseEnabled := proxyMetadataBool(metadata["database_proxy_enabled"])
-	guacdAddress := ""
-	if s.cfg.Guacd != nil {
-		guacdAddress = s.cfg.Guacd.Address()
-	}
+	guacdStatus := s.currentGuacdStatus()
+	guacdAddress := guacdStatus.Address
 	sshLiveAddress := s.sshGatewayAddress()
 	sshLastError := s.sshGatewayLastError()
 	sshListen := firstMetadataString(metadata, "ssh_listen_address", "listen_address")
@@ -322,16 +320,18 @@ func (s *Server) proxyServicesResponse(item model.PlatformItem) map[string]any {
 				"last_error":     sshGatewayProxyRuntimeError(sshEnabled, sshListen, sshLiveAddress, sshLastError),
 			},
 			"rdp_proxy": map[string]any{
-				"enabled":         rdpEnabled,
-				"listen_address":  rdpListen,
-				"live_address":    rdpLiveAddress,
-				"target":          rdpTarget,
-				"routes":          rdpRoutes,
-				"active":          s.rdpProxyActiveConnections(),
-				"allowlist_count": len(rdpAllowlist),
-				"guacd_address":   guacdAddress,
-				"state":           rdpProxyRuntimeState(rdpEnabled, rdpListen, rdpAllowlist, rdpLiveAddress, rdpLastError),
-				"last_error":      rdpProxyRuntimeError(rdpEnabled, rdpListen, rdpAllowlist, rdpLiveAddress, rdpLastError),
+				"enabled":          rdpEnabled,
+				"listen_address":   rdpListen,
+				"live_address":     rdpLiveAddress,
+				"target":           rdpTarget,
+				"routes":           rdpRoutes,
+				"active":           s.rdpProxyActiveConnections(),
+				"allowlist_count":  len(rdpAllowlist),
+				"guacd_address":    guacdAddress,
+				"guacd_status":     guacdStatus.Status,
+				"guacd_last_error": guacdStatus.LastError,
+				"state":            rdpProxyRuntimeState(rdpEnabled, rdpListen, rdpAllowlist, rdpLiveAddress, rdpLastError),
+				"last_error":       rdpProxyRuntimeError(rdpEnabled, rdpListen, rdpAllowlist, rdpLiveAddress, rdpLastError),
 			},
 			"database_proxy": map[string]any{
 				"enabled":         databaseEnabled,

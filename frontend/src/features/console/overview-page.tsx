@@ -16,6 +16,7 @@ import { Card, CardHeader, CardTitle } from '@/components/ui/card'
 import { serverProtocol } from '@/lib/utils'
 import { platformHomeStats, platformLabel, platformPageByRoute } from '@/lib/platform'
 import { canViewPlatformPage, isAdminRole } from '@/lib/rbac'
+import { isGuacdReady } from '@/lib/runtime-status'
 
 import { SessionsTable } from './sessions-table'
 
@@ -49,7 +50,7 @@ export function OverviewPage() {
   const { t } = useTranslation()
   const active = app.data.sessions.filter((item) => item.status === 'active').length
   const recordings = app.data.sessions.filter((item) => item.recording_path).length
-  const gatewayOnline = Boolean(app.data.guacd?.address)
+  const gatewayOnline = isGuacdReady(app.data.guacd)
   const sshSessions = app.data.sessions.filter((item) => item.protocol === 'ssh').length
   const rdpSessions = app.data.sessions.filter((item) => item.protocol === 'rdp').length
   const platform = app.data.platform || {}

@@ -1599,10 +1599,7 @@ func (s *Server) handleSystemMonitoring(w http.ResponseWriter, _ *http.Request) 
 	if errText := s.sshGatewayLastError(); errText != "" {
 		sshGateway["last_error"] = errText
 	}
-	guacdAddress := ""
-	if s.cfg.Guacd != nil {
-		guacdAddress = s.cfg.Guacd.Address()
-	}
+	guacdStatus := s.currentGuacdStatus()
 	transcoderAvailable, transcoderDetail := s.recordingTranscoder.Available()
 	transcoderStatus := "unavailable"
 	if transcoderAvailable {
@@ -1679,10 +1676,7 @@ func (s *Server) handleSystemMonitoring(w http.ResponseWriter, _ *http.Request) 
 			"offline":    len(sessions) - active,
 		},
 		"ssh_gateway": sshGateway,
-		"guacd": map[string]any{
-			"address": guacdAddress,
-			"status":  guacdRuntimeStatus(guacdAddress),
-		},
+		"guacd":       guacdStatus,
 		"recording_transcoder": map[string]any{
 			"status": transcoderStatus,
 			"detail": transcoderDetail,
@@ -1765,13 +1759,6 @@ func gatewayRuntimeStatus(address, lastError string) string {
 		return "running"
 	}
 	return "disabled"
-}
-
-func guacdRuntimeStatus(address string) string {
-	if strings.TrimSpace(address) != "" {
-		return "running"
-	}
-	return "unavailable"
 }
 
 type pingRequest struct {

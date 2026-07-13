@@ -11,6 +11,7 @@ import {
 } from '@/lib/motion'
 import { platformLabel, platformNavGroups } from '@/lib/platform'
 import { canViewPlatformPage, isAdminRole } from '@/lib/rbac'
+import { isGuacdReady } from '@/lib/runtime-status'
 import { cn } from '@/lib/utils'
 
 import { Badge } from '../ui/badge'
@@ -34,6 +35,7 @@ export function AppSidebar({ collapsed = false }: { collapsed?: boolean }) {
   const activeSection = [...visibleConsoleNav.map((item) => item.to), ...visiblePlatformGroups.flatMap((group) => group.items.map((item) => item.route))]
     .find((to) => (to === '/app' ? pathname === '/app' : pathname.startsWith(to))) ?? '/app'
   const animationKey = `${collapsed ? 'collapsed' : 'expanded'}:${activeSection}`
+  const gatewayReady = isGuacdReady(data.guacd)
 
   const navigation = (
     <div className='flex flex-col'>
@@ -142,7 +144,7 @@ export function AppSidebar({ collapsed = false }: { collapsed?: boolean }) {
       <div className={cn('m-2 grid gap-2 rounded-lg bg-card/70 p-2 text-xs ring-1 ring-sidebar-border', collapsed && 'place-items-center p-1')}>
         <div className='flex items-center justify-between gap-2'>
           <span className={cn('text-muted-foreground', collapsed && 'sr-only')}>{t('gateway')}</span>
-          <Badge tone={data.guacd?.address ? 'success' : 'warning'}>{data.guacd?.address ? t('gatewayReady') : t('gatewayOffline')}</Badge>
+          <Badge tone={gatewayReady ? 'success' : 'warning'}>{gatewayReady ? t('gatewayReady') : t('gatewayOffline')}</Badge>
         </div>
         <div className={cn('flex items-center gap-2 text-muted-foreground', collapsed && 'sr-only')}>
           <Settings className='size-3.5' />

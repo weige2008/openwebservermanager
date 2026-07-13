@@ -60,3 +60,11 @@ if (accessPageDefinitions.length !== 7) {
   console.error(`accessPage locale definitions = ${accessPageDefinitions.length}, want 7`)
   process.exit(1)
 }
+
+const popupOpenIndex = platformPageSource.indexOf('const popup = openAccessPopup()')
+const popupMFAIndex = platformPageSource.indexOf('await ensureAccessMFA(`/api/access/http/${item.id}/mfa`')
+const popupNavigateIndex = platformPageSource.indexOf('popup.location.replace(`/api/access/http/${item.id}/proxy/`)')
+if (popupOpenIndex < 0 || popupMFAIndex < 0 || popupNavigateIndex < 0 || !(popupOpenIndex < popupMFAIndex && popupMFAIndex < popupNavigateIndex)) {
+  console.error('web asset access must synchronously open a popup before MFA and navigate it only after verification')
+  process.exit(1)
+}

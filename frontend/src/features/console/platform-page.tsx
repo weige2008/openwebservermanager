@@ -5722,6 +5722,12 @@ async function ensureAccessMFA(path: string, requestAccessMFACode: RequestAccess
   }
 }
 
+function openAccessPopup() {
+  const popup = window.open('about:blank', '_blank')
+  if (popup) popup.opener = null
+  return popup
+}
+
 export function AccessPortalPage() {
   const app = useApp()
   const [databaseQueryItem, setDatabaseQueryItem] = useState<PlatformItem | null>(null)
@@ -5806,10 +5812,19 @@ function AccessSection({
   const connect = async (item: PlatformItem) => {
     const accessProtocol = (protocol || item.protocol || 'ssh') as Protocol
     if (accessProtocol === 'http') {
+      const popup = openAccessPopup()
+      if (!popup) {
+        app.showToast(app.t('accessPage.popupBlocked'))
+        return
+      }
       try {
-        if (!(await ensureAccessMFA(`/api/access/http/${item.id}/mfa`, requestAccessMFACode))) return
-        window.open(`/api/access/http/${item.id}/proxy/`, '_blank', 'noopener,noreferrer')
+        if (!(await ensureAccessMFA(`/api/access/http/${item.id}/mfa`, requestAccessMFACode))) {
+          popup.close()
+          return
+        }
+        popup.location.replace(`/api/access/http/${item.id}/proxy/`)
       } catch (error) {
+        popup.close()
         app.handleApiError(error)
       }
       return

@@ -17337,7 +17337,7 @@ func blockPlatformItemCreate(t *testing.T, st *store.Store, collection string) f
 		t.Fatalf("open store database for create blocker: %v", err)
 	}
 	triggerName := "block_platform_item_create"
-	if _, err := db.Exec(`DROP TRIGGER IF EXISTS ` + triggerName); err != nil {
+	if err := execSQLiteTestDDLWithRetry(db, `DROP TRIGGER IF EXISTS `+triggerName); err != nil {
 		_ = db.Close()
 		t.Fatalf("drop stale create blocker trigger: %v", err)
 	}
@@ -17346,13 +17346,30 @@ WHEN NEW.collection = ` + sqliteTestStringLiteral(collection) + `
 BEGIN
   SELECT RAISE(ABORT, 'forced platform item create failure');
 END`
-	if _, err := db.Exec(triggerSQL); err != nil {
+	if err := execSQLiteTestDDLWithRetry(db, triggerSQL); err != nil {
 		_ = db.Close()
 		t.Fatalf("create platform item blocker trigger: %v", err)
 	}
 	return func() {
-		_, _ = db.Exec(`DROP TRIGGER IF EXISTS ` + triggerName)
+		_ = execSQLiteTestDDLWithRetry(db, `DROP TRIGGER IF EXISTS `+triggerName)
 		_ = db.Close()
+	}
+}
+
+func execSQLiteTestDDLWithRetry(db *sql.DB, statement string) error {
+	deadline := time.Now().Add(2 * time.Second)
+	for {
+		_, err := db.Exec(statement)
+		if err == nil {
+			return nil
+		}
+		if !strings.Contains(err.Error(), "database is locked") && !strings.Contains(err.Error(), "SQLITE_BUSY") {
+			return err
+		}
+		if time.Now().After(deadline) {
+			return err
+		}
+		time.Sleep(10 * time.Millisecond)
 	}
 }
 

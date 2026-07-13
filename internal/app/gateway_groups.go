@@ -1,9 +1,11 @@
 package app
 
 import (
+	"errors"
 	"net/http"
 	"sort"
 	"strings"
+	"sync"
 	"time"
 
 	"openwebservermanager/internal/model"
@@ -50,6 +52,22 @@ type gatewayRouteDecision struct {
 	GatewayName       string
 	GatewayCollection string
 	GatewayType       string
+	Candidates        []gatewayRouteTarget
+	AttemptTimeout    time.Duration
+	FailureCooldown   time.Duration
+	tracker           *gatewayRouteTracker
+}
+
+type gatewayRouteTarget struct {
+	ID         string
+	Name       string
+	Collection string
+	Type       string
+}
+
+type gatewayRouteTracker struct {
+	mu     sync.RWMutex
+	target gatewayRouteTarget
 }
 
 type gatewayRouteError struct {
@@ -110,10 +128,17 @@ func (s *Server) assetGatewayRoute(asset model.PlatformItem) (gatewayRouteDecisi
 		return gatewayRouteDecision{}, true, gatewayRouteError{Status: http.StatusServiceUnavailable, Message: "gateway group is disabled"}
 	}
 	statuses := s.gatewayGroupStatuses([]model.PlatformItem{group})
-	if len(statuses) == 0 || statuses[0].SelectedGateway == nil {
+	if len(statuses) == 0 {
 		return gatewayRouteDecision{}, true, gatewayRouteError{Status: http.StatusServiceUnavailable, Message: "gateway group has no online gateway"}
 	}
-	selected := statuses[0].SelectedGateway
+	if statuses[0].SelectedGateway == nil {
+		return gatewayRouteDecision{}, true, gatewayRouteError{Status: http.StatusServiceUnavailable, Message: "gateway group has no online gateway"}
+	}
+	candidates := s.gatewayRouteCandidates(group, statuses[0], asset.Protocol, true)
+	if len(candidates) == 0 {
+		return gatewayRouteDecision{}, true, gatewayRouteError{Status: http.StatusServiceUnavailable, Message: "gateway group has no compatible online gateway"}
+	}
+	selected := candidates[0]
 	return gatewayRouteDecision{
 		GatewayGroupID:    group.ID,
 		GatewayGroupName:  group.Name,
@@ -121,7 +146,96 @@ func (s *Server) assetGatewayRoute(asset model.PlatformItem) (gatewayRouteDecisi
 		GatewayName:       selected.Name,
 		GatewayCollection: selected.Collection,
 		GatewayType:       selected.Type,
+		Candidates:        candidates,
+		AttemptTimeout:    gatewayRouteAttemptTimeout(group),
+		FailureCooldown:   gatewayRouteFailureCooldown(group),
+		tracker:           &gatewayRouteTracker{target: selected},
 	}, true, nil
+}
+
+func (s *Server) gatewayRouteCandidates(group model.PlatformItem, status gatewayGroupStatus, protocol model.Protocol, advanceRoundRobin bool) []gatewayRouteTarget {
+	targets := make([]gatewayRouteTarget, 0, len(status.Members))
+	for _, member := range status.Members {
+		if !member.Online || !gatewayRouteMemberSupportsProtocol(member, protocol) {
+			continue
+		}
+		targets = append(targets, gatewayRouteTarget{ID: member.ID, Name: member.Name, Collection: member.Collection, Type: member.Type})
+	}
+	if status.SelectionMode == "round_robin" && len(targets) > 1 {
+		index := s.gatewayRoutes.roundRobinIndex(group.ID, len(targets), advanceRoundRobin)
+		targets = append(append([]gatewayRouteTarget(nil), targets[index:]...), targets[:index]...)
+	}
+	return targets
+}
+
+func (s *Server) completeGatewayRoute(route gatewayRouteDecision, protocol model.Protocol) (gatewayRouteDecision, error) {
+	if strings.TrimSpace(route.GatewayGroupID) == "" {
+		return route, nil
+	}
+	if len(route.Candidates) > 0 && route.tracker != nil {
+		return route, nil
+	}
+	s.refreshAgentGatewayStatuses()
+	groups, err := s.cfg.Store.ListPlatformItems("gateway_groups")
+	if err != nil {
+		return gatewayRouteDecision{}, err
+	}
+	group, ok := findGatewayGroup(groups, route.GatewayGroupID)
+	if !ok {
+		return gatewayRouteDecision{}, errors.New("gateway group not found")
+	}
+	statuses := s.gatewayGroupStatuses([]model.PlatformItem{group})
+	if len(statuses) == 0 {
+		return gatewayRouteDecision{}, errors.New("gateway group status is unavailable")
+	}
+	candidates := s.gatewayRouteCandidates(group, statuses[0], protocol, false)
+	if len(candidates) == 0 {
+		return gatewayRouteDecision{}, errors.New("gateway group has no compatible online gateway")
+	}
+	preferredID := strings.TrimSpace(route.GatewayID)
+	if preferredID != "" {
+		for index, candidate := range candidates {
+			if !strings.EqualFold(candidate.ID, preferredID) {
+				continue
+			}
+			candidates = append([]gatewayRouteTarget{candidate}, append(candidates[:index], candidates[index+1:]...)...)
+			break
+		}
+	}
+	selected := candidates[0]
+	return gatewayRouteDecision{
+		GatewayGroupID:    group.ID,
+		GatewayGroupName:  group.Name,
+		GatewayID:         selected.ID,
+		GatewayName:       selected.Name,
+		GatewayCollection: selected.Collection,
+		GatewayType:       selected.Type,
+		Candidates:        candidates,
+		AttemptTimeout:    gatewayRouteAttemptTimeout(group),
+		FailureCooldown:   gatewayRouteFailureCooldown(group),
+		tracker:           &gatewayRouteTracker{target: selected},
+	}, nil
+}
+
+func (route gatewayRouteDecision) currentTarget() gatewayRouteTarget {
+	if route.tracker != nil {
+		route.tracker.mu.RLock()
+		target := route.tracker.target
+		route.tracker.mu.RUnlock()
+		if target.ID != "" {
+			return target
+		}
+	}
+	return gatewayRouteTarget{ID: route.GatewayID, Name: route.GatewayName, Collection: route.GatewayCollection, Type: route.GatewayType}
+}
+
+func (route gatewayRouteDecision) setCurrentTarget(target gatewayRouteTarget) {
+	if route.tracker == nil {
+		return
+	}
+	route.tracker.mu.Lock()
+	route.tracker.target = target
+	route.tracker.mu.Unlock()
 }
 
 func assetGatewayGroupRef(asset model.PlatformItem) string {
@@ -142,13 +256,14 @@ func gatewayRouteMetadata(route gatewayRouteDecision) map[string]any {
 	if route.GatewayGroupID == "" {
 		return nil
 	}
+	target := route.currentTarget()
 	return map[string]any{
 		"gateway_group_id":   route.GatewayGroupID,
 		"gateway_group_name": route.GatewayGroupName,
-		"gateway_id":         route.GatewayID,
-		"gateway_name":       route.GatewayName,
-		"gateway_collection": route.GatewayCollection,
-		"gateway_type":       route.GatewayType,
+		"gateway_id":         target.ID,
+		"gateway_name":       target.Name,
+		"gateway_collection": target.Collection,
+		"gateway_type":       target.Type,
 	}
 }
 
@@ -163,9 +278,10 @@ func applyGatewayRouteSession(session *model.ConnectionSession, route gatewayRou
 		return
 	}
 	session.GatewayGroupID = route.GatewayGroupID
-	session.GatewayID = route.GatewayID
-	session.GatewayName = route.GatewayName
-	session.GatewayCollection = route.GatewayCollection
+	target := route.currentTarget()
+	session.GatewayID = target.ID
+	session.GatewayName = target.Name
+	session.GatewayCollection = target.Collection
 }
 
 func (s *Server) gatewayGroupsWithStatus(groups []model.PlatformItem) []model.PlatformItem {
@@ -219,6 +335,16 @@ func (s *Server) gatewayGroupStatuses(groups []model.PlatformItem) []gatewayGrou
 			if !gatewayGroupMatches(status, group, gateway) {
 				continue
 			}
+			if gateway.Online {
+				if failure, unavailable := s.gatewayRoutes.health(group.ID, gateway.ID, now); unavailable {
+					gateway.Online = false
+					gateway.Status = "cooldown"
+					gateway.Metadata["route_failure_count"] = failure.Count
+					gateway.Metadata["route_last_error"] = failure.LastError
+					gateway.Metadata["route_last_failure_at"] = failure.LastFailure.Format(time.RFC3339Nano)
+					gateway.Metadata["route_unavailable_until"] = failure.Unavailable.Format(time.RFC3339Nano)
+				}
+			}
 			status.Members = append(status.Members, gateway)
 			if gateway.Online {
 				status.Online++
@@ -226,11 +352,34 @@ func (s *Server) gatewayGroupStatuses(groups []model.PlatformItem) []gatewayGrou
 				status.Offline++
 			}
 		}
-		if status.SelectionMode == "manual" && len(status.MemberIDs) > 0 {
+		switch status.SelectionMode {
+		case "manual":
 			sort.SliceStable(status.Members, func(i, j int) bool {
 				return gatewayGroupManualOrder(status.MemberIDs, status.Members[i]) < gatewayGroupManualOrder(status.MemberIDs, status.Members[j])
 			})
-		} else {
+		case "least_sessions":
+			sort.SliceStable(status.Members, func(i, j int) bool {
+				left := status.Members[i]
+				right := status.Members[j]
+				if left.Online != right.Online {
+					return left.Online
+				}
+				if left.ActiveSessions != right.ActiveSessions {
+					return left.ActiveSessions < right.ActiveSessions
+				}
+				if left.LatencyMS != right.LatencyMS {
+					return left.LatencyMS < right.LatencyMS
+				}
+				return left.Name < right.Name
+			})
+		case "round_robin":
+			sort.SliceStable(status.Members, func(i, j int) bool {
+				if status.Members[i].Online != status.Members[j].Online {
+					return status.Members[i].Online
+				}
+				return status.Members[i].Name < status.Members[j].Name
+			})
+		default:
 			sort.SliceStable(status.Members, func(i, j int) bool {
 				left := status.Members[i]
 				right := status.Members[j]
@@ -246,14 +395,21 @@ func (s *Server) gatewayGroupStatuses(groups []model.PlatformItem) []gatewayGrou
 				return left.Name < right.Name
 			})
 		}
+		onlineMembers := make([]gatewayGroupMember, 0, len(status.Members))
 		for _, member := range status.Members {
 			if !member.Online {
 				continue
 			}
-			selected := member
-			status.SelectedGatewayID = member.ID
+			onlineMembers = append(onlineMembers, member)
+		}
+		if len(onlineMembers) > 0 {
+			selectedIndex := 0
+			if status.SelectionMode == "round_robin" {
+				selectedIndex = s.gatewayRoutes.roundRobinIndex(group.ID, len(onlineMembers), false)
+			}
+			selected := onlineMembers[selectedIndex]
+			status.SelectedGatewayID = selected.ID
 			status.SelectedGateway = &selected
-			break
 		}
 		statuses = append(statuses, status)
 	}
@@ -323,11 +479,47 @@ func gatewayGroupSelectionMode(group model.PlatformItem) string {
 		group.Type,
 	)))
 	switch mode {
-	case "auto", "automatic", "label", "labels", "capability", "capabilities", "least-latency", "least_latency", "least-sessions", "least_sessions":
+	case "round-robin", "round_robin", "roundrobin":
+		return "round_robin"
+	case "least-sessions", "least_sessions":
+		return "least_sessions"
+	case "least-latency", "least_latency":
+		return "least_latency"
+	case "auto", "automatic", "label", "labels", "capability", "capabilities":
 		return "auto"
 	default:
 		return "manual"
 	}
+}
+
+func gatewayRouteAttemptTimeout(group model.PlatformItem) time.Duration {
+	seconds := metadataIntDefault(group.Metadata["attempt_timeout_seconds"], 5)
+	return time.Duration(clampInt(seconds, 1, 20, 5)) * time.Second
+}
+
+func gatewayRouteFailureCooldown(group model.PlatformItem) time.Duration {
+	seconds := metadataIntDefault(group.Metadata["failure_cooldown_seconds"], 30)
+	return time.Duration(clampInt(seconds, 1, 300, 30)) * time.Second
+}
+
+func gatewayRouteMemberSupportsProtocol(member gatewayGroupMember, protocol model.Protocol) bool {
+	if len(member.Capabilities) == 0 || protocol == "" {
+		return true
+	}
+	wanted := strings.ToLower(strings.TrimSpace(string(protocol)))
+	for _, capability := range member.Capabilities {
+		value := strings.ToLower(strings.TrimSpace(capability))
+		if value == "tcp" || value == wanted {
+			return true
+		}
+		if wanted == "http" && (value == "https" || value == "web") {
+			return true
+		}
+		if wanted == "database" && (value == "mysql" || value == "postgres" || value == "postgresql") {
+			return true
+		}
+	}
+	return false
 }
 
 func gatewayGroupMemberIDs(group model.PlatformItem) []string {

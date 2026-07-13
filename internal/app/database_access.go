@@ -269,6 +269,7 @@ func (s *Server) executeDatabaseAssetSQL(r *http.Request, asset model.PlatformIt
 	metadata["rows_affected"] = rowsAffected
 	metadata["duration_ms"] = time.Since(start).Milliseconds()
 	metadata["completed_at"] = time.Now().UTC()
+	applyGatewayRouteMetadata(metadata, gatewayRoute)
 	if status == "failed" {
 		metadata["error"] = detail
 	}

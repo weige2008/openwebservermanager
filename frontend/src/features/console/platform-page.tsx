@@ -3993,6 +3993,7 @@ function PlatformItemDialog({
   const isUser = collection === 'users'
   const isDepartment = collection === 'departments'
   const isAssetGroup = collection === 'asset_groups'
+  const isGatewayGroup = collection === 'gateway_groups'
   const isRole = collection === 'roles'
   const isCommandFilter = collection === 'command_filters'
   const isCommandSnippet = collection === 'command_snippets'
@@ -4008,13 +4009,107 @@ function PlatformItemDialog({
   const assetItems = app.data.platform?.assets || []
   const authorizationResourceType = metadataFormText(form.metadata, 'resource_type') || 'storage'
   const gatewayGroupItems = app.data.platform?.gateway_groups || []
+  const agentGatewayItems = app.data.platform?.agent_gateways || []
+  const gatewaySelectionMode = gatewayGroupSelectionModeFromForm(form)
+  const selectedGatewayIDs = metadataStringListFromForm(form.metadata, 'gateway_ids')
   const databaseCredentials = (app.data.platform?.credentials || []).filter((item) => item.type === 'database_password')
   const mtlsCertificates = (app.data.platform?.certificates || []).filter((item) => metadataBool(item.metadata?.mtls_enabled) && metadataBool(item.metadata?.has_private_key))
   return (
     <DialogShell open={open} onOpenChange={onOpenChange} title={title} description={description}>
       <div className='grid gap-4'>
         <div className='grid gap-3 sm:grid-cols-2'>
-          {isAssetGroup ? (
+          {isGatewayGroup ? (
+            <>
+              <Field label={app.t('name')}><Input value={form.name} onChange={(event) => onChange({ name: event.currentTarget.value })} /></Field>
+              <Field label={app.t('status')}>
+                <Select value={form.status || 'enabled'} onChange={(event) => onChange({ status: event.currentTarget.value })}>
+                  <option value='enabled'>{app.t('enabled', 'Enabled')}</option>
+                  <option value='disabled'>{app.t('disabled', 'Disabled')}</option>
+                </Select>
+              </Field>
+              <Field label={app.t('selectionMode', 'Selection mode')}>
+                <Select
+                  value={gatewaySelectionMode}
+                  onChange={(event) => onChange({
+                    type: event.currentTarget.value,
+                    metadata: metadataWithGatewaySelectionMode(form.metadata, event.currentTarget.value),
+                  })}
+                >
+                  <option value='manual'>{app.t('manualSelection', 'Manual')}</option>
+                  <option value='auto'>{app.t('automaticSelection', 'Automatic')}</option>
+                  <option value='least_latency'>{app.t('leastLatency', 'Least latency')}</option>
+                  <option value='least_sessions'>{app.t('leastSessions', 'Least active sessions')}</option>
+                  <option value='round_robin'>{app.t('roundRobin', 'Round robin')}</option>
+                </Select>
+              </Field>
+              <Field label={app.t('attemptTimeoutSeconds', 'Attempt timeout (seconds)')}>
+                <Input
+                  type='number'
+                  min={1}
+                  max={20}
+                  value={metadataFormText(form.metadata, 'attempt_timeout_seconds')}
+                  onChange={(event) => onChange({ metadata: metadataWithValue(form.metadata, 'attempt_timeout_seconds', event.currentTarget.value ? Number(event.currentTarget.value) : '') })}
+                />
+              </Field>
+              <Field label={app.t('failureCooldownSeconds', 'Failure cooldown (seconds)')}>
+                <Input
+                  type='number'
+                  min={1}
+                  max={300}
+                  value={metadataFormText(form.metadata, 'failure_cooldown_seconds')}
+                  onChange={(event) => onChange({ metadata: metadataWithValue(form.metadata, 'failure_cooldown_seconds', event.currentTarget.value ? Number(event.currentTarget.value) : '') })}
+                />
+              </Field>
+              <Field label={app.t('tags', 'Tags')}><Input placeholder='prod,edge' value={form.tags} onChange={(event) => onChange({ tags: event.currentTarget.value })} /></Field>
+              {gatewaySelectionMode === 'manual' ? (
+                <div className='grid gap-2 rounded-lg border border-border bg-muted/20 p-3 sm:col-span-2'>
+                  <div className='flex items-center justify-between gap-3'>
+                    <span className='text-sm font-medium'>{app.t('configuredMembers', 'Configured members')}</span>
+                    <Badge tone={selectedGatewayIDs.length ? 'success' : 'warning'}>{selectedGatewayIDs.length}</Badge>
+                  </div>
+                  <div className='grid max-h-64 gap-2 overflow-auto sm:grid-cols-2'>
+                    {agentGatewayItems.map((gateway) => {
+                      const selected = selectedGatewayIDs.includes(gateway.id)
+                      return (
+                        <label key={gateway.id} className='flex min-w-0 items-start gap-2 rounded-md border border-border bg-background px-3 py-2 text-sm'>
+                          <input
+                            type='checkbox'
+                            className='mt-0.5 size-4 shrink-0 accent-primary'
+                            checked={selected}
+                            onChange={() => onChange({ metadata: metadataWithList(form.metadata, 'gateway_ids', toggleString(selectedGatewayIDs, gateway.id)) })}
+                          />
+                          <span className='min-w-0'>
+                            <strong className='block truncate'>{gateway.name}</strong>
+                            <span className='block truncate text-xs text-muted-foreground'>
+                              {gateway.status || 'offline'} · {metadataInlineListText(gateway.metadata?.capabilities) || gateway.id}
+                            </span>
+                          </span>
+                        </label>
+                      )
+                    })}
+                    {!agentGatewayItems.length ? <p className='text-sm text-muted-foreground'>{app.t('noAgentGateways', 'No Agent gateways are available.')}</p> : null}
+                  </div>
+                </div>
+              ) : (
+                <>
+                  <Field label={app.t('requiredLabels', 'Required labels')}>
+                    <Input
+                      placeholder='prod,edge'
+                      value={metadataListInputText(form.metadata, 'required_labels')}
+                      onChange={(event) => onChange({ metadata: metadataWithList(form.metadata, 'required_labels', splitWords(event.currentTarget.value)) })}
+                    />
+                  </Field>
+                  <Field label={app.t('requiredCapabilities', 'Required capabilities')}>
+                    <Input
+                      placeholder='tcp,ssh,rdp'
+                      value={metadataListInputText(form.metadata, 'required_capabilities')}
+                      onChange={(event) => onChange({ metadata: metadataWithList(form.metadata, 'required_capabilities', splitWords(event.currentTarget.value)) })}
+                    />
+                  </Field>
+                </>
+              )}
+            </>
+          ) : isAssetGroup ? (
             <>
               <Field label={app.t('name')}><Input value={form.name} onChange={(event) => onChange({ name: event.currentTarget.value })} /></Field>
               <Field label={app.t('status')}>
@@ -4694,6 +4789,7 @@ function defaultPlatformType(collection: string) {
   if (collection === 'users') return 'local'
   if (collection === 'departments') return 'department'
   if (collection === 'asset_groups') return 'ssh'
+  if (collection === 'gateway_groups') return 'manual'
   if (collection === 'roles') return 'custom'
   if (collection === 'command_filters') return 'deny'
   if (collection === 'command_snippets') return 'public'
@@ -4713,6 +4809,12 @@ function defaultPlatformPermissions(collection: string): Record<string, boolean>
 function defaultPlatformMetadata(collection: string) {
   if (collection === 'command_filters') return JSON.stringify({ risk: 'high' }, null, 2)
   if (collection === 'asset_groups') return JSON.stringify({ sort: 0, collapsed: false }, null, 2)
+  if (collection === 'gateway_groups') return JSON.stringify({
+    selection_mode: 'manual',
+    gateway_ids: [],
+    attempt_timeout_seconds: 5,
+    failure_cooldown_seconds: 30,
+  }, null, 2)
   if (collection === 'command_snippets') return JSON.stringify({ command: '', append_newline: false }, null, 2)
   if (collection === 'authorization_strategies') return JSON.stringify({ resource_type: 'storage', path_prefix: '' }, null, 2)
   if (collection === 'oidc_clients') return JSON.stringify({
@@ -6717,6 +6819,24 @@ function metadataListInputText(metadata: string, key: string) {
 
 function metadataBoolFromForm(metadata: string, key: string) {
   return metadataBool(metadataObject(metadata)[key])
+}
+
+function gatewayGroupSelectionModeFromForm(form: PlatformFormState) {
+  const value = (metadataFormText(form.metadata, 'selection_mode') || form.type || 'manual').trim().toLowerCase().replaceAll('-', '_')
+  if (value === 'roundrobin') return 'round_robin'
+  if (['auto', 'least_latency', 'least_sessions', 'round_robin'].includes(value)) return value
+  return 'manual'
+}
+
+function metadataWithGatewaySelectionMode(metadata: string, mode: string) {
+  const next = metadataObject(metadata)
+  next.selection_mode = mode
+  if (mode !== 'manual') {
+    for (const key of ['gateway_id', 'gateway_ids', 'member_id', 'member_ids', 'members', 'agent_gateway_ids', 'ssh_gateway_ids']) {
+      delete next[key]
+    }
+  }
+  return JSON.stringify(next, null, 2)
 }
 
 function permissionSummary(permissions: Record<string, boolean> | undefined) {

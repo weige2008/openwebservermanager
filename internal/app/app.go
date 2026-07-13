@@ -100,6 +100,7 @@ type Server struct {
 	ldap                ldapAuthenticator
 	activeConnections   activeConnectionRegistry
 	agentRelay          *agentrelay.Manager
+	gatewayRoutes       gatewayRouteRegistry
 	recordingTranscodes recordingTranscodeRegistry
 	recordingTranscoder RecordingTranscoder
 	acmeIssuer          ACMEIssuer

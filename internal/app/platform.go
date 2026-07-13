@@ -692,6 +692,7 @@ func (s *Server) handleWebAssetProxy(w http.ResponseWriter, r *http.Request, ass
 		recorder := &statusCaptureWriter{ResponseWriter: w, status: http.StatusOK}
 		proxy.ServeHTTP(recorder, r)
 		duration := time.Since(started)
+		applyGatewayRouteMetadata(metadata, gatewayRoute)
 		finalizeWebAccessLogMetadata(metadata, recorder.status, recorder.bytes, duration)
 		_ = s.finalizeAccessLog(r, accessLog, strconv.Itoa(recorder.status), metadata)
 		_ = s.audit(r, "access.web.proxy", asset.ID, model.ProtocolHTTP, "proxied web asset request")
@@ -701,6 +702,7 @@ func (s *Server) handleWebAssetProxy(w http.ResponseWriter, r *http.Request, ass
 	recorder := newBufferedProxyWriter()
 	proxy.ServeHTTP(recorder, r)
 	duration := time.Since(started)
+	applyGatewayRouteMetadata(metadata, gatewayRoute)
 	finalizeWebAccessLogMetadata(metadata, recorder.statusCode(), recorder.bytes, duration)
 	if err := s.finalizeAccessLog(r, accessLog, strconv.Itoa(recorder.statusCode()), metadata); err != nil {
 		writeError(w, http.StatusInternalServerError, err.Error())

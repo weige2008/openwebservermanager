@@ -33,6 +33,7 @@ import (
 	"os"
 	"path"
 	"path/filepath"
+	"slices"
 	"strconv"
 	"strings"
 	"testing"
@@ -10540,6 +10541,319 @@ func TestAgentClientReportsMetricsAndRelaysTCP(t *testing.T) {
 	}
 }
 
+func TestGatewayGroupFailsOverToHealthyAgentAndCoolsDownFailure(t *testing.T) {
+	handler, adminCookie := newTestHandler(t)
+	srv := handler.(*Server)
+	deadGatewayRec := assertStatus(t, handler, http.MethodPost, "/api/admin/agent-gateways", map[string]any{
+		"name":   "agent-a-dead",
+		"type":   "agent",
+		"status": "online",
+		"metadata": map[string]any{
+			"capabilities": []string{"tcp", "ssh"},
+			"latency_ms":   1,
+		},
+	}, adminCookie, http.StatusCreated)
+	var deadGateway model.PlatformItem
+	decodeResponse(t, deadGatewayRec, &deadGateway)
+	liveGatewayRec := assertStatus(t, handler, http.MethodPost, "/api/admin/agent-gateways", map[string]any{
+		"name":   "agent-b-live",
+		"type":   "agent",
+		"status": "offline",
+		"metadata": map[string]any{
+			"capabilities": []string{"tcp", "ssh"},
+			"latency_ms":   20,
+		},
+	}, adminCookie, http.StatusCreated)
+	var liveGateway model.PlatformItem
+	decodeResponse(t, liveGatewayRec, &liveGateway)
+	tokenRec := assertStatus(t, handler, http.MethodPost, "/api/admin/agent-gateways/"+liveGateway.ID+"/token", nil, adminCookie, http.StatusOK)
+	var tokenPayload map[string]any
+	decodeResponse(t, tokenRec, &tokenPayload)
+	registrationToken, _ := tokenPayload["registration_token"].(string)
+
+	managerHTTP := httptest.NewServer(handler)
+	defer managerHTTP.Close()
+	agent, err := agentrelay.NewClient(agentrelay.ClientConfig{
+		ServerURL:         managerHTTP.URL,
+		RegistrationToken: registrationToken,
+		Name:              liveGateway.Name,
+		Capabilities:      []string{"tcp", "ssh"},
+		Workers:           2,
+		HeartbeatInterval: 5 * time.Second,
+		Logger:            slog.New(slog.NewTextHandler(io.Discard, nil)),
+		MetricsCollector: func(context.Context) (agentrelay.HostMetrics, error) {
+			return agentrelay.HostMetrics{CPUPercent: 5, MemoryUsedBytes: 1, MemoryTotalBytes: 2, DiskUsedBytes: 1, DiskTotalBytes: 2}, nil
+		},
+	})
+	if err != nil {
+		t.Fatalf("new live gateway agent: %v", err)
+	}
+	agentCtx, cancelAgent := context.WithCancel(context.Background())
+	agentDone := make(chan error, 1)
+	go func() { agentDone <- agent.Run(agentCtx) }()
+	defer func() {
+		cancelAgent()
+		select {
+		case runErr := <-agentDone:
+			if runErr != nil {
+				t.Errorf("live gateway agent stopped with error: %v", runErr)
+			}
+		case <-time.After(3 * time.Second):
+			t.Error("live gateway agent did not stop")
+		}
+	}()
+	waitForCondition(t, 3*time.Second, func() bool {
+		stored, ok, loadErr := srv.cfg.Store.GetPlatformItem("agent_gateways", liveGateway.ID)
+		return loadErr == nil && ok && stored.Status == "online"
+	})
+
+	groupRec := assertStatus(t, handler, http.MethodPost, "/api/admin/gateway-groups", map[string]any{
+		"name":   "failover-agents",
+		"type":   "manual",
+		"status": "enabled",
+		"metadata": map[string]any{
+			"gateway_ids":              []string{deadGateway.ID, liveGateway.ID},
+			"attempt_timeout_seconds":  1,
+			"failure_cooldown_seconds": 20,
+		},
+	}, adminCookie, http.StatusCreated)
+	var group model.PlatformItem
+	decodeResponse(t, groupRec, &group)
+	asset := model.PlatformItem{ID: "failover-asset", Name: "failover-asset", Protocol: model.ProtocolSSH, Metadata: map[string]any{"gateway_group_id": group.ID}}
+	route, required, err := srv.assetGatewayRoute(asset)
+	if err != nil || !required {
+		t.Fatalf("resolve failover route: required=%v err=%v", required, err)
+	}
+	if route.currentTarget().ID != deadGateway.ID {
+		t.Fatalf("initial route = %#v, want dead first member", route.currentTarget())
+	}
+	session, err := srv.cfg.Store.CreateSession(model.ConnectionSession{Protocol: model.ProtocolSSH, ServerID: asset.ID, UserID: "failover-user"})
+	if err != nil {
+		t.Fatalf("create failover session: %v", err)
+	}
+	if _, err := srv.cfg.Store.UpdateSession(session.ID, func(item *model.ConnectionSession) { applyGatewayRouteSession(item, route) }); err != nil {
+		t.Fatalf("apply initial gateway route: %v", err)
+	}
+	targetAddress, received, closeTarget := startEchoTCPServerWithDeadline(t, 20*time.Second)
+	defer closeTarget()
+	dialContext, err := srv.agentGatewayDialContext(route, session.ID, session.UserID, model.ProtocolSSH)
+	if err != nil {
+		t.Fatalf("create failover dialer: %v", err)
+	}
+	started := time.Now()
+	conn, err := dialContext(context.Background(), "tcp", targetAddress)
+	if err != nil {
+		t.Fatalf("dial through failover gateway group: %v", err)
+	}
+	if elapsed := time.Since(started); elapsed < time.Second || elapsed > 5*time.Second {
+		t.Fatalf("failover duration = %s, want one bounded failed attempt", elapsed)
+	}
+	if route.currentTarget().ID != liveGateway.ID {
+		t.Fatalf("actual route after failover = %#v", route.currentTarget())
+	}
+	storedSession, ok := srv.cfg.Store.GetSession(session.ID)
+	if !ok || storedSession.GatewayID != liveGateway.ID || storedSession.GatewayGroupID != group.ID {
+		t.Fatalf("stored failover session route = %#v", storedSession)
+	}
+	if _, err := io.WriteString(conn, "gateway-failover-ok\n"); err != nil {
+		t.Fatalf("write through failover route: %v", err)
+	}
+	response, err := bufio.NewReader(conn).ReadString('\n')
+	if err != nil || response != "echo:gateway-failover-ok\n" {
+		t.Fatalf("read failover response = %q err=%v", response, err)
+	}
+	_ = conn.Close()
+	select {
+	case payload := <-received:
+		if payload != "gateway-failover-ok\n" {
+			t.Fatalf("failover target received %q", payload)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("failover target did not receive payload")
+	}
+
+	statusRec := assertStatus(t, handler, http.MethodGet, "/api/admin/gateway-groups/status", nil, adminCookie, http.StatusOK)
+	var statusPayload struct {
+		Items []gatewayGroupStatus `json:"items"`
+	}
+	decodeResponse(t, statusRec, &statusPayload)
+	status := gatewayGroupStatusByID(statusPayload.Items, group.ID)
+	if status == nil || status.SelectedGatewayID != liveGateway.ID {
+		t.Fatalf("gateway status after failover = %#v", status)
+	}
+	foundCooldown := false
+	for _, member := range status.Members {
+		if member.ID == deadGateway.ID && member.Status == "cooldown" && member.Metadata["route_unavailable_until"] != nil {
+			foundCooldown = true
+		}
+	}
+	if !foundCooldown {
+		t.Fatalf("failed gateway did not enter cooldown: %#v", status.Members)
+	}
+
+	secondRoute, _, err := srv.assetGatewayRoute(asset)
+	if err != nil {
+		t.Fatalf("resolve route during cooldown: %v", err)
+	}
+	if secondRoute.currentTarget().ID != liveGateway.ID || len(secondRoute.Candidates) != 1 {
+		t.Fatalf("route during cooldown = current %#v candidates %#v", secondRoute.currentTarget(), secondRoute.Candidates)
+	}
+	logs, err := srv.cfg.Store.ListPlatformItems("operation_logs")
+	if err != nil {
+		t.Fatalf("list gateway route logs: %v", err)
+	}
+	failedLogged := false
+	failoverLogged := false
+	for _, item := range logs {
+		switch item.Name {
+		case "gateway.route.attempt_failed":
+			failedLogged = item.Metadata["gateway_id"] == deadGateway.ID
+		case "gateway.route.failover":
+			failoverLogged = item.Metadata["from_gateway_id"] == deadGateway.ID && item.Metadata["to_gateway_id"] == liveGateway.ID
+		}
+	}
+	if !failedLogged || !failoverLogged {
+		t.Fatalf("gateway route audit missing: failed=%v failover=%v logs=%#v", failedLogged, failoverLogged, logs)
+	}
+
+	srv.gatewayRoutes.success(group.ID, deadGateway.ID)
+	attemptAuditRoute, _, err := srv.assetGatewayRoute(asset)
+	if err != nil {
+		t.Fatalf("resolve route for failed-attempt audit test: %v", err)
+	}
+	attemptAuditSession, err := srv.cfg.Store.CreateSession(model.ConnectionSession{Protocol: model.ProtocolSSH, ServerID: asset.ID, UserID: "attempt-audit-user"})
+	if err != nil {
+		t.Fatalf("create failed-attempt audit session: %v", err)
+	}
+	if _, err := srv.cfg.Store.UpdateSession(attemptAuditSession.ID, func(item *model.ConnectionSession) { applyGatewayRouteSession(item, attemptAuditRoute) }); err != nil {
+		t.Fatalf("apply failed-attempt audit route: %v", err)
+	}
+	attemptAuditDialer, err := srv.agentGatewayDialContext(attemptAuditRoute, attemptAuditSession.ID, attemptAuditSession.UserID, model.ProtocolSSH)
+	if err != nil {
+		t.Fatalf("create failed-attempt audit dialer: %v", err)
+	}
+	removeAttemptAuditBlocker := blockOperationLogName(t, srv.cfg.Store, "gateway.route.attempt_failed")
+	_, attemptAuditErr := attemptAuditDialer(context.Background(), "tcp", targetAddress)
+	removeAttemptAuditBlocker()
+	if attemptAuditErr == nil || !strings.Contains(attemptAuditErr.Error(), "persist gateway.route.attempt_failed operation log") {
+		t.Fatalf("blocked failed-attempt audit error = %v", attemptAuditErr)
+	}
+	storedAttemptAuditSession, ok := srv.cfg.Store.GetSession(attemptAuditSession.ID)
+	if !ok || storedAttemptAuditSession.GatewayID != deadGateway.ID || attemptAuditRoute.currentTarget().ID != deadGateway.ID {
+		t.Fatalf("failed-attempt audit continued to fallback: session=%#v route=%#v", storedAttemptAuditSession, attemptAuditRoute.currentTarget())
+	}
+
+	srv.gatewayRoutes.success(group.ID, deadGateway.ID)
+	failoverAuditRoute, _, err := srv.assetGatewayRoute(asset)
+	if err != nil {
+		t.Fatalf("resolve route for failover audit test: %v", err)
+	}
+	failoverAuditSession, err := srv.cfg.Store.CreateSession(model.ConnectionSession{Protocol: model.ProtocolSSH, ServerID: asset.ID, UserID: "failover-audit-user"})
+	if err != nil {
+		t.Fatalf("create failover audit session: %v", err)
+	}
+	if _, err := srv.cfg.Store.UpdateSession(failoverAuditSession.ID, func(item *model.ConnectionSession) { applyGatewayRouteSession(item, failoverAuditRoute) }); err != nil {
+		t.Fatalf("apply failover audit route: %v", err)
+	}
+	failoverTarget, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("listen failover audit target: %v", err)
+	}
+	failoverAccepted := make(chan struct{}, 1)
+	failoverClosed := make(chan error, 1)
+	go func() {
+		conn, acceptErr := failoverTarget.Accept()
+		if acceptErr != nil {
+			failoverClosed <- acceptErr
+			return
+		}
+		failoverAccepted <- struct{}{}
+		_ = conn.SetReadDeadline(time.Now().Add(3 * time.Second))
+		buffer := make([]byte, 1)
+		_, readErr := conn.Read(buffer)
+		_ = conn.Close()
+		failoverClosed <- readErr
+	}()
+	failoverAuditDialer, err := srv.agentGatewayDialContext(failoverAuditRoute, failoverAuditSession.ID, failoverAuditSession.UserID, model.ProtocolSSH)
+	if err != nil {
+		_ = failoverTarget.Close()
+		t.Fatalf("create failover audit dialer: %v", err)
+	}
+	removeFailoverAuditBlocker := blockOperationLogName(t, srv.cfg.Store, "gateway.route.failover")
+	_, failoverAuditErr := failoverAuditDialer(context.Background(), "tcp", failoverTarget.Addr().String())
+	removeFailoverAuditBlocker()
+	if failoverAuditErr == nil || !strings.Contains(failoverAuditErr.Error(), "persist gateway.route.failover operation log") {
+		_ = failoverTarget.Close()
+		t.Fatalf("blocked failover audit error = %v", failoverAuditErr)
+	}
+	select {
+	case <-failoverAccepted:
+	case <-time.After(3 * time.Second):
+		_ = failoverTarget.Close()
+		t.Fatal("healthy gateway did not reach failover audit target")
+	}
+	select {
+	case readErr := <-failoverClosed:
+		if readErr == nil {
+			t.Fatal("failover audit target connection stayed readable after audit failure")
+		}
+	case <-time.After(3 * time.Second):
+		_ = failoverTarget.Close()
+		t.Fatal("failover audit target connection was not closed")
+	}
+	_ = failoverTarget.Close()
+	storedFailoverAuditSession, ok := srv.cfg.Store.GetSession(failoverAuditSession.ID)
+	if !ok || storedFailoverAuditSession.GatewayID != deadGateway.ID {
+		t.Fatalf("failed failover audit persisted unaudited route: %#v", storedFailoverAuditSession)
+	}
+	if !coreAuditLogsContainAction(srv.cfg.Store, "gateway.route.log.persist_failed") {
+		t.Fatal("gateway route operation log persistence failure was not written to core audit logs")
+	}
+}
+
+func TestGatewayGroupRoundRobinSelection(t *testing.T) {
+	handler, adminCookie := newTestHandler(t)
+	srv := handler.(*Server)
+	memberIDs := []string{}
+	for _, name := range []string{"round-a", "round-b", "round-c"} {
+		rec := assertStatus(t, handler, http.MethodPost, "/api/admin/agent-gateways", map[string]any{
+			"name":   name,
+			"type":   "agent",
+			"status": "online",
+			"metadata": map[string]any{
+				"capabilities": []string{"tcp", "ssh"},
+			},
+		}, adminCookie, http.StatusCreated)
+		var item model.PlatformItem
+		decodeResponse(t, rec, &item)
+		memberIDs = append(memberIDs, item.ID)
+	}
+	groupRec := assertStatus(t, handler, http.MethodPost, "/api/admin/gateway-groups", map[string]any{
+		"name":   "round-robin-agents",
+		"type":   "round_robin",
+		"status": "enabled",
+		"metadata": map[string]any{
+			"selection_mode": "round_robin",
+			"gateway_ids":    memberIDs,
+		},
+	}, adminCookie, http.StatusCreated)
+	var group model.PlatformItem
+	decodeResponse(t, groupRec, &group)
+	asset := model.PlatformItem{ID: "round-asset", Protocol: model.ProtocolSSH, Metadata: map[string]any{"gateway_group_id": group.ID}}
+	selected := []string{}
+	for index := 0; index < 6; index++ {
+		route, required, err := srv.assetGatewayRoute(asset)
+		if err != nil || !required {
+			t.Fatalf("round robin route %d: required=%v err=%v", index, required, err)
+		}
+		selected = append(selected, route.currentTarget().ID)
+	}
+	want := []string{memberIDs[0], memberIDs[1], memberIDs[2], memberIDs[0], memberIDs[1], memberIDs[2]}
+	if !slices.Equal(selected, want) {
+		t.Fatalf("round robin sequence = %#v, want %#v", selected, want)
+	}
+}
+
 func TestAgentGatewayOperationLogPersistenceFailures(t *testing.T) {
 	srv, adminCookie := newTestServer(t, nil)
 	handler := http.Handler(srv)
@@ -16127,6 +16441,17 @@ func TestSSHSessionFilesThroughAgentRelay(t *testing.T) {
 	}()
 
 	srv, adminCookie := newTestServer(t, nil)
+	deadGatewayRec := assertStatus(t, srv, http.MethodPost, "/api/admin/agent-gateways", map[string]any{
+		"name":   "relay-agent-dead",
+		"type":   "agent",
+		"status": "online",
+		"metadata": map[string]any{
+			"capabilities": []string{"tcp", "ssh", "rdp", "vnc", "http", "database"},
+			"latency_ms":   1,
+		},
+	}, adminCookie, http.StatusCreated)
+	var deadGateway model.PlatformItem
+	decodeResponse(t, deadGatewayRec, &deadGateway)
 	gatewayRec := assertStatus(t, srv, http.MethodPost, "/api/admin/agent-gateways", map[string]any{
 		"name":   "relay-agent",
 		"type":   "agent",
@@ -16197,7 +16522,9 @@ func TestSSHSessionFilesThroughAgentRelay(t *testing.T) {
 		"type":   "manual",
 		"status": "enabled",
 		"metadata": map[string]any{
-			"gateway_ids": []string{gateway.ID},
+			"gateway_ids":              []string{deadGateway.ID, gateway.ID},
+			"attempt_timeout_seconds":  1,
+			"failure_cooldown_seconds": 20,
 		},
 	}, adminCookie, http.StatusCreated)
 	var group model.PlatformItem
@@ -16230,7 +16557,7 @@ func TestSSHSessionFilesThroughAgentRelay(t *testing.T) {
 	}, adminCookie, http.StatusAccepted)
 	var session model.ConnectionSession
 	decodeResponse(t, sessionRec, &session)
-	if session.GatewayID != gateway.ID || session.GatewayCollection != "agent_gateways" {
+	if session.GatewayID != deadGateway.ID || session.GatewayCollection != "agent_gateways" {
 		t.Fatalf("relay session route = %#v", session)
 	}
 
@@ -16242,6 +16569,10 @@ func TestSSHSessionFilesThroughAgentRelay(t *testing.T) {
 	reportsRec := assertStatus(t, srv, http.MethodGet, "/api/connections/"+session.ID+"/sftp?path="+url.QueryEscape(reportsPath), nil, adminCookie, http.StatusOK)
 	if !strings.Contains(reportsRec.Body.String(), "relay.txt") {
 		t.Fatalf("agent relay reports listing = %s", reportsRec.Body.String())
+	}
+	storedSSHSession, ok := srv.cfg.Store.GetSession(session.ID)
+	if !ok || storedSSHSession.GatewayID != gateway.ID || storedSSHSession.GatewayGroupID != group.ID {
+		t.Fatalf("SSH relay did not persist failover route: %#v", storedSSHSession)
 	}
 
 	echoAddr, received, closeEcho := startEchoTCPServerWithDeadline(t, 20*time.Second)
@@ -16260,8 +16591,8 @@ func TestSSHSessionFilesThroughAgentRelay(t *testing.T) {
 		CredentialID:      "desktop-relay-credential",
 		UserID:            "admin",
 		GatewayGroupID:    group.ID,
-		GatewayID:         gateway.ID,
-		GatewayName:       gateway.Name,
+		GatewayID:         deadGateway.ID,
+		GatewayName:       deadGateway.Name,
 		GatewayCollection: "agent_gateways",
 	})
 	if err != nil {
@@ -16302,6 +16633,10 @@ func TestSSHSessionFilesThroughAgentRelay(t *testing.T) {
 		}
 	case <-time.After(2 * time.Second):
 		t.Fatal("desktop relay target did not receive payload")
+	}
+	storedDesktopSession, ok := srv.cfg.Store.GetSession(desktopSession.ID)
+	if !ok || storedDesktopSession.GatewayID != gateway.ID || storedDesktopSession.GatewayGroupID != group.ID {
+		t.Fatalf("desktop relay did not persist healthy route: %#v", storedDesktopSession)
 	}
 	webRec := assertStatus(t, srv, http.MethodPost, "/api/admin/websites", map[string]any{
 		"name":     "relay web target",
@@ -16346,8 +16681,34 @@ func TestSSHSessionFilesThroughAgentRelay(t *testing.T) {
 	case <-time.After(2 * time.Second):
 		t.Fatal("database target was not reached through the agent relay")
 	}
+	accessLogs, err := srv.cfg.Store.ListPlatformItems("access_logs")
+	if err != nil {
+		t.Fatalf("list relay web access logs: %v", err)
+	}
+	webRouteLogged := false
+	for _, item := range accessLogs {
+		if item.TargetID == webAsset.ID && item.Metadata["gateway_id"] == gateway.ID && item.Metadata["gateway_group_id"] == group.ID {
+			webRouteLogged = true
+		}
+	}
+	if !webRouteLogged {
+		t.Fatalf("web access log did not record healthy gateway: %#v", accessLogs)
+	}
+	sqlLogs, err := srv.cfg.Store.ListPlatformItems("sql_logs")
+	if err != nil {
+		t.Fatalf("list relay SQL logs: %v", err)
+	}
+	databaseRouteLogged := false
+	for _, item := range sqlLogs {
+		if item.TargetID == databaseAsset.ID && item.Metadata["gateway_id"] == gateway.ID && item.Metadata["gateway_group_id"] == group.ID {
+			databaseRouteLogged = true
+		}
+	}
+	if !databaseRouteLogged {
+		t.Fatalf("SQL log did not record healthy gateway: %#v", sqlLogs)
+	}
 	operationLogs := assertStatus(t, srv, http.MethodGet, "/api/admin/audit/operation-logs", nil, adminCookie, http.StatusOK)
-	for _, want := range []string{"agent.relay", "agent_relay", gateway.ID, session.ID, desktopSession.ID, webAsset.ID, databaseAsset.ID, targetAddr, echoAddr, "relay-web.invalid:80", "relay-database.invalid:3306"} {
+	for _, want := range []string{"agent.relay", "agent_relay", "gateway.route.attempt_failed", "gateway.route.failover", deadGateway.ID, gateway.ID, session.ID, desktopSession.ID, webAsset.ID, databaseAsset.ID, targetAddr, echoAddr, "relay-web.invalid:80", "relay-database.invalid:3306"} {
 		if !strings.Contains(operationLogs.Body.String(), want) {
 			t.Fatalf("agent relay operation log missing %q: %s", want, operationLogs.Body.String())
 		}
@@ -17757,7 +18118,7 @@ func blockOperationLogName(t *testing.T, st *store.Store, name string) func() {
 		t.Fatalf("open store database for operation log name blocker: %v", err)
 	}
 	triggerName := "block_operation_log_name"
-	if _, err := db.Exec(`DROP TRIGGER IF EXISTS ` + triggerName); err != nil {
+	if err := execSQLiteTestDDLWithRetry(db, `DROP TRIGGER IF EXISTS `+triggerName); err != nil {
 		_ = db.Close()
 		t.Fatalf("drop stale operation log name blocker trigger: %v", err)
 	}
@@ -17768,12 +18129,12 @@ WHEN NEW.collection = 'operation_logs'
 BEGIN
   SELECT RAISE(ABORT, 'forced operation log name create failure');
 END`
-	if _, err := db.Exec(triggerSQL); err != nil {
+	if err := execSQLiteTestDDLWithRetry(db, triggerSQL); err != nil {
 		_ = db.Close()
 		t.Fatalf("create operation log name blocker trigger: %v", err)
 	}
 	return func() {
-		_, _ = db.Exec(`DROP TRIGGER IF EXISTS ` + triggerName)
+		_ = execSQLiteTestDDLWithRetry(db, `DROP TRIGGER IF EXISTS `+triggerName)
 		_ = db.Close()
 	}
 }

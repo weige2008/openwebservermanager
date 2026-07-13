@@ -5,6 +5,7 @@ import { dirname, join } from 'node:path'
 const root = dirname(dirname(fileURLToPath(import.meta.url)))
 const platformSource = readFileSync(join(root, 'src/lib/platform.ts'), 'utf8')
 const platformPageSource = readFileSync(join(root, 'src/features/console/platform-page.tsx'), 'utf8')
+const workspaceSource = readFileSync(join(root, 'src/features/workspace/workspace-view.tsx'), 'utf8')
 const resourcesSource = readFileSync(join(root, 'src/i18n/resources.ts'), 'utf8')
 
 const mojibakeFragments = [
@@ -71,6 +72,19 @@ const sshExecDefinitions = resourcesSource.match(/sshExecDialog:\s*\{/g) || []
 if (sshExecDefinitions.length !== 7) {
   console.error(`sshExecDialog locale definitions = ${sshExecDefinitions.length}, want 7`)
   process.exit(1)
+}
+
+const sshFileManagerDefinitions = resourcesSource.match(/sshFileManager:\s*\{/g) || []
+if (sshFileManagerDefinitions.length !== 7) {
+  console.error(`sshFileManager locale definitions = ${sshFileManagerDefinitions.length}, want 7`)
+  process.exit(1)
+}
+
+for (const endpoint of ['/sftp/mkdir', '/sftp/write', '/sftp/${fileActionMode}']) {
+  if (!workspaceSource.includes(endpoint)) {
+    console.error(`SSH file manager is missing endpoint: ${endpoint}`)
+    process.exit(1)
+  }
 }
 
 const sshExecStart = platformPageSource.indexOf('function SSHExecDialog(')

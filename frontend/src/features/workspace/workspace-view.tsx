@@ -1,15 +1,16 @@
 import { FitAddon } from '@xterm/addon-fit'
 import { useQuery } from '@tanstack/react-query'
 import { Terminal } from '@xterm/xterm'
-import { ArrowUp, Clipboard, Code2, Download, FileDown, FolderOpen, Power, RefreshCw, Trash2, Upload } from 'lucide-react'
+import { ArrowUp, Clipboard, Code2, Copy, Download, FileDown, FilePlus2, FolderOpen, FolderPlus, MoveRight, Pencil, Power, RefreshCw, Save, Trash2, Upload } from 'lucide-react'
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { useTranslation } from 'react-i18next'
 
 import { useApp } from '@/app/app-provider'
 import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
+import { useConfirmDialog } from '@/components/ui/confirm-dialog'
 import { DialogShell } from '@/components/ui/dialog'
-import { Field, Select, Textarea } from '@/components/ui/field'
+import { Field, Input, Select, Textarea } from '@/components/ui/field'
 import { isAccessMFARequiredError, useAccessMFADialog } from '@/features/access/access-mfa'
 import { ApiError, apiRequest } from '@/lib/api'
 import { base64ToText, textToBase64 } from '@/lib/codec'
@@ -49,6 +50,26 @@ interface FileWorkspaceMessages {
   pathLabel: string
   modifiedLabel: string
   sizeLabel: string
+  createFolder: string
+  folderNamePlaceholder: string
+  folderCreated: string
+  createTextFile: string
+  fileNamePlaceholder: string
+  editFile: string
+  editingFile: (path: string) => string
+  fileContentPlaceholder: string
+  saveFile: string
+  fileSaved: string
+  cancel: string
+  copy: string
+  rename: string
+  sourcePath: string
+  destinationPath: string
+  overwriteDestination: string
+  fileCopied: string
+  fileRenamed: string
+  deleteConfirmTitle: (name: string) => string
+  deleteConfirmDescription: string
 }
 
 export function WorkspaceView() {
@@ -102,6 +123,25 @@ export function WorkspaceView() {
       pathLabel: t('workspace.pathLabel', { defaultValue: 'Path' }),
       modifiedLabel: t('workspace.modifiedLabel', { defaultValue: 'Modified' }),
       sizeLabel: t('workspace.sizeLabel', { defaultValue: 'Size' }),
+      createFolder: t('workspace.sshFileManager.createFolder'),
+      folderNamePlaceholder: t('workspace.sshFileManager.folderNamePlaceholder'),
+      folderCreated: t('workspace.sshFileManager.folderCreated'),
+      createTextFile: t('workspace.sshFileManager.createTextFile'),
+      fileNamePlaceholder: t('workspace.sshFileManager.fileNamePlaceholder'),
+      editFile: t('workspace.sshFileManager.editFile'),
+      editingFile: (path: string) => t('workspace.sshFileManager.editingFile', { path }),
+      fileContentPlaceholder: t('workspace.sshFileManager.fileContentPlaceholder'),
+      saveFile: t('workspace.sshFileManager.saveFile'),
+      fileSaved: t('workspace.sshFileManager.fileSaved'),
+      copy: t('workspace.sshFileManager.copy'),
+      rename: t('workspace.sshFileManager.rename'),
+      sourcePath: t('workspace.sshFileManager.sourcePath'),
+      destinationPath: t('workspace.sshFileManager.destinationPath'),
+      overwriteDestination: t('workspace.sshFileManager.overwriteDestination'),
+      fileCopied: t('workspace.sshFileManager.fileCopied'),
+      fileRenamed: t('workspace.sshFileManager.fileRenamed'),
+      deleteConfirmTitle: (name: string) => t('workspace.sshFileManager.deleteConfirmTitle', { name }),
+      deleteConfirmDescription: t('workspace.sshFileManager.deleteConfirmDescription'),
     }),
     [t]
   )
@@ -326,10 +366,21 @@ function SSHWorkspace({
   watermarkText: string
 }) {
   const app = useApp()
+  const { confirm, confirmDialog } = useConfirmDialog()
   const containerRef = useRef<HTMLDivElement | null>(null)
   const [filesOpen, setFilesOpen] = useState(false)
   const [filePath, setFilePath] = useState('')
   const [uploading, setUploading] = useState(false)
+  const [folderName, setFolderName] = useState('')
+  const [newFileName, setNewFileName] = useState('')
+  const [editingPath, setEditingPath] = useState('')
+  const [editingContent, setEditingContent] = useState('')
+  const [savingFile, setSavingFile] = useState(false)
+  const [fileActionMode, setFileActionMode] = useState<'copy' | 'rename' | ''>('')
+  const [fileActionSource, setFileActionSource] = useState('')
+  const [fileActionDestination, setFileActionDestination] = useState('')
+  const [fileActionOverwrite, setFileActionOverwrite] = useState(false)
+  const [fileActionRunning, setFileActionRunning] = useState(false)
   const filesQuery = useQuery({
     queryKey: ['ssh-files', session.id, filePath],
     queryFn: () => apiRequest<DesktopDriveResponse>(`/api/connections/${session.id}/sftp?path=${encodeURIComponent(filePath)}`),
@@ -358,13 +409,109 @@ function SSHWorkspace({
   }
 
   const deleteEntry = async (entry: DesktopDriveEntry) => {
-    if (entry.is_dir) return
+    const confirmed = await confirm({
+      title: fileMessages.deleteConfirmTitle(entry.name),
+      description: fileMessages.deleteConfirmDescription,
+      confirmText: fileMessages.deleteFile,
+      destructive: true,
+    })
+    if (!confirmed) return
     try {
       await apiRequest(`/api/connections/${session.id}/sftp?path=${encodeURIComponent(entry.path)}`, { method: 'DELETE' })
       app.showToast(fileMessages.fileDeleted)
       await filesQuery.refetch()
     } catch (error) {
       app.handleApiError(error)
+    }
+  }
+
+  const createFolder = async () => {
+    const name = folderName.trim()
+    if (!name) return
+    try {
+      await apiRequest(`/api/connections/${session.id}/sftp/mkdir`, {
+        method: 'POST',
+        body: JSON.stringify({ path: joinRemotePath(currentPath, name) }),
+      })
+      setFolderName('')
+      app.showToast(fileMessages.folderCreated)
+      await filesQuery.refetch()
+    } catch (error) {
+      app.handleApiError(error)
+    }
+  }
+
+  const editEntry = async (entry: DesktopDriveEntry) => {
+    if (entry.is_dir) return
+    try {
+      const content = await fetchSSHFileText(session.id, entry.path)
+      setEditingPath(entry.path)
+      setEditingContent(content)
+      setFileActionMode('')
+    } catch (error) {
+      app.handleApiError(error)
+    }
+  }
+
+  const beginNewTextFile = () => {
+    const name = newFileName.trim()
+    if (!name) return
+    setEditingPath(joinRemotePath(currentPath, name))
+    setEditingContent('')
+    setNewFileName('')
+    setFileActionMode('')
+  }
+
+  const saveEditedFile = async () => {
+    if (!editingPath || savingFile) return
+    setSavingFile(true)
+    try {
+      await apiRequest(`/api/connections/${session.id}/sftp/write`, {
+        method: 'POST',
+        body: JSON.stringify({ path: editingPath, content: editingContent }),
+      })
+      app.showToast(fileMessages.fileSaved)
+      setEditingPath('')
+      setEditingContent('')
+      await filesQuery.refetch()
+    } catch (error) {
+      app.handleApiError(error)
+    } finally {
+      setSavingFile(false)
+    }
+  }
+
+  const beginFileAction = (mode: 'copy' | 'rename', entry: DesktopDriveEntry) => {
+    setFileActionMode(mode)
+    setFileActionSource(entry.path)
+    setFileActionDestination(joinRemotePath(parentRemotePath(entry.path), suggestedRemoteName(entry.name, entry.is_dir, mode)))
+    setFileActionOverwrite(false)
+    setEditingPath('')
+    setEditingContent('')
+  }
+
+  const runFileAction = async () => {
+    if (!fileActionMode || !fileActionSource.trim() || !fileActionDestination.trim() || fileActionRunning) return
+    setFileActionRunning(true)
+    try {
+      await apiRequest(`/api/connections/${session.id}/sftp/${fileActionMode}`, {
+        method: 'POST',
+        body: JSON.stringify({
+          path: fileActionSource,
+          destination: fileActionDestination,
+          overwrite: fileActionOverwrite,
+        }),
+      })
+      app.showToast(fileActionMode === 'copy' ? fileMessages.fileCopied : fileMessages.fileRenamed)
+      setFileActionMode('')
+      setFileActionSource('')
+      setFileActionDestination('')
+      setFileActionOverwrite(false)
+      await filesQuery.refetch()
+    } catch (error) {
+      app.handleApiError(error)
+    } finally {
+      setFileActionRunning(false)
     }
   }
 
@@ -511,11 +658,85 @@ function SSHWorkspace({
               </Button>
             </div>
           </div>
+          <div className='grid gap-2 sm:grid-cols-[minmax(0,1fr)_auto]'>
+            <Input
+              value={folderName}
+              onChange={(event) => setFolderName(event.currentTarget.value)}
+              placeholder={fileMessages.folderNamePlaceholder}
+              onKeyDown={(event) => {
+                if (event.key === 'Enter') void createFolder()
+              }}
+            />
+            <Button variant='outline' onClick={() => void createFolder()} disabled={!folderName.trim()}>
+              <FolderPlus className='size-4' />
+              {fileMessages.createFolder}
+            </Button>
+          </div>
+          <div className='grid gap-2 sm:grid-cols-[minmax(0,1fr)_auto]'>
+            <Input
+              value={newFileName}
+              onChange={(event) => setNewFileName(event.currentTarget.value)}
+              placeholder={fileMessages.fileNamePlaceholder}
+              onKeyDown={(event) => {
+                if (event.key === 'Enter') beginNewTextFile()
+              }}
+            />
+            <Button variant='outline' onClick={beginNewTextFile} disabled={!newFileName.trim()}>
+              <FilePlus2 className='size-4' />
+              {fileMessages.createTextFile}
+            </Button>
+          </div>
+          {editingPath ? (
+            <div className='grid gap-3 rounded-lg border border-border bg-background/70 p-3'>
+              <div className='text-xs font-medium text-muted-foreground'>{fileMessages.editingFile(editingPath)}</div>
+              <Textarea
+                className='min-h-52 font-mono text-xs'
+                value={editingContent}
+                onChange={(event) => setEditingContent(event.currentTarget.value)}
+                placeholder={fileMessages.fileContentPlaceholder}
+              />
+              <div className='flex justify-end gap-2'>
+                <Button variant='outline' onClick={() => { setEditingPath(''); setEditingContent('') }}>{fileMessages.cancel}</Button>
+                <Button variant='primary' onClick={() => void saveEditedFile()} disabled={savingFile}>
+                  <Save className='size-4' />
+                  {fileMessages.saveFile}
+                </Button>
+              </div>
+            </div>
+          ) : null}
+          {fileActionMode ? (
+            <div className='grid gap-3 rounded-lg border border-border bg-background/70 p-3'>
+              <div className='grid gap-2 md:grid-cols-2'>
+                <Field label={fileMessages.sourcePath}>
+                  <Input value={fileActionSource} onChange={(event) => setFileActionSource(event.currentTarget.value)} />
+                </Field>
+                <Field label={fileMessages.destinationPath}>
+                  <Input value={fileActionDestination} onChange={(event) => setFileActionDestination(event.currentTarget.value)} />
+                </Field>
+              </div>
+              <label className='flex items-center gap-2 text-sm text-muted-foreground'>
+                <input
+                  type='checkbox'
+                  checked={fileActionOverwrite}
+                  onChange={(event) => setFileActionOverwrite(event.currentTarget.checked)}
+                  className='size-4 rounded border-border accent-primary'
+                />
+                {fileMessages.overwriteDestination}
+              </label>
+              <div className='flex justify-end gap-2'>
+                <Button variant='outline' onClick={() => setFileActionMode('')}>{fileMessages.cancel}</Button>
+                <Button variant='primary' onClick={() => void runFileAction()} disabled={fileActionRunning || !fileActionSource.trim() || !fileActionDestination.trim()}>
+                  {fileActionMode === 'copy' ? <Copy className='size-4' /> : <MoveRight className='size-4' />}
+                  {fileActionMode === 'copy' ? fileMessages.copy : fileMessages.rename}
+                </Button>
+              </div>
+            </div>
+          ) : null}
           {filesQuery.isError ? (
             <div className='rounded-lg border border-destructive/20 bg-destructive/10 px-3 py-2 text-sm text-destructive'>{fileMessages.fileListFailed}</div>
           ) : null}
           <div className='max-h-[50vh] overflow-auto rounded-lg border border-border'>
-            <div className='grid grid-cols-[minmax(0,1fr)_7rem_10rem_10rem] items-center gap-2 border-b border-border bg-muted/40 px-3 py-2 text-xs font-medium text-muted-foreground max-md:grid-cols-[minmax(0,1fr)_auto]'>
+            <div className='grid grid-cols-[minmax(0,1fr)_7rem_10rem_14rem] items-center gap-2 border-b border-border bg-muted/40 px-3 py-2 text-xs font-medium text-muted-foreground max-md:grid-cols-[minmax(0,1fr)_auto]'>
               <span>{fileMessages.sessionFiles}</span>
               <span className='max-md:hidden'>{fileMessages.sizeLabel}</span>
               <span className='max-md:hidden'>{fileMessages.modifiedLabel}</span>
@@ -525,7 +746,7 @@ function SSHWorkspace({
               <div className='px-3 py-8 text-center text-sm text-muted-foreground'>{fileMessages.refreshFiles}...</div>
             ) : filesQuery.data?.entries?.length ? (
               filesQuery.data.entries.map((entry) => (
-                <div key={entry.path} className='grid grid-cols-[minmax(0,1fr)_7rem_10rem_10rem] items-center gap-2 border-b border-border/60 px-3 py-2 text-sm last:border-0 max-md:grid-cols-[minmax(0,1fr)_auto]'>
+                <div key={entry.path} className='grid grid-cols-[minmax(0,1fr)_7rem_10rem_14rem] items-center gap-2 border-b border-border/60 px-3 py-2 text-sm last:border-0 max-md:grid-cols-[minmax(0,1fr)_auto]'>
                   <button
                     type='button'
                     className='min-w-0 truncate text-left font-medium hover:text-primary disabled:hover:text-foreground'
@@ -539,19 +760,28 @@ function SSHWorkspace({
                   <span className='truncate text-xs text-muted-foreground max-md:hidden'>{formatDate(entry.modified)}</span>
                   <span className='flex justify-end gap-1'>
                     {entry.is_dir ? (
-                      <Button size='icon-sm' variant='ghost' onClick={() => openEntry(entry)} aria-label={fileMessages.openFolder}>
+                      <Button size='icon-sm' variant='ghost' onClick={() => openEntry(entry)} aria-label={fileMessages.openFolder} title={fileMessages.openFolder}>
                         <FolderOpen className='size-4' />
                       </Button>
                     ) : (
                       <>
-                        <Button size='icon-sm' variant='ghost' onClick={() => void downloadEntry(entry)} aria-label={fileMessages.downloadFile}>
+                        <Button size='icon-sm' variant='ghost' onClick={() => void downloadEntry(entry)} aria-label={fileMessages.downloadFile} title={fileMessages.downloadFile}>
                           <Download className='size-4' />
                         </Button>
-                        <Button size='icon-sm' variant='ghost' onClick={() => void deleteEntry(entry)} aria-label={fileMessages.deleteFile}>
-                          <Trash2 className='size-4 text-destructive' />
+                        <Button size='icon-sm' variant='ghost' onClick={() => void editEntry(entry)} aria-label={fileMessages.editFile} title={fileMessages.editFile}>
+                          <Pencil className='size-4' />
                         </Button>
                       </>
                     )}
+                    <Button size='icon-sm' variant='ghost' onClick={() => beginFileAction('copy', entry)} aria-label={fileMessages.copy} title={fileMessages.copy}>
+                      <Copy className='size-4' />
+                    </Button>
+                    <Button size='icon-sm' variant='ghost' onClick={() => beginFileAction('rename', entry)} aria-label={fileMessages.rename} title={fileMessages.rename}>
+                      <MoveRight className='size-4' />
+                    </Button>
+                    <Button size='icon-sm' variant='ghost' onClick={() => void deleteEntry(entry)} aria-label={fileMessages.deleteFile} title={fileMessages.deleteFile}>
+                      <Trash2 className='size-4 text-destructive' />
+                    </Button>
                   </span>
                 </div>
               ))
@@ -561,6 +791,7 @@ function SSHWorkspace({
           </div>
         </div>
       </DialogShell>
+      {confirmDialog}
     </>
   )
 }
@@ -1085,6 +1316,17 @@ async function downloadSSHFile(sessionID: string, entry: DesktopDriveEntry) {
   URL.revokeObjectURL(url)
 }
 
+async function fetchSSHFileText(sessionID: string, path: string) {
+  const response = await fetch(`/api/connections/${sessionID}/sftp/download?path=${encodeURIComponent(path)}`, {
+    credentials: 'same-origin',
+  })
+  if (!response.ok) {
+    const payload = await response.json().catch(() => ({})) as { error?: string }
+    throw new ApiError(payload.error || response.statusText, response.status, false, payload)
+  }
+  return response.text()
+}
+
 async function uploadSSHFile(sessionID: string, path: string, file: File) {
   const form = new FormData()
   form.set('path', path)
@@ -1108,6 +1350,22 @@ function parentRemotePath(value: string) {
   if (separator < 0) return ''
   if (separator === 0) return '/'
   return normalized.slice(0, separator)
+}
+
+function joinRemotePath(parent: string, child: string) {
+  const normalizedParent = parent.trim().replaceAll('\\', '/').replace(/\/+$/g, '')
+  const normalizedChild = child.trim().replaceAll('\\', '/').replace(/^\/+/, '')
+  if (!normalizedParent || normalizedParent === '.') return normalizedChild
+  if (normalizedParent === '/') return `/${normalizedChild}`
+  return `${normalizedParent}/${normalizedChild}`
+}
+
+function suggestedRemoteName(name: string, isDirectory: boolean, mode: 'copy' | 'rename') {
+  const suffix = mode === 'copy' ? 'copy' : 'renamed'
+  if (isDirectory) return `${name}-${suffix}`
+  const dot = name.lastIndexOf('.')
+  if (dot <= 0) return `${name}-${suffix}`
+  return `${name.slice(0, dot)}-${suffix}${name.slice(dot)}`
 }
 
 function resolveWorkspaceWatermark(template: string, user: string, asset: string) {

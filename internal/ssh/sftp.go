@@ -63,6 +63,10 @@ func (c *FileClient) Stat(path string) (os.FileInfo, error) {
 	return c.client.Stat(path)
 }
 
+func (c *FileClient) Lstat(path string) (os.FileInfo, error) {
+	return c.client.Lstat(path)
+}
+
 func (c *FileClient) Open(path string) (RemoteFile, error) {
 	return c.client.Open(path)
 }
@@ -77,6 +81,18 @@ func (c *FileClient) Rename(oldPath, newPath string) error {
 
 func (c *FileClient) Remove(path string) error {
 	return c.client.Remove(path)
+}
+
+func (c *FileClient) Mkdir(path string) error {
+	return c.client.Mkdir(path)
+}
+
+func (c *FileClient) RemoveDirectory(path string) error {
+	return c.client.RemoveDirectory(path)
+}
+
+func (c *FileClient) RemoveAll(path string) error {
+	return c.client.RemoveAll(path)
 }
 
 func (c *FileClient) Chmod(path string, mode os.FileMode) error {

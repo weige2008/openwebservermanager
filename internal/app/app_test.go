@@ -16373,6 +16373,32 @@ func TestSSHSessionFiles(t *testing.T) {
 	if uploadedDownload.Body.String() != "ssh uploaded" {
 		t.Fatalf("SSH uploaded file body = %q", uploadedDownload.Body.String())
 	}
+	managedPath := path.Join(reportsPath, "managed")
+	assertStatus(t, handler, http.MethodPost, "/api/connections/"+session.ID+"/sftp/mkdir", map[string]any{"path": managedPath}, adminCookie, http.StatusCreated)
+	managedFilePath := path.Join(managedPath, "note.txt")
+	assertStatus(t, handler, http.MethodPost, "/api/connections/"+session.ID+"/sftp/write", map[string]any{"path": managedFilePath, "content": "ssh managed"}, adminCookie, http.StatusCreated)
+	managedDownload := assertStatus(t, handler, http.MethodGet, "/api/connections/"+session.ID+"/sftp/download?path="+url.QueryEscape(managedFilePath), nil, adminCookie, http.StatusOK)
+	if managedDownload.Body.String() != "ssh managed" {
+		t.Fatalf("SSH written file body = %q", managedDownload.Body.String())
+	}
+	copiedPath := path.Join(reportsPath, "managed-copy")
+	assertStatus(t, handler, http.MethodPost, "/api/connections/"+session.ID+"/sftp/copy", map[string]any{"path": managedPath, "destination": copiedPath}, adminCookie, http.StatusCreated)
+	copiedDownload := assertStatus(t, handler, http.MethodGet, "/api/connections/"+session.ID+"/sftp/download?path="+url.QueryEscape(path.Join(copiedPath, "note.txt")), nil, adminCookie, http.StatusOK)
+	if copiedDownload.Body.String() != "ssh managed" {
+		t.Fatalf("SSH copied file body = %q", copiedDownload.Body.String())
+	}
+	renamedPath := path.Join(reportsPath, "managed-renamed")
+	assertStatus(t, handler, http.MethodPost, "/api/connections/"+session.ID+"/sftp/rename", map[string]any{"path": copiedPath, "destination": renamedPath}, adminCookie, http.StatusOK)
+	if _, err := os.Stat(filepath.Join(reportsRoot, "managed-renamed", "note.txt")); err != nil {
+		t.Fatalf("SSH renamed directory missing file: %v", err)
+	}
+	assertStatus(t, handler, http.MethodDelete, "/api/connections/"+session.ID+"/sftp?path="+url.QueryEscape(managedPath), nil, adminCookie, http.StatusOK)
+	assertStatus(t, handler, http.MethodDelete, "/api/connections/"+session.ID+"/sftp?path="+url.QueryEscape(renamedPath), nil, adminCookie, http.StatusOK)
+	for _, removed := range []string{"managed", "managed-renamed"} {
+		if _, err := os.Stat(filepath.Join(reportsRoot, removed)); !errors.Is(err, os.ErrNotExist) {
+			t.Fatalf("SSH recursive delete left %s: %v", removed, err)
+		}
+	}
 	removePath := path.Join(reportsPath, "remove.txt")
 	assertStatus(t, handler, http.MethodDelete, "/api/connections/"+session.ID+"/sftp?path="+url.QueryEscape(removePath), nil, adminCookie, http.StatusOK)
 	if _, err := os.Stat(filepath.Join(reportsRoot, "remove.txt")); !errors.Is(err, os.ErrNotExist) {
@@ -16387,6 +16413,26 @@ func TestSSHSessionFiles(t *testing.T) {
 	}
 	if _, err := os.Stat(filepath.Join(reportsRoot, "audit-blocked.txt")); !errors.Is(err, os.ErrNotExist) {
 		t.Fatalf("SSH upload changed remote file before audit persisted: %v", err)
+	}
+	removeMkdirLogBlocker := blockPlatformItemCreate(t, srv.cfg.Store, "file_logs")
+	blockedMkdirPath := path.Join(reportsPath, "audit-blocked-dir")
+	blockedAuditMkdir := assertStatus(t, handler, http.MethodPost, "/api/connections/"+session.ID+"/sftp/mkdir", map[string]any{"path": blockedMkdirPath}, adminCookie, http.StatusInternalServerError)
+	removeMkdirLogBlocker()
+	if !strings.Contains(blockedAuditMkdir.Body.String(), "persist file log failed") {
+		t.Fatalf("SSH mkdir audit failure was not reported: %s", blockedAuditMkdir.Body.String())
+	}
+	if _, err := os.Stat(filepath.Join(reportsRoot, "audit-blocked-dir")); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("SSH mkdir changed remote directory before audit persisted: %v", err)
+	}
+	removeWriteLogBlocker := blockPlatformItemCreate(t, srv.cfg.Store, "file_logs")
+	blockedWritePath := path.Join(reportsPath, "audit-blocked-write.txt")
+	blockedAuditWrite := assertStatus(t, handler, http.MethodPost, "/api/connections/"+session.ID+"/sftp/write", map[string]any{"path": blockedWritePath, "content": "must rollback"}, adminCookie, http.StatusInternalServerError)
+	removeWriteLogBlocker()
+	if !strings.Contains(blockedAuditWrite.Body.String(), "persist file log failed") {
+		t.Fatalf("SSH write audit failure was not reported: %s", blockedAuditWrite.Body.String())
+	}
+	if _, err := os.Stat(filepath.Join(reportsRoot, "audit-blocked-write.txt")); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("SSH write changed remote file before audit persisted: %v", err)
 	}
 
 	userRec := assertStatus(t, handler, http.MethodPost, "/api/admin/users", map[string]any{
@@ -16425,6 +16471,9 @@ func TestSSHSessionFiles(t *testing.T) {
 			"upload":   false,
 			"edit":     false,
 			"delete":   false,
+			"copy":     false,
+			"paste":    false,
+			"rename":   false,
 		},
 		"metadata": map[string]any{"resource_type": "asset", "path_prefix": blockedPath},
 	}, adminCookie, http.StatusCreated)
@@ -16433,6 +16482,9 @@ func TestSSHSessionFiles(t *testing.T) {
 		t.Fatalf("SSH policy list filtering failed: %s", filteredList.Body.String())
 	}
 	assertStatus(t, handler, http.MethodGet, "/api/connections/"+session.ID+"/sftp/download?path="+url.QueryEscape(blockedPath), nil, userCookie, http.StatusForbidden)
+	assertStatus(t, handler, http.MethodPost, "/api/connections/"+session.ID+"/sftp/write", map[string]any{"path": blockedPath, "content": "denied"}, userCookie, http.StatusForbidden)
+	assertStatus(t, handler, http.MethodPost, "/api/connections/"+session.ID+"/sftp/copy", map[string]any{"path": blockedPath, "destination": path.Join(reportsPath, "blocked-copy.txt")}, userCookie, http.StatusForbidden)
+	assertStatus(t, handler, http.MethodPost, "/api/connections/"+session.ID+"/sftp/rename", map[string]any{"path": blockedPath, "destination": path.Join(reportsPath, "blocked-renamed.txt")}, userCookie, http.StatusForbidden)
 	adminBlockedDownload := assertStatus(t, handler, http.MethodGet, "/api/connections/"+session.ID+"/sftp/download?path="+url.QueryEscape(blockedPath), nil, adminCookie, http.StatusOK)
 	if adminBlockedDownload.Body.String() != "ssh blocked" {
 		t.Fatalf("admin SSH policy bypass = %q", adminBlockedDownload.Body.String())
@@ -16465,7 +16517,7 @@ func TestSSHSessionFiles(t *testing.T) {
 	assertStatus(t, handler, http.MethodDelete, "/api/admin/authorizations/assets/"+authorization.ID, nil, adminCookie, http.StatusOK)
 	assertStatus(t, handler, http.MethodGet, "/api/connections/"+session.ID+"/sftp?path="+url.QueryEscape(reportsPath), nil, userCookie, http.StatusForbidden)
 	fileLogs := assertStatus(t, handler, http.MethodGet, "/api/admin/audit/file-logs", nil, adminCookie, http.StatusOK)
-	for _, want := range []string{session.ID, "list", "upload", "download", "delete", "denied", "authorization_strategy", "session_access", "file_transfer_disabled", "asset_authorization"} {
+	for _, want := range []string{session.ID, "list", "upload", "download", "mkdir", "write", "copy", "rename", "delete", "denied", "authorization_strategy", "session_access", "file_transfer_disabled", "asset_authorization"} {
 		if !strings.Contains(fileLogs.Body.String(), want) {
 			t.Fatalf("SSH file log missing %q: %s", want, fileLogs.Body.String())
 		}

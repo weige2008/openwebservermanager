@@ -1069,6 +1069,206 @@ func TestNativeSSHGatewayDirectAssetLogin(t *testing.T) {
 	}
 }
 
+func TestNativeSSHGatewayMenuShellPropagatesExitStatusAndCloses(t *testing.T) {
+	targetAddr, _, closeTarget := startProtocolSSHServer(t, "remote", "target-secret")
+	defer closeTarget()
+
+	st := newGatewayTestStore(t)
+	createGatewayUserAssetAndCredential(t, st, targetAddr)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	gatewayDataDir := mustTempDir(t)
+	defer removeTempDir(gatewayDataDir)
+	gateway, err := StartGateway(ctx, GatewayConfig{
+		Enabled:        true,
+		Address:        "127.0.0.1:0",
+		DataDir:        gatewayDataDir,
+		KnownHostsPath: filepath.Join(gatewayDataDir, "known_hosts"),
+		Store:          st,
+	})
+	if err != nil {
+		t.Fatalf("start gateway: %v", err)
+	}
+	defer gateway.Close()
+
+	client, err := ssh.Dial("tcp", gateway.Address(), &ssh.ClientConfig{
+		User:            "gateway-user",
+		Auth:            []ssh.AuthMethod{ssh.Password("password123")},
+		HostKeyCallback: ssh.InsecureIgnoreHostKey(),
+		Timeout:         5 * time.Second,
+	})
+	if err != nil {
+		t.Fatalf("dial gateway: %v", err)
+	}
+	defer client.Close()
+	session, err := client.NewSession()
+	if err != nil {
+		t.Fatalf("new gateway session: %v", err)
+	}
+	stdout, err := session.StdoutPipe()
+	if err != nil {
+		t.Fatalf("stdout pipe: %v", err)
+	}
+	stdin, err := session.StdinPipe()
+	if err != nil {
+		t.Fatalf("stdin pipe: %v", err)
+	}
+	if err := session.RequestPty("xterm-256color", 24, 80, ssh.TerminalModes{ssh.ECHO: 1}); err != nil {
+		t.Fatalf("request pty: %v", err)
+	}
+	if err := session.Shell(); err != nil {
+		t.Fatalf("start gateway shell: %v", err)
+	}
+	if _, err := io.WriteString(stdin, "1\r"); err != nil {
+		t.Fatalf("select asset: %v", err)
+	}
+	_ = readUntilContains(t, stdout, "target-shell", 5*time.Second)
+	if _, err := io.WriteString(stdin, "exit\r"); err != nil {
+		t.Fatalf("exit target shell: %v", err)
+	}
+	waitResult := make(chan error, 1)
+	go func() {
+		waitResult <- session.Wait()
+	}()
+	select {
+	case waitErr := <-waitResult:
+		var exitErr *ssh.ExitError
+		if !errors.As(waitErr, &exitErr) || exitErr.ExitStatus() != 23 {
+			t.Fatalf("gateway shell wait error = %v, want exit status 23", waitErr)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("gateway shell remained open after target exited")
+	}
+}
+
+func TestNativeSSHGatewayDirectExec(t *testing.T) {
+	targetAddr, requests, closeTarget := startProtocolSSHServer(t, "remote", "target-secret")
+	defer closeTarget()
+
+	st := newGatewayTestStore(t)
+	assetRec := createGatewayUserAssetAndCredential(t, st, targetAddr)
+	gateway := startGatewayForTest(t, st)
+	defer gateway.Close()
+	client := dialGatewayForTest(t, gateway.Address(), "gateway-user#"+assetRec.Name)
+	defer client.Close()
+
+	session, err := client.NewSession()
+	if err != nil {
+		t.Fatalf("new gateway session: %v", err)
+	}
+	output, err := session.CombinedOutput("printf direct-exec-ok")
+	if err != nil {
+		t.Fatalf("run direct exec: %v, output %q", err, string(output))
+	}
+	if got := string(output); got != "exec:printf direct-exec-ok\n" {
+		t.Fatalf("direct exec output = %q", got)
+	}
+	request := readProtocolSSHRequest(t, requests, 2*time.Second)
+	if request.Type != "exec" || request.Value != "printf direct-exec-ok" {
+		t.Fatalf("target request = %#v", request)
+	}
+	logs, err := st.ListPlatformItems("exec_command_logs")
+	if err != nil {
+		t.Fatalf("list exec logs: %v", err)
+	}
+	if commandLogStatusByCommand(logs, "printf direct-exec-ok") != "submitted" {
+		t.Fatalf("direct exec logs = %#v", logs)
+	}
+}
+
+func TestNativeSSHGatewayDirectExecCommandFilter(t *testing.T) {
+	targetAddr, requests, closeTarget := startProtocolSSHServer(t, "remote", "target-secret")
+	defer closeTarget()
+
+	st := newGatewayTestStore(t)
+	assetRec := createGatewayUserAssetAndCredential(t, st, targetAddr)
+	if _, err := st.CreatePlatformItem("command_filters", model.PlatformItemRequest{
+		Name:     "block direct exec",
+		Type:     "deny",
+		Status:   "enabled",
+		Protocol: model.ProtocolSSH,
+		TargetID: assetRec.ID,
+		Metadata: map[string]any{"pattern": "blocked-direct", "risk": "high"},
+	}); err != nil {
+		t.Fatalf("create command filter: %v", err)
+	}
+	gateway := startGatewayForTest(t, st)
+	defer gateway.Close()
+	client := dialGatewayForTest(t, gateway.Address(), "gateway-user#"+assetRec.Name)
+	defer client.Close()
+
+	session, err := client.NewSession()
+	if err != nil {
+		t.Fatalf("new gateway session: %v", err)
+	}
+	output, runErr := session.CombinedOutput("printf blocked-direct")
+	var exitErr *ssh.ExitError
+	if !errors.As(runErr, &exitErr) || exitErr.ExitStatus() != 126 {
+		t.Fatalf("blocked direct exec error = %v, output %q", runErr, string(output))
+	}
+	if !strings.Contains(string(output), "command blocked by block direct exec") {
+		t.Fatalf("blocked direct exec output = %q", string(output))
+	}
+	select {
+	case request := <-requests:
+		t.Fatalf("blocked direct exec reached target: %#v", request)
+	case <-time.After(300 * time.Millisecond):
+	}
+	logs, err := st.ListPlatformItems("exec_command_logs")
+	if err != nil {
+		t.Fatalf("list exec logs: %v", err)
+	}
+	if commandLogStatusByCommand(logs, "printf blocked-direct") != "denied" {
+		t.Fatalf("blocked direct exec logs = %#v", logs)
+	}
+}
+
+func TestNativeSSHGatewayDirectSubsystem(t *testing.T) {
+	targetAddr, requests, closeTarget := startProtocolSSHServer(t, "remote", "target-secret")
+	defer closeTarget()
+
+	st := newGatewayTestStore(t)
+	assetRec := createGatewayUserAssetAndCredential(t, st, targetAddr)
+	gateway := startGatewayForTest(t, st)
+	defer gateway.Close()
+	client := dialGatewayForTest(t, gateway.Address(), "gateway-user#"+assetRec.Name)
+	defer client.Close()
+
+	session, err := client.NewSession()
+	if err != nil {
+		t.Fatalf("new gateway session: %v", err)
+	}
+	stdin, err := session.StdinPipe()
+	if err != nil {
+		t.Fatalf("stdin pipe: %v", err)
+	}
+	stdout, err := session.StdoutPipe()
+	if err != nil {
+		t.Fatalf("stdout pipe: %v", err)
+	}
+	if err := session.RequestSubsystem("echo"); err != nil {
+		t.Fatalf("request echo subsystem: %v", err)
+	}
+	payload := []byte{0, 1, 2, 3, '\n', 255}
+	if _, err := stdin.Write(payload); err != nil {
+		t.Fatalf("write subsystem payload: %v", err)
+	}
+	if err := stdin.Close(); err != nil {
+		t.Fatalf("close subsystem stdin: %v", err)
+	}
+	response, err := io.ReadAll(stdout)
+	if err != nil {
+		t.Fatalf("read subsystem response: %v", err)
+	}
+	if !bytes.Equal(response, payload) {
+		t.Fatalf("subsystem response = %v, want %v", response, payload)
+	}
+	request := readProtocolSSHRequest(t, requests, 2*time.Second)
+	if request.Type != "subsystem" || request.Value != "echo" {
+		t.Fatalf("target subsystem request = %#v", request)
+	}
+}
+
 func TestNativeSSHGatewayRejectsExpiredAuthorization(t *testing.T) {
 	targetAddr, closeTarget := startFakeSSHServer(t, "remote", "target-secret")
 	defer closeTarget()
@@ -2322,6 +2522,154 @@ func startFakeSSHServer(t *testing.T, username, password string) (string, func()
 	}
 }
 
+type protocolSSHRequest struct {
+	Type  string
+	Value string
+}
+
+func startProtocolSSHServer(t *testing.T, username, password string) (string, <-chan protocolSSHRequest, func()) {
+	t.Helper()
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("listen protocol target: %v", err)
+	}
+	requests := make(chan protocolSSHRequest, 16)
+	config := &ssh.ServerConfig{
+		PasswordCallback: func(meta ssh.ConnMetadata, payload []byte) (*ssh.Permissions, error) {
+			if meta.User() == username && string(payload) == password {
+				return nil, nil
+			}
+			return nil, errUnauthorized
+		},
+	}
+	config.AddHostKey(testSSHSigner(t))
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		for {
+			conn, err := listener.Accept()
+			if err != nil {
+				return
+			}
+			go handleProtocolSSHConn(conn, config, requests)
+		}
+	}()
+	return listener.Addr().String(), requests, func() {
+		_ = listener.Close()
+		<-done
+	}
+}
+
+func handleProtocolSSHConn(conn net.Conn, config *ssh.ServerConfig, observed chan<- protocolSSHRequest) {
+	sshConn, chans, reqs, err := ssh.NewServerConn(conn, config)
+	if err != nil {
+		_ = conn.Close()
+		return
+	}
+	defer sshConn.Close()
+	go ssh.DiscardRequests(reqs)
+	for newChannel := range chans {
+		if newChannel.ChannelType() != "session" {
+			_ = newChannel.Reject(ssh.UnknownChannelType, "session only")
+			continue
+		}
+		channel, requests, err := newChannel.Accept()
+		if err != nil {
+			continue
+		}
+		go func() {
+			defer channel.Close()
+			for req := range requests {
+				switch req.Type {
+				case "pty-req", "env", "window-change", "signal":
+					replyRequest(req, true)
+				case "exec":
+					var payload execRequest
+					if ssh.Unmarshal(req.Payload, &payload) != nil {
+						replyRequest(req, false)
+						return
+					}
+					observed <- protocolSSHRequest{Type: "exec", Value: payload.Command}
+					replyRequest(req, true)
+					_, _ = io.WriteString(channel, "exec:"+payload.Command+"\n")
+					_, _ = channel.SendRequest("exit-status", false, ssh.Marshal(exitStatusRequest{Status: 0}))
+					return
+				case "subsystem":
+					var payload subsystemRequest
+					if ssh.Unmarshal(req.Payload, &payload) != nil || payload.Name != "echo" {
+						replyRequest(req, false)
+						return
+					}
+					observed <- protocolSSHRequest{Type: "subsystem", Value: payload.Name}
+					replyRequest(req, true)
+					_, _ = io.Copy(channel, channel)
+					_, _ = channel.SendRequest("exit-status", false, ssh.Marshal(exitStatusRequest{Status: 0}))
+					return
+				case "shell":
+					replyRequest(req, true)
+					_, _ = io.WriteString(channel, "target-shell\r\n")
+					handleProtocolShell(channel, observed)
+					return
+				default:
+					replyRequest(req, false)
+				}
+			}
+		}()
+	}
+}
+
+func handleProtocolShell(channel ssh.Channel, observed chan<- protocolSSHRequest) {
+	var line strings.Builder
+	buffer := make([]byte, 1024)
+	for {
+		n, err := channel.Read(buffer)
+		if n > 0 {
+			for _, b := range buffer[:n] {
+				switch b {
+				case '\r', '\n':
+					command := strings.TrimSpace(line.String())
+					line.Reset()
+					if command == "" {
+						continue
+					}
+					observed <- protocolSSHRequest{Type: "shell-command", Value: command}
+					if command == "exit" {
+						_, _ = channel.SendRequest("exit-status", false, ssh.Marshal(exitStatusRequest{Status: 23}))
+						return
+					}
+					_, _ = io.WriteString(channel, "ran: "+command+"\r\n")
+				case clearCurrentLine, 0x03:
+					line.Reset()
+				case 0x7f, 0x08:
+					value := line.String()
+					if len(value) > 0 {
+						line.Reset()
+						line.WriteString(value[:len(value)-1])
+					}
+				default:
+					if b == '\t' || b >= 0x20 {
+						line.WriteByte(b)
+					}
+				}
+			}
+		}
+		if err != nil {
+			return
+		}
+	}
+}
+
+func readProtocolSSHRequest(t *testing.T, requests <-chan protocolSSHRequest, timeout time.Duration) protocolSSHRequest {
+	t.Helper()
+	select {
+	case request := <-requests:
+		return request
+	case <-time.After(timeout):
+		t.Fatal("timed out waiting for target SSH request")
+		return protocolSSHRequest{}
+	}
+}
+
 func startRecordingSSHServer(t *testing.T, username, password string) (string, <-chan string, func()) {
 	t.Helper()
 	listener, err := net.Listen("tcp", "127.0.0.1:0")
@@ -2493,6 +2841,39 @@ func commandLogStatusByCommand(logs []model.PlatformItem, command string) string
 		}
 	}
 	return ""
+}
+
+func startGatewayForTest(t *testing.T, st *store.Store) *Gateway {
+	t.Helper()
+	ctx, cancel := context.WithCancel(context.Background())
+	t.Cleanup(cancel)
+	gatewayDataDir := mustTempDir(t)
+	t.Cleanup(func() { removeTempDir(gatewayDataDir) })
+	gateway, err := StartGateway(ctx, GatewayConfig{
+		Enabled:        true,
+		Address:        "127.0.0.1:0",
+		DataDir:        gatewayDataDir,
+		KnownHostsPath: filepath.Join(gatewayDataDir, "known_hosts"),
+		Store:          st,
+	})
+	if err != nil {
+		t.Fatalf("start gateway: %v", err)
+	}
+	return gateway
+}
+
+func dialGatewayForTest(t *testing.T, address, username string) *ssh.Client {
+	t.Helper()
+	client, err := ssh.Dial("tcp", address, &ssh.ClientConfig{
+		User:            username,
+		Auth:            []ssh.AuthMethod{ssh.Password("password123")},
+		HostKeyCallback: ssh.InsecureIgnoreHostKey(),
+		Timeout:         5 * time.Second,
+	})
+	if err != nil {
+		t.Fatalf("dial gateway: %v", err)
+	}
+	return client
 }
 
 func newGatewayTestStore(t *testing.T) *store.Store {

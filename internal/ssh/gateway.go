@@ -107,6 +107,27 @@ type windowChangeRequest struct {
 	Height uint32
 }
 
+type envRequest struct {
+	Name  string
+	Value string
+}
+
+type execRequest struct {
+	Command string
+}
+
+type subsystemRequest struct {
+	Name string
+}
+
+type signalRequest struct {
+	Signal string
+}
+
+type exitStatusRequest struct {
+	Status uint32
+}
+
 type directTCPIPRequest struct {
 	Host       string
 	Port       uint32
@@ -1095,6 +1116,11 @@ func (g *Gateway) handleConn(conn net.Conn, serverConfig *ssh.ServerConfig) {
 }
 
 func (g *Gateway) handleSessionChannel(conn *ssh.ServerConn, channel ssh.Channel, requests <-chan *ssh.Request) {
+	user := userFromPermissions(conn.Permissions)
+	if user.DirectAsset != "" {
+		g.handleDirectAssetSessionChannel(conn, channel, requests, user)
+		return
+	}
 	defer channel.Close()
 	pty := gatewayPTY{Term: "xterm-256color", Cols: 120, Rows: 32}
 	var targetMu sync.Mutex
@@ -1145,6 +1171,329 @@ func (g *Gateway) handleSessionChannel(conn *ssh.ServerConn, channel ssh.Channel
 		default:
 			replyRequest(req, false)
 		}
+	}
+}
+
+func (g *Gateway) handleDirectAssetSessionChannel(conn *ssh.ServerConn, channel ssh.Channel, requests <-chan *ssh.Request, user gatewayUser) {
+	defer channel.Close()
+	pty := gatewayPTY{Term: "xterm-256color", Cols: 120, Rows: 32}
+	hasPTY := false
+	environment := map[string]string{}
+	var targetSession *ssh.Session
+	var closeTarget func(string)
+	started := false
+	defer func() {
+		if closeTarget != nil {
+			closeTarget("")
+		}
+	}()
+
+	for req := range requests {
+		switch req.Type {
+		case "pty-req":
+			if started {
+				replyRequest(req, false)
+				continue
+			}
+			var payload ptyRequest
+			if err := ssh.Unmarshal(req.Payload, &payload); err != nil {
+				replyRequest(req, false)
+				continue
+			}
+			hasPTY = true
+			pty.Term = valueOrDefault(payload.Term, pty.Term)
+			if payload.Cols > 0 {
+				pty.Cols = int(payload.Cols)
+			}
+			if payload.Rows > 0 {
+				pty.Rows = int(payload.Rows)
+			}
+			replyRequest(req, true)
+		case "env":
+			if started {
+				replyRequest(req, false)
+				continue
+			}
+			var payload envRequest
+			if err := ssh.Unmarshal(req.Payload, &payload); err != nil || strings.TrimSpace(payload.Name) == "" {
+				replyRequest(req, false)
+				continue
+			}
+			environment[payload.Name] = payload.Value
+			replyRequest(req, true)
+		case "window-change":
+			var payload windowChangeRequest
+			if err := ssh.Unmarshal(req.Payload, &payload); err == nil && payload.Cols > 0 && payload.Rows > 0 {
+				pty.Cols = int(payload.Cols)
+				pty.Rows = int(payload.Rows)
+				if targetSession != nil {
+					_ = targetSession.WindowChange(pty.Rows, pty.Cols)
+				}
+			}
+		case "signal":
+			var payload signalRequest
+			ok := ssh.Unmarshal(req.Payload, &payload) == nil && targetSession != nil && targetSession.Signal(ssh.Signal(payload.Signal)) == nil
+			replyRequest(req, ok)
+		case "shell", "exec", "subsystem":
+			if started {
+				replyRequest(req, false)
+				continue
+			}
+			started = true
+			requestValue := ""
+			switch req.Type {
+			case "exec":
+				var payload execRequest
+				if err := ssh.Unmarshal(req.Payload, &payload); err != nil || strings.TrimSpace(payload.Command) == "" {
+					replyRequest(req, false)
+					return
+				}
+				requestValue = payload.Command
+			case "subsystem":
+				var payload subsystemRequest
+				if err := ssh.Unmarshal(req.Payload, &payload); err != nil || strings.TrimSpace(payload.Name) == "" {
+					replyRequest(req, false)
+					return
+				}
+				requestValue = payload.Name
+			}
+			replyStartFailure := func(startErr error) {
+				writer := io.Writer(channel.Stderr())
+				if req.Type == "shell" {
+					writer = channel
+				}
+				if req.Type == "subsystem" {
+					replyRequest(req, false)
+				} else {
+					replyRequest(req, true)
+				}
+				_, _ = fmt.Fprintf(writer, "openwebservermanager: %v\r\n", startErr)
+				if req.Type != "subsystem" {
+					sendSSHExitStatus(channel, 255)
+				}
+			}
+
+			asset, credential, secret, session, err := g.prepareDirectGatewaySession(conn, user, pty)
+			if err != nil {
+				replyStartFailure(err)
+				return
+			}
+			interceptor := newCommandInterceptor(g.cfg.Store, session)
+			if req.Type == "exec" {
+				decision, evaluateErr := interceptor.evaluate(requestValue)
+				if evaluateErr != nil {
+					interceptor.auditFailure("command_filter.evaluate.failed", evaluateErr)
+					decision = commandDecision{Action: "deny", Risk: "critical", RuleName: "policy_unavailable", Status: "failed", Blocked: true}
+				}
+				approvalID := ""
+				if evaluateErr == nil && commandDecisionStatus(decision.Action, decision.Blocked) == "approval_required" {
+					approval, approvalErr := interceptor.createCommandApproval(requestValue, decision, false, map[string]any{"source": "native_ssh_gateway"})
+					if approvalErr != nil {
+						evaluateErr = fmt.Errorf("persist command approval: %w", approvalErr)
+					} else {
+						approvalID = approval.ID
+					}
+				}
+				metadata := map[string]any{"source": "native_ssh_gateway", "approval_id": approvalID}
+				if recordErr := interceptor.recordExec(requestValue, decision, "native ssh gateway exec "+decision.Status, metadata); recordErr != nil {
+					interceptor.auditFailure("exec_command.log.persist_failed", recordErr)
+					evaluateErr = errors.Join(evaluateErr, recordErr)
+				}
+				if evaluateErr != nil || decision.Blocked {
+					notice := commandBlockNotice(requestValue, decision, approvalID)
+					if evaluateErr != nil {
+						notice = "Command blocked because policy or audit state could not be loaded or persisted.\r\n"
+					}
+					replyRequest(req, true)
+					_, _ = io.WriteString(channel.Stderr(), notice)
+					sendSSHExitStatus(channel, 126)
+					g.finishGatewaySession(session, model.SessionFailed, strings.TrimSpace(notice))
+					return
+				}
+			}
+			if req.Type == "shell" {
+				_, _ = fmt.Fprintf(channel, "\r\nConnecting to %s...\r\n", asset.Name)
+			}
+
+			client, nextTarget, stdin, stdout, stderr, err := g.openGatewayTarget(asset, credential, secret)
+			if err != nil {
+				replyStartFailure(err)
+				g.finishGatewaySession(session, model.SessionFailed, err.Error())
+				return
+			}
+			cleanupUnstarted := func(reason string) {
+				_ = nextTarget.Close()
+				_ = client.Close()
+				g.finishGatewaySession(session, model.SessionFailed, reason)
+			}
+			for name, value := range environment {
+				if err := nextTarget.Setenv(name, value); err != nil {
+					cleanupUnstarted(err.Error())
+					replyStartFailure(fmt.Errorf("set environment %s: %w", name, err))
+					return
+				}
+			}
+			if hasPTY {
+				modes := ssh.TerminalModes{ssh.ECHO: 1, ssh.TTY_OP_ISPEED: 14400, ssh.TTY_OP_OSPEED: 14400}
+				if err := nextTarget.RequestPty(pty.Term, pty.Rows, pty.Cols, modes); err != nil {
+					cleanupUnstarted(err.Error())
+					replyStartFailure(fmt.Errorf("request target PTY: %w", err))
+					return
+				}
+			}
+			switch req.Type {
+			case "shell":
+				err = nextTarget.Shell()
+			case "exec":
+				err = nextTarget.Start(requestValue)
+			case "subsystem":
+				err = nextTarget.RequestSubsystem(requestValue)
+			}
+			if err != nil {
+				cleanupUnstarted(err.Error())
+				replyStartFailure(fmt.Errorf("start target %s: %w", req.Type, err))
+				return
+			}
+			if _, err := g.cfg.Store.UpdateSession(session.ID, func(item *model.ConnectionSession) {
+				item.Status = model.SessionActive
+			}); err != nil {
+				activeErr := fmt.Errorf("mark session active: %w", err)
+				cleanupUnstarted(activeErr.Error())
+				replyStartFailure(activeErr)
+				return
+			}
+
+			var closeOnce sync.Once
+			closeTarget = func(reason string) {
+				closeOnce.Do(func() {
+					_ = nextTarget.Close()
+					_ = client.Close()
+					g.finishGatewaySession(session, model.SessionClosed, reason)
+					_ = channel.Close()
+				})
+			}
+			targetSession = nextTarget
+			replyRequest(req, true)
+			isSubsystem := req.Type == "subsystem"
+			go copyNativeOutput(channel, session.ID, stdout, g.cfg.Store, closeTarget, isSubsystem)
+			go copyNativeOutput(channel.Stderr(), session.ID, stderr, g.cfg.Store, closeTarget, false)
+			var shellInterceptor *commandInterceptor
+			if req.Type == "shell" {
+				shellInterceptor = interceptor
+			}
+			go copyNativeInput(channel, stdin, shellInterceptor, closeTarget)
+			if !isSubsystem {
+				go waitNativeSSHSession(channel, nextTarget, closeTarget)
+			}
+		default:
+			replyRequest(req, false)
+		}
+	}
+}
+
+func (g *Gateway) prepareDirectGatewaySession(conn *ssh.ServerConn, user gatewayUser, pty gatewayPTY) (model.PlatformItem, model.PlatformItem, store.CredentialSecret, model.ConnectionSession, error) {
+	assets, err := g.authorizedSSHAssets(user)
+	if err != nil {
+		return model.PlatformItem{}, model.PlatformItem{}, store.CredentialSecret{}, model.ConnectionSession{}, err
+	}
+	if len(assets) == 0 {
+		return model.PlatformItem{}, model.PlatformItem{}, store.CredentialSecret{}, model.ConnectionSession{}, errors.New("No authorized SSH assets.")
+	}
+	asset, ok := selectGatewayAsset(assets, user.DirectAsset)
+	if !ok {
+		return model.PlatformItem{}, model.PlatformItem{}, store.CredentialSecret{}, model.ConnectionSession{}, fmt.Errorf("direct asset %q is not authorized or does not exist", user.DirectAsset)
+	}
+	credential, secret, ok, err := g.resolveSSHCredential(asset)
+	if err != nil {
+		return model.PlatformItem{}, model.PlatformItem{}, store.CredentialSecret{}, model.ConnectionSession{}, fmt.Errorf("credential error: %w", err)
+	}
+	if !ok {
+		return model.PlatformItem{}, model.PlatformItem{}, store.CredentialSecret{}, model.ConnectionSession{}, errors.New("no compatible SSH credential found")
+	}
+	session, err := g.createAuditedGatewaySession(conn, user, asset, credential, pty)
+	if err != nil {
+		return model.PlatformItem{}, model.PlatformItem{}, store.CredentialSecret{}, model.ConnectionSession{}, err
+	}
+	return asset, credential, secret, session, nil
+}
+
+func (g *Gateway) createAuditedGatewaySession(conn *ssh.ServerConn, user gatewayUser, asset, credential model.PlatformItem, pty gatewayPTY) (model.ConnectionSession, error) {
+	session, err := g.cfg.Store.CreateSession(model.ConnectionSession{
+		Protocol:     model.ProtocolSSH,
+		ServerID:     asset.ID,
+		CredentialID: credential.ID,
+		UserID:       user.UserID,
+		ClientIP:     remoteIP(conn.RemoteAddr()),
+		Width:        pty.Cols,
+		Height:       pty.Rows,
+	})
+	if err != nil {
+		return model.ConnectionSession{}, err
+	}
+	if err := g.recordGatewayConnection(conn, user, session, asset); err != nil {
+		if rollbackErr := g.cfg.Store.DeleteSession(session.ID); rollbackErr != nil {
+			g.auditGatewayConnectionFailure(conn, user, session, asset, "ssh_gateway.connect.rollback_failed", rollbackErr)
+			err = errors.Join(err, fmt.Errorf("roll back unaudited session: %w", rollbackErr))
+		}
+		g.auditGatewayConnectionFailure(conn, user, session, asset, "ssh_gateway.connect.log.persist_failed", err)
+		return model.ConnectionSession{}, fmt.Errorf("connection audit is unavailable: %w", err)
+	}
+	return session, nil
+}
+
+func (g *Gateway) openGatewayTarget(asset, credential model.PlatformItem, secret store.CredentialSecret) (*ssh.Client, *ssh.Session, io.WriteCloser, io.Reader, io.Reader, error) {
+	server := model.Server{ID: asset.ID, Name: asset.Name, Host: asset.Host, SSHPort: asset.Port, OS: model.ServerOSLinux}
+	if server.SSHPort == 0 {
+		server.SSHPort = 22
+	}
+	legacyCredential := model.Credential{ID: credential.ID, Name: credential.Name, Type: model.CredentialType(credential.Type), Username: credential.Username}
+	client, err := dial(server, legacyCredential, secret, g.cfg.KnownHostsPath, nil)
+	if err != nil {
+		return nil, nil, nil, nil, nil, err
+	}
+	targetSession, err := client.NewSession()
+	if err != nil {
+		_ = client.Close()
+		return nil, nil, nil, nil, nil, err
+	}
+	stdin, err := targetSession.StdinPipe()
+	if err != nil {
+		_ = targetSession.Close()
+		_ = client.Close()
+		return nil, nil, nil, nil, nil, err
+	}
+	stdout, err := targetSession.StdoutPipe()
+	if err != nil {
+		_ = targetSession.Close()
+		_ = client.Close()
+		return nil, nil, nil, nil, nil, err
+	}
+	stderr, err := targetSession.StderrPipe()
+	if err != nil {
+		_ = targetSession.Close()
+		_ = client.Close()
+		return nil, nil, nil, nil, nil, err
+	}
+	return client, targetSession, stdin, stdout, stderr, nil
+}
+
+func (g *Gateway) finishGatewaySession(session model.ConnectionSession, status model.SessionStatus, reason string) {
+	now := time.Now().UTC()
+	if _, err := g.cfg.Store.UpdateSession(session.ID, func(item *model.ConnectionSession) {
+		item.Status = status
+		item.EndedAt = &now
+		if strings.TrimSpace(reason) != "" {
+			item.Error = reason
+		}
+	}); err != nil {
+		_ = g.cfg.Store.Audit(model.AuditLog{
+			UserID:   session.UserID,
+			Action:   "ssh_gateway.session.close_state.persist_failed",
+			TargetID: session.ServerID,
+			Protocol: model.ProtocolSSH,
+			Detail:   "session " + session.ID + ": " + err.Error(),
+			ClientIP: session.ClientIP,
+		})
 	}
 }
 
@@ -1533,41 +1882,8 @@ func proxyTCPChannel(channel ssh.Channel, upstream net.Conn, onClose func()) {
 }
 
 func (g *Gateway) proxySSHSession(channel ssh.Channel, session model.ConnectionSession, asset, credential model.PlatformItem, secret store.CredentialSecret, pty gatewayPTY) (*ssh.Session, error) {
-	server := model.Server{ID: asset.ID, Name: asset.Name, Host: asset.Host, SSHPort: asset.Port, OS: model.ServerOSLinux}
-	if server.SSHPort == 0 {
-		server.SSHPort = 22
-	}
-	legacyCredential := model.Credential{
-		ID:       credential.ID,
-		Name:     credential.Name,
-		Type:     model.CredentialType(credential.Type),
-		Username: credential.Username,
-	}
-	client, err := dial(server, legacyCredential, secret, g.cfg.KnownHostsPath, nil)
+	client, targetSession, stdin, stdout, stderr, err := g.openGatewayTarget(asset, credential, secret)
 	if err != nil {
-		return nil, err
-	}
-	targetSession, err := client.NewSession()
-	if err != nil {
-		_ = client.Close()
-		return nil, err
-	}
-	stdin, err := targetSession.StdinPipe()
-	if err != nil {
-		_ = targetSession.Close()
-		_ = client.Close()
-		return nil, err
-	}
-	stdout, err := targetSession.StdoutPipe()
-	if err != nil {
-		_ = targetSession.Close()
-		_ = client.Close()
-		return nil, err
-	}
-	stderr, err := targetSession.StderrPipe()
-	if err != nil {
-		_ = targetSession.Close()
-		_ = client.Close()
 		return nil, err
 	}
 	modes := ssh.TerminalModes{ssh.ECHO: 1, ssh.TTY_OP_ISPEED: 14400, ssh.TTY_OP_OSPEED: 14400}
@@ -1593,55 +1909,48 @@ func (g *Gateway) proxySSHSession(channel ssh.Channel, session model.ConnectionS
 		once.Do(func() {
 			_ = targetSession.Close()
 			_ = client.Close()
-			now := time.Now().UTC()
-			if _, err := g.cfg.Store.UpdateSession(session.ID, func(item *model.ConnectionSession) {
-				item.Status = model.SessionClosed
-				item.EndedAt = &now
-				if reason != "" {
-					item.Error = reason
-				}
-			}); err != nil {
-				_ = g.cfg.Store.Audit(model.AuditLog{
-					UserID:   session.UserID,
-					Action:   "ssh_gateway.session.close_state.persist_failed",
-					TargetID: session.ServerID,
-					Protocol: model.ProtocolSSH,
-					Detail:   "session " + session.ID + ": " + err.Error(),
-					ClientIP: session.ClientIP,
-				})
-			}
+			g.finishGatewaySession(session, model.SessionClosed, reason)
+			_ = channel.Close()
 		})
 	}
-	go copyNativeOutput(channel, session.ID, stdout, g.cfg.Store, closeAll)
-	go copyNativeOutput(channel, session.ID, stderr, g.cfg.Store, closeAll)
+	go copyNativeOutput(channel, session.ID, stdout, g.cfg.Store, closeAll, false)
+	go copyNativeOutput(channel, session.ID, stderr, g.cfg.Store, closeAll, false)
 	go copyNativeInput(channel, stdin, newCommandInterceptor(g.cfg.Store, session), closeAll)
+	go waitNativeSSHSession(channel, targetSession, closeAll)
 	return targetSession, nil
 }
 
-func copyNativeOutput(channel ssh.Channel, sessionID string, reader io.Reader, st *store.Store, closeAll func(string)) {
+func copyNativeOutput(writer io.Writer, sessionID string, reader io.Reader, st *store.Store, closeAll func(string), closeOnEOF bool) {
 	buf := make([]byte, 8192)
 	for {
 		n, err := reader.Read(buf)
 		if n > 0 {
-			if _, writeErr := channel.Write(buf[:n]); writeErr != nil {
+			if _, writeErr := writer.Write(buf[:n]); writeErr != nil {
 				closeAll(writeErr.Error())
 				return
 			}
 			_, _ = st.UpdateSession(sessionID, func(item *model.ConnectionSession) {})
 		}
 		if err != nil {
-			closeAll("")
+			if closeOnEOF {
+				closeAll("")
+			}
 			return
 		}
 	}
 }
 
-func copyNativeInput(channel ssh.Channel, writer io.Writer, interceptor *commandInterceptor, closeAll func(string)) {
+func copyNativeInput(channel ssh.Channel, writer io.WriteCloser, interceptor *commandInterceptor, closeAll func(string)) {
+	defer writer.Close()
 	buf := make([]byte, 8192)
 	for {
 		n, err := channel.Read(buf)
 		if n > 0 {
-			filtered, events := interceptor.Process(buf[:n])
+			filtered := buf[:n]
+			events := []commandEvent{}
+			if interceptor != nil {
+				filtered, events = interceptor.Process(buf[:n])
+			}
 			if len(filtered) > 0 {
 				if _, writeErr := writer.Write(filtered); writeErr != nil {
 					closeAll(writeErr.Error())
@@ -1663,10 +1972,35 @@ func copyNativeInput(channel ssh.Channel, writer io.Writer, interceptor *command
 			}
 		}
 		if err != nil {
-			closeAll("")
 			return
 		}
 	}
+}
+
+func waitNativeSSHSession(channel ssh.Channel, targetSession *ssh.Session, closeAll func(string)) {
+	err := targetSession.Wait()
+	status, reason := nativeSSHExitStatus(err)
+	sendSSHExitStatus(channel, status)
+	closeAll(reason)
+}
+
+func nativeSSHExitStatus(err error) (uint32, string) {
+	if err == nil {
+		return 0, ""
+	}
+	var exitErr *ssh.ExitError
+	if errors.As(err, &exitErr) {
+		status := exitErr.ExitStatus()
+		if status < 0 {
+			status = 255
+		}
+		return uint32(status), err.Error()
+	}
+	return 255, err.Error()
+}
+
+func sendSSHExitStatus(channel ssh.Channel, status uint32) {
+	_, _ = channel.SendRequest("exit-status", false, ssh.Marshal(exitStatusRequest{Status: status}))
 }
 
 func (g *Gateway) authorizedSSHAssets(user gatewayUser) ([]model.PlatformItem, error) {

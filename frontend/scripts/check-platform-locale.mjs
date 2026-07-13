@@ -61,6 +61,29 @@ if (accessPageDefinitions.length !== 7) {
   process.exit(1)
 }
 
+const sqlDialogDefinitions = resourcesSource.match(/sqlDialog:\s*\{/g) || []
+if (sqlDialogDefinitions.length !== 7) {
+  console.error(`sqlDialog locale definitions = ${sqlDialogDefinitions.length}, want 7`)
+  process.exit(1)
+}
+
+const sqlDialogHardcodedText = [
+  "label='申请原因'",
+  '>关闭</Button>',
+  "'提交中' : '提交工单'",
+  "'执行中' : '执行'",
+  "'SQL 工单已执行'",
+  "'SQL 工单已提交'",
+]
+const sqlDialogStart = platformPageSource.indexOf('function SQLExecuteDialog(')
+const sqlDialogEnd = platformPageSource.indexOf('function SQLResultPanel(', sqlDialogStart)
+const sqlDialogSource = sqlDialogStart >= 0 && sqlDialogEnd > sqlDialogStart ? platformPageSource.slice(sqlDialogStart, sqlDialogEnd) : ''
+const sqlHardcodedFound = sqlDialogHardcodedText.filter((fragment) => sqlDialogSource.includes(fragment))
+if (sqlHardcodedFound.length > 0) {
+  console.error(`SQL dialog contains hardcoded locale text: ${sqlHardcodedFound.join(', ')}`)
+  process.exit(1)
+}
+
 const popupOpenIndex = platformPageSource.indexOf('const popup = openAccessPopup()')
 const popupMFAIndex = platformPageSource.indexOf('await ensureAccessMFA(`/api/access/http/${item.id}/mfa`')
 const popupNavigateIndex = platformPageSource.indexOf('popup.location.replace(`/api/access/http/${item.id}/proxy/`)')

@@ -3,6 +3,7 @@ import { useQuery } from '@tanstack/react-query'
 import { Link } from '@tanstack/react-router'
 import { ArrowUpRight, ChevronDown, ChevronRight, Copy, Download, FileDown, FileSearch, Film, FolderPlus, Loader2, MoveRight, Pause, Pencil, Play, Plus, RefreshCw, RotateCcw, Save, ShieldCheck, TerminalSquare, Trash2, Upload } from 'lucide-react'
 import { useEffect, useMemo, useRef, useState } from 'react'
+import { useTranslation } from 'react-i18next'
 
 import { useApp } from '@/app/app-provider'
 import { isAccessMFARequiredError, useAccessMFADialog, type RequestAccessMFACode } from '@/features/access/access-mfa'
@@ -3838,6 +3839,7 @@ function SQLExecuteDialog({
   description?: string
 }) {
   const app = useApp()
+  const { t } = useTranslation()
   const [sql, setSQL] = useState(initialSQL ?? stringValue(item.metadata?.sql))
   const [reason, setReason] = useState('')
   const [result, setResult] = useState<PlatformItem | null>(null)
@@ -3866,7 +3868,7 @@ function SQLExecuteDialog({
       }
       setResult(data)
       await app.refresh(true)
-      app.showToast(successMessage || 'SQL 工单已执行')
+      app.showToast(successMessage || t('sqlDialog.executed'))
     } catch (error) {
       app.handleApiError(error)
     } finally {
@@ -3894,7 +3896,7 @@ function SQLExecuteDialog({
       setResult(data)
       setReason('')
       await app.refresh(true)
-      app.showToast(workOrderMessage || 'SQL 工单已提交')
+      app.showToast(workOrderMessage || t('sqlDialog.workOrderSubmitted'))
     } catch (error) {
       app.handleApiError(error)
     } finally {
@@ -3903,24 +3905,24 @@ function SQLExecuteDialog({
   }
 
   return (
-    <DialogShell open onOpenChange={(open) => !open && onClose()} title={`${item.name} 执行`} description={description || '执行结果会写入 SQL 日志；SELECT 查询最多展示前 100 行。'}>
+    <DialogShell open onOpenChange={(open) => !open && onClose()} title={t('sqlDialog.title', { name: item.name })} description={description || t('sqlDialog.description')}>
       <div className='grid gap-4'>
         <Field label='SQL'><Textarea className='min-h-44 font-mono text-xs' value={sql} onChange={(event) => setSQL(event.currentTarget.value)} /></Field>
         {workOrderEndpoint ? (
-          <Field label='申请原因'><Input value={reason} onChange={(event) => setReason(event.currentTarget.value)} placeholder='说明变更目的、窗口或审批理由' /></Field>
+          <Field label={t('sqlDialog.reason')}><Input value={reason} onChange={(event) => setReason(event.currentTarget.value)} placeholder={t('sqlDialog.reasonPlaceholder')} /></Field>
         ) : null}
         {result ? <SQLResultPanel result={result} /> : null}
         <div className='flex justify-end gap-2'>
-          <Button variant='outline' onClick={onClose}>关闭</Button>
+          <Button variant='outline' onClick={onClose}>{t('sqlDialog.close')}</Button>
           {workOrderEndpoint ? (
             <Button variant='outline' onClick={() => void submitWorkOrder()} disabled={submittingWorkOrder || !sql.trim()}>
               <Plus className='size-4' />
-              {submittingWorkOrder ? '提交中' : '提交工单'}
+              {submittingWorkOrder ? t('sqlDialog.submitting') : t('sqlDialog.submitWorkOrder')}
             </Button>
           ) : null}
           <Button variant='primary' onClick={() => void execute()} disabled={running || !canExecute || !sql.trim()}>
             <Play className='size-4' />
-            {running ? '执行中' : '执行'}
+            {running ? t('sqlDialog.running') : t('sqlDialog.execute')}
           </Button>
         </div>
       </div>

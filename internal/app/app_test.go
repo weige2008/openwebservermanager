@@ -471,6 +471,12 @@ func TestPlatformCollectionEndpoints(t *testing.T) {
 	for _, path := range paths {
 		t.Run(path, func(t *testing.T) {
 			assertStatus(t, handler, http.MethodGet, path, nil, cookie, http.StatusOK)
+			if path == "/api/admin/command-approvals" || path == "/api/admin/sql-work-orders" {
+				assertStatus(t, handler, http.MethodPost, path, map[string]any{"name": "forged workflow", "status": "approved"}, cookie, http.StatusMethodNotAllowed)
+				assertStatus(t, handler, http.MethodPatch, path+"/forged-id", map[string]any{"status": "approved"}, cookie, http.StatusMethodNotAllowed)
+				assertStatus(t, handler, http.MethodDelete, path+"/forged-id", nil, cookie, http.StatusMethodNotAllowed)
+				return
+			}
 			if path == "/api/admin/audit/access-stats" {
 				assertStatus(t, handler, http.MethodPost, path, map[string]any{"name": "manual stats"}, cookie, http.StatusMethodNotAllowed)
 				return
@@ -519,6 +525,113 @@ func TestPlatformCollectionEndpoints(t *testing.T) {
 			assertStatus(t, handler, http.MethodPatch, path+"/forged-id", map[string]any{"status": "changed"}, cookie, http.StatusMethodNotAllowed)
 			assertStatus(t, handler, http.MethodDelete, path+"/forged-id", nil, cookie, http.StatusMethodNotAllowed)
 		})
+	}
+}
+
+func TestManagedWorkflowCollectionsRejectGenericMutations(t *testing.T) {
+	srv, adminCookie := newTestServer(t, nil)
+	handler := http.Handler(srv)
+
+	sshAssetRec := assertStatus(t, handler, http.MethodPost, "/api/admin/assets", map[string]any{
+		"name":     "managed-workflow-ssh",
+		"type":     "linux",
+		"status":   "enabled",
+		"protocol": "ssh",
+		"host":     "127.0.0.1",
+		"port":     22,
+	}, adminCookie, http.StatusCreated)
+	var sshAsset model.PlatformItem
+	decodeResponse(t, sshAssetRec, &sshAsset)
+
+	databaseAssetRec := assertStatus(t, handler, http.MethodPost, "/api/admin/database-assets", map[string]any{
+		"name":     "managed-workflow-database",
+		"type":     "sqlite",
+		"status":   "enabled",
+		"protocol": "database",
+		"metadata": map[string]any{"sqlite_path": "managed-workflow.db"},
+	}, adminCookie, http.StatusCreated)
+	var databaseAsset model.PlatformItem
+	decodeResponse(t, databaseAssetRec, &databaseAsset)
+
+	commandApproval, err := srv.cfg.Store.CreatePlatformItem("command_approvals", model.PlatformItemRequest{
+		Name:        "managed command approval",
+		Type:        "ssh_command",
+		Status:      "pending",
+		Protocol:    model.ProtocolSSH,
+		TargetID:    sshAsset.ID,
+		OwnerID:     "requester-user",
+		Description: "requires approval",
+		Metadata: map[string]any{
+			"command":      "uptime",
+			"requested_by": "requester-user",
+		},
+	})
+	if err != nil {
+		t.Fatalf("create command approval fixture: %v", err)
+	}
+	sqlWorkOrder, err := srv.cfg.Store.CreatePlatformItem("sql_work_orders", model.PlatformItemRequest{
+		Name:        "managed sql work order",
+		Type:        "database_access",
+		Status:      "pending",
+		Protocol:    model.ProtocolDatabase,
+		TargetID:    databaseAsset.ID,
+		OwnerID:     "requester-user",
+		Description: "requires approval",
+		Metadata: map[string]any{
+			"sql":          "SELECT 1",
+			"requested_by": "requester-user",
+		},
+	})
+	if err != nil {
+		t.Fatalf("create sql work order fixture: %v", err)
+	}
+
+	for _, test := range []struct {
+		name       string
+		collection string
+		itemID     string
+	}{
+		{name: "command approval", collection: "command-approvals", itemID: commandApproval.ID},
+		{name: "sql work order", collection: "sql-work-orders", itemID: sqlWorkOrder.ID},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			createRec := assertStatus(t, handler, http.MethodPost, "/api/admin/"+test.collection, map[string]any{
+				"name":   "bypass-created",
+				"status": "approved",
+			}, adminCookie, http.StatusMethodNotAllowed)
+			if !strings.Contains(createRec.Body.String(), "dedicated decision and execution endpoints") {
+				t.Fatalf("generic create error did not explain managed workflow requirement: %s", createRec.Body.String())
+			}
+			assertStatus(t, handler, http.MethodPatch, "/api/admin/"+test.collection+"/"+test.itemID, map[string]any{
+				"status": "approved",
+			}, adminCookie, http.StatusMethodNotAllowed)
+			assertStatus(t, handler, http.MethodDelete, "/api/admin/"+test.collection+"/"+test.itemID, nil, adminCookie, http.StatusMethodNotAllowed)
+
+			detailRec := assertStatus(t, handler, http.MethodGet, "/api/admin/"+test.collection+"/"+test.itemID, nil, adminCookie, http.StatusOK)
+			var item model.PlatformItem
+			decodeResponse(t, detailRec, &item)
+			if item.Status != "pending" {
+				t.Fatalf("generic mutation changed managed workflow status to %q", item.Status)
+			}
+		})
+	}
+
+	commandDecisionRec := assertStatus(t, handler, http.MethodPost, "/api/admin/command-approvals/"+commandApproval.ID+"/approve", map[string]any{
+		"note": "approved through dedicated endpoint",
+	}, adminCookie, http.StatusOK)
+	var approvedCommand model.PlatformItem
+	decodeResponse(t, commandDecisionRec, &approvedCommand)
+	if approvedCommand.Status != "approved" {
+		t.Fatalf("dedicated command approval status = %q, want approved", approvedCommand.Status)
+	}
+
+	sqlDecisionRec := assertStatus(t, handler, http.MethodPost, "/api/admin/sql-work-orders/"+sqlWorkOrder.ID+"/approve", map[string]any{
+		"note": "approved through dedicated endpoint",
+	}, adminCookie, http.StatusOK)
+	var approvedSQL model.PlatformItem
+	decodeResponse(t, sqlDecisionRec, &approvedSQL)
+	if approvedSQL.Status != "approved" {
+		t.Fatalf("dedicated sql work order status = %q, want approved", approvedSQL.Status)
 	}
 }
 
@@ -11937,16 +12050,17 @@ func TestResourceOperationEndpoints(t *testing.T) {
 	var databaseAsset model.PlatformItem
 	decodeResponse(t, databaseRec, &databaseAsset)
 
-	sqlRec := assertStatus(t, handler, http.MethodPost, "/api/admin/sql-work-orders", map[string]any{
-		"name":      "select-one",
-		"type":      "query",
-		"status":    "approved",
-		"protocol":  "database",
-		"target_id": databaseAsset.ID,
-		"metadata":  map[string]any{"sql": "SELECT 1 AS answer"},
-	}, cookie, http.StatusCreated)
-	var order model.PlatformItem
-	decodeResponse(t, sqlRec, &order)
+	order, err := server.cfg.Store.CreatePlatformItem("sql_work_orders", model.PlatformItemRequest{
+		Name:     "select-one",
+		Type:     "query",
+		Status:   "approved",
+		Protocol: model.ProtocolDatabase,
+		TargetID: databaseAsset.ID,
+		Metadata: map[string]any{"sql": "SELECT 1 AS answer"},
+	})
+	if err != nil {
+		t.Fatalf("create approved sql work order fixture: %v", err)
+	}
 	sqlLogRec := assertStatus(t, handler, http.MethodPost, "/api/admin/sql-work-orders/"+order.ID+"/execute", map[string]any{}, cookie, http.StatusOK)
 	if !strings.Contains(sqlLogRec.Body.String(), "answer") || !strings.Contains(sqlLogRec.Body.String(), `"timeout_ms":1234`) {
 		t.Fatal("sql execution log did not include query result and timeout metadata")

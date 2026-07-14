@@ -151,6 +151,10 @@ func (s *Server) handlePlatformAPI(w http.ResponseWriter, r *http.Request) bool 
 }
 
 func (s *Server) handleCollection(w http.ResponseWriter, r *http.Request, collection, id string) {
+	if managedWorkflowCollection(collection) && r.Method != http.MethodGet {
+		writeError(w, http.StatusMethodNotAllowed, "workflow records must be changed through dedicated decision and execution endpoints")
+		return
+	}
 	switch {
 	case id == "" && r.Method == http.MethodGet:
 		if collection == "agent_gateways" {
@@ -296,6 +300,15 @@ func (s *Server) handleCollection(w http.ResponseWriter, r *http.Request, collec
 		writeJSON(w, http.StatusOK, map[string]bool{"ok": true})
 	default:
 		writeError(w, http.StatusMethodNotAllowed, "method not allowed")
+	}
+}
+
+func managedWorkflowCollection(collection string) bool {
+	switch collection {
+	case "command_approvals", "sql_work_orders":
+		return true
+	default:
+		return false
 	}
 }
 

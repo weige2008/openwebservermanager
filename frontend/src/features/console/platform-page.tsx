@@ -116,6 +116,8 @@ type ResourceOperation =
 
 type CanUsePath = (method: string, path: string) => boolean
 
+const managedWorkflowCollections = new Set(['command_approvals', 'sql_work_orders'])
+
 interface StorageEntry {
   name: string
   path: string
@@ -399,11 +401,13 @@ export function PlatformTablePage({ config }: { config: PlatformPageConfig }) {
   const apiPermissions = app.auth?.api_permissions || []
   const canUsePath: CanUsePath = (method, path) => canUseAPI(role, apiPermissions, method, path)
   const auditReadOnly = apiPath.startsWith('/api/admin/audit/')
-  const canCreate = !auditReadOnly && canUsePath('POST', apiPath)
+  const workflowReadOnly = managedWorkflowCollections.has(config.collection)
+  const collectionReadOnly = auditReadOnly || workflowReadOnly
+  const canCreate = !collectionReadOnly && canUsePath('POST', apiPath)
   const canEditPath = (path: string) => canUsePath('PATCH', path)
   const canDeletePath = (path: string) => canUsePath('DELETE', path)
-  const canEditItem = (item: PlatformItem) => !auditReadOnly && canEditPath(`${apiPath}/${item.id}`)
-  const canDeleteItem = (item: PlatformItem) => !auditReadOnly && canDeletePath(`${apiPath}/${item.id}`)
+  const canEditItem = (item: PlatformItem) => !collectionReadOnly && canEditPath(`${apiPath}/${item.id}`)
+  const canDeleteItem = (item: PlatformItem) => !collectionReadOnly && canDeletePath(`${apiPath}/${item.id}`)
   const [formOpen, setFormOpen] = useState(false)
   const [saving, setSaving] = useState(false)
   const [editing, setEditing] = useState<PlatformItem | null>(null)
@@ -420,7 +424,7 @@ export function PlatformTablePage({ config }: { config: PlatformPageConfig }) {
   }, [rows, selectedIDs])
   const canBulkAuthorize = ['assets', 'web_assets', 'database_assets'].includes(config.collection) &&
     canUsePath('POST', `/api/admin/authorizations/${authorizationBulkRoute(config.collection)}/bulk`)
-  const canBulkDelete = Boolean(config.apiPath && !config.apiPath.startsWith('/api/admin/audit/')) &&
+  const canBulkDelete = Boolean(config.apiPath && !collectionReadOnly) &&
     canDeletePath(`${apiPath}/__selected__`)
   const selectionEnabled = canBulkAuthorize || canBulkDelete
 

@@ -10020,22 +10020,31 @@ func TestExternalWeComCallbackTokenFailureIsAuditedAndRedacted(t *testing.T) {
 
 func TestToolsAndMonitoringEndpoints(t *testing.T) {
 	handler, cookie := newTestHandler(t)
+	assertStatus(t, handler, http.MethodPost, "/api/system/monitoring", nil, cookie, http.StatusMethodNotAllowed)
 	monitorRec := assertStatus(t, handler, http.MethodGet, "/api/system/monitoring", nil, cookie, http.StatusOK)
 	var monitor map[string]any
 	decodeResponse(t, monitorRec, &monitor)
-	for _, key := range []string{"runtime", "memory", "database", "storage", "sessions_state", "ssh_gateway", "guacd", "recording_transcoder", "uptime_seconds", "cpu_cores"} {
+	for _, key := range []string{"runtime", "memory", "database", "storage", "sessions_state", "ssh_gateway", "guacd", "recording_transcoder", "uptime_seconds", "cpu_cores", "cpu_percent", "status_reasons", "checked_at", "collection_duration_ms"} {
 		if _, ok := monitor[key]; !ok {
 			t.Fatalf("monitoring response missing %s: %v", key, monitor)
 		}
 	}
-	if runtimeInfo, ok := monitor["runtime"].(map[string]any); !ok || runtimeInfo["go_version"] == "" || runtimeInfo["os"] == "" {
+	if runtimeInfo, ok := monitor["runtime"].(map[string]any); !ok || runtimeInfo["go_version"] == "" || runtimeInfo["os"] == "" || runtimeInfo["cpu"] == nil {
 		t.Fatalf("monitoring runtime info incomplete: %v", monitor["runtime"])
+	}
+	if cpuPercent, ok := monitor["cpu_percent"].(float64); !ok || cpuPercent < 0 || cpuPercent > 100 {
+		t.Fatalf("monitoring CPU percent invalid: %v", monitor["cpu_percent"])
+	}
+	if memoryInfo, ok := monitor["memory"].(map[string]any); !ok || memoryInfo["heap_objects"] == nil || memoryInfo["stack_in_use"] == nil || memoryInfo["total_alloc"] == nil {
+		t.Fatalf("monitoring memory info incomplete: %v", monitor["memory"])
 	}
 	if databaseInfo, ok := monitor["database"].(map[string]any); !ok || databaseInfo["path"] == "" || databaseInfo["connection_pool_state"] == "" {
 		t.Fatalf("monitoring database info incomplete: %v", monitor["database"])
 	}
-	if storageInfo, ok := monitor["storage"].(map[string]any); !ok || storageInfo["data_dir"] == nil || storageInfo["total_bytes"] == nil {
+	if storageInfo, ok := monitor["storage"].(map[string]any); !ok || storageInfo["data_dir"] == nil || storageInfo["total_bytes"] == nil || storageInfo["scan_duration_ms"] == nil {
 		t.Fatalf("monitoring storage info incomplete: %v", monitor["storage"])
+	} else if dataInfo, ok := storageInfo["data_dir"].(map[string]any); !ok || dataInfo["scan_complete"] == nil || dataInfo["available"] != true {
+		t.Fatalf("monitoring data directory info incomplete: %v", storageInfo["data_dir"])
 	}
 	if transcoderInfo, ok := monitor["recording_transcoder"].(map[string]any); !ok || transcoderInfo["status"] == "" || transcoderInfo["detail"] == "" {
 		t.Fatalf("monitoring recording transcoder info incomplete: %v", monitor["recording_transcoder"])
@@ -10109,6 +10118,53 @@ func TestTCPPingHonorsCanceledContext(t *testing.T) {
 	}
 }
 
+func TestMonitoringStorageUsageUsesSingleCancelableScan(t *testing.T) {
+	root := t.TempDir()
+	for _, dir := range []string{"recordings/session-1", "drives/user-1", "backups"} {
+		if err := os.MkdirAll(filepath.Join(root, filepath.FromSlash(dir)), 0o700); err != nil {
+			t.Fatalf("create monitoring storage directory %s: %v", dir, err)
+		}
+	}
+	files := map[string]string{
+		"root.txt":                    "root",
+		"recordings/session-1/a.cast": "recording",
+		"drives/user-1/file.txt":      "drive",
+		"backups/backup.tar":          "backup",
+	}
+	totalBytes := 0
+	for name, content := range files {
+		totalBytes += len(content)
+		if err := os.WriteFile(filepath.Join(root, filepath.FromSlash(name)), []byte(content), 0o600); err != nil {
+			t.Fatalf("write monitoring storage file %s: %v", name, err)
+		}
+	}
+	usage := monitoringStorageUsage(context.Background(), root, time.Second)
+	dataInfo := usage["data_dir"].(map[string]any)
+	recordingInfo := usage["recordings"].(map[string]any)
+	driveInfo := usage["drives"].(map[string]any)
+	backupInfo := usage["backups"].(map[string]any)
+	if dataInfo["bytes"] != int64(totalBytes) || dataInfo["files"] != len(files) || dataInfo["scan_complete"] != true {
+		t.Fatalf("data directory usage = %#v", dataInfo)
+	}
+	if recordingInfo["bytes"] != int64(len("recording")) || recordingInfo["files"] != 1 || recordingInfo["available"] != true {
+		t.Fatalf("recording directory usage = %#v", recordingInfo)
+	}
+	if driveInfo["bytes"] != int64(len("drive")) || driveInfo["files"] != 1 || driveInfo["available"] != true {
+		t.Fatalf("drive directory usage = %#v", driveInfo)
+	}
+	if backupInfo["bytes"] != int64(len("backup")) || backupInfo["files"] != 1 || backupInfo["available"] != true {
+		t.Fatalf("backup directory usage = %#v", backupInfo)
+	}
+
+	canceled, cancel := context.WithCancel(context.Background())
+	cancel()
+	canceledUsage := monitoringStorageUsage(canceled, root, time.Second)
+	canceledData := canceledUsage["data_dir"].(map[string]any)
+	if canceledData["scan_complete"] != false || !strings.Contains(fmt.Sprint(canceledData["last_error"]), "canceled") {
+		t.Fatalf("canceled monitoring storage scan = %#v", canceledData)
+	}
+}
+
 func TestGuacdRuntimeEndpointsReportReachability(t *testing.T) {
 	address := freeLocalTCPAddress(t)
 	host, port, err := net.SplitHostPort(address)
@@ -10136,10 +10192,12 @@ func TestGuacdRuntimeEndpointsReportReachability(t *testing.T) {
 
 	monitorRec := assertStatus(t, handler, http.MethodGet, "/api/system/monitoring", nil, cookie, http.StatusOK)
 	var monitor struct {
-		Guacd guac.RuntimeStatus `json:"guacd"`
+		Status        string             `json:"status"`
+		StatusReasons []string           `json:"status_reasons"`
+		Guacd         guac.RuntimeStatus `json:"guacd"`
 	}
 	decodeResponse(t, monitorRec, &monitor)
-	if monitor.Guacd.Status != "error" || monitor.Guacd.Address != address {
+	if monitor.Status != "degraded" || !slices.Contains(monitor.StatusReasons, "guacd_error") || monitor.Guacd.Status != "error" || monitor.Guacd.Address != address {
 		t.Fatalf("monitoring guacd status = %#v", monitor.Guacd)
 	}
 	notificationsRec := assertStatus(t, handler, http.MethodGet, "/api/notifications", nil, cookie, http.StatusOK)

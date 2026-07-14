@@ -17,6 +17,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"runtime"
+	runtimemetrics "runtime/metrics"
 	"sort"
 	"strconv"
 	"strings"
@@ -1583,7 +1584,12 @@ func webAssetDownstreamPath(basePath, upstreamPath string) string {
 	return strings.TrimLeft(upstream, "/")
 }
 
-func (s *Server) handleSystemMonitoring(w http.ResponseWriter, _ *http.Request) {
+func (s *Server) handleSystemMonitoring(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		writeError(w, http.StatusMethodNotAllowed, "method not allowed")
+		return
+	}
+	requestStarted := time.Now()
 	s.refreshAgentGatewayStatuses()
 	servers, credentials, sessions, auditLogs := s.cfg.Store.Bootstrap()
 	platform, err := s.cfg.Store.PlatformBootstrap()
@@ -1612,16 +1618,14 @@ func (s *Server) handleSystemMonitoring(w http.ResponseWriter, _ *http.Request) 
 			offlineAgentGateways++
 		}
 	}
-	now := time.Now().UTC()
 	dbStats := s.cfg.Store.DBStats()
+	databaseState := databasePoolState(dbStats)
 	dataDir := strings.TrimSpace(s.cfg.DataDir)
 	if dataDir == "" {
 		dataDir = "data"
 	}
-	dataStorage := directoryUsage(dataDir)
-	recordingStorage := directoryUsage(filepath.Join(dataDir, "recordings"))
-	driveStorage := directoryUsage(filepath.Join(dataDir, "drives"))
-	backupStorage := directoryUsage(filepath.Join(dataDir, "backups"))
+	storage := monitoringStorageUsage(r.Context(), dataDir, 5*time.Second)
+	dataStorage, _ := storage["data_dir"].(map[string]any)
 	sshGateway := map[string]any{
 		"address": s.sshGatewayAddress(),
 		"status":  gatewayRuntimeStatus(s.sshGatewayAddress(), s.sshGatewayLastError()),
@@ -1635,10 +1639,43 @@ func (s *Server) handleSystemMonitoring(w http.ResponseWriter, _ *http.Request) 
 	if transcoderAvailable {
 		transcoderStatus = "available"
 	}
+	statusReasons := make([]string, 0, 6)
+	if databaseState == "saturated" {
+		statusReasons = append(statusReasons, "database_pool_saturated")
+	}
+	if available, _ := dataStorage["available"].(bool); !available {
+		statusReasons = append(statusReasons, "storage_unavailable")
+	}
+	if scanComplete, ok := dataStorage["scan_complete"].(bool); ok && !scanComplete {
+		statusReasons = append(statusReasons, "storage_scan_incomplete")
+	}
+	if errText, _ := dataStorage["last_error"].(string); strings.TrimSpace(errText) != "" {
+		statusReasons = append(statusReasons, "storage_scan_failed")
+	}
+	if status, _ := sshGateway["status"].(string); status == "error" {
+		statusReasons = append(statusReasons, "ssh_gateway_error")
+	}
+	if guacdRuntimeStatus := strings.ToLower(strings.TrimSpace(guacdStatus.Status)); guacdRuntimeStatus == "error" || guacdRuntimeStatus == "unavailable" {
+		statusReasons = append(statusReasons, "guacd_"+guacdRuntimeStatus)
+	}
+	if !transcoderAvailable {
+		statusReasons = append(statusReasons, "recording_transcoder_unavailable")
+	}
+	if offlineAgentGateways > 0 {
+		statusReasons = append(statusReasons, "agent_gateways_offline")
+	}
+	healthStatus := "normal"
+	if len(statusReasons) > 0 {
+		healthStatus = "degraded"
+	}
+	checkedAt := time.Now().UTC()
+	uptime := checkedAt.Sub(s.started)
+	cpuUsage := goCPUUsage(uptime)
 	writeJSON(w, http.StatusOK, map[string]any{
-		"status":            "normal",
+		"status":            healthStatus,
+		"status_reasons":    statusReasons,
 		"started_at":        s.started,
-		"uptime_seconds":    int64(now.Sub(s.started).Seconds()),
+		"uptime_seconds":    int64(uptime.Seconds()),
 		"version":           s.cfg.Public.Version,
 		"go_version":        runtime.Version(),
 		"os":                runtime.GOOS,
@@ -1646,6 +1683,7 @@ func (s *Server) handleSystemMonitoring(w http.ResponseWriter, _ *http.Request) 
 		"goroutines":        runtime.NumGoroutine(),
 		"cpu":               runtime.NumCPU(),
 		"cpu_cores":         runtime.NumCPU(),
+		"cpu_percent":       cpuUsage["utilization_percent"],
 		"memory_alloc":      mem.Alloc,
 		"memory_sys":        mem.Sys,
 		"memory_heap_alloc": mem.HeapAlloc,
@@ -1664,19 +1702,25 @@ func (s *Server) handleSystemMonitoring(w http.ResponseWriter, _ *http.Request) 
 		"gateways":          len(platform["agent_gateways"]) + len(platform["ssh_gateways"]),
 		"runtime": map[string]any{
 			"started_at":     s.started,
-			"uptime_seconds": int64(now.Sub(s.started).Seconds()),
+			"uptime_seconds": int64(uptime.Seconds()),
 			"go_version":     runtime.Version(),
 			"os":             runtime.GOOS,
 			"arch":           runtime.GOARCH,
 			"goroutines":     runtime.NumGoroutine(),
 			"cpu_cores":      runtime.NumCPU(),
+			"cpu":            cpuUsage,
 		},
 		"memory": map[string]any{
-			"alloc":      mem.Alloc,
-			"sys":        mem.Sys,
-			"heap_alloc": mem.HeapAlloc,
-			"heap_sys":   mem.HeapSys,
-			"gc_count":   mem.NumGC,
+			"alloc":           mem.Alloc,
+			"sys":             mem.Sys,
+			"heap_alloc":      mem.HeapAlloc,
+			"heap_sys":        mem.HeapSys,
+			"heap_objects":    mem.HeapObjects,
+			"stack_in_use":    mem.StackInuse,
+			"total_alloc":     mem.TotalAlloc,
+			"next_gc":         mem.NextGC,
+			"gc_count":        mem.NumGC,
+			"last_gc_unix_ns": mem.LastGC,
 		},
 		"database": map[string]any{
 			"path":                  s.cfg.Store.DatabasePath(),
@@ -1689,16 +1733,9 @@ func (s *Server) handleSystemMonitoring(w http.ResponseWriter, _ *http.Request) 
 			"max_idle_time_closed":  dbStats.MaxIdleTimeClosed,
 			"max_lifetime_closed":   dbStats.MaxLifetimeClosed,
 			"configured_max_open":   dbStats.MaxOpenConnections,
-			"connection_pool_state": databasePoolState(dbStats),
+			"connection_pool_state": databaseState,
 		},
-		"storage": map[string]any{
-			"data_dir":     dataStorage,
-			"recordings":   recordingStorage,
-			"drives":       driveStorage,
-			"backups":      backupStorage,
-			"total_bytes":  dataStorage["bytes"],
-			"checked_path": dataDir,
-		},
+		"storage": storage,
 		"sessions_state": map[string]any{
 			"total":      len(sessions),
 			"active":     active,
@@ -1716,18 +1753,24 @@ func (s *Server) handleSystemMonitoring(w http.ResponseWriter, _ *http.Request) 
 			"online":  onlineAgentGateways,
 			"offline": offlineAgentGateways,
 		},
-		"checked_at": now,
+		"checked_at":             checkedAt,
+		"collection_duration_ms": time.Since(requestStarted).Milliseconds(),
 	})
 }
 
 func directoryUsage(path string) map[string]any {
+	return directoryUsageContext(context.Background(), path)
+}
+
+func directoryUsageContext(ctx context.Context, path string) map[string]any {
 	result := map[string]any{
-		"path":       path,
-		"bytes":      int64(0),
-		"files":      0,
-		"dirs":       0,
-		"available":  false,
-		"last_error": "",
+		"path":          path,
+		"bytes":         int64(0),
+		"files":         0,
+		"dirs":          0,
+		"available":     false,
+		"scan_complete": true,
+		"last_error":    "",
 	}
 	info, err := os.Stat(path)
 	if err != nil {
@@ -1746,7 +1789,14 @@ func directoryUsage(path string) map[string]any {
 	files := 0
 	dirs := 0
 	walkErr := filepath.WalkDir(path, func(filePath string, entry os.DirEntry, walkErr error) error {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
 		if walkErr != nil {
+			if result["last_error"] == "" {
+				result["last_error"] = walkErr.Error()
+			}
+			result["scan_complete"] = false
 			return nil
 		}
 		if entry.IsDir() {
@@ -1764,11 +1814,142 @@ func directoryUsage(path string) map[string]any {
 	})
 	if walkErr != nil {
 		result["last_error"] = walkErr.Error()
+		result["scan_complete"] = false
 	}
 	result["bytes"] = bytes
 	result["files"] = files
 	result["dirs"] = dirs
 	return result
+}
+
+func monitoringStorageUsage(parent context.Context, dataDir string, timeout time.Duration) map[string]any {
+	if parent == nil {
+		parent = context.Background()
+	}
+	if timeout <= 0 {
+		timeout = 5 * time.Second
+	}
+	ctx, cancel := context.WithTimeout(parent, timeout)
+	defer cancel()
+	startedAt := time.Now()
+	paths := map[string]string{
+		"data_dir":   dataDir,
+		"recordings": filepath.Join(dataDir, "recordings"),
+		"drives":     filepath.Join(dataDir, "drives"),
+		"backups":    filepath.Join(dataDir, "backups"),
+	}
+	results := make(map[string]map[string]any, len(paths))
+	for key, path := range paths {
+		results[key] = newDirectoryUsageResult(path)
+		if _, err := os.Stat(path); err == nil {
+			results[key]["available"] = true
+		} else if !errors.Is(err, os.ErrNotExist) {
+			results[key]["last_error"] = err.Error()
+		}
+	}
+	root := results["data_dir"]
+	if available, _ := root["available"].(bool); available {
+		walkErr := filepath.WalkDir(dataDir, func(path string, entry os.DirEntry, walkErr error) error {
+			if err := ctx.Err(); err != nil {
+				return err
+			}
+			keys := []string{"data_dir"}
+			for _, key := range []string{"recordings", "drives", "backups"} {
+				if path == paths[key] || strings.HasPrefix(path, paths[key]+string(os.PathSeparator)) {
+					keys = append(keys, key)
+				}
+			}
+			if walkErr != nil {
+				for _, key := range keys {
+					if results[key]["last_error"] == "" {
+						results[key]["last_error"] = walkErr.Error()
+					}
+					results[key]["scan_complete"] = false
+				}
+				return nil
+			}
+			for _, key := range keys {
+				accumulateDirectoryUsage(results[key], entry)
+			}
+			return nil
+		})
+		if walkErr != nil {
+			root["last_error"] = walkErr.Error()
+			root["scan_complete"] = false
+			for _, key := range []string{"recordings", "drives", "backups"} {
+				results[key]["scan_complete"] = false
+			}
+		}
+	}
+	response := map[string]any{
+		"checked_path":     dataDir,
+		"scan_duration_ms": time.Since(startedAt).Milliseconds(),
+	}
+	for key, value := range results {
+		response[key] = value
+	}
+	response["total_bytes"] = root["bytes"]
+	return response
+}
+
+func newDirectoryUsageResult(path string) map[string]any {
+	return map[string]any{
+		"path":          path,
+		"bytes":         int64(0),
+		"files":         0,
+		"dirs":          0,
+		"available":     false,
+		"scan_complete": true,
+		"last_error":    "",
+	}
+}
+
+func accumulateDirectoryUsage(result map[string]any, entry os.DirEntry) {
+	if entry.IsDir() {
+		result["dirs"] = result["dirs"].(int) + 1
+		return
+	}
+	info, err := entry.Info()
+	if err != nil {
+		if result["last_error"] == "" {
+			result["last_error"] = err.Error()
+		}
+		result["scan_complete"] = false
+		return
+	}
+	result["files"] = result["files"].(int) + 1
+	result["bytes"] = result["bytes"].(int64) + info.Size()
+}
+
+func goCPUUsage(uptime time.Duration) map[string]any {
+	samples := []runtimemetrics.Sample{
+		{Name: "/cpu/classes/total:cpu-seconds"},
+		{Name: "/cpu/classes/idle:cpu-seconds"},
+	}
+	runtimemetrics.Read(samples)
+	total := metricFloat64(samples[0].Value)
+	idle := metricFloat64(samples[1].Value)
+	used := math.Max(0, total-idle)
+	percent := 0.0
+	if uptime > 0 && runtime.NumCPU() > 0 {
+		percent = used / uptime.Seconds() / float64(runtime.NumCPU()) * 100
+		percent = math.Max(0, math.Min(100, percent))
+		percent = math.Round(percent*100) / 100
+	}
+	return map[string]any{
+		"total_seconds":               total,
+		"idle_seconds":                idle,
+		"used_seconds":                used,
+		"utilization_percent":         percent,
+		"average_utilization_percent": percent,
+	}
+}
+
+func metricFloat64(value runtimemetrics.Value) float64 {
+	if value.Kind() != runtimemetrics.KindFloat64 {
+		return 0
+	}
+	return value.Float64()
 }
 
 func databasePoolState(stats sql.DBStats) string {

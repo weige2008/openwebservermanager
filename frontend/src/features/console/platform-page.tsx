@@ -6258,12 +6258,15 @@ function MonitoringPage({ config }: { config: PlatformPageConfig }) {
   const canReadMonitoring = canUseAPI(role, apiPermissions, 'GET', apiPath)
   const [monitor, setMonitor] = useState<Record<string, unknown> | null>(null)
   const [loading, setLoading] = useState(false)
+  const [loadError, setLoadError] = useState('')
   const load = async () => {
     if (!canReadMonitoring) return
     setLoading(true)
+    setLoadError('')
     try {
       setMonitor(await apiRequest<Record<string, unknown>>(apiPath))
     } catch (error) {
+      setLoadError(error instanceof Error ? error.message : String(error))
       app.handleApiError(error)
     } finally {
       setLoading(false)
@@ -6284,6 +6287,7 @@ function MonitoringPage({ config }: { config: PlatformPageConfig }) {
     recordings: app.data.platform?.offline_sessions?.length || 0,
   }
   const runtimeInfo = recordValue(stats.runtime)
+  const cpuInfo = recordValue(runtimeInfo.cpu)
   const memoryInfo = recordValue(stats.memory)
   const databaseInfo = recordValue(stats.database)
   const storageInfo = recordValue(stats.storage)
@@ -6295,71 +6299,88 @@ function MonitoringPage({ config }: { config: PlatformPageConfig }) {
   const recordingsInfo = recordValue(storageInfo.recordings)
   const drivesInfo = recordValue(storageInfo.drives)
   const backupsInfo = recordValue(storageInfo.backups)
+  const status = metadataText(stats.status) || 'unknown'
+  const statusReasons = stringArrayValue(stats.status_reasons)
   const metricCards = [
-    ['Status', metadataText(stats.status) || 'normal', metadataText(stats.status) === 'normal' ? 'success' : 'neutral'],
-    ['Users', formatNumberValue(stats.users), 'neutral'],
-    ['Assets', formatNumberValue(stats.assets), 'neutral'],
-    ['Active sessions', formatNumberValue(stats.active_sessions), 'success'],
-    ['Recordings', formatNumberValue(stats.recordings), 'neutral'],
-    ['Gateways', formatNumberValue(stats.gateways), 'neutral'],
-    ['Goroutines', formatNumberValue(stats.goroutines), 'neutral'],
-    ['Memory', formatBytesValue(stats.memory_alloc), 'neutral'],
+    [app.t('monitoringPage.status', 'Status'), app.t(`monitoringPage.statusValue.${status}`, status), status === 'normal' ? 'success' : status === 'degraded' ? 'warning' : 'danger'],
+    [app.t('monitoringPage.users', 'Users'), formatNumberValue(stats.users), 'neutral'],
+    [app.t('monitoringPage.assets', 'Assets'), formatNumberValue(stats.assets), 'neutral'],
+    [app.t('monitoringPage.activeSessions', 'Active sessions'), formatNumberValue(stats.active_sessions), 'success'],
+    [app.t('monitoringPage.recordings', 'Recordings'), formatNumberValue(stats.recordings), 'neutral'],
+    [app.t('monitoringPage.gateways', 'Gateways'), formatNumberValue(stats.gateways), 'neutral'],
+    [app.t('monitoringPage.cpuUsage', 'Average Go CPU'), `${formatNumberValue(cpuInfo.average_utilization_percent ?? cpuInfo.utilization_percent ?? stats.cpu_percent)}%`, 'neutral'],
+    [app.t('monitoringPage.goMemory', 'Go memory'), formatBytesValue(stats.memory_alloc), 'neutral'],
   ] as const
   const runtimeRows: Array<[string, string]> = [
-    ['Uptime', `${formatNumberValue(stats.uptime_seconds)} s`],
+    [app.t('monitoringPage.uptime', 'Uptime'), `${formatNumberValue(stats.uptime_seconds)} s`],
     ['Go', metadataText(runtimeInfo.go_version || stats.go_version) || '-'],
-    ['OS / Arch', `${metadataText(runtimeInfo.os || stats.os) || '-'} / ${metadataText(runtimeInfo.arch || stats.arch) || '-'}`],
-    ['CPU cores', formatNumberValue(runtimeInfo.cpu_cores || stats.cpu_cores || stats.cpu)],
-    ['Heap alloc', formatBytesValue(memoryInfo.heap_alloc || stats.memory_heap_alloc)],
-    ['GC count', formatNumberValue(memoryInfo.gc_count || stats.gc_count)],
-    ['DB pool', metadataText(databaseInfo.connection_pool_state) || '-'],
-    ['DB connections', `${formatNumberValue(databaseInfo.in_use)} in use / ${formatNumberValue(databaseInfo.idle)} idle`],
+    [app.t('monitoringPage.osArch', 'OS / Arch'), `${metadataText(runtimeInfo.os || stats.os) || '-'} / ${metadataText(runtimeInfo.arch || stats.arch) || '-'}`],
+    [app.t('monitoringPage.cpuCores', 'CPU cores'), formatNumberValue(runtimeInfo.cpu_cores || stats.cpu_cores || stats.cpu)],
+    [app.t('monitoringPage.goroutines', 'Goroutines'), formatNumberValue(runtimeInfo.goroutines || stats.goroutines)],
+    [app.t('monitoringPage.heapAlloc', 'Heap alloc'), formatBytesValue(memoryInfo.heap_alloc || stats.memory_heap_alloc)],
+    [app.t('monitoringPage.heapObjects', 'Heap objects'), formatNumberValue(memoryInfo.heap_objects)],
+    [app.t('monitoringPage.gcCount', 'GC count'), formatNumberValue(memoryInfo.gc_count || stats.gc_count)],
+    [app.t('monitoringPage.dbPool', 'DB pool'), metadataText(databaseInfo.connection_pool_state) || '-'],
+    [app.t('monitoringPage.dbConnections', 'DB connections'), `${formatNumberValue(databaseInfo.in_use)} ${app.t('monitoringPage.inUse', 'in use')} / ${formatNumberValue(databaseInfo.idle)} ${app.t('monitoringPage.idle', 'idle')}`],
   ]
   const gatewayRows: Array<[string, string]> = [
-    ['SSH Gateway', `${metadataText(sshGatewayInfo.status) || 'disabled'} ${metadataText(sshGatewayInfo.address)}`.trim()],
-    ['guacd', `${metadataText(guacdInfo.status) || 'unavailable'} ${metadataText(guacdInfo.address)}`.trim()],
-		['Recording transcoder', `${metadataText(recordingTranscoderInfo.status) || 'unavailable'} ${metadataText(recordingTranscoderInfo.detail)}`.trim()],
-    ['Agent gateways', `${formatNumberValue(agentGatewayInfo.online)} online / ${formatNumberValue(agentGatewayInfo.offline)} offline`],
+    ['SSH Gateway', `${metadataText(sshGatewayInfo.status) || 'disabled'} ${metadataText(sshGatewayInfo.address)} ${metadataText(sshGatewayInfo.last_error)}`.trim()],
+    ['guacd', `${metadataText(guacdInfo.status) || 'unavailable'} ${metadataText(guacdInfo.address)} ${metadataText(guacdInfo.last_error)}`.trim()],
+		[app.t('monitoringPage.recordingTranscoder', 'Recording transcoder'), `${metadataText(recordingTranscoderInfo.status) || 'unavailable'} ${metadataText(recordingTranscoderInfo.detail)}`.trim()],
+    [app.t('monitoringPage.agentGateways', 'Agent gateways'), `${formatNumberValue(agentGatewayInfo.online)} ${app.t('monitoringPage.online', 'online')} / ${formatNumberValue(agentGatewayInfo.offline)} ${app.t('monitoringPage.offline', 'offline')}`],
   ]
   const storageRows: Array<[string, string]> = [
-    ['Data dir', `${formatBytesValue(dataDirInfo.bytes)} / ${formatNumberValue(dataDirInfo.files)} files`],
-    ['Recordings', `${formatBytesValue(recordingsInfo.bytes)} / ${formatNumberValue(recordingsInfo.files)} files`],
-    ['Drives', `${formatBytesValue(drivesInfo.bytes)} / ${formatNumberValue(drivesInfo.files)} files`],
-    ['Backups', `${formatBytesValue(backupsInfo.bytes)} / ${formatNumberValue(backupsInfo.files)} files`],
+    [app.t('monitoringPage.dataDir', 'Data dir'), monitoringStorageRow(dataDirInfo, app.t('monitoringPage.files', 'files'), app.t('monitoringPage.scanIncomplete', 'scan incomplete'), app.t('monitoringPage.unavailable', 'unavailable'))],
+    [app.t('monitoringPage.recordings', 'Recordings'), monitoringStorageRow(recordingsInfo, app.t('monitoringPage.files', 'files'), app.t('monitoringPage.scanIncomplete', 'scan incomplete'), app.t('monitoringPage.unavailable', 'unavailable'))],
+    [app.t('monitoringPage.drives', 'Drives'), monitoringStorageRow(drivesInfo, app.t('monitoringPage.files', 'files'), app.t('monitoringPage.scanIncomplete', 'scan incomplete'), app.t('monitoringPage.unavailable', 'unavailable'))],
+    [app.t('monitoringPage.backups', 'Backups'), monitoringStorageRow(backupsInfo, app.t('monitoringPage.files', 'files'), app.t('monitoringPage.scanIncomplete', 'scan incomplete'), app.t('monitoringPage.unavailable', 'unavailable'))],
   ]
   return (
     <Card>
       <CardHeader>
         <div>
-          <CardTitle>系统监控</CardTitle>
-          <CardDescription>集中查看服务、网关、会话、存储和告警的运行状态。</CardDescription>
+          <CardTitle>{app.t('monitoringPage.title', 'System monitoring')}</CardTitle>
+          <CardDescription>{app.t('monitoringPage.description', 'Review runtime, gateway, session, storage, and database health.')}</CardDescription>
         </div>
         {canReadMonitoring ? (
-          <Button variant='outline' onClick={() => void load()} disabled={loading}>
-            <RefreshCw className={cn('size-4', loading && 'animate-spin')} />
-            刷新
-          </Button>
+          <div className='flex flex-wrap items-center justify-end gap-2'>
+            {metadataText(stats.checked_at) ? <span className='text-xs text-muted-foreground'>{app.t('monitoringPage.checkedAt', 'Checked')}: {formatDate(metadataText(stats.checked_at))}</span> : null}
+            <Button variant='outline' onClick={() => void load()} disabled={loading}>
+              <RefreshCw className={cn('size-4', loading && 'animate-spin')} />
+              {app.t('refresh', 'Refresh')}
+            </Button>
+          </div>
         ) : null}
       </CardHeader>
       <CardContent className='grid gap-5'>
         {canReadMonitoring ? (
-          <>
+          loading && !monitor ? (
+            <div className='rounded-lg border border-dashed border-border p-6 text-sm text-muted-foreground'>{app.t('monitoringPage.loading', 'Loading monitoring data...')}</div>
+          ) : loadError && !monitor ? (
+            <div className='rounded-lg border border-destructive/30 bg-destructive/5 p-6 text-sm text-destructive'>{loadError}</div>
+          ) : <>
+            {statusReasons.length > 0 ? (
+              <div className='flex flex-wrap items-center gap-2 rounded-lg border border-warning/30 bg-warning/10 p-3 text-sm'>
+                <span className='font-medium'>{app.t('monitoringPage.healthReasons', 'Health notices')}</span>
+                {statusReasons.map((reason) => <Badge key={reason} tone='warning'>{app.t(`monitoringPage.reason.${reason}`, reason)}</Badge>)}
+              </div>
+            ) : null}
             <div className='grid gap-3 md:grid-cols-3 xl:grid-cols-4'>
               {metricCards.map(([label, value, tone]) => (
-                <div key={label} className='rounded-xl border border-border bg-background/60 p-4'>
+                <div key={label} className='rounded-lg border border-border bg-background/60 p-4'>
                   <div className='text-xs font-medium text-muted-foreground'>{label}</div>
-                  <div className={cn('mt-2 truncate font-mono text-xl font-semibold', tone === 'success' && 'text-success')}>{value}</div>
+                  <div className={cn('mt-2 truncate font-mono text-xl font-semibold', tone === 'success' && 'text-success', tone === 'warning' && 'text-warning', tone === 'danger' && 'text-destructive')}>{value}</div>
                 </div>
               ))}
             </div>
             <div className='grid gap-3 lg:grid-cols-3'>
-              <MonitoringPanel title='Runtime / Database' rows={runtimeRows} />
-              <MonitoringPanel title='Gateways' rows={gatewayRows} />
-              <MonitoringPanel title='Storage' rows={storageRows} />
+              <MonitoringPanel title={app.t('monitoringPage.runtimeDatabase', 'Runtime / Database')} rows={runtimeRows} />
+              <MonitoringPanel title={app.t('monitoringPage.gateways', 'Gateways')} rows={gatewayRows} />
+              <MonitoringPanel title={app.t('monitoringPage.storage', 'Storage')} rows={storageRows} />
             </div>
           </>
         ) : (
-          <div className='rounded-xl border border-dashed border-border p-6 text-sm text-muted-foreground'>当前账号没有读取系统监控的 API 权限。</div>
+          <div className='rounded-lg border border-dashed border-border p-6 text-sm text-muted-foreground'>{app.t('monitoringPage.noPermission', 'Your account cannot read system monitoring data.')}</div>
         )}
       </CardContent>
     </Card>
@@ -6368,7 +6389,7 @@ function MonitoringPage({ config }: { config: PlatformPageConfig }) {
 
 function MonitoringPanel({ title, rows }: { title: string; rows: Array<[string, string]> }) {
   return (
-    <section className='rounded-xl border border-border bg-background/60 p-4'>
+    <section className='rounded-lg border border-border bg-background/60 p-4'>
       <h3 className='text-sm font-semibold'>{title}</h3>
       <div className='mt-3 grid gap-2'>
         {rows.map(([label, value]) => (
@@ -6380,6 +6401,13 @@ function MonitoringPanel({ title, rows }: { title: string; rows: Array<[string, 
       </div>
     </section>
   )
+}
+
+function monitoringStorageRow(info: Record<string, unknown>, filesLabel: string, incompleteLabel: string, unavailableLabel: string) {
+  if (!metadataBool(info.available)) return unavailableLabel
+  const base = `${formatBytesValue(info.bytes)} / ${formatNumberValue(info.files)} ${filesLabel}`
+  if (metadataBool(info.scan_complete) && !metadataText(info.last_error)) return base
+  return `${base} · ${metadataText(info.last_error) || incompleteLabel}`
 }
 
 function BackupsPage({ config }: { config: PlatformPageConfig }) {

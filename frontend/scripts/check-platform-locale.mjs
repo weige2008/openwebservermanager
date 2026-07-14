@@ -96,6 +96,22 @@ if (toolsPageHardcodedFound.length > 0) {
   process.exit(1)
 }
 
+const monitoringPageDefinitions = resourcesSource.match(/monitoringPage:\s*\{/g) || []
+if (monitoringPageDefinitions.length !== 2) {
+  console.error(`monitoringPage locale definitions = ${monitoringPageDefinitions.length}, want 2 (English and Simplified Chinese; other locales inherit fallback text)`)
+  process.exit(1)
+}
+
+const monitoringPageStart = platformPageSource.indexOf('function MonitoringPage(')
+const monitoringPageEnd = platformPageSource.indexOf('function BackupsPage(', monitoringPageStart)
+const monitoringPageSource = monitoringPageStart >= 0 && monitoringPageEnd > monitoringPageStart ? platformPageSource.slice(monitoringPageStart, monitoringPageEnd) : ''
+const monitoringPageHardcodedText = ['>系统监控<', '集中查看服务', '>刷新<', '当前账号没有读取系统监控', "['Status'", "['Users'", "['Uptime'"]
+const monitoringPageHardcodedFound = monitoringPageHardcodedText.filter((fragment) => monitoringPageSource.includes(fragment))
+if (monitoringPageHardcodedFound.length > 0) {
+  console.error(`monitoring page contains hardcoded locale text: ${monitoringPageHardcodedFound.join(', ')}`)
+  process.exit(1)
+}
+
 for (const endpoint of ['/sftp/mkdir', '/sftp/write', '/sftp/${fileActionMode}']) {
   if (!workspaceSource.includes(endpoint)) {
     console.error(`SSH file manager is missing endpoint: ${endpoint}`)

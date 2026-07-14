@@ -3,8 +3,10 @@ package app
 import (
 	"errors"
 	"fmt"
+	"math"
 	"regexp"
 	"strings"
+	"time"
 
 	"openwebservermanager/internal/model"
 )
@@ -15,17 +17,33 @@ const (
 )
 
 func preparePlatformItemCreateRequest(collection string, req *model.PlatformItemRequest) error {
-	if collection == "command_filters" && req.Protocol == "" {
-		req.Protocol = model.ProtocolSSH
+	switch collection {
+	case "command_filters":
+		if req.Protocol == "" {
+			req.Protocol = model.ProtocolSSH
+		}
+	case "scheduled_tasks":
+		if req.Metadata == nil {
+			req.Metadata = map[string]any{}
+		}
+		normalizeScheduledTaskMutation(req)
 	}
 	return validatePlatformItemRequest(collection, *req)
 }
 
-func validatePlatformItemUpdateRequest(collection string, existing model.PlatformItem, req model.PlatformItemRequest) error {
-	if collection == "command_filters" {
-		return validateCommandFilterItem(commandFilterItemAfterUpdate(existing, req))
+func preparePlatformItemUpdateRequest(collection string, existing model.PlatformItem, req *model.PlatformItemRequest) error {
+	if collection == "scheduled_tasks" {
+		normalizeScheduledTaskMutation(req)
 	}
-	return validatePlatformItemRequest(collection, req)
+	item := platformItemAfterUpdate(existing, *req)
+	switch collection {
+	case "command_filters":
+		return validateCommandFilterItem(item)
+	case "scheduled_tasks":
+		return validateScheduledTaskItem(item)
+	default:
+		return validatePlatformItemRequest(collection, *req)
+	}
 }
 
 func validatePlatformItemRequest(collection string, req model.PlatformItemRequest) error {
@@ -42,6 +60,13 @@ func validatePlatformItemRequest(collection string, req model.PlatformItemReques
 			Group:       strings.TrimSpace(req.Group),
 			Description: strings.TrimSpace(req.Description),
 			Metadata:    req.Metadata,
+		})
+	case "scheduled_tasks":
+		return validateScheduledTaskItem(model.PlatformItem{
+			Name:     strings.TrimSpace(req.Name),
+			Type:     strings.TrimSpace(req.Type),
+			Status:   strings.TrimSpace(req.Status),
+			Metadata: req.Metadata,
 		})
 	default:
 		return nil
@@ -60,7 +85,7 @@ func validateStorageRequest(req model.PlatformItemRequest) error {
 	return nil
 }
 
-func commandFilterItemAfterUpdate(existing model.PlatformItem, req model.PlatformItemRequest) model.PlatformItem {
+func platformItemAfterUpdate(existing model.PlatformItem, req model.PlatformItemRequest) model.PlatformItem {
 	item := existing
 	if strings.TrimSpace(req.Name) != "" {
 		item.Name = strings.TrimSpace(req.Name)
@@ -87,6 +112,174 @@ func commandFilterItemAfterUpdate(existing model.PlatformItem, req model.Platfor
 		item.Metadata = req.Metadata
 	}
 	return item
+}
+
+func normalizeScheduledTaskMutation(req *model.PlatformItemRequest) {
+	if req.Type != "" {
+		req.Type = normalizeScheduledTaskType(req.Type)
+	}
+	if req.Metadata == nil {
+		return
+	}
+	req.Metadata = cloneMetadata(req.Metadata)
+	if !scheduledTaskMetadataHasSchedule(req.Metadata) {
+		if _, exists := req.Metadata["manual_only"]; !exists {
+			req.Metadata["manual_only"] = true
+		}
+	}
+}
+
+func validateScheduledTaskItem(item model.PlatformItem) error {
+	if strings.TrimSpace(item.Name) == "" {
+		return errors.New("scheduled task name is required")
+	}
+	taskType := normalizeScheduledTaskType(item.Type)
+	switch taskType {
+	case "backup", "log-cleanup", "asset-status", "certificate-renewal":
+	default:
+		return fmt.Errorf("scheduled task type must be backup, log-cleanup, asset-status, or certificate-renewal, got %q", taskType)
+	}
+	status := strings.ToLower(strings.TrimSpace(item.Status))
+	if status != "" {
+		switch status {
+		case "enabled", "active", "disabled", "inactive":
+		default:
+			return fmt.Errorf("scheduled task status must be enabled or disabled, got %q", status)
+		}
+	}
+	metadata := item.Metadata
+	intervalKeys := scheduledTaskNonEmptyKeys(metadata,
+		"interval_ms", "run_every_ms", "every_ms",
+		"interval_seconds", "run_every_seconds", "every_seconds",
+		"interval_minutes", "run_every_minutes", "every_minutes",
+		"interval", "run_every", "every",
+	)
+	if len(intervalKeys) > 1 {
+		return fmt.Errorf("scheduled task must use only one interval field, got %s", strings.Join(intervalKeys, ", "))
+	}
+	if len(intervalKeys) == 1 {
+		duration, ok := scheduledTaskInterval(map[string]any{intervalKeys[0]: metadata[intervalKeys[0]]})
+		if !ok {
+			return fmt.Errorf("scheduled task %s must be a positive interval", intervalKeys[0])
+		}
+		if duration > 365*24*time.Hour {
+			return errors.New("scheduled task interval must not exceed 365 days")
+		}
+		if number, ok := metadata[intervalKeys[0]].(float64); ok && number != math.Trunc(number) {
+			return fmt.Errorf("scheduled task %s must be an integer", intervalKeys[0])
+		}
+	}
+	cronKeys := scheduledTaskNonEmptyKeys(metadata, "cron", "cron_expression", "cronExpression")
+	if len(cronKeys) > 1 {
+		return fmt.Errorf("scheduled task must use only one cron field, got %s", strings.Join(cronKeys, ", "))
+	}
+	if len(cronKeys) == 1 {
+		cron := strings.TrimSpace(firstMetadataString(metadata, cronKeys[0]))
+		if _, ok := nextCronRun(cron, time.Date(2023, 12, 31, 23, 59, 58, 0, time.UTC)); !ok {
+			return fmt.Errorf("scheduled task cron expression is invalid or cannot run: %q", cron)
+		}
+	}
+	if len(intervalKeys) > 0 && len(cronKeys) > 0 {
+		return errors.New("scheduled task interval and cron expression cannot be configured together")
+	}
+	for _, key := range []string{"next_run_at"} {
+		if value, exists := metadata[key]; exists && !metadataValueEmpty(value) {
+			if _, ok := metadataTime(value); !ok {
+				return fmt.Errorf("scheduled task %s must be a valid RFC3339 timestamp", key)
+			}
+		}
+	}
+	runOnStart, err := scheduledTaskBooleanMetadata(metadata, "run_on_start")
+	if err != nil {
+		return err
+	}
+	manualOnly, err := scheduledTaskBooleanMetadata(metadata, "manual_only")
+	if err != nil {
+		return err
+	}
+	hasScheduledRun := len(intervalKeys) > 0 || len(cronKeys) > 0 || runOnStart || scheduledTaskMetadataTimePresent(metadata, "next_run_at")
+	if manualOnly && hasScheduledRun {
+		return errors.New("manual-only scheduled task cannot define interval, cron, startup, or next-run scheduling")
+	}
+	if !manualOnly && !hasScheduledRun {
+		return errors.New("scheduled task must define a schedule or set manual_only to true")
+	}
+	if err := validateScheduledTaskTypeMetadata(taskType, metadata); err != nil {
+		return err
+	}
+	return nil
+}
+
+func scheduledTaskMetadataHasSchedule(metadata map[string]any) bool {
+	if len(scheduledTaskNonEmptyKeys(metadata,
+		"interval_ms", "run_every_ms", "every_ms",
+		"interval_seconds", "run_every_seconds", "every_seconds",
+		"interval_minutes", "run_every_minutes", "every_minutes",
+		"interval", "run_every", "every",
+		"cron", "cron_expression", "cronExpression", "next_run_at",
+	)) > 0 {
+		return true
+	}
+	value, ok := metadataBoolValue(metadata["run_on_start"])
+	return ok && value
+}
+
+func scheduledTaskNonEmptyKeys(metadata map[string]any, keys ...string) []string {
+	result := []string{}
+	for _, key := range keys {
+		if value, exists := metadata[key]; exists && !metadataValueEmpty(value) {
+			result = append(result, key)
+		}
+	}
+	return result
+}
+
+func scheduledTaskBooleanMetadata(metadata map[string]any, key string) (bool, error) {
+	value, exists := metadata[key]
+	if !exists || metadataValueEmpty(value) {
+		return false, nil
+	}
+	parsed, ok := metadataBoolValue(value)
+	if !ok {
+		return false, fmt.Errorf("scheduled task %s must be a boolean", key)
+	}
+	return parsed, nil
+}
+
+func scheduledTaskMetadataTimePresent(metadata map[string]any, key string) bool {
+	value, exists := metadata[key]
+	return exists && !metadataValueEmpty(value)
+}
+
+func validateScheduledTaskTypeMetadata(taskType string, metadata map[string]any) error {
+	switch taskType {
+	case "asset-status":
+		return validateScheduledTaskInteger(metadata, "timeout_ms", 100, 30000)
+	case "log-cleanup", "backup":
+		return validateScheduledTaskInteger(metadata, "retention_days", 0, 36500)
+	case "certificate-renewal":
+		if err := validateScheduledTaskInteger(metadata, "renew_before_days", 0, 3650); err != nil {
+			return err
+		}
+		return validateScheduledTaskInteger(metadata, "validity_days", 1, 3650)
+	default:
+		return nil
+	}
+}
+
+func validateScheduledTaskInteger(metadata map[string]any, key string, minimum, maximum int) error {
+	value, exists := metadata[key]
+	if !exists || metadataValueEmpty(value) {
+		return nil
+	}
+	parsed, ok := metadataInt(value)
+	if number, isFloat := value.(float64); isFloat && number != math.Trunc(number) {
+		ok = false
+	}
+	if !ok || parsed < minimum || parsed > maximum {
+		return fmt.Errorf("scheduled task %s must be an integer between %d and %d", key, minimum, maximum)
+	}
+	return nil
 }
 
 func validateCommandFilterItem(item model.PlatformItem) error {

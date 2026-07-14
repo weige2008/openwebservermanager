@@ -4041,7 +4041,7 @@ function PlatformItemDialog({
         <div className='grid gap-3 sm:grid-cols-2'>
           {isStorage ? (
             <>
-              <Field label={app.t('name')}><Input value={form.name} onChange={(event) => onChange({ name: event.currentTarget.value })} /></Field>
+              <Field label={app.t('name')}><Input value={form.name} onChange={(event) => onChange({ name: event.currentTarget.value })} required /></Field>
               <Field label={app.t('status')}>
                 <Select value={form.status || 'enabled'} onChange={(event) => onChange({ status: event.currentTarget.value })}>
                   <option value='enabled'>{app.t('enabled', 'Enabled')}</option>
@@ -4514,41 +4514,60 @@ function PlatformItemDialog({
                   <option value='log-cleanup'>Log cleanup</option>
                   <option value='certificate-renewal'>Certificate renewal</option>
                   <option value='backup'>Backup</option>
-                  <option value='custom'>Custom / record only</option>
                 </Select>
               </Field>
-              <Field label={app.t('intervalSeconds', 'Interval seconds')}>
-                <Input
-                  type='number'
-                  min={1}
-                  placeholder='600'
-                  value={metadataFormText(form.metadata, 'interval_seconds')}
-                  onChange={(event) => onChange({ metadata: metadataWithValue(form.metadata, 'interval_seconds', event.currentTarget.value ? Number(event.currentTarget.value) : '') })}
-                />
+              <Field label={app.t('scheduleMode', 'Schedule mode')}>
+                <Select value={scheduledTaskScheduleModeFromForm(form.metadata)} onChange={(event) => onChange({ metadata: metadataWithScheduledTaskMode(form.metadata, event.currentTarget.value) })}>
+                  <option value='interval'>{app.t('intervalSchedule', 'Interval')}</option>
+                  <option value='cron'>{app.t('cronSchedule', 'Cron')}</option>
+                  <option value='startup'>{app.t('startupSchedule', 'On scheduler start')}</option>
+                  <option value='once'>{app.t('oneTimeSchedule', 'Run once')}</option>
+                  <option value='manual'>{app.t('manualOnlySchedule', 'Manual only')}</option>
+                </Select>
               </Field>
-              <Field label={app.t('cronExpression', 'Cron expression')}>
-                <Input
-                  placeholder='0 0/10 * * * ?'
-                  value={metadataFormText(form.metadata, 'cron')}
-                  onChange={(event) => onChange({ metadata: metadataWithValue(form.metadata, 'cron', event.currentTarget.value) })}
-                />
-              </Field>
-              <Field label={app.t('nextRun', 'Next run')}>
-                <Input
-                  placeholder='2026-07-06T12:00:00Z'
-                  value={metadataFormText(form.metadata, 'next_run_at')}
-                  onChange={(event) => onChange({ metadata: metadataWithValue(form.metadata, 'next_run_at', event.currentTarget.value) })}
-                />
-              </Field>
-              <label className='flex items-center gap-2 rounded-lg border border-border bg-muted/20 px-3 py-2 text-sm sm:col-span-2'>
-                <input
-                  type='checkbox'
-                  className='size-4 accent-primary'
-                  checked={metadataBoolFromForm(form.metadata, 'run_on_start')}
-                  onChange={(event) => onChange({ metadata: metadataWithValue(form.metadata, 'run_on_start', event.currentTarget.checked) })}
-                />
-                <span>{app.t('runOnStart', 'Run once on scheduler start')}</span>
-              </label>
+              {scheduledTaskScheduleModeFromForm(form.metadata) === 'interval' ? (
+                <Field label={app.t('intervalSeconds', 'Interval seconds')}>
+                  <Input
+                    type='number'
+                    min={1}
+                    placeholder='600'
+                    value={metadataFormText(form.metadata, 'interval_seconds')}
+                    onChange={(event) => onChange({ metadata: metadataWithValue(form.metadata, 'interval_seconds', event.currentTarget.value ? Number(event.currentTarget.value) : '') })}
+                    required
+                  />
+                </Field>
+              ) : null}
+              {scheduledTaskScheduleModeFromForm(form.metadata) === 'cron' ? (
+                <Field label={app.t('cronExpression', 'Cron expression')}>
+                  <Input
+                    placeholder='0 */10 * * * *'
+                    value={metadataFormText(form.metadata, 'cron')}
+                    onChange={(event) => onChange({ metadata: metadataWithValue(form.metadata, 'cron', event.currentTarget.value) })}
+                    required
+                  />
+                </Field>
+              ) : null}
+              {scheduledTaskScheduleModeFromForm(form.metadata) === 'once' ? (
+                <Field label={app.t('nextRun', 'Next run')}>
+                  <Input
+                    placeholder='2026-07-16T12:00:00Z'
+                    value={metadataFormText(form.metadata, 'next_run_at')}
+                    onChange={(event) => onChange({ metadata: metadataWithValue(form.metadata, 'next_run_at', event.currentTarget.value) })}
+                    required
+                  />
+                </Field>
+              ) : null}
+              {['interval', 'cron'].includes(scheduledTaskScheduleModeFromForm(form.metadata)) ? (
+                <label className='flex items-center gap-2 rounded-lg border border-border bg-muted/20 px-3 py-2 text-sm sm:col-span-2'>
+                  <input
+                    type='checkbox'
+                    className='size-4 accent-primary'
+                    checked={metadataBoolFromForm(form.metadata, 'run_on_start')}
+                    onChange={(event) => onChange({ metadata: metadataWithValue(form.metadata, 'run_on_start', event.currentTarget.checked) })}
+                  />
+                  <span>{app.t('runOnStart', 'Run once on scheduler start')}</span>
+                </label>
+              ) : null}
               {form.type === 'asset-status' ? (
                 <Field label={app.t('timeoutMs', 'Timeout ms')}>
                   <Input
@@ -6900,8 +6919,46 @@ function scheduledTaskScheduleText(item: PlatformItem) {
   if (interval) return `every ${interval}`
   const cron = metadataText(item.metadata?.cron) || metadataText(item.metadata?.cron_expression)
   if (cron) return `cron ${cron}`
+  const nextRun = metadataText(item.metadata?.next_run_at)
+  if (nextRun) return `once ${nextRun}`
   if (metadataBool(item.metadata?.run_on_start)) return 'run on start'
-  return '-'
+  return metadataBool(item.metadata?.manual_only) ? 'manual only' : '-'
+}
+
+function scheduledTaskScheduleModeFromForm(metadata: string) {
+  const source = metadataObject(metadata)
+  if (metadataBool(source.manual_only)) return 'manual'
+  if (['interval_ms', 'run_every_ms', 'every_ms', 'interval_seconds', 'run_every_seconds', 'every_seconds', 'interval_minutes', 'run_every_minutes', 'every_minutes', 'interval', 'run_every', 'every'].some((key) => metadataText(source[key]))) return 'interval'
+  if (['cron', 'cron_expression', 'cronExpression'].some((key) => metadataText(source[key]))) return 'cron'
+  if (metadataText(source.next_run_at)) return 'once'
+  if (metadataBool(source.run_on_start)) return 'startup'
+  return 'manual'
+}
+
+function metadataWithScheduledTaskMode(metadata: string, mode: string) {
+  const next = metadataObject(metadata)
+  for (const key of ['interval_ms', 'run_every_ms', 'every_ms', 'interval_seconds', 'run_every_seconds', 'every_seconds', 'interval_minutes', 'run_every_minutes', 'every_minutes', 'interval', 'run_every', 'every', 'cron', 'cron_expression', 'cronExpression', 'next_run_at', 'manual_only']) {
+    delete next[key]
+  }
+  next.run_on_start = false
+  switch (mode) {
+    case 'interval':
+      next.interval_seconds = 600
+      break
+    case 'cron':
+      next.cron = '0 */10 * * * *'
+      break
+    case 'startup':
+      next.run_on_start = true
+      break
+    case 'once':
+      next.next_run_at = new Date(Date.now() + 5 * 60 * 1000).toISOString()
+      break
+    default:
+      next.manual_only = true
+      break
+  }
+  return JSON.stringify(next, null, 2)
 }
 
 function stringArrayValue(value: unknown) {

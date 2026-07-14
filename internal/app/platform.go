@@ -245,7 +245,7 @@ func (s *Server) handleCollection(w http.ResponseWriter, r *http.Request, collec
 			writeError(w, http.StatusNotFound, "record not found")
 			return
 		}
-		if err := validatePlatformItemUpdateRequest(collection, previous, req); err != nil {
+		if err := preparePlatformItemUpdateRequest(collection, previous, &req); err != nil {
 			writeError(w, http.StatusBadRequest, err.Error())
 			return
 		}

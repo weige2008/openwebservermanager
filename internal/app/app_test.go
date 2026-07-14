@@ -498,6 +498,10 @@ func TestPlatformCollectionEndpoints(t *testing.T) {
 				payload["protocol"] = "ssh"
 				payload["metadata"] = map[string]any{"pattern": "blocked-test-command", "risk": "high"}
 			}
+			if path == "/api/admin/scheduled-tasks" {
+				payload["type"] = "asset-status"
+				payload["metadata"] = map[string]any{"interval_seconds": 600, "timeout_ms": 2000}
+			}
 			rec := assertStatus(t, handler, http.MethodPost, path, payload, cookie, http.StatusCreated)
 			var item model.PlatformItem
 			if err := json.Unmarshal(rec.Body.Bytes(), &item); err != nil {
@@ -14186,6 +14190,95 @@ func TestBackupOperationLogPersistenceFailures(t *testing.T) {
 	}
 }
 
+func TestScheduledTaskValidationRejectsInertConfiguration(t *testing.T) {
+	handler, adminCookie := newTestHandler(t)
+
+	invalidCases := []struct {
+		name    string
+		payload map[string]any
+		want    string
+	}{
+		{name: "missing name", payload: map[string]any{"type": "backup", "metadata": map[string]any{"manual_only": true}}, want: "name is required"},
+		{name: "unsupported type", payload: map[string]any{"name": "custom", "type": "custom", "metadata": map[string]any{"manual_only": true}}, want: "scheduled task type must be"},
+		{name: "invalid status", payload: map[string]any{"name": "status", "type": "backup", "status": "enable", "metadata": map[string]any{"manual_only": true}}, want: "status must be enabled or disabled"},
+		{name: "zero interval", payload: map[string]any{"name": "zero", "type": "backup", "metadata": map[string]any{"interval_seconds": 0}}, want: "must be a positive interval"},
+		{name: "fractional interval", payload: map[string]any{"name": "fractional", "type": "backup", "metadata": map[string]any{"interval_seconds": 1.5}}, want: "must be an integer"},
+		{name: "multiple interval fields", payload: map[string]any{"name": "intervals", "type": "backup", "metadata": map[string]any{"interval_seconds": 60, "interval_minutes": 1}}, want: "only one interval field"},
+		{name: "interval and cron", payload: map[string]any{"name": "ambiguous", "type": "backup", "metadata": map[string]any{"interval_seconds": 60, "cron": "0 * * * * *"}}, want: "cannot be configured together"},
+		{name: "invalid cron", payload: map[string]any{"name": "bad cron", "type": "backup", "metadata": map[string]any{"cron": "not a cron"}}, want: "cron expression is invalid"},
+		{name: "impossible cron", payload: map[string]any{"name": "impossible cron", "type": "backup", "metadata": map[string]any{"cron": "0 0 0 31 2 *"}}, want: "cannot run"},
+		{name: "invalid next run", payload: map[string]any{"name": "bad next", "type": "backup", "metadata": map[string]any{"next_run_at": "tomorrow"}}, want: "valid RFC3339 timestamp"},
+		{name: "invalid startup flag", payload: map[string]any{"name": "bad start", "type": "backup", "metadata": map[string]any{"run_on_start": "sometimes"}}, want: "run_on_start must be a boolean"},
+		{name: "manual conflict", payload: map[string]any{"name": "manual conflict", "type": "backup", "metadata": map[string]any{"manual_only": true, "interval_seconds": 60}}, want: "manual-only scheduled task cannot define"},
+		{name: "explicit non-manual without schedule", payload: map[string]any{"name": "missing schedule", "type": "backup", "metadata": map[string]any{"manual_only": false}}, want: "must define a schedule"},
+		{name: "invalid asset timeout", payload: map[string]any{"name": "bad timeout", "type": "asset-status", "metadata": map[string]any{"manual_only": true, "timeout_ms": 99}}, want: "timeout_ms must be an integer between 100 and 30000"},
+		{name: "invalid retention", payload: map[string]any{"name": "bad retention", "type": "log-cleanup", "metadata": map[string]any{"manual_only": true, "retention_days": -1}}, want: "retention_days must be an integer between 0"},
+		{name: "invalid certificate validity", payload: map[string]any{"name": "bad validity", "type": "certificate-renewal", "metadata": map[string]any{"manual_only": true, "validity_days": 0}}, want: "validity_days must be an integer between 1"},
+	}
+	for _, test := range invalidCases {
+		t.Run(test.name, func(t *testing.T) {
+			rec := assertStatus(t, handler, http.MethodPost, "/api/admin/scheduled-tasks", test.payload, adminCookie, http.StatusBadRequest)
+			if !strings.Contains(rec.Body.String(), test.want) {
+				t.Fatalf("validation error = %s, want %q", rec.Body.String(), test.want)
+			}
+		})
+	}
+
+	manualRec := assertStatus(t, handler, http.MethodPost, "/api/admin/scheduled-tasks", map[string]any{
+		"name": "manual backup", "type": "backup", "status": "enabled",
+	}, adminCookie, http.StatusCreated)
+	var manualTask model.PlatformItem
+	decodeResponse(t, manualRec, &manualTask)
+	if manualTask.Metadata["manual_only"] != true {
+		t.Fatalf("schedule-free task was not normalized to manual-only: %#v", manualTask.Metadata)
+	}
+
+	cronRec := assertStatus(t, handler, http.MethodPost, "/api/admin/scheduled-tasks", map[string]any{
+		"name": "cron status check", "type": "asset_status", "status": "active",
+		"metadata": map[string]any{"cron": "0 */10 * * * *", "timeout_ms": 2000},
+	}, adminCookie, http.StatusCreated)
+	var cronTask model.PlatformItem
+	decodeResponse(t, cronRec, &cronTask)
+	if cronTask.Type != "asset-status" || firstMetadataString(cronTask.Metadata, "cron") != "0 */10 * * * *" {
+		t.Fatalf("scheduled task normalization failed: %#v", cronTask)
+	}
+
+	for _, update := range []struct {
+		name    string
+		payload map[string]any
+		want    string
+	}{
+		{name: "broken cron", payload: map[string]any{"metadata": map[string]any{"cron": "61 * * * * *", "timeout_ms": 2000}}, want: "cron expression is invalid"},
+		{name: "ambiguous schedule", payload: map[string]any{"metadata": map[string]any{"cron": "0 * * * * *", "interval_seconds": 60, "timeout_ms": 2000}}, want: "cannot be configured together"},
+		{name: "unsupported type", payload: map[string]any{"type": "custom"}, want: "scheduled task type must be"},
+	} {
+		t.Run("update "+update.name, func(t *testing.T) {
+			rec := assertStatus(t, handler, http.MethodPatch, "/api/admin/scheduled-tasks/"+cronTask.ID, update.payload, adminCookie, http.StatusBadRequest)
+			if !strings.Contains(rec.Body.String(), update.want) {
+				t.Fatalf("update validation error = %s, want %q", rec.Body.String(), update.want)
+			}
+		})
+	}
+
+	assertStatus(t, handler, http.MethodPatch, "/api/admin/scheduled-tasks/"+cronTask.ID, map[string]any{
+		"metadata": map[string]any{"interval_seconds": 300, "timeout_ms": 1500},
+	}, adminCookie, http.StatusOK)
+	detailRec := assertStatus(t, handler, http.MethodGet, "/api/admin/scheduled-tasks/"+cronTask.ID, nil, adminCookie, http.StatusOK)
+	var stored model.PlatformItem
+	decodeResponse(t, detailRec, &stored)
+	if stored.Type != "asset-status" || stored.Metadata["interval_seconds"] != float64(300) || stored.Metadata["timeout_ms"] != float64(1500) {
+		t.Fatalf("valid schedule update was not persisted: %#v", stored)
+	}
+	if _, exists := stored.Metadata["cron"]; exists {
+		t.Fatalf("valid schedule replacement retained old cron metadata: %#v", stored.Metadata)
+	}
+
+	listRec := assertStatus(t, handler, http.MethodGet, "/api/admin/scheduled-tasks", nil, adminCookie, http.StatusOK)
+	if strings.Contains(listRec.Body.String(), `"name":"custom"`) || strings.Contains(listRec.Body.String(), `"name":"bad cron"`) {
+		t.Fatalf("invalid scheduled tasks were persisted: %s", listRec.Body.String())
+	}
+}
+
 func TestScheduledTaskRunners(t *testing.T) {
 	issuer := &fakeACMEIssuer{}
 	dnsProviderRuntime := &fakeDNSChallengeProvider{}
@@ -14265,9 +14358,16 @@ func TestScheduledTaskRunners(t *testing.T) {
 		"name":   "Unsupported scheduled task",
 		"type":   "custom-runner",
 		"status": "enabled",
-	}, cookie, http.StatusCreated)
-	var unsupportedTask model.PlatformItem
-	decodeResponse(t, unsupportedTaskRec, &unsupportedTask)
+	}, cookie, http.StatusBadRequest)
+	if !strings.Contains(unsupportedTaskRec.Body.String(), "scheduled task type must be") {
+		t.Fatalf("unsupported scheduled task create error = %s", unsupportedTaskRec.Body.String())
+	}
+	unsupportedTask, err := srv.cfg.Store.CreatePlatformItem("scheduled_tasks", model.PlatformItemRequest{
+		Name: "Legacy unsupported scheduled task", Type: "custom-runner", Status: "enabled", Metadata: map[string]any{"manual_only": true},
+	})
+	if err != nil {
+		t.Fatalf("create legacy unsupported scheduled task fixture: %v", err)
+	}
 	unsupportedRunRec := assertStatus(t, handler, http.MethodPost, "/api/admin/scheduled-tasks/"+unsupportedTask.ID+"/run", nil, cookie, http.StatusUnprocessableEntity)
 	if !strings.Contains(unsupportedRunRec.Body.String(), "scheduled task type is not supported") || !strings.Contains(unsupportedRunRec.Body.String(), `"status":"failed"`) || !strings.Contains(unsupportedRunRec.Body.String(), `"supported":false`) {
 		t.Fatalf("unsupported scheduled task did not return failed log context: %s", unsupportedRunRec.Body.String())

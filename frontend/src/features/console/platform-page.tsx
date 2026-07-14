@@ -52,6 +52,7 @@ interface AccessAssetsResponse {
   desktop?: PlatformItem[]
   web?: PlatformItem[]
   database?: PlatformItem[]
+  storages?: PlatformItem[]
   authorized?: PlatformItem[]
   authorized_assets?: PlatformItem[]
   authorized_web_assets?: PlatformItem[]
@@ -652,7 +653,7 @@ export function PlatformTablePage({ config }: { config: PlatformPageConfig }) {
           cell: ({ row }) => <span className='font-mono text-xs'>{metadataText(row.original.metadata?.path_prefix) || '*'}</span>,
         },
       ] satisfies ColumnDef<PlatformItem>[] : []),
-      ...(!['asset_groups', 'command_filters', 'command_snippets', 'oidc_clients', 'authorization_strategies'].includes(config.collection) ? [
+      ...(!['asset_groups', 'command_filters', 'command_snippets', 'oidc_clients', 'authorization_strategies', 'storages'].includes(config.collection) ? [
         {
           header: app.t('address'),
           cell: ({ row }) => {
@@ -708,6 +709,20 @@ export function PlatformTablePage({ config }: { config: PlatformPageConfig }) {
             const selected = metadataText(row.original.metadata?.selected_gateway_id)
             return selected ? <Badge tone='success'>{selected}</Badge> : <Badge tone='warning'>{app.t('none', '无')}</Badge>
           },
+        },
+      ] satisfies ColumnDef<PlatformItem>[] : []),
+      ...(config.collection === 'storages' ? [
+        {
+          header: app.t('usage', 'Usage'),
+          cell: ({ row }) => (
+            <span className='font-mono text-xs'>
+              {formatBytesValue(row.original.metadata?.used_bytes)}{row.original.metadata?.limit_bytes ? ` / ${formatBytesValue(row.original.metadata.limit_bytes)}` : ''}
+            </span>
+          ),
+        },
+        {
+          header: app.t('sharing', 'Sharing'),
+          cell: ({ row }) => <Badge tone={metadataBool(row.original.metadata?.shared) ? 'success' : 'neutral'}>{metadataBool(row.original.metadata?.shared) ? app.t('shared', 'Shared') : app.t('private', 'Private')}</Badge>,
         },
       ] satisfies ColumnDef<PlatformItem>[] : []),
       { header: app.t('group'), accessorFn: (row) => row.group || row.owner_id || row.target_id || '-' },
@@ -3020,10 +3035,10 @@ function CertificateLogsDialog({ item, onClose, canRead }: { item: PlatformItem;
   )
 }
 
-function StorageFilesDialog({ item, onClose, canUsePath }: { item: PlatformItem; onClose: () => void; canUsePath: CanUsePath }) {
+function StorageFilesDialog({ item, onClose, canUsePath, apiBasePath }: { item: PlatformItem; onClose: () => void; canUsePath: CanUsePath; apiBasePath?: string }) {
   const app = useApp()
   const { confirm, confirmDialog } = useConfirmDialog()
-  const storageAPIPath = `/api/admin/storages/${item.id}`
+  const storageAPIPath = apiBasePath || `/api/admin/storages/${item.id}`
   const canListFiles = canUsePath('GET', `${storageAPIPath}/files`)
   const canDeleteFiles = canUsePath('DELETE', `${storageAPIPath}/files`)
   const canDownloadFiles = canUsePath('GET', `${storageAPIPath}/files-download`)
@@ -3994,6 +4009,7 @@ function PlatformItemDialog({
   const isDepartment = collection === 'departments'
   const isAssetGroup = collection === 'asset_groups'
   const isGatewayGroup = collection === 'gateway_groups'
+  const isStorage = collection === 'storages'
   const isRole = collection === 'roles'
   const isCommandFilter = collection === 'command_filters'
   const isCommandSnippet = collection === 'command_snippets'
@@ -4010,6 +4026,7 @@ function PlatformItemDialog({
   const authorizationResourceType = metadataFormText(form.metadata, 'resource_type') || 'storage'
   const gatewayGroupItems = app.data.platform?.gateway_groups || []
   const agentGatewayItems = app.data.platform?.agent_gateways || []
+  const storageOwnerItems = app.data.platform?.users || []
   const gatewaySelectionMode = gatewayGroupSelectionModeFromForm(form)
   const selectedGatewayIDs = metadataStringListFromForm(form.metadata, 'gateway_ids')
   const databaseCredentials = (app.data.platform?.credentials || []).filter((item) => item.type === 'database_password')
@@ -4018,7 +4035,52 @@ function PlatformItemDialog({
     <DialogShell open={open} onOpenChange={onOpenChange} title={title} description={description}>
       <div className='grid gap-4'>
         <div className='grid gap-3 sm:grid-cols-2'>
-          {isGatewayGroup ? (
+          {isStorage ? (
+            <>
+              <Field label={app.t('name')}><Input value={form.name} onChange={(event) => onChange({ name: event.currentTarget.value })} /></Field>
+              <Field label={app.t('status')}>
+                <Select value={form.status || 'enabled'} onChange={(event) => onChange({ status: event.currentTarget.value })}>
+                  <option value='enabled'>{app.t('enabled', 'Enabled')}</option>
+                  <option value='disabled'>{app.t('disabled', 'Disabled')}</option>
+                </Select>
+              </Field>
+              <Field label={app.t('storageType', 'Storage type')}>
+                <Select value={form.type || 'local'} onChange={(event) => onChange({ type: event.currentTarget.value })}>
+                  <option value='local'>{app.t('localStorage', 'Local server storage')}</option>
+                </Select>
+              </Field>
+              <Field label={app.t('storageOwner', 'Owner')}>
+                <Select value={form.owner_id} onChange={(event) => onChange({ owner_id: event.currentTarget.value })}>
+                  <option value=''>{app.t('systemSharedStorage', 'System shared storage')}</option>
+                  {storageOwnerItems.map((user) => <option key={user.id} value={user.id}>{user.name}</option>)}
+                </Select>
+              </Field>
+              <Field label={app.t('quotaBytes', 'Quota (bytes or 10GB)')}>
+                <Input
+                  value={metadataFormText(form.metadata, 'limit_bytes')}
+                  onChange={(event) => onChange({ metadata: metadataWithValue(form.metadata, 'limit_bytes', event.currentTarget.value) })}
+                  placeholder='10GB'
+                />
+              </Field>
+              <Field label={app.t('sharedUsers', 'Additional users')}>
+                <Input
+                  value={metadataListInputText(form.metadata, 'shared_users')}
+                  onChange={(event) => onChange({ metadata: metadataWithList(form.metadata, 'shared_users', splitWords(event.currentTarget.value)) })}
+                  placeholder={app.t('userIDsPlaceholder', 'user IDs separated by commas')}
+                />
+              </Field>
+              <label className='flex items-center gap-2 rounded-lg border border-border bg-muted/20 px-3 py-2 text-sm sm:col-span-2'>
+                <input
+                  type='checkbox'
+                  className='size-4 accent-primary'
+                  checked={metadataBoolFromForm(form.metadata, 'shared')}
+                  onChange={(event) => onChange({ metadata: metadataWithValue(form.metadata, 'shared', event.currentTarget.checked) })}
+                />
+                <span>{app.t('sharedStorage', 'Allow all authenticated users to access this storage')}</span>
+              </label>
+              <Field label={app.t('tags', 'Tags')}><Input placeholder='shared,documents' value={form.tags} onChange={(event) => onChange({ tags: event.currentTarget.value })} /></Field>
+            </>
+          ) : isGatewayGroup ? (
             <>
               <Field label={app.t('name')}><Input value={form.name} onChange={(event) => onChange({ name: event.currentTarget.value })} /></Field>
               <Field label={app.t('status')}>
@@ -4790,6 +4852,7 @@ function defaultPlatformType(collection: string) {
   if (collection === 'departments') return 'department'
   if (collection === 'asset_groups') return 'ssh'
   if (collection === 'gateway_groups') return 'manual'
+  if (collection === 'storages') return 'local'
   if (collection === 'roles') return 'custom'
   if (collection === 'command_filters') return 'deny'
   if (collection === 'command_snippets') return 'public'
@@ -4815,6 +4878,7 @@ function defaultPlatformMetadata(collection: string) {
     attempt_timeout_seconds: 5,
     failure_cooldown_seconds: 30,
   }, null, 2)
+  if (collection === 'storages') return JSON.stringify({ shared: false, shared_users: [], limit_bytes: '' }, null, 2)
   if (collection === 'command_snippets') return JSON.stringify({ command: '', append_newline: false }, null, 2)
   if (collection === 'authorization_strategies') return JSON.stringify({ resource_type: 'storage', path_prefix: '' }, null, 2)
   if (collection === 'oidc_clients') return JSON.stringify({
@@ -5836,6 +5900,7 @@ function openAccessPopup() {
 export function AccessPortalPage() {
   const app = useApp()
   const [databaseQueryItem, setDatabaseQueryItem] = useState<PlatformItem | null>(null)
+  const [storageFileItem, setStorageFileItem] = useState<PlatformItem | null>(null)
   const { requestAccessMFACode, accessMFADialog } = useAccessMFADialog()
   const accessAssetsQuery = useQuery({
     queryKey: ['access-assets'],
@@ -5846,6 +5911,7 @@ export function AccessPortalPage() {
   const desktopAssets = accessAssetsQuery.data?.desktop || []
   const webAssets = accessAssetsQuery.data?.web || []
   const databaseAssets = accessAssetsQuery.data?.database || []
+  const accessStorages = accessAssetsQuery.data?.storages || []
   const assetsPage = platformPageByRoute('/app/assets')
   const canManageAssets = assetsPage ? canViewPlatformPage(app.auth?.role, assetsPage, app.auth?.menu_permissions) : false
   return (
@@ -5879,6 +5945,7 @@ export function AccessPortalPage() {
           <AccessSection title={app.t('accessPage.desktopProtocols')} items={desktopAssets} requestAccessMFACode={requestAccessMFACode} />
           <AccessSection title={app.t('accessPage.webAssets')} items={webAssets} protocol='http' requestAccessMFACode={requestAccessMFACode} />
           <AccessSection title={app.t('accessPage.databaseAssets')} items={databaseAssets} protocol='database' onDatabaseQuery={setDatabaseQueryItem} requestAccessMFACode={requestAccessMFACode} />
+          <AccessStorageSection items={accessStorages} requestAccessMFACode={requestAccessMFACode} onOpen={setStorageFileItem} />
         </>
       )}
       {databaseQueryItem ? (
@@ -5894,8 +5961,57 @@ export function AccessPortalPage() {
           onClose={() => setDatabaseQueryItem(null)}
         />
       ) : null}
+      {storageFileItem ? (
+        <StorageFilesDialog
+          item={storageFileItem}
+          onClose={() => setStorageFileItem(null)}
+          canUsePath={() => true}
+          apiBasePath={`/api/access/storages/${storageFileItem.id}`}
+        />
+      ) : null}
       {accessMFADialog}
     </div>
+  )
+}
+
+function AccessStorageSection({ items, requestAccessMFACode, onOpen }: { items: PlatformItem[]; requestAccessMFACode: RequestAccessMFACode; onOpen: (item: PlatformItem) => void }) {
+  const app = useApp()
+  const openStorage = async (item: PlatformItem) => {
+    try {
+      if (!(await ensureAccessMFA(`/api/access/storages/${item.id}/mfa`, requestAccessMFACode))) return
+      onOpen(item)
+    } catch (error) {
+      app.handleApiError(error)
+    }
+  }
+  return (
+    <section className='grid gap-3'>
+      <h2 className='text-sm font-semibold'>{app.t('accessPage.storageAssets', 'File storage')}</h2>
+      {items.length ? (
+        <div className='grid gap-3 md:grid-cols-2 xl:grid-cols-3'>
+          {items.map((item) => (
+            <article key={item.id} className='rounded-xl border border-border bg-card p-4'>
+              <div className='flex items-start justify-between gap-3'>
+                <div className='min-w-0'>
+                  <h3 className='truncate text-sm font-semibold'>{item.name}</h3>
+                  <p className='mt-1 truncate text-xs text-muted-foreground'>{item.description || item.group || item.id}</p>
+                </div>
+                <Badge tone={metadataBool(item.metadata?.shared) ? 'success' : 'neutral'}>{metadataBool(item.metadata?.shared) ? app.t('shared', 'Shared') : app.t('private', 'Private')}</Badge>
+              </div>
+              <p className='mt-3 text-xs text-muted-foreground'>
+                {formatBytesValue(item.metadata?.used_bytes)}{item.metadata?.limit_bytes ? ` / ${formatBytesValue(item.metadata.limit_bytes)}` : ''}
+              </p>
+              <Button className='mt-4 w-full' variant='primary' size='sm' onClick={() => void openStorage(item)}>
+                <FileSearch className='size-4' />
+                {app.t('accessPage.openStorage', 'Open files')}
+              </Button>
+            </article>
+          ))}
+        </div>
+      ) : (
+        <div className='rounded-xl border border-dashed border-border p-6 text-sm text-muted-foreground'>{app.t('accessPage.noStorageResources', 'No shared or owned file storage.')}</div>
+      )}
+    </section>
   )
 }
 

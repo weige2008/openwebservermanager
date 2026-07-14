@@ -78,8 +78,14 @@ func (s *Server) handlePlatformAPI(w http.ResponseWriter, r *http.Request) bool 
 	case path == "access/assets":
 		s.handleAccessAssets(w, r)
 		return true
+	case path == "access/storages":
+		s.handleAccessStorages(w, r)
+		return true
 	case path == "access/command-snippets":
 		s.handleAccessCommandSnippets(w, r)
+		return true
+	case strings.HasPrefix(path, "access/storages/"):
+		s.handleAccessStorageOperation(w, r, strings.TrimPrefix(path, "access/storages/"))
 		return true
 	case strings.HasPrefix(path, "access/"):
 		s.handleAccessAction(w, r)
@@ -195,6 +201,10 @@ func (s *Server) handleCollection(w http.ResponseWriter, r *http.Request, collec
 		if !decodeJSON(w, r, &req) {
 			return
 		}
+		if err := validatePlatformItemRequest(collection, req); err != nil {
+			writeError(w, http.StatusBadRequest, err.Error())
+			return
+		}
 		if err := validateAuthorizationRequest(collection, req); err != nil {
 			writeError(w, http.StatusBadRequest, err.Error())
 			return
@@ -216,6 +226,10 @@ func (s *Server) handleCollection(w http.ResponseWriter, r *http.Request, collec
 	case id != "" && r.Method == http.MethodPatch:
 		var req model.PlatformItemRequest
 		if !decodeJSON(w, r, &req) {
+			return
+		}
+		if err := validatePlatformItemRequest(collection, req); err != nil {
+			writeError(w, http.StatusBadRequest, err.Error())
 			return
 		}
 		if err := validateAuthorizationRequest(collection, req); err != nil {
@@ -427,6 +441,7 @@ func (s *Server) handleAccessAssets(w http.ResponseWriter, r *http.Request) {
 		"desktop":                    filterDesktopAssets(assets),
 		"web":                        webAssets,
 		"database":                   databaseAssets,
+		"storages":                   s.accessStorageItems(platform["storages"], userID, isAdmin),
 		"authorized":                 authorizations,
 		"authorized_assets":          assetAuthorizations,
 		"authorized_web_assets":      webAuthorizations,

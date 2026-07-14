@@ -17037,6 +17037,97 @@ func TestSSHSessionFiles(t *testing.T) {
 	}
 }
 
+func TestSharedStorageAccessPortalScopeAndFileOperations(t *testing.T) {
+	handler, adminCookie := newTestHandler(t)
+	srv := handler.(*Server)
+	ownerRec := assertStatus(t, handler, http.MethodPost, "/api/admin/users", map[string]any{
+		"name":     "storage-owner",
+		"type":     "local",
+		"status":   "enabled",
+		"password": "password123",
+		"metadata": map[string]any{"role": "user"},
+	}, adminCookie, http.StatusCreated)
+	var owner model.PlatformItem
+	decodeResponse(t, ownerRec, &owner)
+	memberRec := assertStatus(t, handler, http.MethodPost, "/api/admin/users", map[string]any{
+		"name":     "storage-member",
+		"type":     "local",
+		"status":   "enabled",
+		"password": "password123",
+		"metadata": map[string]any{"role": "user"},
+	}, adminCookie, http.StatusCreated)
+	var member model.PlatformItem
+	decodeResponse(t, memberRec, &member)
+	assertStatus(t, handler, http.MethodPost, "/api/admin/storages", map[string]any{
+		"name":     "invalid-storage-quota",
+		"type":     "local",
+		"status":   "enabled",
+		"metadata": map[string]any{"limit_bytes": "not-a-size"},
+	}, adminCookie, http.StatusBadRequest)
+
+	sharedRec := assertStatus(t, handler, http.MethodPost, "/api/admin/storages", map[string]any{
+		"name":     "shared-storage",
+		"type":     "local",
+		"status":   "enabled",
+		"owner_id": owner.ID,
+		"metadata": map[string]any{"shared": true, "limit_bytes": 1024},
+	}, adminCookie, http.StatusCreated)
+	var shared model.PlatformItem
+	decodeResponse(t, sharedRec, &shared)
+	privateRec := assertStatus(t, handler, http.MethodPost, "/api/admin/storages", map[string]any{
+		"name":     "private-storage",
+		"type":     "local",
+		"status":   "enabled",
+		"owner_id": owner.ID,
+		"metadata": map[string]any{"shared": false},
+	}, adminCookie, http.StatusCreated)
+	var private model.PlatformItem
+	decodeResponse(t, privateRec, &private)
+
+	assertStatus(t, handler, http.MethodPost, "/api/admin/storages/"+shared.ID+"/files-write", map[string]any{
+		"path":    "shared.txt",
+		"content": "shared content",
+	}, adminCookie, http.StatusCreated)
+	memberLogin := assertStatus(t, handler, http.MethodPost, "/api/auth/login", map[string]any{"username": "storage-member", "password": "password123"}, nil, http.StatusOK)
+	memberCookie := memberLogin.Result().Cookies()[0]
+	ownerLogin := assertStatus(t, handler, http.MethodPost, "/api/auth/login", map[string]any{"username": "storage-owner", "password": "password123"}, nil, http.StatusOK)
+	ownerCookie := ownerLogin.Result().Cookies()[0]
+
+	memberStorages := assertStatus(t, handler, http.MethodGet, "/api/access/storages", nil, memberCookie, http.StatusOK)
+	if !strings.Contains(memberStorages.Body.String(), shared.ID) || strings.Contains(memberStorages.Body.String(), private.ID) {
+		t.Fatalf("member storage scope leaked or omitted shared storage: %s", memberStorages.Body.String())
+	}
+	ownerStorages := assertStatus(t, handler, http.MethodGet, "/api/access/storages", nil, ownerCookie, http.StatusOK)
+	if !strings.Contains(ownerStorages.Body.String(), shared.ID) || !strings.Contains(ownerStorages.Body.String(), private.ID) {
+		t.Fatalf("owner storage scope missing owned storage: %s", ownerStorages.Body.String())
+	}
+	sharedList := assertStatus(t, handler, http.MethodGet, "/api/access/storages/"+shared.ID+"/files", nil, memberCookie, http.StatusOK)
+	if !strings.Contains(sharedList.Body.String(), "shared.txt") {
+		t.Fatalf("member shared storage listing missing file: %s", sharedList.Body.String())
+	}
+	assertStatus(t, handler, http.MethodPost, "/api/access/storages/"+shared.ID+"/files-write", map[string]any{
+		"path":    "member.txt",
+		"content": "member content",
+	}, memberCookie, http.StatusCreated)
+	assertStatus(t, handler, http.MethodGet, "/api/access/storages/"+private.ID+"/files", nil, memberCookie, http.StatusForbidden)
+	assertStatus(t, handler, http.MethodGet, "/api/access/storages/"+shared.ID+"/files", nil, nil, http.StatusUnauthorized)
+	deniedLogs := assertStatus(t, handler, http.MethodGet, "/api/admin/audit/operation-logs", nil, adminCookie, http.StatusOK)
+	if !strings.Contains(deniedLogs.Body.String(), "access.storage.denied") {
+		t.Fatalf("shared storage denial was not audited: %s", deniedLogs.Body.String())
+	}
+
+	if _, err := srv.cfg.Store.UpdatePlatformItem("storages", shared.ID, model.PlatformItemRequest{
+		Name:     shared.Name,
+		Type:     shared.Type,
+		Status:   shared.Status,
+		OwnerID:  shared.OwnerID,
+		Metadata: map[string]any{"shared": false, "limit_bytes": 1024},
+	}); err != nil {
+		t.Fatalf("disable shared storage: %v", err)
+	}
+	assertStatus(t, handler, http.MethodGet, "/api/access/storages/"+shared.ID+"/files", nil, memberCookie, http.StatusForbidden)
+}
+
 func sshFileEntriesContain(entries []sshFileEntry, name string) bool {
 	for _, entry := range entries {
 		if entry.Name == name {

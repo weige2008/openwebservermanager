@@ -1793,7 +1793,7 @@ func gatewayRuntimeStatus(address, lastError string) string {
 
 type pingRequest struct {
 	Target string `json:"target"`
-	Count  int    `json:"count"`
+	Count  *int   `json:"count"`
 	Mode   string `json:"mode"`
 }
 
@@ -1822,11 +1822,21 @@ func (s *Server) handlePingTool(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "target is required")
 		return
 	}
-	count := clampInt(req.Count, 1, 10, 4)
-	mode := normalizePingMode(req.Mode, target)
+	count := 4
+	if req.Count != nil {
+		if *req.Count < 1 || *req.Count > 10 {
+			writeError(w, http.StatusBadRequest, "ping count must be between 1 and 10")
+			return
+		}
+		count = *req.Count
+	}
+	mode, err := normalizePingMode(req.Mode, target)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, err.Error())
+		return
+	}
 	host := target
 	port := 0
-	var err error
 	if mode == "tcp" {
 		host, port, err = parsePingTCPTarget(target)
 		if err != nil {
@@ -1844,38 +1854,67 @@ func (s *Server) handlePingTool(w http.ResponseWriter, r *http.Request) {
 	}
 	results := make([]pingToolResult, 0, count)
 	okCount := 0
+	var totalLatency int64
+	var minLatency int64
+	var maxLatency int64
 	for i := 0; i < count; i++ {
 		var result pingToolResult
 		if mode == "tcp" {
-			result = runTCPPing(i+1, host, port, 2*time.Second)
+			result = runTCPPing(r.Context(), i+1, host, port, 2*time.Second)
 		} else {
-			result = runICMPPing(i+1, host, 2*time.Second)
+			result = runICMPPing(r.Context(), i+1, host, 2*time.Second)
 		}
 		if result.Status == "ok" {
 			okCount++
+			totalLatency += result.LatencyMS
+			if okCount == 1 || result.LatencyMS < minLatency {
+				minLatency = result.LatencyMS
+			}
+			if okCount == 1 || result.LatencyMS > maxLatency {
+				maxLatency = result.LatencyMS
+			}
 		}
 		results = append(results, result)
 	}
-	_ = s.audit(r, "tool.ping", target, "", "ran "+mode+" "+strconv.Itoa(count)+" checks")
+	failedCount := count - okCount
+	averageLatency := int64(0)
+	if okCount > 0 {
+		averageLatency = totalLatency / int64(okCount)
+	}
+	if err := s.audit(r, "tool.ping", target, "", fmt.Sprintf("ran %s checks: %d succeeded, %d failed", mode, okCount, failedCount)); err != nil {
+		writeError(w, http.StatusInternalServerError, "failed to persist ping audit log")
+		return
+	}
 	writeJSON(w, http.StatusOK, map[string]any{
 		"target":  target,
 		"mode":    mode,
 		"count":   count,
 		"results": results,
-		"summary": map[string]int{"ok": okCount, "failed": count - okCount},
+		"summary": map[string]any{
+			"ok":                  okCount,
+			"failed":              failedCount,
+			"min_latency_ms":      minLatency,
+			"max_latency_ms":      maxLatency,
+			"average_latency_ms":  averageLatency,
+			"packet_loss_percent": (failedCount*100 + count/2) / count,
+		},
 	})
 }
 
-func normalizePingMode(mode, target string) string {
+func normalizePingMode(mode, target string) (string, error) {
 	value := strings.ToLower(strings.TrimSpace(mode))
 	switch value {
+	case "icmp", "ping":
+		return "icmp", nil
 	case "tcp", "tcp_ping", "tcp-ping":
-		return "tcp"
-	default:
-		if value == "" && looksLikeHostPort(target) {
-			return "tcp"
+		return "tcp", nil
+	case "":
+		if looksLikeHostPort(target) {
+			return "tcp", nil
 		}
-		return "icmp"
+		return "icmp", nil
+	default:
+		return "", errors.New("ping mode must be icmp or tcp")
 	}
 }
 
@@ -1918,16 +1957,17 @@ func parsePingHost(target string) (string, error) {
 	if target == "" {
 		return "", errors.New("target host is required")
 	}
-	if len(target) > 255 || strings.ContainsAny(target, "/\\\x00\r\n\t ") {
+	if len(target) > 255 || strings.HasPrefix(target, "-") || strings.ContainsAny(target, "/\\\x00\r\n\t ") {
 		return "", errors.New("target host is invalid")
 	}
 	return target, nil
 }
 
-func runTCPPing(seq int, host string, port int, timeout time.Duration) pingToolResult {
+func runTCPPing(ctx context.Context, seq int, host string, port int, timeout time.Duration) pingToolResult {
 	target := net.JoinHostPort(host, strconv.Itoa(port))
 	start := time.Now()
-	conn, err := net.DialTimeout("tcp", target, timeout)
+	dialer := &net.Dialer{Timeout: timeout}
+	conn, err := dialer.DialContext(ctx, "tcp", target)
 	latency := time.Since(start).Milliseconds()
 	result := pingToolResult{Seq: seq, Mode: "tcp", Target: target, Address: target, Latency: latency, LatencyMS: latency}
 	if err != nil {
@@ -1941,9 +1981,9 @@ func runTCPPing(seq int, host string, port int, timeout time.Duration) pingToolR
 	return result
 }
 
-func runICMPPing(seq int, host string, timeout time.Duration) pingToolResult {
+func runICMPPing(ctx context.Context, seq int, host string, timeout time.Duration) pingToolResult {
 	start := time.Now()
-	output, err := executeSystemPing(host, timeout)
+	output, err := executeSystemPing(ctx, host, timeout)
 	latency := time.Since(start).Milliseconds()
 	if parsedLatency, ok := parsePingLatency(output); ok {
 		latency = parsedLatency
@@ -1952,7 +1992,7 @@ func runICMPPing(seq int, host string, timeout time.Duration) pingToolResult {
 		Seq:       seq,
 		Mode:      "icmp",
 		Target:    host,
-		Address:   firstResolvedAddress(host),
+		Address:   firstResolvedAddress(ctx, host, timeout),
 		Latency:   latency,
 		LatencyMS: latency,
 		Detail:    pingOutputDetail(output),
@@ -1968,8 +2008,11 @@ func runICMPPing(seq int, host string, timeout time.Duration) pingToolResult {
 	return result
 }
 
-func executeSystemPing(host string, timeout time.Duration) (string, error) {
-	ctx, cancel := context.WithTimeout(context.Background(), timeout+time.Second)
+func executeSystemPing(parent context.Context, host string, timeout time.Duration) (string, error) {
+	if parent == nil {
+		parent = context.Background()
+	}
+	ctx, cancel := context.WithTimeout(parent, timeout+time.Second)
 	defer cancel()
 	args := pingCommandArgs(host, timeout)
 	cmd := exec.CommandContext(ctx, "ping", args...)
@@ -2046,8 +2089,16 @@ func pingOutputDetail(output string) string {
 	return ""
 }
 
-func firstResolvedAddress(host string) string {
-	addrs, err := net.LookupHost(host)
+func firstResolvedAddress(parent context.Context, host string, timeout time.Duration) string {
+	if ip := net.ParseIP(host); ip != nil {
+		return ip.String()
+	}
+	if parent == nil {
+		parent = context.Background()
+	}
+	ctx, cancel := context.WithTimeout(parent, timeout)
+	defer cancel()
+	addrs, err := net.DefaultResolver.LookupHost(ctx, host)
 	if err != nil || len(addrs) == 0 {
 		return ""
 	}

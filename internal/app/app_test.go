@@ -10044,18 +10044,68 @@ func TestToolsAndMonitoringEndpoints(t *testing.T) {
 	listener, closeListener := startAppTestTCPListener(t)
 	defer closeListener()
 	tcpRec := assertStatus(t, handler, http.MethodPost, "/api/tools/ping", map[string]any{"target": listener.Addr().String(), "count": 2, "mode": "tcp"}, cookie, http.StatusOK)
-	tcpBody := tcpRec.Body.String()
-	if !strings.Contains(tcpBody, `"mode":"tcp"`) || !strings.Contains(tcpBody, `"status":"ok"`) || !strings.Contains(tcpBody, "tcp connection established") {
-		t.Fatalf("tcp ping did not report successful connection: %s", tcpBody)
+	var tcpPayload struct {
+		Target  string           `json:"target"`
+		Mode    string           `json:"mode"`
+		Count   int              `json:"count"`
+		Results []pingToolResult `json:"results"`
+		Summary map[string]int   `json:"summary"`
 	}
-	badTCPRec := assertStatus(t, handler, http.MethodPost, "/api/tools/ping", map[string]any{"target": "localhost", "count": 1, "mode": "tcp"}, cookie, http.StatusBadRequest)
-	if !strings.Contains(badTCPRec.Body.String(), "host:port") {
-		t.Fatalf("invalid tcp ping target did not return clear error: %s", badTCPRec.Body.String())
+	decodeResponse(t, tcpRec, &tcpPayload)
+	if tcpPayload.Mode != "tcp" || tcpPayload.Count != 2 || len(tcpPayload.Results) != 2 || tcpPayload.Summary["ok"] != 2 || tcpPayload.Summary["failed"] != 0 || tcpPayload.Summary["packet_loss_percent"] != 0 {
+		t.Fatalf("tcp ping summary is incomplete: %#v", tcpPayload)
 	}
-	assertStatus(t, handler, http.MethodPost, "/api/tools/ping", map[string]any{"target": "", "count": 1}, cookie, http.StatusBadRequest)
+	for _, result := range tcpPayload.Results {
+		if result.Status != "ok" || result.Detail != "tcp connection established" || result.Target != tcpPayload.Target {
+			t.Fatalf("tcp ping did not report successful connection: %#v", result)
+		}
+	}
+	defaultRec := assertStatus(t, handler, http.MethodPost, "/api/tools/ping", map[string]any{"target": listener.Addr().String()}, cookie, http.StatusOK)
+	var defaultPayload struct {
+		Mode    string           `json:"mode"`
+		Count   int              `json:"count"`
+		Results []pingToolResult `json:"results"`
+	}
+	decodeResponse(t, defaultRec, &defaultPayload)
+	if defaultPayload.Mode != "tcp" || defaultPayload.Count != 4 || len(defaultPayload.Results) != 4 {
+		t.Fatalf("default ping mode or count was not applied: %#v", defaultPayload)
+	}
+	for _, test := range []struct {
+		name    string
+		payload map[string]any
+		want    string
+	}{
+		{name: "missing target", payload: map[string]any{"count": 1}, want: "target is required"},
+		{name: "tcp without port", payload: map[string]any{"target": "localhost", "count": 1, "mode": "tcp"}, want: "host:port"},
+		{name: "unknown mode", payload: map[string]any{"target": "localhost", "count": 1, "mode": "udp"}, want: "mode must be icmp or tcp"},
+		{name: "zero count", payload: map[string]any{"target": "localhost", "count": 0}, want: "count must be between 1 and 10"},
+		{name: "negative count", payload: map[string]any{"target": "localhost", "count": -1}, want: "count must be between 1 and 10"},
+		{name: "excessive count", payload: map[string]any{"target": "localhost", "count": 11}, want: "count must be between 1 and 10"},
+		{name: "ping option injection", payload: map[string]any{"target": "-f", "count": 1, "mode": "icmp"}, want: "target host is invalid"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			rec := assertStatus(t, handler, http.MethodPost, "/api/tools/ping", test.payload, cookie, http.StatusBadRequest)
+			if !strings.Contains(rec.Body.String(), test.want) {
+				t.Fatalf("ping validation error = %s, want %q", rec.Body.String(), test.want)
+			}
+		})
+	}
 	logsRec := assertStatus(t, handler, http.MethodGet, "/api/admin/audit/operation-logs", nil, cookie, http.StatusOK)
-	if !strings.Contains(logsRec.Body.String(), "tool.ping") {
+	if !strings.Contains(logsRec.Body.String(), "tool.ping") || !strings.Contains(logsRec.Body.String(), "succeeded") {
 		t.Fatalf("ping tool did not write operation log: %s", logsRec.Body.String())
+	}
+}
+
+func TestTCPPingHonorsCanceledContext(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	startedAt := time.Now()
+	result := runTCPPing(ctx, 1, "203.0.113.1", 9, 5*time.Second)
+	if result.Status != "failed" || !strings.Contains(strings.ToLower(result.Detail), "canceled") {
+		t.Fatalf("canceled TCP ping result = %#v", result)
+	}
+	if elapsed := time.Since(startedAt); elapsed > time.Second {
+		t.Fatalf("canceled TCP ping took %s", elapsed)
 	}
 }
 

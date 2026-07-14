@@ -80,6 +80,22 @@ if (sshFileManagerDefinitions.length !== 7) {
   process.exit(1)
 }
 
+const toolsPageDefinitions = resourcesSource.match(/toolsPage:\s*\{/g) || []
+if (toolsPageDefinitions.length !== 2) {
+  console.error(`toolsPage locale definitions = ${toolsPageDefinitions.length}, want 2 (English and Simplified Chinese; other locales inherit fallback text)`)
+  process.exit(1)
+}
+
+const toolsPageStart = platformPageSource.indexOf('function ToolsPage(')
+const toolsPageEnd = platformPageSource.indexOf('function MonitoringPage(', toolsPageStart)
+const toolsPageSource = toolsPageStart >= 0 && toolsPageEnd > toolsPageStart ? platformPageSource.slice(toolsPageStart, toolsPageEnd) : ''
+const toolsPageHardcodedText = ['>实用工具<', '检测目标地址连通性', '检测中', '开始检测', '暂无检测结果', '当前账号没有执行诊断工具']
+const toolsPageHardcodedFound = toolsPageHardcodedText.filter((fragment) => toolsPageSource.includes(fragment))
+if (toolsPageHardcodedFound.length > 0) {
+  console.error(`tools page contains hardcoded locale text: ${toolsPageHardcodedFound.join(', ')}`)
+  process.exit(1)
+}
+
 for (const endpoint of ['/sftp/mkdir', '/sftp/write', '/sftp/${fileActionMode}']) {
   if (!workspaceSource.includes(endpoint)) {
     console.error(`SSH file manager is missing endpoint: ${endpoint}`)

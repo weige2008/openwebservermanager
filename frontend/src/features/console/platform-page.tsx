@@ -378,6 +378,10 @@ interface PingToolResponse {
   summary?: {
     ok?: number
     failed?: number
+    min_latency_ms?: number
+    max_latency_ms?: number
+    average_latency_ms?: number
+    packet_loss_percent?: number
   }
 }
 
@@ -6160,13 +6164,16 @@ function ToolsPage({ config }: { config: PlatformPageConfig }) {
   const [count, setCount] = useState('4')
   const [loading, setLoading] = useState(false)
   const [result, setResult] = useState<PingToolResponse | null>(null)
+  const parsedCount = Number(count)
+  const countValid = Number.isInteger(parsedCount) && parsedCount >= 1 && parsedCount <= 10
   const run = async () => {
-    if (!canRunTool) return
+    if (!canRunTool || !target.trim() || !countValid) return
     setLoading(true)
+    setResult(null)
     try {
       const data = await apiRequest<PingToolResponse>(apiPath, {
         method: 'POST',
-        body: JSON.stringify({ target, count: Number(count) || 4, mode }),
+        body: JSON.stringify({ target: target.trim(), count: parsedCount, mode }),
       })
       setResult(data)
     } catch (error) {
@@ -6179,33 +6186,46 @@ function ToolsPage({ config }: { config: PlatformPageConfig }) {
     <Card>
       <CardHeader>
         <div>
-          <CardTitle>实用工具</CardTitle>
-          <CardDescription>Ping / TCP Ping 检测目标地址连通性。</CardDescription>
+          <CardTitle>{app.t('toolsPage.title', 'Tools')}</CardTitle>
+          <CardDescription>{app.t('toolsPage.description', 'Run Ping and TCP Ping connectivity checks.')}</CardDescription>
         </div>
       </CardHeader>
       <CardContent className='grid gap-4'>
         {canRunTool ? (
-          <div className='grid gap-3 md:grid-cols-[minmax(0,1fr)_10rem_7rem_auto]'>
-            <Input placeholder={mode === 'tcp' ? 'host:port' : 'IP / domain'} value={target} onChange={(event) => setTarget(event.currentTarget.value)} />
-            <Select value={mode} onChange={(event) => setMode(event.currentTarget.value as 'icmp' | 'tcp')}>
-              <option value='icmp'>Ping</option>
-              <option value='tcp'>TCP Ping</option>
-            </Select>
-            <Input type='number' min={1} max={10} value={count} onChange={(event) => setCount(event.currentTarget.value)} aria-label='count' />
-            <Button variant='primary' onClick={() => void run()} disabled={!target.trim() || loading}>
+          <form className='grid gap-3 md:grid-cols-[minmax(0,1fr)_10rem_7rem_auto] md:items-end' onSubmit={(event) => { event.preventDefault(); void run() }}>
+            <Field label={app.t('toolsPage.target', 'Target')}>
+              <Input
+                placeholder={mode === 'tcp' ? app.t('toolsPage.tcpPlaceholder', 'host:port') : app.t('toolsPage.icmpPlaceholder', 'IP or domain')}
+                value={target}
+                onChange={(event) => setTarget(event.currentTarget.value)}
+                required
+              />
+            </Field>
+            <Field label={app.t('toolsPage.mode', 'Mode')}>
+              <Select value={mode} onChange={(event) => setMode(event.currentTarget.value as 'icmp' | 'tcp')}>
+                <option value='icmp'>{app.t('toolsPage.ping', 'Ping')}</option>
+                <option value='tcp'>{app.t('toolsPage.tcpPing', 'TCP Ping')}</option>
+              </Select>
+            </Field>
+            <Field label={app.t('toolsPage.count', 'Count')}>
+              <Input type='number' min={1} max={10} step={1} value={count} onChange={(event) => setCount(event.currentTarget.value)} required />
+            </Field>
+            <Button type='submit' variant='primary' disabled={!target.trim() || !countValid || loading}>
               <Play className={cn('size-4', loading && 'animate-pulse')} />
-              {loading ? '检测中' : '开始检测'}
+              {loading ? app.t('toolsPage.running', 'Running...') : app.t('toolsPage.run', 'Run')}
             </Button>
-          </div>
+          </form>
         ) : (
-          <div className='rounded-xl border border-dashed border-border p-6 text-sm text-muted-foreground'>当前账号没有执行诊断工具的 API 权限。</div>
+          <div className='rounded-xl border border-dashed border-border p-6 text-sm text-muted-foreground'>{app.t('toolsPage.noPermission', 'Your account cannot run diagnostic tools.')}</div>
         )}
         {result ? (
           <div className='grid gap-3'>
             <div className='flex flex-wrap items-center gap-2 text-sm'>
               <Badge tone='neutral'>{result.mode}</Badge>
-              <Badge tone='success'>OK {numberValue(result.summary?.ok)}</Badge>
-              <Badge tone={numberValue(result.summary?.failed) > 0 ? 'danger' : 'neutral'}>Failed {numberValue(result.summary?.failed)}</Badge>
+              <Badge tone='success'>{app.t('toolsPage.succeeded', 'Succeeded')} {numberValue(result.summary?.ok)}</Badge>
+              <Badge tone={numberValue(result.summary?.failed) > 0 ? 'danger' : 'neutral'}>{app.t('toolsPage.failed', 'Failed')} {numberValue(result.summary?.failed)}</Badge>
+              <Badge tone='neutral'>{app.t('toolsPage.averageLatency', 'Average')} {numberValue(result.summary?.average_latency_ms)} ms</Badge>
+              <Badge tone={numberValue(result.summary?.packet_loss_percent) > 0 ? 'warning' : 'neutral'}>{app.t('toolsPage.packetLoss', 'Loss')} {numberValue(result.summary?.packet_loss_percent)}%</Badge>
               <span className='font-mono text-xs text-muted-foreground'>{result.target}</span>
             </div>
             <div className='overflow-hidden rounded-xl border border-border bg-background/60'>
@@ -6223,7 +6243,7 @@ function ToolsPage({ config }: { config: PlatformPageConfig }) {
             </div>
           </div>
         ) : (
-          <div className='rounded-xl border border-dashed border-border p-6 text-sm text-muted-foreground'>暂无检测结果</div>
+          <div className='rounded-xl border border-dashed border-border p-6 text-sm text-muted-foreground'>{app.t('toolsPage.noResults', 'No diagnostic results yet.')}</div>
         )}
       </CardContent>
     </Card>

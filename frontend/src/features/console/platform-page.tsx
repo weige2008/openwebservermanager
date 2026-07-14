@@ -6431,6 +6431,9 @@ function BackupsPage({ config }: { config: PlatformPageConfig }) {
   const [restoring, setRestoring] = useState(false)
   const [uploadFile, setUploadFile] = useState<File | null>(null)
   const [validation, setValidation] = useState<Record<string, unknown> | null>(null)
+  const [validatedUploadKey, setValidatedUploadKey] = useState('')
+  const uploadKey = uploadFile ? backupUploadKey(uploadFile) : ''
+  const uploadValidated = Boolean(validation && uploadKey && uploadKey === validatedUploadKey)
 
   const load = async () => {
     if (!canListBackups) return
@@ -6455,7 +6458,7 @@ function BackupsPage({ config }: { config: PlatformPageConfig }) {
     try {
       await apiRequest(apiPath, { method: 'POST', body: '{}' })
       await load()
-      app.showToast('备份已创建')
+      app.showToast(app.t('backupsPage.created', 'Backup created.'))
     } catch (error) {
       app.handleApiError(error)
     } finally {
@@ -6467,22 +6470,25 @@ function BackupsPage({ config }: { config: PlatformPageConfig }) {
     if (!canRestoreBackup || !uploadFile) return
     setRestoring(true)
     try {
-      setValidation(await submitBackupFile(uploadFile, true))
-      app.showToast('备份校验通过')
+      const result = await submitBackupFile(uploadFile, true)
+      setValidation(result)
+      setValidatedUploadKey(backupUploadKey(uploadFile))
+      app.showToast(app.t('backupsPage.validated', 'Backup validation passed.'))
     } catch (error) {
       app.handleApiError(error)
       setValidation(null)
+      setValidatedUploadKey('')
     } finally {
       setRestoring(false)
     }
   }
 
   const restoreUpload = async () => {
-    if (!canRestoreBackup || !uploadFile) return
+    if (!canRestoreBackup || !uploadFile || !uploadValidated) return
     const confirmed = await confirm({
-      title: '恢复备份并覆盖当前数据?',
-      description: '恢复会覆盖当前系统数据，并在恢复前自动创建一份当前备份。恢复完成后需要重新登录。',
-      confirmText: '恢复',
+      title: app.t('backupsPage.restoreConfirmTitle', 'Restore this backup and replace current data?'),
+      description: app.t('backupsPage.restoreConfirmDescription', 'A current snapshot is created before restore. All sessions are revoked after restore.'),
+      confirmText: app.t('backupsPage.restore', 'Restore'),
       destructive: true,
     })
     if (!confirmed) return
@@ -6490,7 +6496,7 @@ function BackupsPage({ config }: { config: PlatformPageConfig }) {
     try {
       const result = await submitBackupFile(uploadFile, false)
       setValidation(result)
-      app.showToast('恢复完成，请重新登录')
+      app.showToast(app.t('backupsPage.restored', 'Restore completed. Sign in again.'))
       window.setTimeout(() => window.location.assign('/login'), 800)
     } catch (error) {
       app.handleApiError(error)
@@ -6502,16 +6508,16 @@ function BackupsPage({ config }: { config: PlatformPageConfig }) {
   const deleteBackup = async (item: BackupInfo) => {
     if (!canDeleteBackup(item)) return
     const confirmed = await confirm({
-      title: `删除备份 ${item.name}?`,
-      description: '备份文件删除后不可恢复。',
-      confirmText: '删除',
+      title: `${app.t('backupsPage.deleteConfirmTitle', 'Delete backup')} ${item.name}?`,
+      description: app.t('backupsPage.deleteConfirmDescription', 'The backup archive cannot be recovered after deletion.'),
+      confirmText: app.t('delete', 'Delete'),
       destructive: true,
     })
     if (!confirmed) return
     try {
       await apiRequest(`${apiPath}/${encodeURIComponent(item.name)}`, { method: 'DELETE' })
       await load()
-      app.showToast('备份已删除')
+      app.showToast(app.t('backupsPage.deleted', 'Backup deleted.'))
     } catch (error) {
       app.handleApiError(error)
     }
@@ -6533,40 +6539,56 @@ function BackupsPage({ config }: { config: PlatformPageConfig }) {
               {canListBackups ? (
                 <Button variant='outline' onClick={() => void load()} disabled={loading}>
                   <RefreshCw className={cn('size-4', loading && 'animate-spin')} />
-                  刷新
+                  {app.t('refresh', 'Refresh')}
                 </Button>
               ) : null}
               {canCreateBackup ? (
                 <Button variant='primary' onClick={() => void createBackup()} disabled={creating}>
                   <Save className='size-4' />
-                  {creating ? '备份中' : '立即备份'}
+                  {creating ? app.t('backupsPage.creating', 'Creating...') : app.t('backupsPage.createNow', 'Create backup')}
                 </Button>
               ) : null}
             </div>
           </CardHeader>
           <CardContent className='grid gap-5'>
             {canRestoreBackup ? (
-              <section className='grid gap-3 rounded-xl border border-border bg-background/60 p-4'>
+              <section className='grid gap-3 rounded-lg border border-border bg-background/60 p-4'>
                 <div>
-                  <h3 className='text-sm font-semibold'>上传恢复</h3>
-                  <p className='mt-1 text-xs leading-5 text-muted-foreground'>上传系统生成的备份 zip。执行恢复前会自动创建一份当前数据备份，恢复后需要重新登录。</p>
+                  <h3 className='text-sm font-semibold'>{app.t('backupsPage.uploadRestore', 'Upload and restore')}</h3>
+                  <p className='mt-1 text-xs leading-5 text-muted-foreground'>{app.t('backupsPage.uploadDescription', 'Validate a system backup archive before restoring it. A current snapshot is created automatically.')}</p>
                 </div>
                 <div className='grid gap-3 md:grid-cols-[minmax(0,1fr)_auto_auto]'>
-                  <Input type='file' accept='.zip,application/zip' onChange={(event) => {
-                    setUploadFile(event.currentTarget.files?.[0] || null)
+                  <Input type='file' accept='.zip,application/zip' aria-label={app.t('backupsPage.backupFile', 'Backup file')} onChange={(event) => {
+                    const nextFile = event.currentTarget.files?.[0] || null
+                    if (nextFile && nextFile.size > 512 * 1024 * 1024) {
+                      event.currentTarget.value = ''
+                      setUploadFile(null)
+                      setValidation(null)
+                      setValidatedUploadKey('')
+                      app.showToast(app.t('backupsPage.fileTooLarge', 'Backup file exceeds the 512 MiB upload limit.'))
+                      return
+                    }
+                    setUploadFile(nextFile)
                     setValidation(null)
+                    setValidatedUploadKey('')
                   }} />
                   <Button variant='outline' onClick={() => void validateUpload()} disabled={!uploadFile || restoring}>
                     <FileSearch className='size-4' />
-                    校验
+                    {restoring ? app.t('backupsPage.processing', 'Processing...') : app.t('backupsPage.validate', 'Validate')}
                   </Button>
-                  <Button variant='destructive' onClick={() => void restoreUpload()} disabled={!uploadFile || restoring}>
+                  <Button variant='destructive' onClick={() => void restoreUpload()} disabled={!uploadValidated || restoring}>
                     <Upload className='size-4' />
-                    {restoring ? '处理中' : '恢复'}
+                    {restoring ? app.t('backupsPage.processing', 'Processing...') : app.t('backupsPage.restore', 'Restore')}
                   </Button>
                 </div>
                 {validation ? (
-                  <pre className='max-h-56 overflow-auto rounded-lg bg-muted p-3 text-xs'>{JSON.stringify(validation, null, 2)}</pre>
+                  <div className='grid gap-2 rounded-lg border border-success/30 bg-success/5 p-3 text-xs'>
+                    <div className='flex flex-wrap items-center gap-2'>
+                      <Badge tone='success'>{app.t('backupsPage.validationPassed', 'Validation passed')}</Badge>
+                      <span className='font-mono text-muted-foreground'>{uploadFile?.name} · {formatBytesValue(uploadFile?.size)}</span>
+                    </div>
+                    <pre className='max-h-48 overflow-auto whitespace-pre-wrap break-all text-xs'>{JSON.stringify(validation, null, 2)}</pre>
+                  </div>
                 ) : null}
               </section>
             ) : null}
@@ -6576,36 +6598,36 @@ function BackupsPage({ config }: { config: PlatformPageConfig }) {
                   const canDownload = canDownloadBackup(item)
                   const canDelete = canDeleteBackup(item)
                   return (
-                <article key={item.name} className='grid gap-3 rounded-xl border border-border bg-background/60 p-4 md:grid-cols-[minmax(0,1fr)_auto] md:items-center'>
+                <article key={item.name} className='grid gap-3 rounded-lg border border-border bg-background/60 p-4 md:grid-cols-[minmax(0,1fr)_auto] md:items-center'>
                   <div className='min-w-0'>
                     <div className='flex flex-wrap items-center gap-2'>
                       <h3 className='truncate text-sm font-semibold'>{item.name}</h3>
                       <Badge tone='neutral'>{formatBytesValue(item.size)}</Badge>
                     </div>
-                    <p className='mt-1 text-xs text-muted-foreground'>{formatDate(item.modified_at)} · {(item.files || []).join(', ') || 'manifest only'}</p>
+                    <p className='mt-1 text-xs text-muted-foreground'>{formatDate(item.modified_at)} · {(item.files || []).join(', ') || app.t('backupsPage.manifestOnly', 'manifest only')}</p>
                   </div>
                   <div className='flex flex-wrap justify-end gap-2 md:flex-nowrap'>
                     {canDownload ? (
                       <Button variant='outline' onClick={() => void downloadResponse(`${apiPath}/${encodeURIComponent(item.name)}/download`, item.name)}>
                         <Download className='size-4' />
-                        下载
+                        {app.t('download', 'Download')}
                       </Button>
                     ) : null}
                     {canDelete ? (
                       <Button variant='destructive' onClick={() => void deleteBackup(item)}>
                         <Trash2 className='size-4' />
-                        删除
+                        {app.t('delete', 'Delete')}
                       </Button>
                     ) : null}
                   </div>
                 </article>
                   )
                 }) : (
-                  <div className='rounded-xl border border-dashed border-border p-6 text-sm text-muted-foreground'>暂无备份。点击“立即备份”生成第一份快照。</div>
+                  <div className='rounded-lg border border-dashed border-border p-6 text-sm text-muted-foreground'>{app.t('backupsPage.empty', 'No backups yet.')}</div>
                 )}
               </div>
             ) : (
-              <div className='rounded-xl border border-dashed border-border p-6 text-sm text-muted-foreground'>当前账号没有查看备份列表的 API 权限。</div>
+              <div className='rounded-lg border border-dashed border-border p-6 text-sm text-muted-foreground'>{app.t('backupsPage.noPermission', 'Your account cannot view backups.')}</div>
             )}
           </CardContent>
         </Card>
@@ -6613,6 +6635,10 @@ function BackupsPage({ config }: { config: PlatformPageConfig }) {
       {confirmDialog}
     </CardStaggerContainer>
   )
+}
+
+function backupUploadKey(file: File) {
+  return `${file.name}:${file.size}:${file.lastModified}`
 }
 
 async function submitBackupFile(file: File, dryRun: boolean) {

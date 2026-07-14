@@ -112,6 +112,29 @@ if (monitoringPageHardcodedFound.length > 0) {
   process.exit(1)
 }
 
+const backupsPageDefinitions = resourcesSource.match(/backupsPage:\s*\{/g) || []
+if (backupsPageDefinitions.length !== 2) {
+  console.error(`backupsPage locale definitions = ${backupsPageDefinitions.length}, want 2 (English and Simplified Chinese; other locales inherit fallback text)`)
+  process.exit(1)
+}
+
+const backupsPageStart = platformPageSource.indexOf('function BackupsPage(')
+const backupsPageEnd = platformPageSource.indexOf('async function submitBackupFile(', backupsPageStart)
+const backupsPageSource = backupsPageStart >= 0 && backupsPageEnd > backupsPageStart ? platformPageSource.slice(backupsPageStart, backupsPageEnd) : ''
+const backupsPageHardcodedText = ['备份已创建', '备份校验通过', '恢复备份并覆盖当前数据', '>上传恢复<', '>立即备份<', '>校验<', '>恢复<', '>下载<', '>删除<', '暂无备份', '当前账号没有查看备份']
+const backupsPageHardcodedFound = backupsPageHardcodedText.filter((fragment) => backupsPageSource.includes(fragment))
+if (backupsPageHardcodedFound.length > 0) {
+  console.error(`backups page contains hardcoded locale text: ${backupsPageHardcodedFound.join(', ')}`)
+  process.exit(1)
+}
+
+for (const fragment of ['backupUploadKey(uploadFile)', 'nextFile.size > 512 * 1024 * 1024', '!uploadFile || !uploadValidated', 'disabled={!uploadValidated || restoring}']) {
+  if (!backupsPageSource.includes(fragment)) {
+    console.error(`backups page is missing validated restore guard: ${fragment}`)
+    process.exit(1)
+  }
+}
+
 for (const endpoint of ['/sftp/mkdir', '/sftp/write', '/sftp/${fileActionMode}']) {
   if (!workspaceSource.includes(endpoint)) {
     console.error(`SSH file manager is missing endpoint: ${endpoint}`)

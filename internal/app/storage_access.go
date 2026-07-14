@@ -1,24 +1,11 @@
 package app
 
 import (
-	"fmt"
 	"net/http"
 	"strings"
 
 	"openwebservermanager/internal/model"
 )
-
-func validatePlatformItemRequest(collection string, req model.PlatformItemRequest) error {
-	if collection != "storages" || req.Metadata == nil {
-		return nil
-	}
-	if value, exists := req.Metadata["limit_bytes"]; exists && !metadataValueEmpty(value) {
-		if _, ok := parseStorageByteSize(value); !ok {
-			return fmt.Errorf("storage quota must be a positive byte value such as 1073741824 or 10GB")
-		}
-	}
-	return nil
-}
 
 func (s *Server) handleAccessStorages(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet {

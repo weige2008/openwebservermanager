@@ -4227,7 +4227,7 @@ function PlatformItemDialog({
             </>
           ) : isCommandFilter ? (
             <>
-              <Field label={app.t('ruleName', '规则名称')}><Input value={form.name} onChange={(event) => onChange({ name: event.currentTarget.value })} /></Field>
+              <Field label={app.t('ruleName', '规则名称')}><Input value={form.name} onChange={(event) => onChange({ name: event.currentTarget.value })} required /></Field>
               <Field label={app.t('status')}>
                 <Select value={form.status || 'enabled'} onChange={(event) => onChange({ status: event.currentTarget.value })}>
                   <option value='enabled'>{app.t('enabled', '启用')}</option>
@@ -4254,6 +4254,7 @@ function PlatformItemDialog({
                   value={metadataFormText(form.metadata, 'pattern')}
                   onChange={(event) => onChange({ metadata: metadataWithValue(form.metadata, 'pattern', event.currentTarget.value) })}
                   placeholder={'rm\\s+-rf|mkfs|shutdown|reboot'}
+                  required
                 />
               </Field>
               <Field label={app.t('protocol')}>

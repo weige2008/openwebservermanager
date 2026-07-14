@@ -493,6 +493,11 @@ func TestPlatformCollectionEndpoints(t *testing.T) {
 				payload["password"] = "password123"
 				payload["metadata"] = map[string]any{"role": "user"}
 			}
+			if path == "/api/admin/command-filters" {
+				payload["type"] = "deny"
+				payload["protocol"] = "ssh"
+				payload["metadata"] = map[string]any{"pattern": "blocked-test-command", "risk": "high"}
+			}
 			rec := assertStatus(t, handler, http.MethodPost, path, payload, cookie, http.StatusCreated)
 			var item model.PlatformItem
 			if err := json.Unmarshal(rec.Body.Bytes(), &item); err != nil {
@@ -632,6 +637,127 @@ func TestManagedWorkflowCollectionsRejectGenericMutations(t *testing.T) {
 	decodeResponse(t, sqlDecisionRec, &approvedSQL)
 	if approvedSQL.Status != "approved" {
 		t.Fatalf("dedicated sql work order status = %q, want approved", approvedSQL.Status)
+	}
+}
+
+func TestCommandFilterValidationPreventsSilentAllow(t *testing.T) {
+	handler, adminCookie := newTestHandler(t)
+
+	invalidCases := []struct {
+		name    string
+		payload map[string]any
+		want    string
+	}{
+		{
+			name: "missing name",
+			payload: map[string]any{
+				"type": "deny", "protocol": "ssh", "metadata": map[string]any{"pattern": "shutdown"},
+			},
+			want: "name is required",
+		},
+		{
+			name: "unknown action",
+			payload: map[string]any{
+				"name": "typo action", "type": "denny", "protocol": "ssh", "metadata": map[string]any{"pattern": "shutdown"},
+			},
+			want: "action must be allow, deny, or approval",
+		},
+		{
+			name: "empty pattern",
+			payload: map[string]any{
+				"name": "empty pattern", "type": "deny", "protocol": "ssh", "metadata": map[string]any{"pattern": "  "},
+			},
+			want: "pattern is required",
+		},
+		{
+			name: "invalid regular expression",
+			payload: map[string]any{
+				"name": "invalid regex", "type": "deny", "protocol": "ssh", "metadata": map[string]any{"pattern": "[shutdown"},
+			},
+			want: "invalid command filter pattern",
+		},
+		{
+			name: "unknown risk",
+			payload: map[string]any{
+				"name": "unknown risk", "type": "deny", "protocol": "ssh", "metadata": map[string]any{"pattern": "shutdown", "risk": "extreme"},
+			},
+			want: "command filter risk must be",
+		},
+		{
+			name: "unsupported protocol",
+			payload: map[string]any{
+				"name": "rdp rule", "type": "deny", "protocol": "rdp", "metadata": map[string]any{"pattern": "shutdown"},
+			},
+			want: "only support the ssh protocol",
+		},
+		{
+			name: "unknown status",
+			payload: map[string]any{
+				"name": "bad status", "type": "deny", "status": "enable", "protocol": "ssh", "metadata": map[string]any{"pattern": "shutdown"},
+			},
+			want: "status must be enabled or disabled",
+		},
+	}
+	for _, test := range invalidCases {
+		t.Run(test.name, func(t *testing.T) {
+			rec := assertStatus(t, handler, http.MethodPost, "/api/admin/command-filters", test.payload, adminCookie, http.StatusBadRequest)
+			if !strings.Contains(rec.Body.String(), test.want) {
+				t.Fatalf("validation error = %s, want %q", rec.Body.String(), test.want)
+			}
+		})
+	}
+
+	createRec := assertStatus(t, handler, http.MethodPost, "/api/admin/command-filters", map[string]any{
+		"name":   "validated destructive command",
+		"type":   "deny",
+		"status": "enabled",
+		"metadata": map[string]any{
+			"pattern": `rm\s+-rf|mkfs`,
+			"risk":    "critical",
+		},
+	}, adminCookie, http.StatusCreated)
+	var filter model.PlatformItem
+	decodeResponse(t, createRec, &filter)
+	if filter.Protocol != model.ProtocolSSH {
+		t.Fatalf("default command filter protocol = %q, want ssh", filter.Protocol)
+	}
+
+	assertStatus(t, handler, http.MethodPatch, "/api/admin/command-filters/"+filter.ID, map[string]any{
+		"type": "approval",
+		"metadata": map[string]any{
+			"pattern": "systemctl\\s+restart",
+			"risk":    "emergency",
+		},
+	}, adminCookie, http.StatusOK)
+
+	for _, update := range []struct {
+		name    string
+		payload map[string]any
+		want    string
+	}{
+		{name: "action typo", payload: map[string]any{"type": "approvee"}, want: "action must be allow, deny, or approval"},
+		{name: "broken regex", payload: map[string]any{"metadata": map[string]any{"pattern": "(restart"}}, want: "invalid command filter pattern"},
+		{name: "metadata replacement without pattern", payload: map[string]any{"metadata": map[string]any{"risk": "high"}}, want: "pattern is required"},
+	} {
+		t.Run("update "+update.name, func(t *testing.T) {
+			rec := assertStatus(t, handler, http.MethodPatch, "/api/admin/command-filters/"+filter.ID, update.payload, adminCookie, http.StatusBadRequest)
+			if !strings.Contains(rec.Body.String(), update.want) {
+				t.Fatalf("update validation error = %s, want %q", rec.Body.String(), update.want)
+			}
+		})
+	}
+
+	assertStatus(t, handler, http.MethodPatch, "/api/admin/command-filters/"+filter.ID, map[string]any{"status": "disabled"}, adminCookie, http.StatusOK)
+	detailRec := assertStatus(t, handler, http.MethodGet, "/api/admin/command-filters/"+filter.ID, nil, adminCookie, http.StatusOK)
+	var stored model.PlatformItem
+	decodeResponse(t, detailRec, &stored)
+	if stored.Type != "approval" || stored.Status != "disabled" || firstMetadataString(stored.Metadata, "pattern") != "systemctl\\s+restart" || firstMetadataString(stored.Metadata, "risk") != "emergency" {
+		t.Fatalf("invalid updates changed stored command filter: %#v", stored)
+	}
+
+	listRec := assertStatus(t, handler, http.MethodGet, "/api/admin/command-filters", nil, adminCookie, http.StatusOK)
+	if strings.Contains(listRec.Body.String(), "typo action") || strings.Contains(listRec.Body.String(), "invalid regex") {
+		t.Fatalf("invalid command filters were persisted: %s", listRec.Body.String())
 	}
 }
 

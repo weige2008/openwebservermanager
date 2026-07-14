@@ -205,7 +205,7 @@ func (s *Server) handleCollection(w http.ResponseWriter, r *http.Request, collec
 		if !decodeJSON(w, r, &req) {
 			return
 		}
-		if err := validatePlatformItemRequest(collection, req); err != nil {
+		if err := preparePlatformItemCreateRequest(collection, &req); err != nil {
 			writeError(w, http.StatusBadRequest, err.Error())
 			return
 		}
@@ -232,10 +232,6 @@ func (s *Server) handleCollection(w http.ResponseWriter, r *http.Request, collec
 		if !decodeJSON(w, r, &req) {
 			return
 		}
-		if err := validatePlatformItemRequest(collection, req); err != nil {
-			writeError(w, http.StatusBadRequest, err.Error())
-			return
-		}
 		if err := validateAuthorizationRequest(collection, req); err != nil {
 			writeError(w, http.StatusBadRequest, err.Error())
 			return
@@ -247,6 +243,10 @@ func (s *Server) handleCollection(w http.ResponseWriter, r *http.Request, collec
 		}
 		if !ok {
 			writeError(w, http.StatusNotFound, "record not found")
+			return
+		}
+		if err := validatePlatformItemUpdateRequest(collection, previous, req); err != nil {
+			writeError(w, http.StatusBadRequest, err.Error())
 			return
 		}
 		item, err := s.cfg.Store.UpdatePlatformItem(collection, id, req)

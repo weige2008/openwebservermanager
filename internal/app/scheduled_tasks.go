@@ -770,11 +770,15 @@ func (s *Server) cleanupHistoryLogs(task model.PlatformItem, preservedOperationL
 		}
 	}
 	deletedByCollection := map[string]int{}
+	retentionByCollection := map[string]int{}
 	totalDeleted := 0
 	now := time.Now().UTC()
 	for _, collection := range collections {
-		days := retentionDaysForCollection(collection, task.Metadata, settings, 90)
-		cutoff := now.AddDate(0, 0, -days)
+		collectionDays := retentionDaysForCollection(collection, task.Metadata, settings, 90)
+		retentionByCollection[collection] = collectionDays
+		if collection == "operation_logs" {
+			retentionByCollection["scheduled_task_logs"] = scheduledTaskLogRetentionDays(task.Metadata, settings, 90)
+		}
 		items, err := s.cfg.Store.ListPlatformItems(collection)
 		if err != nil {
 			return nil, err
@@ -783,6 +787,11 @@ func (s *Server) cleanupHistoryLogs(task model.PlatformItem, preservedOperationL
 			if collection == "operation_logs" && preservedOperationLogs[item.ID] {
 				continue
 			}
+			days := collectionDays
+			if collection == "operation_logs" && strings.EqualFold(strings.TrimSpace(item.Type), "scheduled_task") {
+				days = retentionByCollection["scheduled_task_logs"]
+			}
+			cutoff := now.AddDate(0, 0, -days)
 			if item.CreatedAt.IsZero() || item.CreatedAt.After(cutoff) {
 				continue
 			}
@@ -799,6 +808,8 @@ func (s *Server) cleanupHistoryLogs(task model.PlatformItem, preservedOperationL
 	if err != nil {
 		return nil, err
 	}
+	retentionByCollection["connection_sessions"] = sessionCleanup.RetentionDays
+	retentionByCollection["offline_sessions"] = sessionCleanup.RetentionDays
 	deletedByCollection["connection_sessions"] = sessionCleanup.DeletedSessions
 	deletedByCollection["offline_sessions"] = sessionCleanup.DeletedOfflineRecords
 	totalDeleted += sessionCleanup.DeletedSessions + sessionCleanup.DeletedOfflineRecords
@@ -809,6 +820,7 @@ func (s *Server) cleanupHistoryLogs(task model.PlatformItem, preservedOperationL
 		"recording_bytes":                sessionCleanup.DeletedRecordingBytes,
 		"unsafe_recording_paths_skipped": sessionCleanup.UnsafeRecordingPaths,
 		"session_retention_days":         sessionCleanup.RetentionDays,
+		"retention_days":                 retentionByCollection,
 	}, nil
 }
 
@@ -953,11 +965,34 @@ func (s *Server) retentionSettings() map[string]any {
 		return nil
 	}
 	for _, item := range items {
-		if strings.EqualFold(item.Type, "retention") {
+		if strings.EqualFold(item.Type, "retention") && platformItemEnabled(item) {
 			return item.Metadata
 		}
 	}
 	return nil
+}
+
+func scheduledTaskLogRetentionDays(taskMetadata, settings map[string]any, fallback int) int {
+	keys := []string{
+		"scheduled_task_logs_days",
+		"scheduled_tasks_days",
+		"scheduled_task_days",
+		"operation_logs_days",
+		"operation_days",
+		"retention_days",
+		"days",
+	}
+	for _, key := range keys {
+		if value, ok := metadataInt(taskMetadata[key]); ok {
+			return maxInt(value, 0)
+		}
+	}
+	for _, key := range keys {
+		if value, ok := metadataInt(settings[key]); ok {
+			return maxInt(value, 0)
+		}
+	}
+	return fallback
 }
 
 func retentionDaysForCollection(collection string, taskMetadata, settings map[string]any, fallback int) int {

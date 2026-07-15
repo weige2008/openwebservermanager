@@ -14321,6 +14321,7 @@ func TestScheduledTaskValidationRejectsInertConfiguration(t *testing.T) {
 		{name: "explicit non-manual without schedule", payload: map[string]any{"name": "missing schedule", "type": "backup", "metadata": map[string]any{"manual_only": false}}, want: "must define a schedule"},
 		{name: "invalid asset timeout", payload: map[string]any{"name": "bad timeout", "type": "asset-status", "metadata": map[string]any{"manual_only": true, "timeout_ms": 99}}, want: "timeout_ms must be an integer between 100 and 30000"},
 		{name: "invalid retention", payload: map[string]any{"name": "bad retention", "type": "log-cleanup", "metadata": map[string]any{"manual_only": true, "retention_days": -1}}, want: "retention_days must be an integer between 0"},
+		{name: "unknown retention field", payload: map[string]any{"name": "bad retention field", "type": "log-cleanup", "metadata": map[string]any{"manual_only": true, "login_log_days": 30}}, want: "login_log_days"},
 		{name: "invalid certificate validity", payload: map[string]any{"name": "bad validity", "type": "certificate-renewal", "metadata": map[string]any{"manual_only": true, "validity_days": 0}}, want: "validity_days must be an integer between 1"},
 	}
 	for _, test := range invalidCases {
@@ -14384,6 +14385,126 @@ func TestScheduledTaskValidationRejectsInertConfiguration(t *testing.T) {
 	listRec := assertStatus(t, handler, http.MethodGet, "/api/admin/scheduled-tasks", nil, adminCookie, http.StatusOK)
 	if strings.Contains(listRec.Body.String(), `"name":"custom"`) || strings.Contains(listRec.Body.String(), `"name":"bad cron"`) {
 		t.Fatalf("invalid scheduled tasks were persisted: %s", listRec.Body.String())
+	}
+}
+
+func TestRetentionSettingsValidateAndCleanCollectionsIndependently(t *testing.T) {
+	handler, adminCookie := newTestHandler(t)
+	srv := handler.(*Server)
+
+	for _, test := range []struct {
+		name     string
+		metadata map[string]any
+		want     string
+	}{
+		{name: "negative", metadata: map[string]any{"login_logs_days": -1}, want: "integer between 0 and 36500"},
+		{name: "fractional", metadata: map[string]any{"access_logs_days": 1.5}, want: "integer between 0 and 36500"},
+		{name: "invalid string", metadata: map[string]any{"sql_logs_days": "thirty"}, want: "integer between 0 and 36500"},
+		{name: "unknown field", metadata: map[string]any{"acess_logs_days": 30}, want: "is not supported"},
+	} {
+		t.Run("reject "+test.name, func(t *testing.T) {
+			rec := assertStatus(t, handler, http.MethodPost, "/api/admin/system-settings", map[string]any{
+				"name": "Invalid retention", "type": "retention", "status": "enabled", "metadata": test.metadata,
+			}, adminCookie, http.StatusBadRequest)
+			if !strings.Contains(rec.Body.String(), test.want) {
+				t.Fatalf("retention validation error = %s, want %q", rec.Body.String(), test.want)
+			}
+		})
+	}
+
+	settingRec := assertStatus(t, handler, http.MethodPost, "/api/admin/system-settings", map[string]any{
+		"name":   "Log retention",
+		"type":   "retention",
+		"status": "enabled",
+		"metadata": map[string]any{
+			"connection_sessions_days": 1,
+			"login_logs_days":          1,
+			"scheduled_task_logs_days": 30,
+			"operation_logs_days":      1,
+			"file_logs_days":           30,
+			"access_logs_days":         30,
+			"sql_logs_days":            1,
+			"exec_command_logs_days":   1,
+		},
+	}, adminCookie, http.StatusCreated)
+	var setting model.PlatformItem
+	decodeResponse(t, settingRec, &setting)
+	invalidUpdateRec := assertStatus(t, handler, http.MethodPatch, "/api/admin/system-settings/"+setting.ID, map[string]any{
+		"metadata": map[string]any{"scheduled_task_logs_days": 2.25},
+	}, adminCookie, http.StatusBadRequest)
+	if !strings.Contains(invalidUpdateRec.Body.String(), "scheduled_task_logs_days must be an integer") {
+		t.Fatalf("retention update validation error = %s", invalidUpdateRec.Body.String())
+	}
+
+	oldCreatedAt := time.Now().UTC().AddDate(0, 0, -2)
+	createOldLog := func(collection, name, itemType string) model.PlatformItem {
+		t.Helper()
+		item, err := srv.cfg.Store.CreatePlatformItem(collection, model.PlatformItemRequest{
+			Name: name, Type: itemType, Status: "success", TargetID: "historical-task",
+		})
+		if err != nil {
+			t.Fatalf("create %s fixture: %v", collection, err)
+		}
+		item.CreatedAt = oldCreatedAt
+		item.UpdatedAt = oldCreatedAt
+		item, err = srv.cfg.Store.SavePlatformItem(collection, item)
+		if err != nil {
+			t.Fatalf("age %s fixture: %v", collection, err)
+		}
+		return item
+	}
+	oldLogin := createOldLog("login_logs", "old login", "password")
+	oldScheduledTask := createOldLog("operation_logs", "old task run", "scheduled_task")
+	oldOperation := createOldLog("operation_logs", "old operation", "assets")
+	oldFile := createOldLog("file_logs", "old file", "download")
+	oldAccess := createOldLog("access_logs", "old access", "GET")
+	oldSQL := createOldLog("sql_logs", "old sql", "query")
+	oldExec := createOldLog("exec_command_logs", "old command", "exec")
+
+	cleanupTaskRec := assertStatus(t, handler, http.MethodPost, "/api/admin/scheduled-tasks", map[string]any{
+		"name": "Independent retention cleanup", "type": "log-cleanup", "status": "enabled",
+	}, adminCookie, http.StatusCreated)
+	var cleanupTask model.PlatformItem
+	decodeResponse(t, cleanupTaskRec, &cleanupTask)
+	cleanupRec := assertStatus(t, handler, http.MethodPost, "/api/admin/scheduled-tasks/"+cleanupTask.ID+"/run", nil, adminCookie, http.StatusAccepted)
+	var cleanupLog model.PlatformItem
+	decodeResponse(t, cleanupRec, &cleanupLog)
+
+	assertStored := func(collection string, item model.PlatformItem, want bool) {
+		t.Helper()
+		_, ok, err := srv.cfg.Store.GetPlatformItem(collection, item.ID)
+		if err != nil || ok != want {
+			t.Fatalf("%s item %s exists = %v, want %v, err %v", collection, item.ID, ok, want, err)
+		}
+	}
+	assertStored("login_logs", oldLogin, false)
+	assertStored("operation_logs", oldScheduledTask, true)
+	assertStored("operation_logs", oldOperation, false)
+	assertStored("file_logs", oldFile, true)
+	assertStored("access_logs", oldAccess, true)
+	assertStored("sql_logs", oldSQL, false)
+	assertStored("exec_command_logs", oldExec, false)
+
+	retention, ok := cleanupLog.Metadata["retention_days"].(map[string]any)
+	if !ok {
+		t.Fatalf("cleanup retention metadata missing: %#v", cleanupLog.Metadata)
+	}
+	if got, ok := metadataInt(retention["scheduled_task_logs"]); !ok || got != 30 {
+		t.Fatalf("scheduled task retention = %v/%v, want 30 in %#v", got, ok, retention)
+	}
+	if got, ok := metadataInt(retention["operation_logs"]); !ok || got != 1 {
+		t.Fatalf("operation retention = %v/%v, want 1 in %#v", got, ok, retention)
+	}
+	historicalTaskLogsRec := assertStatus(t, handler, http.MethodGet, "/api/admin/scheduled-tasks/historical-task/logs", nil, adminCookie, http.StatusOK)
+	if !strings.Contains(historicalTaskLogsRec.Body.String(), oldScheduledTask.ID) {
+		t.Fatalf("independently retained task log not returned by task logs API: %s", historicalTaskLogsRec.Body.String())
+	}
+
+	assertStatus(t, handler, http.MethodPatch, "/api/admin/system-settings/"+setting.ID, map[string]any{
+		"status": "disabled",
+	}, adminCookie, http.StatusOK)
+	if settings := srv.retentionSettings(); settings != nil {
+		t.Fatalf("disabled retention setting remained active: %#v", settings)
 	}
 }
 

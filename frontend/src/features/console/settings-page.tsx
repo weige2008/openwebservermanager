@@ -1,4 +1,4 @@
-import { BadgeCheck, Fingerprint, Globe2, KeyRound, MessageCircle, Monitor, Moon, Network, RotateCcw, ShieldCheck, Sun, Trash2, UserCircle } from 'lucide-react'
+import { BadgeCheck, Fingerprint, Globe2, History, KeyRound, MessageCircle, Monitor, Moon, Network, RotateCcw, ShieldCheck, Sun, Trash2, UserCircle } from 'lucide-react'
 import { useEffect, useState } from 'react'
 import { useTranslation } from 'react-i18next'
 
@@ -196,6 +196,31 @@ interface LocalLicenseFormState {
   features: string
 }
 
+interface RetentionSettingsState {
+  sessionDays: number
+  loginDays: number
+  scheduledTaskDays: number
+  operationDays: number
+  fileDays: number
+  accessDays: number
+  sqlDays: number
+  execCommandDays: number
+  setting?: PlatformItem
+}
+
+type RetentionNumberKey = Exclude<keyof RetentionSettingsState, 'setting'>
+
+const retentionFieldOptions: Array<{ key: RetentionNumberKey; labelKey: string; descriptionKey: string }> = [
+  { key: 'sessionDays', labelKey: 'settingsPage.retentionSessions', descriptionKey: 'settingsPage.retentionSessionsDescription' },
+  { key: 'loginDays', labelKey: 'settingsPage.retentionLoginLogs', descriptionKey: 'settingsPage.retentionLoginLogsDescription' },
+  { key: 'scheduledTaskDays', labelKey: 'settingsPage.retentionScheduledTaskLogs', descriptionKey: 'settingsPage.retentionScheduledTaskLogsDescription' },
+  { key: 'operationDays', labelKey: 'settingsPage.retentionOperationLogs', descriptionKey: 'settingsPage.retentionOperationLogsDescription' },
+  { key: 'fileDays', labelKey: 'settingsPage.retentionFileLogs', descriptionKey: 'settingsPage.retentionFileLogsDescription' },
+  { key: 'accessDays', labelKey: 'settingsPage.retentionAccessLogs', descriptionKey: 'settingsPage.retentionAccessLogsDescription' },
+  { key: 'sqlDays', labelKey: 'settingsPage.retentionSQLLogs', descriptionKey: 'settingsPage.retentionSQLLogsDescription' },
+  { key: 'execCommandDays', labelKey: 'settingsPage.retentionExecCommandLogs', descriptionKey: 'settingsPage.retentionExecCommandLogsDescription' },
+]
+
 const loginSecurityTypes = ['security', 'identity', 'login', 'password', 'captcha', 'mfa']
 const captchaKeys = ['captcha_enabled', 'login_captcha', 'enable_captcha', 'captcha', 'require_captcha']
 const disablePasswordKeys = ['disable_password_login', 'password_login_disabled', 'disablePasswordLogin', 'passwordLoginDisabled', 'no_password_login']
@@ -253,6 +278,8 @@ export function SettingsPage() {
     loginLockMinutes: 5,
   })
   const [loginSecurityBusy, setLoginSecurityBusy] = useState(false)
+  const [retentionSettings, setRetentionSettings] = useState<RetentionSettingsState>(() => defaultRetentionSettings())
+  const [retentionBusy, setRetentionBusy] = useState(false)
   const [loginPolicies, setLoginPolicies] = useState<PlatformItem[]>([])
   const [loginPolicyForm, setLoginPolicyForm] = useState<LoginPolicyFormState>(defaultLoginPolicyForm)
   const [loginPolicyBusy, setLoginPolicyBusy] = useState(false)
@@ -293,6 +320,7 @@ export function SettingsPage() {
   const loadLoginSecurity = async () => {
     const result = await apiRequest<{ items: PlatformItem[] }>('/api/admin/system-settings')
     setLoginSecurity(loginSecurityFromSettings(result.items, app.captchaRequired, app.passwordLoginDisabled))
+    setRetentionSettings(retentionSettingsFromSettings(result.items))
     setOIDCSettings(oidcSettingsFromSettings(result.items))
     setLDAPSettings(ldapSettingsFromSettings(result.items))
     setWeComSettings(wecomSettingsFromSettings(result.items))
@@ -584,6 +612,55 @@ export function SettingsPage() {
       app.handleApiError(error)
     } finally {
       setLoginSecurityBusy(false)
+    }
+  }
+
+  const patchRetentionSettings = (key: RetentionNumberKey, value: number) => {
+    setRetentionSettings((current) => ({
+      ...current,
+      [key]: clampSettingNumber(value, 0, 36500, 90),
+    }))
+  }
+
+  const saveRetentionSettings = async () => {
+    if (!canSaveSystemSetting(retentionSettings.setting?.id)) {
+      showPermissionDenied()
+      return
+    }
+    setRetentionBusy(true)
+    try {
+      const payload = {
+        name: retentionSettings.setting?.name || 'Log retention',
+        type: 'retention',
+        status: 'enabled',
+        metadata: {
+          connection_sessions_days: retentionSettings.sessionDays,
+          login_logs_days: retentionSettings.loginDays,
+          scheduled_task_logs_days: retentionSettings.scheduledTaskDays,
+          operation_logs_days: retentionSettings.operationDays,
+          file_logs_days: retentionSettings.fileDays,
+          access_logs_days: retentionSettings.accessDays,
+          sql_logs_days: retentionSettings.sqlDays,
+          exec_command_logs_days: retentionSettings.execCommandDays,
+        },
+      }
+      if (retentionSettings.setting?.id) {
+        await apiRequest<PlatformItem>(`/api/admin/system-settings/${retentionSettings.setting.id}`, {
+          method: 'PATCH',
+          body: JSON.stringify(payload),
+        })
+      } else {
+        await apiRequest<PlatformItem>('/api/admin/system-settings', {
+          method: 'POST',
+          body: JSON.stringify(payload),
+        })
+      }
+      await loadLoginSecurity()
+      app.showToast(t('settingsPage.retentionSaved'))
+    } catch (error) {
+      app.handleApiError(error)
+    } finally {
+      setRetentionBusy(false)
     }
   }
 
@@ -967,6 +1044,7 @@ export function SettingsPage() {
   }
 
   const canSaveLoginSecurity = canSaveSystemSetting(loginSecurity.setting?.id)
+  const canSaveRetentionSettings = canSaveSystemSetting(retentionSettings.setting?.id)
   const canSaveOIDCSettings = canSaveSystemSetting(oidcSettings.setting?.id)
   const canSaveLDAPSettings = canSaveSystemSetting(ldapSettings.setting?.id)
   const canSaveWeComSettings = canSaveSystemSetting(wecomSettings.setting?.id)
@@ -1932,6 +2010,50 @@ export function SettingsPage() {
       </CardStaggerItem>
       ) : null}
 
+      {canReadSystemSettings ? (
+      <CardStaggerItem className='grid gap-4 rounded-xl border border-border bg-card p-5 shadow-sm lg:grid-cols-[0.85fr_1.15fr]'>
+        <div className='flex min-w-0 items-start gap-3'>
+          <span className='grid size-12 shrink-0 place-items-center rounded-full bg-primary text-primary-foreground'>
+            <History className='size-5' />
+          </span>
+          <div className='min-w-0'>
+            <div className='flex flex-wrap items-center gap-2'>
+              <h2 className='truncate text-base font-semibold'>{t('settingsPage.retentionTitle')}</h2>
+              <Badge tone={retentionSettings.setting ? 'success' : 'neutral'}>
+                {retentionSettings.setting ? t('settingsPage.retentionConfigured') : t('settingsPage.retentionDefault')}
+              </Badge>
+            </div>
+            <p className='mt-1 max-w-lg text-sm leading-6 text-muted-foreground'>{t('settingsPage.retentionDescription')}</p>
+            <p className='mt-2 text-xs leading-5 text-muted-foreground'>{t('settingsPage.retentionCleanupHint')}</p>
+          </div>
+        </div>
+        <div className='grid gap-4'>
+          <div className='grid gap-3 sm:grid-cols-2'>
+            {retentionFieldOptions.map((option) => (
+              <Field key={option.key} label={t(option.labelKey)}>
+                <Input
+                  type='number'
+                  min={0}
+                  max={36500}
+                  step={1}
+                  value={retentionSettings[option.key]}
+                  onChange={(event) => patchRetentionSettings(option.key, numberInputValue(event.currentTarget.value, 90))}
+                />
+                <p className='text-xs leading-5 text-muted-foreground'>{t(option.descriptionKey)}</p>
+              </Field>
+            ))}
+          </div>
+          {canSaveRetentionSettings ? (
+            <div className='flex justify-end'>
+              <Button variant='primary' onClick={() => void saveRetentionSettings()} disabled={retentionBusy}>
+                {retentionBusy ? t('saving') : t('settingsPage.saveRetention')}
+              </Button>
+            </div>
+          ) : null}
+        </div>
+      </CardStaggerItem>
+      ) : null}
+
       {canReadLicense ? (
       <CardStaggerItem className='grid gap-4 rounded-xl border border-border bg-card p-5 shadow-sm lg:grid-cols-[0.85fr_1.15fr]'>
         <div className='flex min-w-0 items-start gap-3'>
@@ -2213,6 +2335,37 @@ function loginSecurityFromSettings(items: PlatformItem[], fallbackCaptcha: boole
     candidates.find((item) => hasLoginSecurityMetadata(item)) ||
     candidates[0]
   return { captchaEnabled, passwordLoginDisabled, forceMFARequired, loginFailureThreshold, loginFailureWindowMinutes, loginLockMinutes, setting }
+}
+
+function defaultRetentionSettings(): RetentionSettingsState {
+  return {
+    sessionDays: 90,
+    loginDays: 90,
+    scheduledTaskDays: 90,
+    operationDays: 90,
+    fileDays: 90,
+    accessDays: 90,
+    sqlDays: 90,
+    execCommandDays: 90,
+  }
+}
+
+function retentionSettingsFromSettings(items: PlatformItem[]): RetentionSettingsState {
+  const setting = items.find((item) => platformItemEnabled(item) && (item.type || '').trim().toLowerCase() === 'retention')
+  if (!setting) return defaultRetentionSettings()
+  const metadata = setting.metadata ?? {}
+  const fallback = metadataNumberByKeys(metadata, ['retention_days', 'days'], 90, 0, 36500)
+  return {
+    sessionDays: metadataNumberByKeys(metadata, ['connection_sessions_days', 'connection_session_days', 'sessions_days', 'session_days', 'offline_sessions_days', 'offline_session_days', 'recordings_days', 'recording_days'], fallback, 0, 36500),
+    loginDays: metadataNumberByKeys(metadata, ['login_logs_days', 'login_days'], fallback, 0, 36500),
+    scheduledTaskDays: metadataNumberByKeys(metadata, ['scheduled_task_logs_days', 'scheduled_tasks_days', 'scheduled_task_days', 'operation_logs_days', 'operation_days'], fallback, 0, 36500),
+    operationDays: metadataNumberByKeys(metadata, ['operation_logs_days', 'operation_days'], fallback, 0, 36500),
+    fileDays: metadataNumberByKeys(metadata, ['file_logs_days', 'file_days'], fallback, 0, 36500),
+    accessDays: metadataNumberByKeys(metadata, ['access_logs_days', 'access_days'], fallback, 0, 36500),
+    sqlDays: metadataNumberByKeys(metadata, ['sql_logs_days', 'sql_days'], fallback, 0, 36500),
+    execCommandDays: metadataNumberByKeys(metadata, ['exec_command_logs_days', 'exec_command_days'], fallback, 0, 36500),
+    setting,
+  }
 }
 
 function defaultOIDCSettings(): OIDCSettingsState {

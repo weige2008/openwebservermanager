@@ -41,6 +41,8 @@ func preparePlatformItemUpdateRequest(collection string, existing model.Platform
 		return validateCommandFilterItem(item)
 	case "scheduled_tasks":
 		return validateScheduledTaskItem(item)
+	case "system_settings":
+		return validateSystemSettingItem(item)
 	default:
 		return validatePlatformItemRequest(collection, *req)
 	}
@@ -63,6 +65,13 @@ func validatePlatformItemRequest(collection string, req model.PlatformItemReques
 		})
 	case "scheduled_tasks":
 		return validateScheduledTaskItem(model.PlatformItem{
+			Name:     strings.TrimSpace(req.Name),
+			Type:     strings.TrimSpace(req.Type),
+			Status:   strings.TrimSpace(req.Status),
+			Metadata: req.Metadata,
+		})
+	case "system_settings":
+		return validateSystemSettingItem(model.PlatformItem{
 			Name:     strings.TrimSpace(req.Name),
 			Type:     strings.TrimSpace(req.Type),
 			Status:   strings.TrimSpace(req.Status),
@@ -255,8 +264,10 @@ func validateScheduledTaskTypeMetadata(taskType string, metadata map[string]any)
 	switch taskType {
 	case "asset-status":
 		return validateScheduledTaskInteger(metadata, "timeout_ms", 100, 30000)
-	case "log-cleanup", "backup":
+	case "backup":
 		return validateScheduledTaskInteger(metadata, "retention_days", 0, 36500)
+	case "log-cleanup":
+		return validateRetentionDaysMetadata(metadata, "scheduled task")
 	case "certificate-renewal":
 		if err := validateScheduledTaskInteger(metadata, "renew_before_days", 0, 3650); err != nil {
 			return err
@@ -265,6 +276,75 @@ func validateScheduledTaskTypeMetadata(taskType string, metadata map[string]any)
 	default:
 		return nil
 	}
+}
+
+var retentionDayMetadataKeys = []string{
+	"retention_days",
+	"days",
+	"connection_sessions_days",
+	"connection_session_days",
+	"sessions_days",
+	"session_days",
+	"offline_sessions_days",
+	"offline_session_days",
+	"recordings_days",
+	"recording_days",
+	"login_logs_days",
+	"login_days",
+	"scheduled_task_logs_days",
+	"scheduled_tasks_days",
+	"scheduled_task_days",
+	"operation_logs_days",
+	"operation_days",
+	"file_logs_days",
+	"file_days",
+	"access_logs_days",
+	"access_days",
+	"sql_logs_days",
+	"sql_days",
+	"exec_command_logs_days",
+	"exec_command_days",
+}
+
+func validateSystemSettingItem(item model.PlatformItem) error {
+	if !strings.EqualFold(strings.TrimSpace(item.Type), "retention") {
+		return nil
+	}
+	status := strings.ToLower(strings.TrimSpace(item.Status))
+	if status != "" {
+		switch status {
+		case "enabled", "active", "disabled", "inactive":
+		default:
+			return fmt.Errorf("retention setting status must be enabled or disabled, got %q", status)
+		}
+	}
+	return validateRetentionDaysMetadata(item.Metadata, "retention setting")
+}
+
+func validateRetentionDaysMetadata(metadata map[string]any, context string) error {
+	allowed := make(map[string]bool, len(retentionDayMetadataKeys))
+	for _, key := range retentionDayMetadataKeys {
+		allowed[key] = true
+	}
+	for key := range metadata {
+		if strings.HasSuffix(strings.ToLower(strings.TrimSpace(key)), "_days") && !allowed[key] {
+			return fmt.Errorf("%s field %q is not supported", context, key)
+		}
+	}
+	for _, key := range retentionDayMetadataKeys {
+		value, exists := metadata[key]
+		if !exists || metadataValueEmpty(value) {
+			continue
+		}
+		parsed, ok := metadataInt(value)
+		if number, isFloat := value.(float64); isFloat && number != math.Trunc(number) {
+			ok = false
+		}
+		if !ok || parsed < 0 || parsed > 36500 {
+			return fmt.Errorf("%s %s must be an integer between 0 and 36500", context, key)
+		}
+	}
+	return nil
 }
 
 func validateScheduledTaskInteger(metadata map[string]any, key string, minimum, maximum int) error {

@@ -14,6 +14,7 @@ import (
 const (
 	maxCommandFilterPatterns = 128
 	maxCommandFilterPattern  = 4096
+	maxIntegrationSecret     = 32 << 10
 )
 
 func preparePlatformItemCreateRequest(collection string, req *model.PlatformItemRequest) error {
@@ -29,7 +30,7 @@ func preparePlatformItemCreateRequest(collection string, req *model.PlatformItem
 		normalizeScheduledTaskMutation(req)
 	case "system_settings":
 		if strings.EqualFold(strings.TrimSpace(req.Type), "integration") {
-			if err := validateSMTPIntegrationMetadataInput(req.Metadata); err != nil {
+			if err := validateIntegrationMetadataInput(req.Metadata); err != nil {
 				return err
 			}
 		}
@@ -43,7 +44,7 @@ func preparePlatformItemUpdateRequest(collection string, existing model.Platform
 	}
 	item := platformItemAfterUpdate(existing, *req)
 	if collection == "system_settings" && strings.EqualFold(strings.TrimSpace(item.Type), "integration") && req.Metadata != nil {
-		if err := validateSMTPIntegrationMetadataInput(req.Metadata); err != nil {
+		if err := validateIntegrationMetadataInput(req.Metadata); err != nil {
 			return err
 		}
 	}
@@ -334,13 +335,16 @@ func validateSystemSettingItem(item model.PlatformItem) error {
 	case "retention":
 		return validateRetentionDaysMetadata(item.Metadata, "retention setting")
 	case "integration":
-		return validateSMTPIntegrationItem(item)
+		if err := validateSMTPIntegrationItem(item); err != nil {
+			return err
+		}
+		return validateLLMIntegrationItem(item)
 	default:
 		return nil
 	}
 }
 
-var smtpIntegrationMetadataTypes = map[string]string{
+var integrationMetadataTypes = map[string]string{
 	"host":                             "string",
 	"port":                             "integer",
 	"username":                         "string",
@@ -378,14 +382,28 @@ var smtpIntegrationMetadataTypes = map[string]string{
 	"smtp_password_encrypted":          "string",
 	"smtp_password_set":                "boolean",
 	"smtp_password_updated_at":         "string",
+	"provider":                         "string",
+	"base_url":                         "string",
+	"api_base_url":                     "string",
+	"openai_base_url":                  "string",
+	"model":                            "string",
+	"llm_provider":                     "string",
+	"llm_base_url":                     "string",
+	"llm_model":                        "string",
+	"llm_api_key":                      "string",
+	"plain_llm_api_key":                "string",
+	"llm_api_key_clear":                "boolean",
+	"llm_api_key_encrypted":            "string",
+	"llm_api_key_set":                  "boolean",
+	"llm_api_key_updated_at":           "string",
 }
 
-func validateSMTPIntegrationMetadataInput(metadata map[string]any) error {
+func validateIntegrationMetadataInput(metadata map[string]any) error {
 	for key, value := range metadata {
 		normalized := strings.ToLower(strings.TrimSpace(key))
-		valueType, known := smtpIntegrationMetadataTypes[normalized]
+		valueType, known := integrationMetadataTypes[normalized]
 		if !known {
-			if strings.HasPrefix(normalized, "smtp_") {
+			if strings.HasPrefix(normalized, "smtp_") || strings.HasPrefix(normalized, "llm") {
 				return fmt.Errorf("integration setting field %q is not supported", key)
 			}
 			continue
@@ -398,8 +416,12 @@ func validateSMTPIntegrationMetadataInput(metadata map[string]any) error {
 		}
 		switch valueType {
 		case "string":
-			if _, ok := value.(string); !ok {
+			text, ok := value.(string)
+			if !ok {
 				return fmt.Errorf("integration setting %s must be a string", key)
+			}
+			if (normalized == "llm_api_key" || normalized == "plain_llm_api_key") && len(text) > maxIntegrationSecret {
+				return fmt.Errorf("integration setting %s must not exceed %d bytes", key, maxIntegrationSecret)
 			}
 		case "integer":
 			port, ok := strictMetadataInteger(value)
@@ -477,6 +499,29 @@ func validateSMTPIntegrationItem(item model.PlatformItem) error {
 	}
 	if _, err := smtpDeliveryConfigFromSetting(item, "", ""); err != nil {
 		return fmt.Errorf("integration setting SMTP notification configuration is invalid: %w", err)
+	}
+	return nil
+}
+
+func validateLLMIntegrationItem(item model.PlatformItem) error {
+	metadata := item.Metadata
+	if metadata == nil {
+		return nil
+	}
+	provider := smtpMetadataString(metadata, "llm_provider", "provider")
+	if len(provider) > 128 {
+		return errors.New("integration setting llm_provider must not exceed 128 bytes")
+	}
+	modelName := smtpMetadataString(metadata, "llm_model", "model")
+	if len(modelName) > 256 {
+		return errors.New("integration setting llm_model must not exceed 256 bytes")
+	}
+	baseURL := smtpMetadataString(metadata, "llm_base_url", "base_url", "api_base_url", "openai_base_url")
+	if baseURL == "" {
+		return nil
+	}
+	if _, err := llmChatCompletionsURL(baseURL); err != nil {
+		return fmt.Errorf("integration setting LLM configuration is invalid: %w", err)
 	}
 	return nil
 }

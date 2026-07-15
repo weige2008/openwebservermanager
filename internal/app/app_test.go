@@ -13350,6 +13350,213 @@ func TestLLMIntegrationTestPrompt(t *testing.T) {
 	}, cookie, http.StatusNotFound)
 }
 
+func TestLLMIntegrationSettingValidation(t *testing.T) {
+	handler, cookie := newTestHandler(t)
+	base := func(metadata map[string]any) map[string]any {
+		return map[string]any{
+			"name":     "LLM validation",
+			"type":     "integration",
+			"status":   "enabled",
+			"metadata": metadata,
+		}
+	}
+	tests := []struct {
+		name     string
+		metadata map[string]any
+		contains string
+	}{
+		{name: "invalid URL type", metadata: map[string]any{"llm_base_url": 42}, contains: "must be a string"},
+		{name: "invalid model type", metadata: map[string]any{"llm_model": true}, contains: "must be a string"},
+		{name: "invalid clear type", metadata: map[string]any{"llm_api_key_clear": "true"}, contains: "must be a boolean"},
+		{name: "unknown field", metadata: map[string]any{"llm_modle": "test"}, contains: "is not supported"},
+		{name: "legacy camel case field", metadata: map[string]any{"llmApiKey": "secret"}, contains: "is not supported"},
+		{name: "invalid scheme", metadata: map[string]any{"llm_base_url": "ftp://api.example.test/v1"}, contains: "must use http or https"},
+		{name: "embedded credentials", metadata: map[string]any{"llm_base_url": "https://user:secret@api.example.test/v1"}, contains: "must not include credentials"},
+		{name: "provider too long", metadata: map[string]any{"llm_provider": strings.Repeat("p", 129)}, contains: "must not exceed 128 bytes"},
+		{name: "model too long", metadata: map[string]any{"llm_model": strings.Repeat("m", 257)}, contains: "must not exceed 256 bytes"},
+		{name: "URL too long", metadata: map[string]any{"llm_base_url": "https://api.example.test/" + strings.Repeat("x", 4097)}, contains: "must not exceed 4096 bytes"},
+		{name: "API key too long", metadata: map[string]any{"llm_api_key": strings.Repeat("k", maxIntegrationSecret+1)}, contains: "must not exceed 32768 bytes"},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			rec := assertStatus(t, handler, http.MethodPost, "/api/admin/system-settings", base(test.metadata), cookie, http.StatusBadRequest)
+			if !strings.Contains(rec.Body.String(), test.contains) {
+				t.Fatalf("LLM validation error = %s, want substring %q", rec.Body.String(), test.contains)
+			}
+		})
+	}
+
+	partialRec := assertStatus(t, handler, http.MethodPost, "/api/admin/system-settings", base(map[string]any{
+		"llm_api_key": "draft-secret",
+	}), cookie, http.StatusCreated)
+	if strings.Contains(partialRec.Body.String(), "draft-secret") {
+		t.Fatalf("partial LLM draft leaked API key: %s", partialRec.Body.String())
+	}
+
+	validRec := assertStatus(t, handler, http.MethodPost, "/api/admin/system-settings", base(map[string]any{
+		"llm_provider": "openai-compatible",
+		"llm_base_url": "https://api.example.test/v1",
+		"llm_model":    "test-model",
+	}), cookie, http.StatusCreated)
+	var setting model.PlatformItem
+	decodeResponse(t, validRec, &setting)
+	patchRec := assertStatus(t, handler, http.MethodPatch, "/api/admin/system-settings/"+setting.ID, map[string]any{
+		"metadata": map[string]any{"llm_base_url": "file:///tmp/provider"},
+	}, cookie, http.StatusBadRequest)
+	if !strings.Contains(patchRec.Body.String(), "llm_base_url") {
+		t.Fatalf("LLM PATCH validation error = %s", patchRec.Body.String())
+	}
+}
+
+func TestLLMIntegrationCancellationRedirectAndResponseLimits(t *testing.T) {
+	handler, cookie := newTestHandler(t)
+
+	stalledStarted := make(chan struct{}, 1)
+	stalledRelease := make(chan struct{})
+	stalledServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		select {
+		case stalledStarted <- struct{}{}:
+		default:
+		}
+		<-stalledRelease
+	}))
+	defer stalledServer.Close()
+	stalledSettingRec := assertStatus(t, handler, http.MethodPost, "/api/admin/system-settings", map[string]any{
+		"name": "Stalled LLM", "type": "integration", "status": "enabled",
+		"metadata": map[string]any{"llm_base_url": stalledServer.URL + "/v1", "llm_model": "test-model"},
+	}, cookie, http.StatusCreated)
+	var stalledSetting model.PlatformItem
+	decodeResponse(t, stalledSettingRec, &stalledSetting)
+	testPayload, err := json.Marshal(map[string]any{"setting_id": stalledSetting.ID, "prompt": "ping"})
+	if err != nil {
+		t.Fatalf("marshal stalled LLM test payload: %v", err)
+	}
+	requestContext, cancelRequest := context.WithTimeout(context.Background(), 100*time.Millisecond)
+	defer cancelRequest()
+	request := httptest.NewRequest(http.MethodPost, "/api/admin/system-settings/llm/test", bytes.NewReader(testPayload)).WithContext(requestContext)
+	request.Header.Set("Content-Type", "application/json")
+	request.AddCookie(cookie)
+	response := httptest.NewRecorder()
+	started := time.Now()
+	handler.ServeHTTP(response, request)
+	close(stalledRelease)
+	if response.Code != http.StatusBadGateway || !strings.Contains(response.Body.String(), "context deadline exceeded") {
+		t.Fatalf("canceled LLM test status=%d body=%s", response.Code, response.Body.String())
+	}
+	if elapsed := time.Since(started); elapsed > time.Second {
+		t.Fatalf("canceled LLM test took %s", elapsed)
+	}
+	select {
+	case <-stalledStarted:
+	case <-time.After(time.Second):
+		t.Fatal("stalled LLM provider did not receive request")
+	}
+
+	oversizedServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = io.WriteString(w, `{"choices":[{"message":{"content":"`)
+		_, _ = io.WriteString(w, strings.Repeat("x", maxLLMResponseBytes))
+		_, _ = io.WriteString(w, `"}}]}`)
+	}))
+	defer oversizedServer.Close()
+	oversizedSettingRec := assertStatus(t, handler, http.MethodPost, "/api/admin/system-settings", map[string]any{
+		"name": "Oversized LLM", "type": "integration", "status": "enabled",
+		"metadata": map[string]any{"llm_base_url": oversizedServer.URL + "/v1", "llm_model": "test-model"},
+	}, cookie, http.StatusCreated)
+	var oversizedSetting model.PlatformItem
+	decodeResponse(t, oversizedSettingRec, &oversizedSetting)
+	oversizedRec := assertStatus(t, handler, http.MethodPost, "/api/admin/system-settings/llm/test", map[string]any{
+		"setting_id": oversizedSetting.ID,
+	}, cookie, http.StatusBadGateway)
+	if !strings.Contains(oversizedRec.Body.String(), "response exceeds") || oversizedRec.Body.Len() > 2048 {
+		t.Fatalf("oversized LLM response was not bounded: length=%d body=%s", oversizedRec.Body.Len(), oversizedRec.Body.String())
+	}
+
+	errorSecret := "bounded-error-secret"
+	errorServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusBadGateway)
+		_, _ = io.WriteString(w, "Bearer "+errorSecret+" "+strings.Repeat("provider-error-", maxLLMErrorBytes))
+	}))
+	defer errorServer.Close()
+	errorSettingRec := assertStatus(t, handler, http.MethodPost, "/api/admin/system-settings", map[string]any{
+		"name": "Bounded LLM error", "type": "integration", "status": "enabled",
+		"metadata": map[string]any{"llm_base_url": errorServer.URL + "/v1", "llm_model": "test-model", "llm_api_key": errorSecret},
+	}, cookie, http.StatusCreated)
+	var errorSetting model.PlatformItem
+	decodeResponse(t, errorSettingRec, &errorSetting)
+	errorRec := assertStatus(t, handler, http.MethodPost, "/api/admin/system-settings/llm/test", map[string]any{
+		"setting_id": errorSetting.ID,
+	}, cookie, http.StatusBadGateway)
+	if strings.Contains(errorRec.Body.String(), errorSecret) || !strings.Contains(errorRec.Body.String(), "[redacted]") || !strings.Contains(errorRec.Body.String(), "[truncated]") || errorRec.Body.Len() > maxLLMErrorBytes+2048 {
+		t.Fatalf("LLM provider error was not bounded and redacted: length=%d body=%s", errorRec.Body.Len(), errorRec.Body.String())
+	}
+	errorLogsRec := assertStatus(t, handler, http.MethodGet, "/api/admin/audit/operation-logs", nil, cookie, http.StatusOK)
+	if strings.Contains(errorLogsRec.Body.String(), errorSecret) || !strings.Contains(errorLogsRec.Body.String(), "[truncated]") {
+		t.Fatalf("bounded LLM error audit leaked secret or lost truncation marker: %s", errorLogsRec.Body.String())
+	}
+
+	redirectTargetCalls := make(chan string, 1)
+	redirectTarget := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		redirectTargetCalls <- r.Header.Get("Authorization")
+		writeJSON(w, http.StatusOK, map[string]any{"choices": []map[string]any{{"message": map[string]any{"content": "unexpected"}}}})
+	}))
+	defer redirectTarget.Close()
+	redirectSource := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Redirect(w, r, redirectTarget.URL+"/completion", http.StatusTemporaryRedirect)
+	}))
+	defer redirectSource.Close()
+	redirectSettingRec := assertStatus(t, handler, http.MethodPost, "/api/admin/system-settings", map[string]any{
+		"name": "Redirecting LLM", "type": "integration", "status": "enabled",
+		"metadata": map[string]any{"llm_base_url": redirectSource.URL + "/v1", "llm_model": "test-model", "llm_api_key": "redirect-secret"},
+	}, cookie, http.StatusCreated)
+	var redirectSetting model.PlatformItem
+	decodeResponse(t, redirectSettingRec, &redirectSetting)
+	redirectRec := assertStatus(t, handler, http.MethodPost, "/api/admin/system-settings/llm/test", map[string]any{
+		"setting_id": redirectSetting.ID,
+	}, cookie, http.StatusBadGateway)
+	if !strings.Contains(redirectRec.Body.String(), "redirect must remain") || strings.Contains(redirectRec.Body.String(), "redirect-secret") {
+		t.Fatalf("cross-origin LLM redirect response = %s", redirectRec.Body.String())
+	}
+	select {
+	case auth := <-redirectTargetCalls:
+		t.Fatalf("cross-origin LLM redirect reached target with Authorization %q", auth)
+	case <-time.After(150 * time.Millisecond):
+	}
+
+	sameOriginAuth := make(chan string, 1)
+	sameOriginServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/v1/chat/completions" {
+			http.Redirect(w, r, "/actual", http.StatusTemporaryRedirect)
+			return
+		}
+		sameOriginAuth <- r.Header.Get("Authorization")
+		writeJSON(w, http.StatusOK, map[string]any{"choices": []map[string]any{{"message": map[string]any{"content": "pong"}}}})
+	}))
+	defer sameOriginServer.Close()
+	content, err := sendLLMTestPrompt(context.Background(), llmDeliveryConfig{
+		BaseURL: sameOriginServer.URL + "/v1/chat/completions", Model: "test-model", APIKey: "same-origin-secret",
+	}, "ping")
+	if err != nil || content != "pong" {
+		t.Fatalf("same-origin LLM redirect content=%q err=%v", content, err)
+	}
+	select {
+	case auth := <-sameOriginAuth:
+		if auth != "Bearer same-origin-secret" {
+			t.Fatalf("same-origin redirect Authorization = %q", auth)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("same-origin LLM redirect did not reach target")
+	}
+
+	promptRec := assertStatus(t, handler, http.MethodPost, "/api/admin/system-settings/llm/test", map[string]any{
+		"setting_id": oversizedSetting.ID,
+		"prompt":     strings.Repeat("p", maxLLMPromptBytes+1),
+	}, cookie, http.StatusBadRequest)
+	if !strings.Contains(promptRec.Body.String(), "must not exceed") {
+		t.Fatalf("oversized LLM prompt response = %s", promptRec.Body.String())
+	}
+}
+
 func TestProxyServiceSettingsPersistStatusAndSyncSSHGateway(t *testing.T) {
 	handler, cookie := newTestHandler(t)
 	srv := handler.(*Server)

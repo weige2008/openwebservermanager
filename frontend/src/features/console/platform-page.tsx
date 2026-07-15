@@ -5038,6 +5038,7 @@ export function PlatformSettingsPage({ config, sectionId }: { config: PlatformPa
   const smtpTestRecipientValid = !form.testTo.trim() || smtpRecipientInputValid(form.testTo)
   const smtpNotificationRecipientsReady = !form.notificationsEnabled || Boolean(form.to.trim())
   const smtpFormValid = smtpPortValid && smtpSenderValid && smtpRecipientsValid && smtpTestRecipientValid && smtpNotificationRecipientsReady
+  const llmBaseURLValid = !form.llmBaseUrl.trim() || httpEndpointInputValid(form.llmBaseUrl)
 
   useEffect(() => {
     setBrandingForm(brandingFormFromItem(brandingSetting, app.publicConfig))
@@ -5591,7 +5592,10 @@ export function PlatformSettingsPage({ config, sectionId }: { config: PlatformPa
                   <Input value={form.llmProvider} onChange={(event) => patchForm({ llmProvider: event.currentTarget.value })} placeholder='openai-compatible' />
                 </Field>
                 <Field className='xl:col-span-2' label={app.t('baseUrl', 'Base URL')}>
-                  <Input value={form.llmBaseUrl} onChange={(event) => patchForm({ llmBaseUrl: event.currentTarget.value })} placeholder='https://api.example.com/v1' />
+                  <>
+                    <Input type='url' value={form.llmBaseUrl} onChange={(event) => patchForm({ llmBaseUrl: event.currentTarget.value })} placeholder='https://api.example.com/v1' aria-invalid={!llmBaseURLValid} />
+                    {!llmBaseURLValid ? <span className='text-xs font-normal text-destructive'>{app.t('llmBaseURLInvalid', 'Enter an HTTP(S) URL without embedded credentials.')}</span> : null}
+                  </>
                 </Field>
                 <Field label={app.t('model', 'Model')}>
                   <Input value={form.llmModel} onChange={(event) => patchForm({ llmModel: event.currentTarget.value })} placeholder='gpt-4.1-mini' />
@@ -5609,13 +5613,13 @@ export function PlatformSettingsPage({ config, sectionId }: { config: PlatformPa
               </div>
               <div className='flex flex-wrap justify-end gap-2'>
                 {canSaveIntegrationSettings ? (
-                  <Button variant='outline' onClick={() => void saveIntegration()} disabled={saving || testing || testingLLM}>
+                  <Button variant='outline' onClick={() => void saveIntegration()} disabled={saving || testing || testingLLM || !llmBaseURLValid}>
                     <Save className='size-4' />
                     {saving ? app.t('saving', 'Saving') : app.t('save', 'Save')}
                   </Button>
                 ) : null}
                 {canRunLLMTest ? (
-                  <Button variant='primary' onClick={() => void testLLM()} disabled={saving || testing || testingLLM || !form.llmBaseUrl.trim() || !form.llmModel.trim()}>
+                  <Button variant='primary' onClick={() => void testLLM()} disabled={saving || testing || testingLLM || !form.llmBaseUrl.trim() || !form.llmModel.trim() || !llmBaseURLValid}>
                     <Play className='size-4' />
                     {testingLLM ? app.t('testing', 'Testing') : app.t('testLLM', 'Test LLM')}
                   </Button>
@@ -5935,6 +5939,15 @@ function smtpRecipientInputValid(value: string) {
     .map((entry) => entry.trim())
     .filter(Boolean)
     .every(smtpMailboxInputValid)
+}
+
+function httpEndpointInputValid(value: string) {
+  try {
+    const parsed = new URL(value.trim())
+    return ['http:', 'https:'].includes(parsed.protocol) && !parsed.username && !parsed.password
+  } catch {
+    return false
+  }
 }
 
 async function ensureAccessMFA(path: string, requestAccessMFACode: RequestAccessMFACode) {

@@ -24,8 +24,13 @@ import (
 )
 
 const (
-	smtpConnectTimeout = 10 * time.Second
-	smtpSessionTimeout = 15 * time.Second
+	smtpConnectTimeout  = 10 * time.Second
+	smtpSessionTimeout  = 15 * time.Second
+	llmRequestTimeout   = 20 * time.Second
+	maxLLMPromptBytes   = 64 << 10
+	maxLLMResponseBytes = 1 << 20
+	maxLLMErrorBytes    = 8 << 10
+	maxLLMRedirects     = 3
 )
 
 type smtpTestRequest struct {
@@ -207,8 +212,12 @@ func (s *Server) handleLLMTest(w http.ResponseWriter, r *http.Request) {
 	if prompt == "" {
 		prompt = "Reply with the single word: ok"
 	}
+	if len(prompt) > maxLLMPromptBytes {
+		writeError(w, http.StatusBadRequest, fmt.Sprintf("LLM test prompt must not exceed %d bytes", maxLLMPromptBytes))
+		return
+	}
 	started := time.Now()
-	content, err := sendLLMTestPrompt(cfg, prompt)
+	content, err := sendLLMTestPrompt(r.Context(), cfg, prompt)
 	if err != nil {
 		errText := sanitizeLLMTestText(cfg, err.Error())
 		if logErr := s.createIntegrationTestOperationLog(r, "system_settings.llm_test.failed", "failed", item.ID, "LLM test failed: "+errText, map[string]any{
@@ -778,6 +787,12 @@ func llmDeliveryConfigFromSetting(item model.PlatformItem, apiKey string) (llmDe
 	if cfg.Model == "" {
 		return llmDeliveryConfig{}, errors.New("llm_model is required")
 	}
+	if len(cfg.Provider) > 128 {
+		return llmDeliveryConfig{}, errors.New("llm_provider must not exceed 128 bytes")
+	}
+	if len(cfg.Model) > 256 {
+		return llmDeliveryConfig{}, errors.New("llm_model must not exceed 256 bytes")
+	}
 	target, err := llmChatCompletionsURL(cfg.BaseURL)
 	if err != nil {
 		return llmDeliveryConfig{}, err
@@ -882,7 +897,16 @@ func smtpContextError(ctx context.Context, err error) error {
 	return err
 }
 
-func sendLLMTestPrompt(cfg llmDeliveryConfig, prompt string) (string, error) {
+func sendLLMTestPrompt(ctx context.Context, cfg llmDeliveryConfig, prompt string) (string, error) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	if len(prompt) > maxLLMPromptBytes {
+		return "", fmt.Errorf("LLM test prompt must not exceed %d bytes", maxLLMPromptBytes)
+	}
+	ctx, cancel := context.WithTimeout(ctx, llmRequestTimeout)
+	defer cancel()
+
 	payload := map[string]any{
 		"model": cfg.Model,
 		"messages": []map[string]string{
@@ -896,7 +920,7 @@ func sendLLMTestPrompt(cfg llmDeliveryConfig, prompt string) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	req, err := http.NewRequest(http.MethodPost, cfg.BaseURL, bytes.NewReader(body))
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, cfg.BaseURL, bytes.NewReader(body))
 	if err != nil {
 		return "", err
 	}
@@ -904,18 +928,33 @@ func sendLLMTestPrompt(cfg llmDeliveryConfig, prompt string) (string, error) {
 	if strings.TrimSpace(cfg.APIKey) != "" {
 		req.Header.Set("Authorization", "Bearer "+strings.TrimSpace(cfg.APIKey))
 	}
-	client := &http.Client{Timeout: 20 * time.Second}
+	client := &http.Client{Timeout: llmRequestTimeout, CheckRedirect: llmRedirectPolicy}
 	resp, err := client.Do(req)
 	if err != nil {
 		return "", err
 	}
 	defer resp.Body.Close()
-	limited, err := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
+	responseLimit := int64(maxLLMResponseBytes)
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		responseLimit = maxLLMErrorBytes
+	}
+	limited, err := io.ReadAll(io.LimitReader(resp.Body, responseLimit+1))
 	if err != nil {
 		return "", err
 	}
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		return "", fmt.Errorf("LLM provider returned %s: %s", resp.Status, strings.TrimSpace(string(limited)))
+		truncated := len(limited) > int(responseLimit)
+		if truncated {
+			limited = limited[:responseLimit]
+		}
+		detail := strings.TrimSpace(string(limited))
+		if truncated {
+			detail += " [truncated]"
+		}
+		return "", fmt.Errorf("LLM provider returned %s: %s", resp.Status, detail)
+	}
+	if len(limited) > int(responseLimit) {
+		return "", fmt.Errorf("LLM provider response exceeds %d bytes", maxLLMResponseBytes)
 	}
 	var decoded struct {
 		Choices []struct {
@@ -937,6 +976,20 @@ func sendLLMTestPrompt(cfg llmDeliveryConfig, prompt string) (string, error) {
 		}
 	}
 	return "", errors.New("LLM provider response did not include a completion")
+}
+
+func llmRedirectPolicy(req *http.Request, via []*http.Request) error {
+	if len(via) > maxLLMRedirects {
+		return fmt.Errorf("LLM provider redirected more than %d times", maxLLMRedirects)
+	}
+	if len(via) == 0 {
+		return nil
+	}
+	origin := via[0].URL
+	if !strings.EqualFold(req.URL.Scheme, origin.Scheme) || !strings.EqualFold(req.URL.Host, origin.Host) {
+		return errors.New("LLM provider redirect must remain on the configured origin")
+	}
+	return nil
 }
 
 func sanitizeLLMTestText(cfg llmDeliveryConfig, text string) string {
@@ -991,6 +1044,12 @@ func llmChatCompletionsURL(base string) (string, error) {
 	}
 	if parsed.Scheme != "http" && parsed.Scheme != "https" {
 		return "", errors.New("llm_base_url must use http or https")
+	}
+	if parsed.User != nil {
+		return "", errors.New("llm_base_url must not include credentials")
+	}
+	if len(raw) > 4096 {
+		return "", errors.New("llm_base_url must not exceed 4096 bytes")
 	}
 	parsed.Path = strings.TrimRight(parsed.Path, "/")
 	if parsed.Path == "" {

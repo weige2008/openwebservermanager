@@ -9457,7 +9457,7 @@ func TestWeComIntegrationTokenTest(t *testing.T) {
 	}
 	assertStatus(t, handler, http.MethodPatch, "/api/admin/system-settings/"+setting.ID, map[string]any{
 		"metadata": map[string]any{
-			"wecom_enabled":            true,
+			"wecom_enabled":            false,
 			"wecom_provider_id":        "corp-wecom",
 			"wecom_provider_name":      "Corp WeCom",
 			"wecom_corp_id":            "ww-openweb",

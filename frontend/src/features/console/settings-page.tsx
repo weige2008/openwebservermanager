@@ -956,6 +956,10 @@ export function SettingsPage() {
       showPermissionDenied()
       return
     }
+    if (!wecomFormValid) {
+      app.showToast(t('settingsPage.wecomConfigurationInvalid', { defaultValue: 'Complete the Enterprise WeChat connection settings before saving.' }))
+      return
+    }
     setWeComBusy(true)
     try {
       const target = wecomSettings.setting
@@ -1066,6 +1070,14 @@ export function SettingsPage() {
   const ldapTLSModeValid = !(ldapUsesImplicitTLS && ldapSettings.startTLS)
   const ldapSearchBaseReady = Boolean(ldapSettings.baseDN.trim() || ldapSettings.userDNTemplate.trim())
   const ldapFormValid = !ldapSettings.enabled || (Boolean(ldapSettings.url.trim()) && ldapURLValid && ldapTLSModeValid && ldapSearchBaseReady)
+  const wecomCorpID = wecomSettings.corpID.trim()
+  const wecomAgentID = wecomSettings.agentID.trim()
+  const wecomCorpIDValid = !wecomCorpID || (!/[\s/@?#\\]/.test(wecomCorpID) && wecomCorpID.length <= 256)
+  const wecomAgentIDValid = !wecomAgentID || /^\d{1,32}$/.test(wecomAgentID)
+  const wecomAgentSecretReady = Boolean(wecomSettings.agentSecret.trim() || (wecomSettings.agentSecretSet && !wecomSettings.agentSecretClear))
+  const wecomCorpIDFieldInvalid = !wecomCorpIDValid || (wecomSettings.enabled && !wecomCorpID)
+  const wecomAgentSecretFieldInvalid = wecomSettings.enabled && !wecomAgentSecretReady
+  const wecomFormValid = wecomCorpIDValid && wecomAgentIDValid && (!wecomSettings.enabled || (Boolean(wecomCorpID) && wecomAgentSecretReady))
   const canShowLoginAccessSection = canReadSystemSettings || canReadLoginPolicies || canReadLoginLocks || canReadLicense
 
   return (
@@ -1975,7 +1987,9 @@ export function SettingsPage() {
                 {wecomSettings.enabled ? t('settingsPage.wecomEnabled', { defaultValue: 'WeCom on' }) : t('settingsPage.wecomDisabled', { defaultValue: 'WeCom off' })}
               </Badge>
               <Badge tone={wecomSettings.agentSecretSet ? 'success' : 'neutral'}>
-                {wecomSettings.agentSecretSet ? t('passwordSaved') : t('passwordNotSet')}
+                {wecomSettings.agentSecretSet
+                  ? t('settingsPage.wecomAgentSecretSaved', { defaultValue: 'Agent secret saved' })
+                  : t('settingsPage.wecomAgentSecretNotSet', { defaultValue: 'Agent secret not set' })}
               </Badge>
             </div>
             <p className='mt-1 max-w-lg text-sm leading-6 text-muted-foreground'>
@@ -1998,13 +2012,16 @@ export function SettingsPage() {
               <Input value={wecomSettings.providerName} onChange={(event) => patchWeCom({ providerName: event.currentTarget.value })} placeholder='Enterprise WeChat' />
             </Field>
             <Field label={t('settingsPage.wecomCorpID', { defaultValue: 'Corp ID' })}>
-              <Input value={wecomSettings.corpID} onChange={(event) => patchWeCom({ corpID: event.currentTarget.value })} placeholder='wwxxxxxxxxxxxxxxxx' />
+              <Input value={wecomSettings.corpID} onChange={(event) => patchWeCom({ corpID: event.currentTarget.value })} placeholder='wwxxxxxxxxxxxxxxxx' maxLength={256} aria-invalid={wecomCorpIDFieldInvalid} />
+              {wecomCorpIDFieldInvalid ? <span className='text-xs font-normal text-destructive'>{t('settingsPage.wecomCorpIDInvalid', { defaultValue: 'Enter a valid Enterprise WeChat Corp ID without spaces or URL delimiters.' })}</span> : null}
             </Field>
             <Field label={t('settingsPage.wecomAgentID', { defaultValue: 'Agent ID' })}>
-              <Input value={wecomSettings.agentID} onChange={(event) => patchWeCom({ agentID: event.currentTarget.value })} placeholder='1000002' />
+              <Input value={wecomSettings.agentID} onChange={(event) => patchWeCom({ agentID: event.currentTarget.value })} placeholder='1000002' inputMode='numeric' maxLength={32} aria-invalid={!wecomAgentIDValid} />
+              {!wecomAgentIDValid ? <span className='text-xs font-normal text-destructive'>{t('settingsPage.wecomAgentIDInvalid', { defaultValue: 'Agent ID must contain only digits.' })}</span> : null}
             </Field>
             <Field label={t('settingsPage.wecomAgentSecret', { defaultValue: 'Agent secret' })}>
-              <Input type='password' value={wecomSettings.agentSecret} onChange={(event) => patchWeCom({ agentSecret: event.currentTarget.value, agentSecretClear: false })} placeholder={wecomSettings.agentSecretSet ? 'Leave blank to keep current secret' : ''} autoComplete='new-password' />
+              <Input type='password' value={wecomSettings.agentSecret} onChange={(event) => patchWeCom({ agentSecret: event.currentTarget.value, agentSecretClear: false })} placeholder={wecomSettings.agentSecretSet ? t('settingsPage.keepCurrentSecret') : ''} autoComplete='new-password' aria-invalid={wecomAgentSecretFieldInvalid} />
+              {wecomAgentSecretFieldInvalid ? <span className='text-xs font-normal text-destructive'>{t('settingsPage.wecomAgentSecretRequired', { defaultValue: 'An Agent secret is required while Enterprise WeChat login is enabled.' })}</span> : null}
             </Field>
             <Field label={t('settingsPage.defaultRole', { defaultValue: 'Default role' })}>
               <Select value={wecomSettings.role} onChange={(event) => patchWeCom({ role: event.currentTarget.value })}>
@@ -2053,7 +2070,7 @@ export function SettingsPage() {
           </div>
           {canSaveWeComSettings ? (
             <div className='flex justify-end'>
-              <Button variant='primary' onClick={() => void saveWeComSettings()} disabled={wecomBusy || (wecomSettings.enabled && (!wecomSettings.corpID.trim() || !wecomSettings.agentSecret.trim() && !wecomSettings.agentSecretSet))}>
+              <Button variant='primary' onClick={() => void saveWeComSettings()} disabled={wecomBusy || !wecomFormValid}>
                 {wecomBusy ? t('saving') : t('save')}
               </Button>
             </div>

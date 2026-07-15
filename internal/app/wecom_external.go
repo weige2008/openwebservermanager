@@ -1,10 +1,12 @@
 package app
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"net/url"
 	"strconv"
@@ -17,6 +19,7 @@ import (
 
 const externalWeComStateTTL = 5 * time.Minute
 const externalWeComStateCollection = "external_wecom_states"
+const externalWeComRequestTimeout = 10 * time.Second
 
 type externalWeComState struct {
 	ProviderID string    `json:"provider_id"`
@@ -155,7 +158,7 @@ func (s *Server) handleExternalWeComCallback(w http.ResponseWriter, r *http.Requ
 		writeError(w, http.StatusBadRequest, err.Error())
 		return
 	}
-	claims, err := s.fetchExternalWeComClaims(provider, code)
+	claims, err := s.fetchExternalWeComClaims(r.Context(), provider, code)
 	if err != nil {
 		safeErr := sanitizedExternalProviderError(err, provider.AgentSecret)
 		if logErr := s.recordExternalWeComLoginFailure(r, provider, externalWeComClaims{}, safeErr); logErr != nil {
@@ -234,8 +237,10 @@ func (s *Server) recordExternalWeComLoginFailure(r *http.Request, provider exter
 	return nil
 }
 
-func (s *Server) fetchExternalWeComClaims(provider externalWeComProvider, code string) (externalWeComClaims, error) {
-	client := http.Client{Timeout: 10 * time.Second}
+func (s *Server) fetchExternalWeComClaims(parent context.Context, provider externalWeComProvider, code string) (externalWeComClaims, error) {
+	ctx, cancel := context.WithTimeout(parent, externalWeComRequestTimeout)
+	defer cancel()
+	client := externalWeComHTTPClient()
 	tokenURL, err := url.Parse(provider.TokenEndpoint)
 	if err != nil {
 		return externalWeComClaims{}, err
@@ -244,7 +249,7 @@ func (s *Server) fetchExternalWeComClaims(provider externalWeComProvider, code s
 	tokenQuery.Set("corpid", provider.CorpID)
 	tokenQuery.Set("corpsecret", provider.AgentSecret)
 	tokenURL.RawQuery = tokenQuery.Encode()
-	tokenPayload, err := fetchExternalWeComJSON(client, tokenURL.String())
+	tokenPayload, err := fetchExternalWeComJSON(ctx, client, tokenURL.String())
 	if err != nil {
 		return externalWeComClaims{}, err
 	}
@@ -260,9 +265,12 @@ func (s *Server) fetchExternalWeComClaims(provider externalWeComProvider, code s
 	userInfoQuery.Set("access_token", accessToken)
 	userInfoQuery.Set("code", code)
 	userInfoURL.RawQuery = userInfoQuery.Encode()
-	userInfo, err := fetchExternalWeComJSON(client, userInfoURL.String())
+	userInfo, err := fetchExternalWeComJSON(ctx, client, userInfoURL.String())
 	if err != nil {
-		return externalWeComClaims{}, err
+		if ctx.Err() != nil {
+			return externalWeComClaims{}, ctx.Err()
+		}
+		return externalWeComClaims{}, sanitizedExternalProviderError(err, provider.AgentSecret, accessToken, code)
 	}
 	claims := externalWeComClaims{
 		UserID: firstMetadataString(userInfo, "UserId", "userid", "user_id"),
@@ -281,11 +289,13 @@ func (s *Server) fetchExternalWeComClaims(provider externalWeComProvider, code s
 		userDetailQuery.Set("access_token", accessToken)
 		userDetailQuery.Set("userid", claims.UserID)
 		userDetailURL.RawQuery = userDetailQuery.Encode()
-		if detail, err := fetchExternalWeComJSON(client, userDetailURL.String()); err == nil {
+		if detail, err := fetchExternalWeComJSON(ctx, client, userDetailURL.String()); err == nil {
 			claims.Username = firstMetadataString(detail, "userid", "UserId", "username", "name")
 			claims.DisplayName = firstMetadataString(detail, "name", "display_name", "alias")
 			claims.Email = firstMetadataString(detail, "email", "biz_mail")
 			claims.Mobile = firstMetadataString(detail, "mobile")
+		} else if ctx.Err() != nil {
+			return externalWeComClaims{}, ctx.Err()
 		}
 	}
 	if claims.Username == "" {
@@ -297,13 +307,20 @@ func (s *Server) fetchExternalWeComClaims(provider externalWeComProvider, code s
 	return claims, nil
 }
 
-func fetchExternalWeComJSON(client http.Client, endpoint string) (map[string]any, error) {
-	resp, err := client.Get(endpoint)
+func fetchExternalWeComJSON(ctx context.Context, client *http.Client, endpoint string) (map[string]any, error) {
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, endpoint, nil)
+	if err != nil {
+		return nil, err
+	}
+	resp, err := client.Do(req)
 	if err != nil {
 		return nil, err
 	}
 	defer resp.Body.Close()
-	body, _ := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
+	body, err := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
+	if err != nil {
+		return nil, err
+	}
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 		return nil, fmt.Errorf("wecom endpoint returned %s: %s", resp.Status, strings.TrimSpace(string(body)))
 	}
@@ -315,6 +332,14 @@ func fetchExternalWeComJSON(client http.Client, endpoint string) (map[string]any
 		return nil, fmt.Errorf("wecom endpoint returned errcode %d: %s", code, firstMetadataString(payload, "errmsg"))
 	}
 	return payload, nil
+}
+
+func externalWeComHTTPClient() *http.Client {
+	return &http.Client{
+		CheckRedirect: func(_ *http.Request, _ []*http.Request) error {
+			return http.ErrUseLastResponse
+		},
+	}
 }
 
 func wecomErrCode(payload map[string]any) (int, bool) {
@@ -490,16 +515,24 @@ func (s *Server) externalWeComProviderFromObject(object map[string]any, requireE
 	} else if enabled, ok := metadataBoolValue(object["enabled"]); ok && !enabled {
 		return externalWeComProvider{}, false, nil
 	}
+	provider := externalWeComProviderShapeFromObject(object)
 	secret, err := s.externalWeComAgentSecret(object)
 	if err != nil {
 		return externalWeComProvider{}, false, err
 	}
+	provider.AgentSecret = secret
+	if err := validateExternalWeComProviderShape(provider, true, secret != ""); err != nil {
+		return externalWeComProvider{}, false, err
+	}
+	return provider, true, nil
+}
+
+func externalWeComProviderShapeFromObject(object map[string]any) externalWeComProvider {
 	provider := externalWeComProvider{
 		ID:                 firstMetadataString(object, "id", "provider_id", "wecom_provider_id", "enterprise_wechat_provider_id"),
 		Name:               firstMetadataString(object, "name", "label", "provider_name", "wecom_provider_name", "enterprise_wechat_provider_name"),
 		CorpID:             firstMetadataString(object, "corp_id", "corpid", "wecom_corp_id", "enterprise_wechat_corp_id"),
 		AgentID:            firstMetadataString(object, "agent_id", "agentid", "wecom_agent_id", "enterprise_wechat_agent_id"),
-		AgentSecret:        secret,
 		AuthorizeEndpoint:  firstMetadataString(object, "authorize_endpoint", "authorization_endpoint", "wecom_authorize_endpoint"),
 		TokenEndpoint:      firstMetadataString(object, "token_endpoint", "wecom_token_endpoint"),
 		UserInfoEndpoint:   firstMetadataString(object, "userinfo_endpoint", "user_info_endpoint", "wecom_userinfo_endpoint"),
@@ -516,7 +549,7 @@ func (s *Server) externalWeComProviderFromObject(object map[string]any, requireE
 	if provider.UserInfoEndpoint == "" {
 		provider.UserInfoEndpoint = "https://qyapi.weixin.qq.com/cgi-bin/auth/getuserinfo"
 	}
-	if provider.UserDetailEndpoint == "" {
+	if provider.UserDetailEndpoint == "" && strings.EqualFold(provider.TokenEndpoint, "https://qyapi.weixin.qq.com/cgi-bin/gettoken") && strings.EqualFold(provider.UserInfoEndpoint, "https://qyapi.weixin.qq.com/cgi-bin/auth/getuserinfo") {
 		provider.UserDetailEndpoint = "https://qyapi.weixin.qq.com/cgi-bin/user/get"
 	}
 	if provider.ID == "" {
@@ -532,10 +565,136 @@ func (s *Server) externalWeComProviderFromObject(object map[string]any, requireE
 	if autoCreate, ok := metadataBoolValue(object["wecom_auto_create"]); ok {
 		provider.AutoCreate = autoCreate
 	}
-	if provider.ID == "" || provider.CorpID == "" || provider.AgentSecret == "" || provider.AuthorizeEndpoint == "" || provider.TokenEndpoint == "" || provider.UserInfoEndpoint == "" {
-		return externalWeComProvider{}, false, nil
+	return provider
+}
+
+func validateExternalWeComProviderShape(provider externalWeComProvider, required, secretConfigured bool) error {
+	for label, value := range map[string]string{
+		"provider id":   provider.ID,
+		"provider name": provider.Name,
+		"Corp ID":       provider.CorpID,
+		"Agent ID":      provider.AgentID,
+		"scope":         provider.Scope,
+		"default role":  provider.Role,
+	} {
+		if strings.ContainsAny(value, "\x00\r\n\t") {
+			return fmt.Errorf("Enterprise WeChat %s must not contain control characters", label)
+		}
 	}
-	return provider, true, nil
+	if len(provider.ID) > 256 || len(provider.Name) > 256 {
+		return errors.New("Enterprise WeChat provider id and name must not exceed 256 bytes")
+	}
+	if provider.ID != "" && !ldapRolePattern.MatchString(provider.ID) {
+		return errors.New("Enterprise WeChat provider id is invalid")
+	}
+	if len(provider.CorpID) > 256 || strings.ContainsAny(provider.CorpID, " /\\@?#") {
+		return errors.New("Enterprise WeChat Corp ID is invalid")
+	}
+	if provider.AgentID != "" {
+		if len(provider.AgentID) > 32 {
+			return errors.New("Enterprise WeChat Agent ID is invalid")
+		}
+		for _, char := range provider.AgentID {
+			if char < '0' || char > '9' {
+				return errors.New("Enterprise WeChat Agent ID must contain only digits")
+			}
+		}
+	}
+	if provider.Role != "" && !ldapRolePattern.MatchString(provider.Role) {
+		return errors.New("Enterprise WeChat default role is invalid")
+	}
+	scope := firstNonEmpty(provider.Scope, "snsapi_base")
+	switch scope {
+	case "snsapi_base", "snsapi_userinfo", "snsapi_privateinfo":
+	default:
+		return fmt.Errorf("Enterprise WeChat scope %q is not supported", scope)
+	}
+	if scope == "snsapi_privateinfo" && provider.AgentID == "" {
+		return errors.New("Enterprise WeChat Agent ID is required for snsapi_privateinfo")
+	}
+	if _, err := parseExternalWeComEndpoint(provider.AuthorizeEndpoint, "authorization", true); err != nil {
+		return err
+	}
+	tokenURL, err := parseExternalWeComEndpoint(provider.TokenEndpoint, "token", false)
+	if err != nil {
+		return err
+	}
+	userInfoURL, err := parseExternalWeComEndpoint(provider.UserInfoEndpoint, "userinfo", false)
+	if err != nil {
+		return err
+	}
+	if !sameExternalWeComOrigin(tokenURL, userInfoURL) {
+		return errors.New("Enterprise WeChat token and userinfo endpoints must use the same origin")
+	}
+	if provider.UserDetailEndpoint != "" {
+		userDetailURL, err := parseExternalWeComEndpoint(provider.UserDetailEndpoint, "user detail", false)
+		if err != nil {
+			return err
+		}
+		if !sameExternalWeComOrigin(tokenURL, userDetailURL) {
+			return errors.New("Enterprise WeChat token, userinfo, and user detail endpoints must use the same origin")
+		}
+	}
+	if required && provider.CorpID == "" {
+		return errors.New("Enterprise WeChat Corp ID is required when login is enabled")
+	}
+	if required && !secretConfigured {
+		return errors.New("Enterprise WeChat Agent secret is required when login is enabled")
+	}
+	return nil
+}
+
+func parseExternalWeComEndpoint(raw, label string, allowWeChatFragment bool) (*url.URL, error) {
+	value := strings.TrimSpace(raw)
+	if value == "" {
+		return nil, fmt.Errorf("Enterprise WeChat %s endpoint is required", label)
+	}
+	if len(value) > 4096 || strings.ContainsAny(value, "\x00\r\n\t") {
+		return nil, fmt.Errorf("Enterprise WeChat %s endpoint is invalid", label)
+	}
+	parsed, err := url.Parse(value)
+	if err != nil || parsed.Opaque != "" || parsed.Hostname() == "" {
+		return nil, fmt.Errorf("Enterprise WeChat %s endpoint is invalid", label)
+	}
+	if parsed.Scheme != "https" && parsed.Scheme != "http" {
+		return nil, fmt.Errorf("Enterprise WeChat %s endpoint must use http or https", label)
+	}
+	if parsed.User != nil {
+		return nil, fmt.Errorf("Enterprise WeChat %s endpoint must not contain URL credentials", label)
+	}
+	if parsed.Fragment != "" && (!allowWeChatFragment || parsed.Fragment != "wechat_redirect") {
+		return nil, fmt.Errorf("Enterprise WeChat %s endpoint contains an invalid fragment", label)
+	}
+	if parsed.Scheme == "http" && !externalWeComLoopbackHost(parsed.Hostname()) {
+		return nil, fmt.Errorf("Enterprise WeChat %s endpoint must use https unless it targets loopback", label)
+	}
+	return parsed, nil
+}
+
+func externalWeComLoopbackHost(host string) bool {
+	host = strings.TrimSuffix(strings.ToLower(strings.TrimSpace(host)), ".")
+	if host == "localhost" {
+		return true
+	}
+	address := net.ParseIP(host)
+	return address != nil && address.IsLoopback()
+}
+
+func sameExternalWeComOrigin(left, right *url.URL) bool {
+	if left == nil || right == nil || !strings.EqualFold(left.Scheme, right.Scheme) || !strings.EqualFold(left.Hostname(), right.Hostname()) {
+		return false
+	}
+	return externalWeComEffectivePort(left) == externalWeComEffectivePort(right)
+}
+
+func externalWeComEffectivePort(endpoint *url.URL) string {
+	if port := endpoint.Port(); port != "" {
+		return port
+	}
+	if endpoint.Scheme == "https" {
+		return "443"
+	}
+	return "80"
 }
 
 func (s *Server) externalWeComAgentSecret(object map[string]any) (string, error) {

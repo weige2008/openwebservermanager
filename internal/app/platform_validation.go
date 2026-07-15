@@ -68,7 +68,7 @@ func preparePlatformItemUpdateRequest(collection string, existing model.Platform
 	case "scheduled_tasks":
 		return validateScheduledTaskItem(item)
 	case "system_settings":
-		return validateSystemSettingItem(item)
+		return validateSystemSettingItemWithExisting(item, existing.Metadata)
 	default:
 		return validatePlatformItemRequest(collection, *req)
 	}
@@ -336,6 +336,10 @@ var retentionDayMetadataKeys = []string{
 }
 
 func validateSystemSettingItem(item model.PlatformItem) error {
+	return validateSystemSettingItemWithExisting(item, nil)
+}
+
+func validateSystemSettingItemWithExisting(item model.PlatformItem, existingMetadata map[string]any) error {
 	settingType := strings.ToLower(strings.TrimSpace(item.Type))
 	status := strings.ToLower(strings.TrimSpace(item.Status))
 	if status != "" {
@@ -354,7 +358,7 @@ func validateSystemSettingItem(item model.PlatformItem) error {
 		}
 		return validateLLMIntegrationItem(item)
 	case "identity":
-		return validateIdentitySettingItem(item)
+		return validateIdentitySettingItem(item, existingMetadata)
 	default:
 		return nil
 	}
@@ -453,10 +457,101 @@ var ldapProviderMetadataTypes = map[string]string{
 	"ldap_server_name":              "string",
 }
 
+var weComTopLevelMetadataTypes = map[string]string{
+	"wecom_enabled":                            "boolean",
+	"wecom_login_enabled":                      "boolean",
+	"enterprise_wechat_enabled":                "boolean",
+	"wecom_provider_id":                        "string",
+	"enterprise_wechat_provider_id":            "string",
+	"wecom_provider_name":                      "string",
+	"enterprise_wechat_provider_name":          "string",
+	"wecom_corp_id":                            "string",
+	"enterprise_wechat_corp_id":                "string",
+	"wecom_agent_id":                           "string",
+	"enterprise_wechat_agent_id":               "string",
+	"wecom_agent_secret":                       "secret",
+	"enterprise_wechat_agent_secret":           "secret",
+	"wecom_agent_secret_clear":                 "boolean",
+	"clear_wecom_agent_secret":                 "boolean",
+	"wecom_agent_secret_encrypted":             "string",
+	"enterprise_wechat_agent_secret_encrypted": "string",
+	"wecom_agent_secret_set":                   "boolean",
+	"wecom_agent_secret_updated_at":            "string",
+	"wecom_authorize_endpoint":                 "string",
+	"wecom_token_endpoint":                     "string",
+	"wecom_userinfo_endpoint":                  "string",
+	"wecom_user_detail_endpoint":               "string",
+	"wecom_scope":                              "string",
+	"wecom_role":                               "string",
+	"wecom_auto_create":                        "boolean",
+	"wecom_providers":                          "object_list",
+	"enterprise_wechat_providers":              "object_list",
+}
+
+var weComProviderMetadataTypes = map[string]string{
+	"id":                              "string",
+	"provider_id":                     "string",
+	"wecom_provider_id":               "string",
+	"enterprise_wechat_provider_id":   "string",
+	"name":                            "string",
+	"label":                           "string",
+	"provider_name":                   "string",
+	"wecom_provider_name":             "string",
+	"enterprise_wechat_provider_name": "string",
+	"enabled":                         "boolean",
+	"corp_id":                         "string",
+	"corpid":                          "string",
+	"wecom_corp_id":                   "string",
+	"enterprise_wechat_corp_id":       "string",
+	"agent_id":                        "string",
+	"agentid":                         "string",
+	"wecom_agent_id":                  "string",
+	"enterprise_wechat_agent_id":      "string",
+	"agent_secret":                    "secret",
+	"wecom_agent_secret":              "secret",
+	"enterprise_wechat_agent_secret":  "secret",
+	"corp_secret":                     "secret",
+	"corpsecret":                      "secret",
+	"wecom_agent_secret_clear":        "boolean",
+	"clear_wecom_agent_secret":        "boolean",
+	"agent_secret_clear":              "boolean",
+	"clear_agent_secret":              "boolean",
+	"wecom_agent_secret_encrypted":    "string",
+	"enterprise_wechat_agent_secret_encrypted": "string",
+	"agent_secret_encrypted":                   "string",
+	"wecom_agent_secret_set":                   "boolean",
+	"wecom_agent_secret_updated_at":            "string",
+	"authorize_endpoint":                       "string",
+	"authorization_endpoint":                   "string",
+	"wecom_authorize_endpoint":                 "string",
+	"token_endpoint":                           "string",
+	"wecom_token_endpoint":                     "string",
+	"userinfo_endpoint":                        "string",
+	"user_info_endpoint":                       "string",
+	"wecom_userinfo_endpoint":                  "string",
+	"user_detail_endpoint":                     "string",
+	"user_endpoint":                            "string",
+	"wecom_user_detail_endpoint":               "string",
+	"scope":                                    "string",
+	"wecom_scope":                              "string",
+	"role":                                     "string",
+	"default_role":                             "string",
+	"wecom_role":                               "string",
+	"auto_create":                              "boolean",
+	"wecom_auto_create":                        "boolean",
+}
+
 var ldapAttributeNamePattern = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._;-]{0,127}$`)
 var ldapRolePattern = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}$`)
 
 func validateIdentityMetadataInput(metadata map[string]any) error {
+	if err := validateLDAPMetadataInput(metadata); err != nil {
+		return err
+	}
+	return validateWeComMetadataInput(metadata)
+}
+
+func validateLDAPMetadataInput(metadata map[string]any) error {
 	for key, value := range metadata {
 		normalized := strings.ToLower(strings.TrimSpace(key))
 		valueType, known := ldapTopLevelMetadataTypes[normalized]
@@ -481,6 +576,46 @@ func validateIdentityMetadataInput(metadata map[string]any) error {
 			for childKey, childValue := range object {
 				normalizedChild := strings.ToLower(strings.TrimSpace(childKey))
 				childType, ok := ldapProviderMetadataTypes[normalizedChild]
+				if !ok {
+					return fmt.Errorf("%s field %q is not supported", context, childKey)
+				}
+				if childKey != normalizedChild {
+					return fmt.Errorf("%s field %q must use the canonical name %q", context, childKey, normalizedChild)
+				}
+				if err := validateLDAPMetadataValue(context+"."+childKey, childValue, childType); err != nil {
+					return err
+				}
+			}
+		}
+	}
+	return nil
+}
+
+func validateWeComMetadataInput(metadata map[string]any) error {
+	for key, value := range metadata {
+		normalized := strings.ToLower(strings.TrimSpace(key))
+		valueType, known := weComTopLevelMetadataTypes[normalized]
+		if !known {
+			if strings.HasPrefix(normalized, "wecom_") || strings.HasPrefix(normalized, "enterprise_wechat_") {
+				return fmt.Errorf("identity setting field %q is not supported", key)
+			}
+			continue
+		}
+		if key != normalized {
+			return fmt.Errorf("identity setting field %q must use the canonical name %q", key, normalized)
+		}
+		if err := validateLDAPMetadataValue(key, value, valueType); err != nil {
+			return err
+		}
+		if valueType != "object_list" || value == nil {
+			continue
+		}
+		objects, _ := strictMetadataObjectList(value)
+		for index, object := range objects {
+			context := fmt.Sprintf("identity setting %s[%d]", key, index)
+			for childKey, childValue := range object {
+				normalizedChild := strings.ToLower(strings.TrimSpace(childKey))
+				childType, ok := weComProviderMetadataTypes[normalizedChild]
 				if !ok {
 					return fmt.Errorf("%s field %q is not supported", context, childKey)
 				}
@@ -549,7 +684,7 @@ func strictMetadataObjectList(value any) ([]map[string]any, bool) {
 	}
 }
 
-func validateIdentitySettingItem(item model.PlatformItem) error {
+func validateIdentitySettingItem(item model.PlatformItem, existingMetadata map[string]any) error {
 	if item.Metadata == nil {
 		return nil
 	}
@@ -572,17 +707,16 @@ func validateIdentitySettingItem(item model.PlatformItem) error {
 			}
 		}
 	}
-	if !identityHasLDAPMetadata(item.Metadata) {
-		return nil
+	if identityHasLDAPMetadata(item.Metadata) {
+		id, enabled, err := validateLDAPProviderObject(item.Metadata, true, "identity setting LDAP provider")
+		if err != nil {
+			return err
+		}
+		if enabled && id != "" && providerIDs[id] {
+			return fmt.Errorf("identity setting LDAP provider id %q is duplicated", id)
+		}
 	}
-	id, enabled, err := validateLDAPProviderObject(item.Metadata, true, "identity setting LDAP provider")
-	if err != nil {
-		return err
-	}
-	if enabled && id != "" && providerIDs[id] {
-		return fmt.Errorf("identity setting LDAP provider id %q is duplicated", id)
-	}
-	return nil
+	return validateWeComSettingMetadata(item.Metadata, existingMetadata)
 }
 
 func identityHasLDAPMetadata(metadata map[string]any) bool {
@@ -593,6 +727,133 @@ func identityHasLDAPMetadata(metadata map[string]any) bool {
 		}
 	}
 	return false
+}
+
+func validateWeComSettingMetadata(metadata, existingMetadata map[string]any) error {
+	providerIDs := map[string]bool{}
+	for _, key := range []string{"wecom_providers", "enterprise_wechat_providers"} {
+		objects, _ := strictMetadataObjectList(metadata[key])
+		existingObjects, _ := strictMetadataObjectList(existingMetadata[key])
+		for index, object := range objects {
+			existingObject := matchingWeComProviderObject(object, existingObjects, index)
+			id, enabled, err := validateWeComProviderObject(object, existingObject, false, fmt.Sprintf("identity setting %s[%d]", key, index))
+			if err != nil {
+				return err
+			}
+			if enabled && id != "" {
+				if providerIDs[id] {
+					return fmt.Errorf("identity setting Enterprise WeChat provider id %q is duplicated", id)
+				}
+				providerIDs[id] = true
+			}
+		}
+	}
+	if !identityHasFlatWeComMetadata(metadata) {
+		return nil
+	}
+	existingObject := matchingFlatWeComProviderObject(metadata, existingMetadata)
+	id, enabled, err := validateWeComProviderObject(metadata, existingObject, true, "identity setting Enterprise WeChat provider")
+	if err != nil {
+		return err
+	}
+	if enabled && id != "" && providerIDs[id] {
+		return fmt.Errorf("identity setting Enterprise WeChat provider id %q is duplicated", id)
+	}
+	return nil
+}
+
+func identityHasWeComMetadata(metadata map[string]any) bool {
+	for key := range metadata {
+		normalized := strings.ToLower(strings.TrimSpace(key))
+		if strings.HasPrefix(normalized, "wecom_") || strings.HasPrefix(normalized, "enterprise_wechat_") {
+			return true
+		}
+	}
+	return false
+}
+
+func identityHasFlatWeComMetadata(metadata map[string]any) bool {
+	for key := range metadata {
+		normalized := strings.ToLower(strings.TrimSpace(key))
+		if normalized == "wecom_providers" || normalized == "enterprise_wechat_providers" {
+			continue
+		}
+		if strings.HasPrefix(normalized, "wecom_") || strings.HasPrefix(normalized, "enterprise_wechat_") {
+			return true
+		}
+	}
+	return false
+}
+
+func validateWeComProviderObject(object, existing map[string]any, requireExplicitEnable bool, context string) (string, bool, error) {
+	enabled := !requireExplicitEnable
+	if requireExplicitEnable {
+		enabled, _ = metadataBoolValue(object["wecom_enabled"])
+		if _, exists := object["wecom_enabled"]; !exists {
+			enabled, _ = metadataBoolValue(object["wecom_login_enabled"])
+			if _, legacyExists := object["wecom_login_enabled"]; !legacyExists {
+				enabled, _ = metadataBoolValue(object["enterprise_wechat_enabled"])
+			}
+		}
+	} else if value, exists := object["enabled"]; exists {
+		enabled, _ = metadataBoolValue(value)
+	}
+	provider := externalWeComProviderShapeFromObject(object)
+	secretConfigured := weComProviderSecretConfigured(object, existing)
+	if err := validateExternalWeComProviderShape(provider, enabled, secretConfigured); err != nil {
+		return provider.ID, enabled, fmt.Errorf("%s: %w", context, err)
+	}
+	return provider.ID, enabled, nil
+}
+
+func matchingFlatWeComProviderObject(incoming, existing map[string]any) map[string]any {
+	if existing == nil || !identityHasWeComMetadata(existing) {
+		return nil
+	}
+	incomingID := externalWeComProviderShapeFromObject(incoming).ID
+	existingID := externalWeComProviderShapeFromObject(existing).ID
+	if incomingID != "" && existingID != "" && incomingID != existingID {
+		return nil
+	}
+	return existing
+}
+
+func matchingWeComProviderObject(incoming map[string]any, existing []map[string]any, index int) map[string]any {
+	incomingID := externalWeComProviderShapeFromObject(incoming).ID
+	if incomingID != "" {
+		for _, candidate := range existing {
+			if externalWeComProviderShapeFromObject(candidate).ID == incomingID {
+				return candidate
+			}
+		}
+		return nil
+	}
+	if index >= 0 && index < len(existing) {
+		return existing[index]
+	}
+	return nil
+}
+
+func weComProviderSecretConfigured(object, existing map[string]any) bool {
+	if clearRequested, _ := metadataBoolByKeys(object, "wecom_agent_secret_clear", "clear_wecom_agent_secret", "agent_secret_clear", "clear_agent_secret"); clearRequested {
+		return false
+	}
+	if firstMetadataString(object, "agent_secret", "wecom_agent_secret", "enterprise_wechat_agent_secret", "corp_secret", "corpsecret") != "" {
+		return true
+	}
+	if existing == nil {
+		return false
+	}
+	return firstMetadataString(existing,
+		"agent_secret",
+		"wecom_agent_secret",
+		"enterprise_wechat_agent_secret",
+		"corp_secret",
+		"corpsecret",
+		"wecom_agent_secret_encrypted",
+		"enterprise_wechat_agent_secret_encrypted",
+		"agent_secret_encrypted",
+	) != ""
 }
 
 func validateLDAPProviderObject(object map[string]any, requireExplicitEnable bool, context string) (string, bool, error) {

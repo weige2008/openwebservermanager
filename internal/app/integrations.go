@@ -410,7 +410,7 @@ func (s *Server) handleWeComTest(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	started := time.Now()
-	expiresIn, err := testExternalWeComAccessToken(provider)
+	expiresIn, err := testExternalWeComAccessToken(r.Context(), provider)
 	if err != nil {
 		errText := sanitizedWeComTestError(provider, err)
 		if logErr := s.createIntegrationTestOperationLog(r, "system_settings.wecom_test.failed", "failed", item.ID, "Enterprise WeChat test failed: "+errText, map[string]any{"provider_id": provider.ID}); logErr != nil {
@@ -670,8 +670,10 @@ func sanitizedOIDCTestError(provider externalOIDCProvider, err error) string {
 	return redactSecretVariants(err.Error(), provider.ClientSecret)
 }
 
-func testExternalWeComAccessToken(provider externalWeComProvider) (int, error) {
-	client := http.Client{Timeout: 10 * time.Second}
+func testExternalWeComAccessToken(parent context.Context, provider externalWeComProvider) (int, error) {
+	ctx, cancel := context.WithTimeout(parent, externalWeComRequestTimeout)
+	defer cancel()
+	client := externalWeComHTTPClient()
 	tokenURL, err := url.Parse(provider.TokenEndpoint)
 	if err != nil {
 		return 0, err
@@ -680,7 +682,7 @@ func testExternalWeComAccessToken(provider externalWeComProvider) (int, error) {
 	tokenQuery.Set("corpid", provider.CorpID)
 	tokenQuery.Set("corpsecret", provider.AgentSecret)
 	tokenURL.RawQuery = tokenQuery.Encode()
-	payload, err := fetchExternalWeComJSON(client, tokenURL.String())
+	payload, err := fetchExternalWeComJSON(ctx, client, tokenURL.String())
 	if err != nil {
 		return 0, err
 	}

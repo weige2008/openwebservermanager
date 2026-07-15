@@ -1,6 +1,7 @@
 package app
 
 import (
+	"context"
 	"crypto"
 	"crypto/rsa"
 	"crypto/sha256"
@@ -10,6 +11,7 @@ import (
 	"fmt"
 	"io"
 	"math/big"
+	"net"
 	"net/http"
 	"net/url"
 	"strings"
@@ -21,12 +23,15 @@ import (
 
 const externalOIDCStateTTL = 5 * time.Minute
 const externalOIDCStateCollection = "external_oidc_states"
+const externalOIDCRequestTimeout = 10 * time.Second
+const maxExternalOIDCTokenBytes = 1 << 20
 
 type externalOIDCState struct {
-	ProviderID string    `json:"provider_id"`
-	Next       string    `json:"next"`
-	Nonce      string    `json:"nonce"`
-	ExpiresAt  time.Time `json:"expires_at"`
+	ProviderID   string    `json:"provider_id"`
+	Next         string    `json:"next"`
+	Nonce        string    `json:"nonce"`
+	CodeVerifier string    `json:"code_verifier,omitempty"`
+	ExpiresAt    time.Time `json:"expires_at"`
 }
 
 type externalOIDCProvider struct {
@@ -39,9 +44,11 @@ type externalOIDCProvider struct {
 	JWKSEndpoint          string
 	ClientID              string
 	ClientSecret          string
+	TokenAuthMethod       string
 	Scopes                []string
 	Role                  string
 	AutoCreate            bool
+	RequireIDToken        bool
 }
 
 func (s *Server) handleExternalOIDCAPI(w http.ResponseWriter, r *http.Request) {
@@ -81,7 +88,7 @@ func (s *Server) handleExternalOIDCStart(w http.ResponseWriter, r *http.Request)
 		return
 	}
 	next := safeRedirectPath(r.URL.Query().Get("next"))
-	state, nonce, err := s.auth.createExternalOIDCState(provider.ID, next)
+	state, nonce, codeVerifier, err := s.auth.createExternalOIDCStateWithPKCE(provider.ID, next)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, err.Error())
 		return
@@ -98,6 +105,9 @@ func (s *Server) handleExternalOIDCStart(w http.ResponseWriter, r *http.Request)
 	values.Set("scope", strings.Join(provider.Scopes, " "))
 	values.Set("state", state)
 	values.Set("nonce", nonce)
+	codeChallenge := sha256.Sum256([]byte(codeVerifier))
+	values.Set("code_challenge", base64.RawURLEncoding.EncodeToString(codeChallenge[:]))
+	values.Set("code_challenge_method", "S256")
 	authorizeURL.RawQuery = values.Encode()
 	http.Redirect(w, r, authorizeURL.String(), http.StatusFound)
 }
@@ -140,9 +150,9 @@ func (s *Server) handleExternalOIDCCallback(w http.ResponseWriter, r *http.Reque
 		writeError(w, http.StatusBadRequest, err.Error())
 		return
 	}
-	claims, err := s.exchangeExternalOIDCCode(r, provider, code, state.Nonce)
+	claims, err := s.exchangeExternalOIDCCode(r, provider, code, state.Nonce, state.CodeVerifier)
 	if err != nil {
-		safeErr := sanitizedExternalProviderError(err, provider.ClientSecret)
+		safeErr := sanitizedExternalProviderError(err, provider.ClientSecret, code)
 		if logErr := s.recordExternalOIDCLoginFailure(r, provider, nil, safeErr); logErr != nil {
 			writeError(w, http.StatusInternalServerError, logErr.Error())
 			return
@@ -288,28 +298,39 @@ func sanitizedExternalProviderError(err error, secrets ...string) error {
 	return errors.New(redactSecretVariants(err.Error(), secrets...))
 }
 
-func (s *Server) exchangeExternalOIDCCode(r *http.Request, provider externalOIDCProvider, code, expectedNonce string) (map[string]any, error) {
+func (s *Server) exchangeExternalOIDCCode(r *http.Request, provider externalOIDCProvider, code, expectedNonce, codeVerifier string) (map[string]any, error) {
+	ctx, cancel := context.WithTimeout(r.Context(), externalOIDCRequestTimeout)
+	defer cancel()
 	form := url.Values{
 		"grant_type":   {"authorization_code"},
 		"code":         {code},
 		"redirect_uri": {externalOIDCRedirectURI(r, s.cfg.TrustProxyHeaders)},
 		"client_id":    {provider.ClientID},
 	}
-	req, err := http.NewRequest(http.MethodPost, provider.TokenEndpoint, strings.NewReader(form.Encode()))
+	if codeVerifier != "" {
+		form.Set("code_verifier", codeVerifier)
+	}
+	if provider.TokenAuthMethod == "client_secret_post" {
+		form.Set("client_secret", provider.ClientSecret)
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, provider.TokenEndpoint, strings.NewReader(form.Encode()))
 	if err != nil {
 		return nil, err
 	}
 	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
-	if provider.ClientSecret != "" {
+	if provider.TokenAuthMethod == "client_secret_basic" {
 		req.SetBasicAuth(provider.ClientID, provider.ClientSecret)
 	}
-	client := http.Client{Timeout: 10 * time.Second}
+	client := externalOIDCHTTPClient()
 	resp, err := client.Do(req)
 	if err != nil {
 		return nil, err
 	}
 	defer resp.Body.Close()
-	body, _ := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
+	body, err := io.ReadAll(io.LimitReader(resp.Body, maxExternalOIDCTokenBytes))
+	if err != nil {
+		return nil, err
+	}
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 		return nil, fmt.Errorf("oidc token endpoint returned %s: %s", resp.Status, strings.TrimSpace(string(body)))
 	}
@@ -317,26 +338,57 @@ func (s *Server) exchangeExternalOIDCCode(r *http.Request, provider externalOIDC
 	if err := json.Unmarshal(body, &tokenPayload); err != nil {
 		return nil, fmt.Errorf("decode oidc token response: %w", err)
 	}
+	if tokenType := firstMetadataString(tokenPayload, "token_type"); tokenType != "" && !strings.EqualFold(tokenType, "Bearer") {
+		return nil, errors.New("oidc token response returned unsupported token_type")
+	}
 	accessToken := firstMetadataString(tokenPayload, "access_token")
-	if accessToken == "" {
-		return nil, errors.New("oidc token response missing access_token")
+	idToken := firstMetadataString(tokenPayload, "id_token")
+	var idTokenClaims map[string]any
+	if idToken != "" {
+		if provider.Issuer == "" {
+			if provider.RequireIDToken {
+				return nil, errors.New("oidc id_token verification requires issuer")
+			}
+		} else {
+			idTokenClaims, err = verifyExternalOIDCIDToken(ctx, client, provider, idToken, expectedNonce)
+			if err != nil {
+				return nil, err
+			}
+		}
+	} else if provider.RequireIDToken {
+		return nil, errors.New("oidc token response missing required id_token")
 	}
 	if provider.UserInfoEndpoint != "" {
-		claims, err := fetchExternalOIDCUserInfo(client, provider.UserInfoEndpoint, accessToken)
-		if err == nil {
-			return claims, nil
+		if accessToken == "" {
+			return nil, errors.New("oidc token response missing access_token")
 		}
-		return nil, fmt.Errorf("oidc userinfo failed: %w", err)
+		claims, err := fetchExternalOIDCUserInfo(ctx, client, provider.UserInfoEndpoint, accessToken)
+		if err != nil {
+			if ctx.Err() != nil {
+				return nil, ctx.Err()
+			}
+			return nil, sanitizedExternalProviderError(fmt.Errorf("oidc userinfo failed: %w", err), accessToken, code, idToken)
+		}
+		userinfoSubject := firstMetadataString(claims, "sub")
+		if userinfoSubject == "" {
+			return nil, errors.New("oidc userinfo missing subject")
+		}
+		if idTokenClaims != nil && userinfoSubject != firstMetadataString(idTokenClaims, "sub") {
+			return nil, errors.New("oidc userinfo subject does not match id_token")
+		}
+		return mergeExternalOIDCClaims(idTokenClaims, claims), nil
 	}
-	idToken := firstMetadataString(tokenPayload, "id_token")
+	if idTokenClaims != nil {
+		return idTokenClaims, nil
+	}
 	if idToken == "" {
 		return nil, errors.New("oidc provider did not return userinfo or id_token")
 	}
-	return verifyExternalOIDCIDToken(client, provider, idToken, expectedNonce)
+	return nil, errors.New("oidc id_token could not be verified")
 }
 
-func fetchExternalOIDCUserInfo(client http.Client, endpoint, accessToken string) (map[string]any, error) {
-	req, err := http.NewRequest(http.MethodGet, endpoint, nil)
+func fetchExternalOIDCUserInfo(ctx context.Context, client *http.Client, endpoint, accessToken string) (map[string]any, error) {
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, endpoint, nil)
 	if err != nil {
 		return nil, err
 	}
@@ -346,7 +398,10 @@ func fetchExternalOIDCUserInfo(client http.Client, endpoint, accessToken string)
 		return nil, err
 	}
 	defer resp.Body.Close()
-	body, _ := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
+	body, err := io.ReadAll(io.LimitReader(resp.Body, maxExternalOIDCTokenBytes))
+	if err != nil {
+		return nil, err
+	}
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 		return nil, fmt.Errorf("userinfo returned %s", resp.Status)
 	}
@@ -355,6 +410,30 @@ func fetchExternalOIDCUserInfo(client http.Client, endpoint, accessToken string)
 		return nil, err
 	}
 	return claims, nil
+}
+
+func mergeExternalOIDCClaims(verified, userinfo map[string]any) map[string]any {
+	if verified == nil {
+		return cloneMetadata(userinfo)
+	}
+	result := cloneMetadata(verified)
+	for key, value := range userinfo {
+		switch key {
+		case "sub", "iss", "aud", "azp", "exp", "nbf", "iat", "nonce":
+			continue
+		default:
+			result[key] = value
+		}
+	}
+	return result
+}
+
+func externalOIDCHTTPClient() *http.Client {
+	return &http.Client{
+		CheckRedirect: func(_ *http.Request, _ []*http.Request) error {
+			return http.ErrUseLastResponse
+		},
+	}
 }
 
 type externalOIDCJWKS struct {
@@ -370,7 +449,10 @@ type externalOIDCJWK struct {
 	E   string `json:"e"`
 }
 
-func verifyExternalOIDCIDToken(client http.Client, provider externalOIDCProvider, token, expectedNonce string) (map[string]any, error) {
+func verifyExternalOIDCIDToken(ctx context.Context, client *http.Client, provider externalOIDCProvider, token, expectedNonce string) (map[string]any, error) {
+	if len(token) > maxExternalOIDCTokenBytes {
+		return nil, errors.New("id_token is too large")
+	}
 	parts := strings.Split(token, ".")
 	if len(parts) != 3 {
 		return nil, errors.New("invalid id_token")
@@ -386,11 +468,11 @@ func verifyExternalOIDCIDToken(client http.Client, provider externalOIDCProvider
 	if err := decodeJWTPart(parts[1], &claims); err != nil {
 		return nil, fmt.Errorf("decode id_token claims: %w", err)
 	}
-	jwksURI, issuer, err := externalOIDCJWKSURI(client, provider)
+	jwksURI, issuer, err := externalOIDCJWKSURI(ctx, client, provider)
 	if err != nil {
 		return nil, err
 	}
-	publicKey, err := externalOIDCJWKSKey(client, jwksURI, firstMetadataString(header, "kid"))
+	publicKey, err := externalOIDCJWKSKey(ctx, client, jwksURI, firstMetadataString(header, "kid"))
 	if err != nil {
 		return nil, err
 	}
@@ -409,17 +491,23 @@ func verifyExternalOIDCIDToken(client http.Client, provider externalOIDCProvider
 	return claims, nil
 }
 
-func externalOIDCJWKSURI(client http.Client, provider externalOIDCProvider) (string, string, error) {
+func externalOIDCJWKSURI(ctx context.Context, client *http.Client, provider externalOIDCProvider) (string, string, error) {
 	jwksURI := strings.TrimSpace(provider.JWKSEndpoint)
 	issuer := strings.TrimRight(strings.TrimSpace(provider.Issuer), "/")
 	if issuer == "" {
 		return "", "", errors.New("oidc id_token verification requires issuer")
 	}
 	if jwksURI != "" {
+		if _, err := parseExternalOIDCEndpoint(jwksURI, "JWKS", false); err != nil {
+			return "", "", err
+		}
 		return jwksURI, issuer, nil
 	}
 	discoveryURL := issuer + "/.well-known/openid-configuration"
-	req, err := http.NewRequest(http.MethodGet, discoveryURL, nil)
+	if _, err := parseExternalOIDCEndpoint(discoveryURL, "discovery", false); err != nil {
+		return "", "", err
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, discoveryURL, nil)
 	if err != nil {
 		return "", "", err
 	}
@@ -428,7 +516,10 @@ func externalOIDCJWKSURI(client http.Client, provider externalOIDCProvider) (str
 		return "", "", err
 	}
 	defer resp.Body.Close()
-	body, _ := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
+	body, err := io.ReadAll(io.LimitReader(resp.Body, maxExternalOIDCTokenBytes))
+	if err != nil {
+		return "", "", err
+	}
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 		return "", "", fmt.Errorf("oidc discovery returned %s", resp.Status)
 	}
@@ -436,18 +527,21 @@ func externalOIDCJWKSURI(client http.Client, provider externalOIDCProvider) (str
 	if err := json.Unmarshal(body, &discovery); err != nil {
 		return "", "", fmt.Errorf("decode oidc discovery: %w", err)
 	}
-	if discoveredIssuer := strings.TrimRight(firstMetadataString(discovery, "issuer"), "/"); discoveredIssuer != "" && discoveredIssuer != issuer {
+	if discoveredIssuer := strings.TrimRight(firstMetadataString(discovery, "issuer"), "/"); discoveredIssuer != issuer {
 		return "", "", errors.New("oidc discovery issuer mismatch")
 	}
 	jwksURI = firstMetadataString(discovery, "jwks_uri")
 	if jwksURI == "" {
 		return "", "", errors.New("oidc discovery missing jwks_uri")
 	}
+	if _, err := parseExternalOIDCEndpoint(jwksURI, "discovered JWKS", false); err != nil {
+		return "", "", err
+	}
 	return jwksURI, issuer, nil
 }
 
-func externalOIDCJWKSKey(client http.Client, jwksURI, kid string) (*rsa.PublicKey, error) {
-	req, err := http.NewRequest(http.MethodGet, jwksURI, nil)
+func externalOIDCJWKSKey(ctx context.Context, client *http.Client, jwksURI, kid string) (*rsa.PublicKey, error) {
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, jwksURI, nil)
 	if err != nil {
 		return nil, err
 	}
@@ -456,7 +550,10 @@ func externalOIDCJWKSKey(client http.Client, jwksURI, kid string) (*rsa.PublicKe
 		return nil, err
 	}
 	defer resp.Body.Close()
-	body, _ := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
+	body, err := io.ReadAll(io.LimitReader(resp.Body, maxExternalOIDCTokenBytes))
+	if err != nil {
+		return nil, err
+	}
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 		return nil, fmt.Errorf("oidc jwks returned %s", resp.Status)
 	}
@@ -502,11 +599,19 @@ func rsaPublicKeyFromJWK(key externalOIDCJWK) (*rsa.PublicKey, error) {
 	if err != nil {
 		return nil, fmt.Errorf("decode oidc jwk exponent: %w", err)
 	}
-	exponent := new(big.Int).SetBytes(eRaw).Int64()
-	if exponent <= 1 || exponent > int64(^uint(0)>>1) {
+	exponentValue := new(big.Int).SetBytes(eRaw)
+	if !exponentValue.IsInt64() {
 		return nil, errors.New("oidc jwk exponent is invalid")
 	}
-	return &rsa.PublicKey{N: new(big.Int).SetBytes(nRaw), E: int(exponent)}, nil
+	exponent := exponentValue.Int64()
+	modulus := new(big.Int).SetBytes(nRaw)
+	if modulus.BitLen() < 2048 || modulus.BitLen() > 16384 {
+		return nil, errors.New("oidc jwk rsa modulus size is invalid")
+	}
+	if exponent < 3 || exponent%2 == 0 || exponent > 1<<31-1 {
+		return nil, errors.New("oidc jwk exponent is invalid")
+	}
+	return &rsa.PublicKey{N: modulus, E: int(exponent)}, nil
 }
 
 func validateExternalOIDCIDTokenClaims(claims map[string]any, clientID, issuer, expectedNonce string, now time.Time) error {
@@ -757,7 +862,10 @@ func (s *Server) externalOIDCProvidersFromMetadata(metadata map[string]any) ([]e
 
 func (s *Server) externalOIDCProviderFromObject(object map[string]any, requireExplicitEnable bool) (externalOIDCProvider, bool, error) {
 	if requireExplicitEnable {
-		enabled, ok := metadataBoolValue(object["oidc_login_enabled"])
+		enabled, ok := metadataBoolValue(object["oidc_enabled"])
+		if !ok {
+			enabled, ok = metadataBoolValue(object["oidc_login_enabled"])
+		}
 		if !ok {
 			enabled, ok = metadataBoolValue(object["external_oidc_enabled"])
 		}
@@ -767,10 +875,19 @@ func (s *Server) externalOIDCProviderFromObject(object map[string]any, requireEx
 	} else if enabled, ok := metadataBoolValue(object["enabled"]); ok && !enabled {
 		return externalOIDCProvider{}, false, nil
 	}
+	provider := externalOIDCProviderShapeFromObject(object)
 	clientSecret, err := s.externalOIDCClientSecret(object)
 	if err != nil {
 		return externalOIDCProvider{}, false, err
 	}
+	provider.ClientSecret = clientSecret
+	if err := validateExternalOIDCProviderShape(provider, true, clientSecret != ""); err != nil {
+		return externalOIDCProvider{}, false, err
+	}
+	return provider, true, nil
+}
+
+func externalOIDCProviderShapeFromObject(object map[string]any) externalOIDCProvider {
 	provider := externalOIDCProvider{
 		ID:                    firstMetadataString(object, "id", "provider_id", "oidc_provider_id"),
 		Name:                  firstMetadataString(object, "name", "label", "provider_name", "oidc_provider_name"),
@@ -780,8 +897,11 @@ func (s *Server) externalOIDCProviderFromObject(object map[string]any, requireEx
 		UserInfoEndpoint:      firstMetadataString(object, "userinfo_endpoint", "user_info_endpoint", "userinfo_url", "oidc_userinfo_endpoint"),
 		JWKSEndpoint:          firstMetadataString(object, "jwks_uri", "jwks_endpoint", "jwks_url", "oidc_jwks_uri", "oidc_jwks_endpoint"),
 		ClientID:              firstMetadataString(object, "client_id", "clientId", "oidc_client_id"),
-		ClientSecret:          clientSecret,
+		TokenAuthMethod:       firstMetadataString(object, "token_endpoint_auth_method", "oidc_token_endpoint_auth_method", "client_auth_method", "oidc_auth_method"),
 		Role:                  firstMetadataString(object, "role", "default_role", "oidc_role"),
+	}
+	if provider.TokenAuthMethod == "" {
+		provider.TokenAuthMethod = "client_secret_basic"
 	}
 	if provider.ID == "" {
 		provider.ID = provider.ClientID
@@ -797,10 +917,139 @@ func (s *Server) externalOIDCProviderFromObject(object map[string]any, requireEx
 	if autoCreate, ok := metadataBoolValue(object["oidc_auto_create"]); ok {
 		provider.AutoCreate = autoCreate
 	}
-	if provider.ID == "" || provider.AuthorizationEndpoint == "" || provider.TokenEndpoint == "" || provider.ClientID == "" {
-		return externalOIDCProvider{}, false, nil
+	provider.RequireIDToken = provider.UserInfoEndpoint == ""
+	for _, key := range []string{"require_id_token", "oidc_require_id_token", "verify_id_token", "oidc_verify_id_token"} {
+		if required, ok := metadataBoolValue(object[key]); ok {
+			provider.RequireIDToken = required
+			break
+		}
 	}
-	return provider, true, nil
+	return provider
+}
+
+func validateExternalOIDCProviderShape(provider externalOIDCProvider, required, secretConfigured bool) error {
+	for label, value := range map[string]string{
+		"provider id":   provider.ID,
+		"provider name": provider.Name,
+		"client id":     provider.ClientID,
+		"default role":  provider.Role,
+	} {
+		if strings.ContainsAny(value, "\x00\r\n\t") {
+			return fmt.Errorf("OIDC %s must not contain control characters", label)
+		}
+	}
+	if len(provider.ID) > 256 || len(provider.Name) > 256 {
+		return errors.New("OIDC provider id and name must not exceed 256 bytes")
+	}
+	if provider.ID != "" && !ldapRolePattern.MatchString(provider.ID) {
+		return errors.New("OIDC provider id is invalid")
+	}
+	if len(provider.ClientID) > 512 || strings.TrimSpace(provider.ClientID) != provider.ClientID {
+		return errors.New("OIDC client id is invalid")
+	}
+	if provider.Role != "" && !ldapRolePattern.MatchString(provider.Role) {
+		return errors.New("OIDC default role is invalid")
+	}
+	switch provider.TokenAuthMethod {
+	case "client_secret_basic", "client_secret_post", "none":
+	default:
+		return fmt.Errorf("OIDC token endpoint auth method %q is not supported", provider.TokenAuthMethod)
+	}
+	if len(provider.Scopes) == 0 || len(provider.Scopes) > 32 {
+		return errors.New("OIDC scopes must contain between 1 and 32 values")
+	}
+	hasOpenID := false
+	for _, scope := range provider.Scopes {
+		if len(scope) > 128 || scope == "" || strings.ContainsAny(scope, " \t\r\n\x00") {
+			return fmt.Errorf("OIDC scope %q is invalid", scope)
+		}
+		if scope == "openid" {
+			hasOpenID = true
+		}
+	}
+	if required && !hasOpenID {
+		return errors.New("OIDC scopes must include openid")
+	}
+	if provider.Issuer != "" {
+		issuer, err := parseExternalOIDCEndpoint(provider.Issuer, "issuer", false)
+		if err != nil {
+			return err
+		}
+		if issuer.RawQuery != "" {
+			return errors.New("OIDC issuer must not contain a query")
+		}
+	} else if required && provider.RequireIDToken {
+		return errors.New("OIDC issuer is required when ID token verification is enabled")
+	}
+	for _, endpoint := range []struct {
+		label      string
+		value      string
+		allowQuery bool
+	}{
+		{"authorization", provider.AuthorizationEndpoint, true},
+		{"token", provider.TokenEndpoint, false},
+		{"userinfo", provider.UserInfoEndpoint, false},
+		{"JWKS", provider.JWKSEndpoint, false},
+	} {
+		if endpoint.value == "" {
+			continue
+		}
+		if _, err := parseExternalOIDCEndpoint(endpoint.value, endpoint.label, endpoint.allowQuery); err != nil {
+			return err
+		}
+	}
+	if required && provider.AuthorizationEndpoint == "" {
+		return errors.New("OIDC authorization endpoint is required when login is enabled")
+	}
+	if required && provider.TokenEndpoint == "" {
+		return errors.New("OIDC token endpoint is required when login is enabled")
+	}
+	if required && provider.ClientID == "" {
+		return errors.New("OIDC client id is required when login is enabled")
+	}
+	if required && provider.UserInfoEndpoint == "" && !provider.RequireIDToken {
+		return errors.New("OIDC UserInfo endpoint or required ID token verification must be configured")
+	}
+	if required && provider.TokenAuthMethod != "none" && !secretConfigured {
+		return errors.New("OIDC client secret is required for the selected token endpoint auth method")
+	}
+	return nil
+}
+
+func parseExternalOIDCEndpoint(raw, label string, allowQuery bool) (*url.URL, error) {
+	value := strings.TrimSpace(raw)
+	if value == "" || len(value) > 4096 || strings.ContainsAny(value, "\x00\r\n\t") {
+		return nil, fmt.Errorf("OIDC %s URL is invalid", label)
+	}
+	parsed, err := url.Parse(value)
+	if err != nil || parsed.Opaque != "" || parsed.Hostname() == "" {
+		return nil, fmt.Errorf("OIDC %s URL is invalid", label)
+	}
+	if parsed.Scheme != "https" && parsed.Scheme != "http" {
+		return nil, fmt.Errorf("OIDC %s URL must use http or https", label)
+	}
+	if parsed.User != nil {
+		return nil, fmt.Errorf("OIDC %s URL must not contain URL credentials", label)
+	}
+	if parsed.Fragment != "" {
+		return nil, fmt.Errorf("OIDC %s URL must not contain a fragment", label)
+	}
+	if !allowQuery && parsed.RawQuery != "" {
+		return nil, fmt.Errorf("OIDC %s URL must not contain a query", label)
+	}
+	if parsed.Scheme == "http" && !externalOIDCLoopbackHost(parsed.Hostname()) {
+		return nil, fmt.Errorf("OIDC %s URL must use https unless it targets loopback", label)
+	}
+	return parsed, nil
+}
+
+func externalOIDCLoopbackHost(host string) bool {
+	host = strings.TrimSuffix(strings.ToLower(strings.TrimSpace(host)), ".")
+	if host == "localhost" {
+		return true
+	}
+	address := net.ParseIP(host)
+	return address != nil && address.IsLoopback()
 }
 
 func (s *Server) externalOIDCClientSecret(object map[string]any) (string, error) {
@@ -845,26 +1094,35 @@ func metadataObjectList(value any) []map[string]any {
 }
 
 func (m *authManager) createExternalOIDCState(providerID, next string) (string, string, error) {
+	state, nonce, _, err := m.createExternalOIDCStateWithPKCE(providerID, next)
+	return state, nonce, err
+}
+
+func (m *authManager) createExternalOIDCStateWithPKCE(providerID, next string) (string, string, string, error) {
 	state, err := randomToken()
 	if err != nil {
-		return "", "", err
+		return "", "", "", err
 	}
 	nonce, err := randomToken()
 	if err != nil {
-		return "", "", err
+		return "", "", "", err
+	}
+	codeVerifier, err := randomToken()
+	if err != nil {
+		return "", "", "", err
 	}
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	now := time.Now().UTC()
-	item := externalOIDCState{ProviderID: providerID, Next: next, Nonce: nonce, ExpiresAt: now.Add(externalOIDCStateTTL)}
+	item := externalOIDCState{ProviderID: providerID, Next: next, Nonce: nonce, CodeVerifier: codeVerifier, ExpiresAt: now.Add(externalOIDCStateTTL)}
 	if m.store != nil {
 		if err := m.pruneAuthRuntimeStates(externalOIDCStateCollection); err != nil {
-			return "", "", err
+			return "", "", "", err
 		}
 		if err := m.persistAuthRuntimeState(externalOIDCStateCollection, state, item, item.ExpiresAt); err != nil {
-			return "", "", err
+			return "", "", "", err
 		}
-		return state, nonce, nil
+		return state, nonce, codeVerifier, nil
 	}
 	for key, item := range m.oidcStates {
 		if now.After(item.ExpiresAt) {
@@ -872,7 +1130,7 @@ func (m *authManager) createExternalOIDCState(providerID, next string) (string, 
 		}
 	}
 	m.oidcStates[state] = item
-	return state, nonce, nil
+	return state, nonce, codeVerifier, nil
 }
 
 func (m *authManager) consumeExternalOIDCState(value string) (externalOIDCState, bool, error) {
@@ -906,7 +1164,11 @@ func externalOIDCRedirectURI(r *http.Request, trustProxy bool) string {
 
 func safeRedirectPath(value string) string {
 	value = strings.TrimSpace(value)
-	if value == "" || !strings.HasPrefix(value, "/") || strings.HasPrefix(value, "//") {
+	if value == "" || !strings.HasPrefix(value, "/") || strings.HasPrefix(value, "//") || strings.ContainsAny(value, "\\\x00\r\n\t") {
+		return "/app"
+	}
+	parsed, err := url.Parse(value)
+	if err != nil || parsed.IsAbs() || parsed.Host != "" || !strings.HasPrefix(parsed.Path, "/") || strings.HasPrefix(parsed.Path, "//") {
 		return "/app"
 	}
 	return value

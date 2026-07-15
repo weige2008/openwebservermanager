@@ -7826,6 +7826,8 @@ func TestExternalOIDCLoginCreatesUserAndSession(t *testing.T) {
 	srv := handler.(*Server)
 	var authorizeState string
 	var authorizeNonce string
+	var authorizeCodeChallenge string
+	var tokenCodeVerifier string
 	var tokenEndpointCalls int
 	provider := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {
@@ -7837,6 +7839,11 @@ func TestExternalOIDCLoginCreatesUserAndSession(t *testing.T) {
 			}
 			authorizeState = query.Get("state")
 			authorizeNonce = query.Get("nonce")
+			authorizeCodeChallenge = query.Get("code_challenge")
+			if authorizeCodeChallenge == "" || query.Get("code_challenge_method") != "S256" {
+				http.Error(w, "missing PKCE challenge", http.StatusBadRequest)
+				return
+			}
 			callback, _ := url.Parse(query.Get("redirect_uri"))
 			values := callback.Query()
 			values.Set("code", "external-code")
@@ -7850,7 +7857,9 @@ func TestExternalOIDCLoginCreatesUserAndSession(t *testing.T) {
 				return
 			}
 			clientID, clientSecret, _ := r.BasicAuth()
-			if clientID != "openweb-client" || clientSecret != "openweb-secret" || r.PostForm.Get("code") != "external-code" {
+			tokenCodeVerifier = r.PostForm.Get("code_verifier")
+			verifierHash := sha256.Sum256([]byte(tokenCodeVerifier))
+			if clientID != "openweb-client" || clientSecret != "openweb-secret" || r.PostForm.Get("code") != "external-code" || base64.RawURLEncoding.EncodeToString(verifierHash[:]) != authorizeCodeChallenge {
 				http.Error(w, "bad token request", http.StatusUnauthorized)
 				return
 			}
@@ -7950,6 +7959,9 @@ func TestExternalOIDCLoginCreatesUserAndSession(t *testing.T) {
 	if tokenEndpointCalls != 1 {
 		t.Fatalf("oidc token endpoint calls = %d, want 1", tokenEndpointCalls)
 	}
+	if tokenCodeVerifier == "" {
+		t.Fatal("oidc token exchange did not send the PKCE verifier")
+	}
 	assertStatus(t, handler, http.MethodGet, callbackURL.RequestURI(), nil, nil, http.StatusBadRequest)
 	if tokenEndpointCalls != 1 {
 		t.Fatalf("replayed oidc callback reached provider token endpoint again: calls = %d", tokenEndpointCalls)
@@ -7969,16 +7981,17 @@ func TestExternalOIDCLoginCreatesUserAndSession(t *testing.T) {
 
 	assertStatus(t, handler, http.MethodPatch, "/api/admin/system-settings/"+setting.ID, map[string]any{
 		"metadata": map[string]any{
-			"oidc_login_enabled":          true,
-			"oidc_provider_id":            "fake-sso",
-			"oidc_provider_name":          "Fake SSO",
-			"oidc_authorization_endpoint": provider.URL + "/authorize",
-			"oidc_token_endpoint":         provider.URL + "/token",
-			"oidc_userinfo_endpoint":      provider.URL + "/userinfo",
-			"oidc_client_id":              "openweb-client",
-			"oidc_client_secret_clear":    true,
-			"oidc_scopes":                 []string{"openid", "profile", "email"},
-			"oidc_role":                   "user",
+			"oidc_login_enabled":              true,
+			"oidc_provider_id":                "fake-sso",
+			"oidc_provider_name":              "Fake SSO",
+			"oidc_authorization_endpoint":     provider.URL + "/authorize",
+			"oidc_token_endpoint":             provider.URL + "/token",
+			"oidc_userinfo_endpoint":          provider.URL + "/userinfo",
+			"oidc_client_id":                  "openweb-client",
+			"oidc_client_secret_clear":        true,
+			"oidc_token_endpoint_auth_method": "none",
+			"oidc_scopes":                     []string{"openid", "profile", "email"},
+			"oidc_role":                       "user",
 		},
 	}, adminCookie, http.StatusOK)
 	rawSetting, ok, err := srv.cfg.Store.GetPlatformItem("system_settings", setting.ID)
@@ -8475,7 +8488,8 @@ func TestExternalOIDCIDTokenValidationRejectsTamperedSignature(t *testing.T) {
 	signature[0] ^= 0xff
 	parts[2] = base64.RawURLEncoding.EncodeToString(signature)
 	tampered := strings.Join(parts, ".")
-	_, err = verifyExternalOIDCIDToken(http.Client{Timeout: time.Second}, externalOIDCProvider{
+	client := &http.Client{Timeout: time.Second}
+	_, err = verifyExternalOIDCIDToken(context.Background(), client, externalOIDCProvider{
 		Issuer:       provider.URL,
 		JWKSEndpoint: provider.URL + "/jwks",
 		ClientID:     "openweb-client",
@@ -8609,8 +8623,8 @@ func TestExternalOIDCCallbackDoesNotFallbackToIDTokenWhenUserInfoFails(t *testin
 	if !strings.Contains(failedRec.Body.String(), "userinfo failed") {
 		t.Fatalf("userinfo failure response did not explain failure: %s", failedRec.Body.String())
 	}
-	if jwksEndpointCalls != 0 {
-		t.Fatalf("userinfo failure fell back to id_token and fetched jwks: calls = %d", jwksEndpointCalls)
+	if jwksEndpointCalls != 1 {
+		t.Fatalf("userinfo failure did not verify the returned id_token first: calls = %d", jwksEndpointCalls)
 	}
 	usersRec := assertStatus(t, handler, http.MethodGet, "/api/admin/users", nil, adminCookie, http.StatusOK)
 	if strings.Contains(usersRec.Body.String(), "oidc-fallback-user") {
@@ -8746,6 +8760,7 @@ func TestOIDCIntegrationAuthorizationEndpointTest(t *testing.T) {
 			"oidc_provider_name":          "Bad SSO",
 			"oidc_authorization_endpoint": provider.URL + "/bad-authorize",
 			"oidc_token_endpoint":         provider.URL + "/token",
+			"oidc_userinfo_endpoint":      provider.URL + "/userinfo",
 			"oidc_client_id":              "openweb-client",
 			"oidc_client_secret":          clientSecret,
 		},

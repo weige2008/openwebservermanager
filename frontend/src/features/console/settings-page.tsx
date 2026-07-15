@@ -100,6 +100,8 @@ interface OIDCSettingsState {
   clientSecret: string
   clientSecretSet: boolean
   clientSecretClear: boolean
+  tokenAuthMethod: 'client_secret_basic' | 'client_secret_post' | 'none'
+  requireIDToken: boolean
   scopes: string
   role: string
   autoCreate: boolean
@@ -787,6 +789,10 @@ export function SettingsPage() {
       showPermissionDenied()
       return
     }
+    if (!oidcFormValid) {
+      app.showToast(t('settingsPage.oidcConfigurationInvalid', { defaultValue: 'Complete the OIDC connection settings before saving.' }))
+      return
+    }
     setOIDCBusy(true)
     try {
       const target = oidcSettings.setting
@@ -802,6 +808,8 @@ export function SettingsPage() {
         oidc_jwks_uri: oidcSettings.jwksEndpoint.trim(),
         oidc_client_id: oidcSettings.clientID.trim(),
         oidc_scopes: oidcSettings.scopes.split(/[,\s]+/).map((item) => item.trim()).filter(Boolean),
+        oidc_token_endpoint_auth_method: oidcSettings.tokenAuthMethod,
+        oidc_require_id_token: oidcSettings.requireIDToken,
         oidc_role: oidcSettings.role || 'user',
         oidc_auto_create: oidcSettings.autoCreate,
       }
@@ -1070,6 +1078,30 @@ export function SettingsPage() {
   const ldapTLSModeValid = !(ldapUsesImplicitTLS && ldapSettings.startTLS)
   const ldapSearchBaseReady = Boolean(ldapSettings.baseDN.trim() || ldapSettings.userDNTemplate.trim())
   const ldapFormValid = !ldapSettings.enabled || (Boolean(ldapSettings.url.trim()) && ldapURLValid && ldapTLSModeValid && ldapSearchBaseReady)
+  const oidcIssuer = oidcSettings.issuer.trim()
+  const oidcAuthorizationEndpoint = oidcSettings.authorizationEndpoint.trim()
+  const oidcTokenEndpoint = oidcSettings.tokenEndpoint.trim()
+  const oidcUserInfoEndpoint = oidcSettings.userInfoEndpoint.trim()
+  const oidcJWKSEndpoint = oidcSettings.jwksEndpoint.trim()
+  const oidcClientID = oidcSettings.clientID.trim()
+  const oidcScopes = oidcSettings.scopes.split(/[,\s]+/).map((item) => item.trim()).filter(Boolean)
+  const oidcIssuerValid = !oidcIssuer || isValidOIDCEndpoint(oidcIssuer, false)
+  const oidcAuthorizationEndpointValid = !oidcAuthorizationEndpoint || isValidOIDCEndpoint(oidcAuthorizationEndpoint, true)
+  const oidcTokenEndpointValid = !oidcTokenEndpoint || isValidOIDCEndpoint(oidcTokenEndpoint, false)
+  const oidcUserInfoEndpointValid = !oidcUserInfoEndpoint || isValidOIDCEndpoint(oidcUserInfoEndpoint, false)
+  const oidcJWKSEndpointValid = !oidcJWKSEndpoint || isValidOIDCEndpoint(oidcJWKSEndpoint, false)
+  const oidcClientIDValid = !oidcClientID || (!/[\u0000\r\n\t]/.test(oidcClientID) && oidcClientID.length <= 512)
+  const oidcScopesValid = oidcScopes.length > 0 && oidcScopes.length <= 32 && oidcScopes.includes('openid') && oidcScopes.every((scope) => scope.length <= 128 && !/\s/.test(scope))
+  const oidcClientSecretReady = oidcSettings.tokenAuthMethod === 'none' || Boolean(oidcSettings.clientSecret.trim() || (oidcSettings.clientSecretSet && !oidcSettings.clientSecretClear))
+  const oidcIssuerFieldInvalid = !oidcIssuerValid || (oidcSettings.enabled && oidcSettings.requireIDToken && !oidcIssuer)
+  const oidcAuthorizationFieldInvalid = !oidcAuthorizationEndpointValid || (oidcSettings.enabled && !oidcAuthorizationEndpoint)
+  const oidcTokenFieldInvalid = !oidcTokenEndpointValid || (oidcSettings.enabled && !oidcTokenEndpoint)
+  const oidcUserInfoFieldInvalid = !oidcUserInfoEndpointValid || (oidcSettings.enabled && !oidcSettings.requireIDToken && !oidcUserInfoEndpoint)
+  const oidcClientIDFieldInvalid = !oidcClientIDValid || (oidcSettings.enabled && !oidcClientID)
+  const oidcClientSecretFieldInvalid = oidcSettings.enabled && !oidcClientSecretReady
+  const oidcFormValid = oidcIssuerValid && oidcAuthorizationEndpointValid && oidcTokenEndpointValid && oidcUserInfoEndpointValid && oidcJWKSEndpointValid && oidcClientIDValid && oidcScopesValid && (!oidcSettings.enabled || (
+    Boolean(oidcAuthorizationEndpoint) && Boolean(oidcTokenEndpoint) && Boolean(oidcClientID) && oidcClientSecretReady && (oidcSettings.requireIDToken ? Boolean(oidcIssuer) : Boolean(oidcUserInfoEndpoint))
+  ))
   const wecomCorpID = wecomSettings.corpID.trim()
   const wecomAgentID = wecomSettings.agentID.trim()
   const wecomCorpIDValid = !wecomCorpID || (!/[\s/@?#\\]/.test(wecomCorpID) && wecomCorpID.length <= 256)
@@ -1267,7 +1299,9 @@ export function SettingsPage() {
                 {oidcSettings.enabled ? t('settingsPage.oidcEnabled', { defaultValue: 'OIDC on' }) : t('settingsPage.oidcDisabled', { defaultValue: 'OIDC off' })}
               </Badge>
               <Badge tone={oidcSettings.clientSecretSet ? 'success' : 'neutral'}>
-                {oidcSettings.clientSecretSet ? t('passwordSaved') : t('passwordNotSet')}
+                {oidcSettings.clientSecretSet
+                  ? t('settingsPage.oidcClientSecretSaved', { defaultValue: 'Client secret saved' })
+                  : t('settingsPage.oidcClientSecretNotSet', { defaultValue: 'Client secret not set' })}
               </Badge>
             </div>
             <p className='mt-1 max-w-lg text-sm leading-6 text-muted-foreground'>
@@ -1290,28 +1324,43 @@ export function SettingsPage() {
               <Input value={oidcSettings.providerName} onChange={(event) => patchOIDC({ providerName: event.currentTarget.value })} placeholder='Corporate SSO' />
             </Field>
             <Field label={t('settingsPage.oidcClientID', { defaultValue: 'Client ID' })}>
-              <Input value={oidcSettings.clientID} onChange={(event) => patchOIDC({ clientID: event.currentTarget.value })} placeholder='openweb-client' />
+              <Input value={oidcSettings.clientID} onChange={(event) => patchOIDC({ clientID: event.currentTarget.value })} placeholder='openweb-client' maxLength={512} aria-invalid={oidcClientIDFieldInvalid} />
+              {oidcClientIDFieldInvalid ? <span className='text-xs font-normal text-destructive'>{t('settingsPage.oidcClientIDRequired', { defaultValue: 'A valid Client ID is required while OIDC login is enabled.' })}</span> : null}
             </Field>
             <Field label={t('settingsPage.oidcClientSecret', { defaultValue: 'Client secret' })}>
-              <Input type='password' value={oidcSettings.clientSecret} onChange={(event) => patchOIDC({ clientSecret: event.currentTarget.value, clientSecretClear: false })} placeholder={oidcSettings.clientSecretSet ? 'Leave blank to keep current secret' : ''} autoComplete='new-password' />
+              <Input type='password' value={oidcSettings.clientSecret} onChange={(event) => patchOIDC({ clientSecret: event.currentTarget.value, clientSecretClear: false })} placeholder={oidcSettings.clientSecretSet ? t('settingsPage.keepCurrentSecret') : ''} autoComplete='new-password' aria-invalid={oidcClientSecretFieldInvalid} />
+              {oidcClientSecretFieldInvalid ? <span className='text-xs font-normal text-destructive'>{t('settingsPage.oidcClientSecretRequired', { defaultValue: 'A Client secret is required for the selected token authentication method.' })}</span> : null}
             </Field>
             <Field label={t('settingsPage.oidcScopes', { defaultValue: 'Scopes' })}>
-              <Input value={oidcSettings.scopes} onChange={(event) => patchOIDC({ scopes: event.currentTarget.value })} placeholder='openid profile email' />
+              <Input value={oidcSettings.scopes} onChange={(event) => patchOIDC({ scopes: event.currentTarget.value })} placeholder='openid profile email' aria-invalid={!oidcScopesValid} />
+              {!oidcScopesValid ? <span className='text-xs font-normal text-destructive'>{t('settingsPage.oidcOpenIDScopeRequired', { defaultValue: 'Scopes must include openid.' })}</span> : null}
             </Field>
             <Field label={t('settingsPage.oidcIssuer', { defaultValue: 'Issuer' })}>
-              <Input value={oidcSettings.issuer} onChange={(event) => patchOIDC({ issuer: event.currentTarget.value })} placeholder='https://sso.example.com' />
+              <Input value={oidcSettings.issuer} onChange={(event) => patchOIDC({ issuer: event.currentTarget.value })} placeholder='https://sso.example.com' aria-invalid={oidcIssuerFieldInvalid} />
+              {oidcIssuerFieldInvalid ? <span className='text-xs font-normal text-destructive'>{t('settingsPage.oidcIssuerInvalid', { defaultValue: 'Enter a valid HTTPS issuer URL without credentials, query, or fragment.' })}</span> : null}
             </Field>
             <Field label={t('settingsPage.oidcAuthorizationEndpoint', { defaultValue: 'Authorization endpoint' })}>
-              <Input value={oidcSettings.authorizationEndpoint} onChange={(event) => patchOIDC({ authorizationEndpoint: event.currentTarget.value })} placeholder='https://sso.example.com/oauth2/authorize' />
+              <Input value={oidcSettings.authorizationEndpoint} onChange={(event) => patchOIDC({ authorizationEndpoint: event.currentTarget.value })} placeholder='https://sso.example.com/oauth2/authorize' aria-invalid={oidcAuthorizationFieldInvalid} />
+              {oidcAuthorizationFieldInvalid ? <span className='text-xs font-normal text-destructive'>{t('settingsPage.oidcEndpointInvalid', { defaultValue: 'Enter a valid HTTPS endpoint URL.' })}</span> : null}
             </Field>
             <Field label={t('settingsPage.oidcTokenEndpoint', { defaultValue: 'Token endpoint' })}>
-              <Input value={oidcSettings.tokenEndpoint} onChange={(event) => patchOIDC({ tokenEndpoint: event.currentTarget.value })} placeholder='https://sso.example.com/oauth2/token' />
+              <Input value={oidcSettings.tokenEndpoint} onChange={(event) => patchOIDC({ tokenEndpoint: event.currentTarget.value })} placeholder='https://sso.example.com/oauth2/token' aria-invalid={oidcTokenFieldInvalid} />
+              {oidcTokenFieldInvalid ? <span className='text-xs font-normal text-destructive'>{t('settingsPage.oidcEndpointInvalid', { defaultValue: 'Enter a valid HTTPS endpoint URL.' })}</span> : null}
             </Field>
             <Field label={t('settingsPage.oidcUserInfoEndpoint', { defaultValue: 'UserInfo endpoint' })}>
-              <Input value={oidcSettings.userInfoEndpoint} onChange={(event) => patchOIDC({ userInfoEndpoint: event.currentTarget.value })} placeholder='https://sso.example.com/oauth2/userinfo' />
+              <Input value={oidcSettings.userInfoEndpoint} onChange={(event) => patchOIDC({ userInfoEndpoint: event.currentTarget.value })} placeholder='https://sso.example.com/oauth2/userinfo' aria-invalid={oidcUserInfoFieldInvalid} />
+              {oidcUserInfoFieldInvalid ? <span className='text-xs font-normal text-destructive'>{t('settingsPage.oidcUserInfoRequired', { defaultValue: 'UserInfo is required when ID token verification is disabled.' })}</span> : null}
             </Field>
             <Field label={t('settingsPage.oidcJWKSEndpoint', { defaultValue: 'JWKS URI' })}>
-              <Input value={oidcSettings.jwksEndpoint} onChange={(event) => patchOIDC({ jwksEndpoint: event.currentTarget.value })} placeholder='https://sso.example.com/oauth2/jwks' />
+              <Input value={oidcSettings.jwksEndpoint} onChange={(event) => patchOIDC({ jwksEndpoint: event.currentTarget.value })} placeholder='https://sso.example.com/oauth2/jwks' aria-invalid={!oidcJWKSEndpointValid} />
+              {!oidcJWKSEndpointValid ? <span className='text-xs font-normal text-destructive'>{t('settingsPage.oidcEndpointInvalid', { defaultValue: 'Enter a valid HTTPS endpoint URL.' })}</span> : null}
+            </Field>
+            <Field label={t('settingsPage.oidcAuthMethod', { defaultValue: 'Token auth method' })}>
+              <Select value={oidcSettings.tokenAuthMethod} onChange={(event) => patchOIDC({ tokenAuthMethod: event.currentTarget.value as OIDCSettingsState['tokenAuthMethod'] })}>
+                <option value='client_secret_basic'>client_secret_basic</option>
+                <option value='client_secret_post'>client_secret_post</option>
+                <option value='none'>{t('settingsPage.oidcPublicClient', { defaultValue: 'none (public client)' })}</option>
+              </Select>
             </Field>
             <Field label={t('settingsPage.defaultRole', { defaultValue: 'Default role' })}>
               <Select value={oidcSettings.role} onChange={(event) => patchOIDC({ role: event.currentTarget.value })}>
@@ -1321,6 +1370,15 @@ export function SettingsPage() {
               </Select>
             </Field>
           </div>
+          <label className='flex items-center gap-2 rounded-lg border border-border bg-background/70 px-3 py-2 text-sm'>
+            <input
+              type='checkbox'
+              className='size-4 accent-primary'
+              checked={oidcSettings.requireIDToken}
+              onChange={(event) => patchOIDC({ requireIDToken: event.currentTarget.checked })}
+            />
+            <span>{t('settingsPage.oidcRequireIDToken', { defaultValue: 'Require and verify ID Token' })}</span>
+          </label>
           <label className='flex items-center gap-2 rounded-lg border border-border bg-background/70 px-3 py-2 text-sm'>
             <input
               type='checkbox'
@@ -1360,7 +1418,7 @@ export function SettingsPage() {
           </div>
           {canSaveOIDCSettings ? (
             <div className='flex justify-end'>
-              <Button variant='primary' onClick={() => void saveOIDCSettings()} disabled={oidcBusy || (oidcSettings.enabled && (!oidcSettings.authorizationEndpoint.trim() || !oidcSettings.tokenEndpoint.trim() || !oidcSettings.clientID.trim()))}>
+              <Button variant='primary' onClick={() => void saveOIDCSettings()} disabled={oidcBusy || !oidcFormValid}>
                 {oidcBusy ? t('saving') : t('save')}
               </Button>
             </div>
@@ -2450,6 +2508,8 @@ function defaultOIDCSettings(): OIDCSettingsState {
     clientSecret: '',
     clientSecretSet: false,
     clientSecretClear: false,
+    tokenAuthMethod: 'client_secret_basic',
+    requireIDToken: true,
     scopes: 'openid profile email',
     role: 'user',
     autoCreate: true,
@@ -2501,23 +2561,33 @@ function oidcSettingsFromSettings(items: PlatformItem[]): OIDCSettingsState {
   const setting = candidates.find((item) => item.name === 'External OIDC identity') || candidates[0]
   if (!setting) return defaultOIDCSettings()
   const metadata = setting.metadata ?? {}
+  const userInfoEndpoint = metadataText(metadata.oidc_userinfo_endpoint) || metadataText(metadata.userinfo_endpoint) || metadataText(metadata.user_info_endpoint) || ''
   return {
     enabled: metadataBoolValue(metadata.oidc_login_enabled) === true || metadataBoolValue(metadata.external_oidc_enabled) === true,
     providerName: metadataText(metadata.oidc_provider_name) || metadataText(metadata.provider_name) || setting.name || 'OIDC',
     issuer: metadataText(metadata.oidc_issuer) || metadataText(metadata.issuer) || metadataText(metadata.issuer_url) || '',
     authorizationEndpoint: metadataText(metadata.oidc_authorization_endpoint) || metadataText(metadata.authorization_endpoint) || metadataText(metadata.authorize_endpoint) || '',
     tokenEndpoint: metadataText(metadata.oidc_token_endpoint) || metadataText(metadata.token_endpoint) || '',
-    userInfoEndpoint: metadataText(metadata.oidc_userinfo_endpoint) || metadataText(metadata.userinfo_endpoint) || metadataText(metadata.user_info_endpoint) || '',
+    userInfoEndpoint,
     jwksEndpoint: metadataText(metadata.oidc_jwks_uri) || metadataText(metadata.jwks_uri) || metadataText(metadata.jwks_endpoint) || metadataText(metadata.jwks_url) || '',
     clientID: metadataText(metadata.oidc_client_id) || metadataText(metadata.client_id) || '',
     clientSecret: '',
     clientSecretSet: metadataBoolValue(metadata.oidc_client_secret_set) === true,
     clientSecretClear: false,
+    tokenAuthMethod: normalizeOIDCTokenAuthMethod(metadataText(metadata.oidc_token_endpoint_auth_method) || metadataText(metadata.token_endpoint_auth_method) || metadataText(metadata.oidc_auth_method)),
+    requireIDToken: metadata.oidc_require_id_token === undefined
+      ? !userInfoEndpoint
+      : metadataBoolValue(metadata.oidc_require_id_token) === true,
     scopes: metadataListText(metadata.oidc_scopes) || metadataText(metadata.scope) || metadataText(metadata.scopes) || 'openid profile email',
     role: metadataText(metadata.oidc_role) || metadataText(metadata.role) || 'user',
     autoCreate: metadata.oidc_auto_create === undefined ? true : metadataBoolValue(metadata.oidc_auto_create) === true,
     setting,
   }
+}
+
+function normalizeOIDCTokenAuthMethod(value: string): OIDCSettingsState['tokenAuthMethod'] {
+  if (value === 'client_secret_post' || value === 'none') return value
+  return 'client_secret_basic'
 }
 
 function ldapSettingsFromSettings(items: PlatformItem[]): LDAPSettingsState {
@@ -2581,6 +2651,22 @@ function hasOIDCMetadata(item: PlatformItem) {
 function hasLDAPMetadata(item: PlatformItem) {
   const metadata = item.metadata ?? {}
   return ldapSettingKeys.some((key) => Object.prototype.hasOwnProperty.call(metadata, key))
+}
+
+function isValidOIDCEndpoint(value: string, allowQuery: boolean) {
+  try {
+    const parsed = new URL(value.trim())
+    if (parsed.protocol !== 'https:' && parsed.protocol !== 'http:') return false
+    if (!parsed.hostname || parsed.username || parsed.password || parsed.hash) return false
+    if (!allowQuery && parsed.search) return false
+    if (parsed.protocol === 'http:') {
+      const host = parsed.hostname.toLowerCase()
+      if (host !== 'localhost' && host !== '::1' && host !== '[::1]' && !host.startsWith('127.')) return false
+    }
+    return true
+  } catch {
+    return false
+  }
 }
 
 function isValidLDAPURL(value: string) {

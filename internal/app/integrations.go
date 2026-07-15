@@ -3,6 +3,7 @@ package app
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
 	"crypto/tls"
 	"encoding/base64"
 	"encoding/json"
@@ -353,7 +354,7 @@ func (s *Server) handleOIDCTest(w http.ResponseWriter, r *http.Request) {
 	}
 	redirectURI := externalOIDCRedirectURI(r, s.cfg.TrustProxyHeaders)
 	started := time.Now()
-	statusCode, authorizeURL, err := testExternalOIDCAuthorizationEndpoint(provider, redirectURI)
+	statusCode, authorizeURL, err := testExternalOIDCAuthorizationEndpoint(r.Context(), provider, redirectURI)
 	if err != nil {
 		errText := sanitizedOIDCTestError(provider, err)
 		if logErr := s.createIntegrationTestOperationLog(r, "system_settings.oidc_test.failed", "failed", item.ID, "External OIDC test failed: "+errText, map[string]any{"provider_id": provider.ID}); logErr != nil {
@@ -635,7 +636,9 @@ func selectWeComTestProvider(providers []externalWeComProvider, id string) (exte
 	return externalWeComProvider{}, false
 }
 
-func testExternalOIDCAuthorizationEndpoint(provider externalOIDCProvider, redirectURI string) (int, string, error) {
+func testExternalOIDCAuthorizationEndpoint(parent context.Context, provider externalOIDCProvider, redirectURI string) (int, string, error) {
+	ctx, cancel := context.WithTimeout(parent, externalOIDCRequestTimeout)
+	defer cancel()
 	authorizeURL, err := url.Parse(provider.AuthorizationEndpoint)
 	if err != nil {
 		return 0, "", err
@@ -647,19 +650,25 @@ func testExternalOIDCAuthorizationEndpoint(provider externalOIDCProvider, redire
 	values.Set("scope", strings.Join(provider.Scopes, " "))
 	values.Set("state", "configuration-test")
 	values.Set("nonce", "configuration-test")
+	verifier := "configuration-test-pkce-verifier"
+	challenge := sha256.Sum256([]byte(verifier))
+	values.Set("code_challenge", base64.RawURLEncoding.EncodeToString(challenge[:]))
+	values.Set("code_challenge_method", "S256")
 	authorizeURL.RawQuery = values.Encode()
-	client := http.Client{
-		Timeout: 10 * time.Second,
-		CheckRedirect: func(_ *http.Request, _ []*http.Request) error {
-			return http.ErrUseLastResponse
-		},
+	client := externalOIDCHTTPClient()
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, authorizeURL.String(), nil)
+	if err != nil {
+		return 0, authorizeURL.String(), err
 	}
-	resp, err := client.Get(authorizeURL.String())
+	resp, err := client.Do(req)
 	if err != nil {
 		return 0, authorizeURL.String(), err
 	}
 	defer resp.Body.Close()
-	body, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
+	body, err := io.ReadAll(io.LimitReader(resp.Body, 4096))
+	if err != nil {
+		return resp.StatusCode, authorizeURL.String(), err
+	}
 	if resp.StatusCode < 200 || resp.StatusCode >= 400 {
 		return resp.StatusCode, authorizeURL.String(), fmt.Errorf("oidc authorization endpoint returned %s: %s", resp.Status, strings.TrimSpace(string(body)))
 	}

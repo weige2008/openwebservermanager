@@ -541,11 +541,108 @@ var weComProviderMetadataTypes = map[string]string{
 	"wecom_auto_create":                        "boolean",
 }
 
+var oidcTopLevelMetadataTypes = map[string]string{
+	"oidc_enabled":                          "boolean",
+	"oidc_login_enabled":                    "boolean",
+	"external_oidc_enabled":                 "boolean",
+	"oidc_provider_id":                      "string",
+	"oidc_provider_name":                    "string",
+	"oidc_issuer":                           "string",
+	"oidc_issuer_url":                       "string",
+	"oidc_authorization_endpoint":           "string",
+	"oidc_token_endpoint":                   "string",
+	"oidc_userinfo_endpoint":                "string",
+	"oidc_jwks_uri":                         "string",
+	"oidc_jwks_endpoint":                    "string",
+	"oidc_client_id":                        "string",
+	"oidc_client_secret":                    "secret",
+	"external_oidc_client_secret":           "secret",
+	"oidc_client_secret_clear":              "boolean",
+	"clear_oidc_client_secret":              "boolean",
+	"oidc_client_secret_encrypted":          "string",
+	"external_oidc_client_secret_encrypted": "string",
+	"oidc_client_secret_set":                "boolean",
+	"oidc_client_secret_updated_at":         "string",
+	"oidc_scopes":                           "string_list",
+	"oidc_role":                             "string",
+	"oidc_auto_create":                      "boolean",
+	"oidc_token_endpoint_auth_method":       "string",
+	"oidc_auth_method":                      "string",
+	"oidc_require_id_token":                 "boolean",
+	"oidc_verify_id_token":                  "boolean",
+	"oidc_providers":                        "object_list",
+	"external_oidc_providers":               "object_list",
+}
+
+var oidcProviderMetadataTypes = map[string]string{
+	"id":                                    "string",
+	"provider_id":                           "string",
+	"oidc_provider_id":                      "string",
+	"name":                                  "string",
+	"label":                                 "string",
+	"provider_name":                         "string",
+	"oidc_provider_name":                    "string",
+	"enabled":                               "boolean",
+	"issuer":                                "string",
+	"issuer_url":                            "string",
+	"oidc_issuer":                           "string",
+	"oidc_issuer_url":                       "string",
+	"authorization_endpoint":                "string",
+	"authorize_endpoint":                    "string",
+	"authorization_url":                     "string",
+	"oidc_authorization_endpoint":           "string",
+	"token_endpoint":                        "string",
+	"token_url":                             "string",
+	"oidc_token_endpoint":                   "string",
+	"userinfo_endpoint":                     "string",
+	"user_info_endpoint":                    "string",
+	"userinfo_url":                          "string",
+	"oidc_userinfo_endpoint":                "string",
+	"jwks_uri":                              "string",
+	"jwks_endpoint":                         "string",
+	"jwks_url":                              "string",
+	"oidc_jwks_uri":                         "string",
+	"oidc_jwks_endpoint":                    "string",
+	"client_id":                             "string",
+	"oidc_client_id":                        "string",
+	"client_secret":                         "secret",
+	"oidc_client_secret":                    "secret",
+	"external_oidc_client_secret":           "secret",
+	"oidc_client_secret_clear":              "boolean",
+	"clear_oidc_client_secret":              "boolean",
+	"client_secret_clear":                   "boolean",
+	"clear_client_secret":                   "boolean",
+	"oidc_client_secret_encrypted":          "string",
+	"client_secret_encrypted":               "string",
+	"external_oidc_client_secret_encrypted": "string",
+	"oidc_client_secret_set":                "boolean",
+	"oidc_client_secret_updated_at":         "string",
+	"scopes":                                "string_list",
+	"scope":                                 "string_list",
+	"oidc_scopes":                           "string_list",
+	"role":                                  "string",
+	"default_role":                          "string",
+	"oidc_role":                             "string",
+	"auto_create":                           "boolean",
+	"oidc_auto_create":                      "boolean",
+	"token_endpoint_auth_method":            "string",
+	"oidc_token_endpoint_auth_method":       "string",
+	"client_auth_method":                    "string",
+	"oidc_auth_method":                      "string",
+	"require_id_token":                      "boolean",
+	"oidc_require_id_token":                 "boolean",
+	"verify_id_token":                       "boolean",
+	"oidc_verify_id_token":                  "boolean",
+}
+
 var ldapAttributeNamePattern = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._;-]{0,127}$`)
 var ldapRolePattern = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}$`)
 
 func validateIdentityMetadataInput(metadata map[string]any) error {
 	if err := validateLDAPMetadataInput(metadata); err != nil {
+		return err
+	}
+	if err := validateOIDCMetadataInput(metadata); err != nil {
 		return err
 	}
 	return validateWeComMetadataInput(metadata)
@@ -631,6 +728,46 @@ func validateWeComMetadataInput(metadata map[string]any) error {
 	return nil
 }
 
+func validateOIDCMetadataInput(metadata map[string]any) error {
+	for key, value := range metadata {
+		normalized := strings.ToLower(strings.TrimSpace(key))
+		valueType, known := oidcTopLevelMetadataTypes[normalized]
+		if !known {
+			if strings.HasPrefix(normalized, "oidc_") || strings.HasPrefix(normalized, "external_oidc_") {
+				return fmt.Errorf("identity setting field %q is not supported", key)
+			}
+			continue
+		}
+		if key != normalized {
+			return fmt.Errorf("identity setting field %q must use the canonical name %q", key, normalized)
+		}
+		if err := validateLDAPMetadataValue(key, value, valueType); err != nil {
+			return err
+		}
+		if valueType != "object_list" || value == nil {
+			continue
+		}
+		objects, _ := strictMetadataObjectList(value)
+		for index, object := range objects {
+			context := fmt.Sprintf("identity setting %s[%d]", key, index)
+			for childKey, childValue := range object {
+				normalizedChild := strings.ToLower(strings.TrimSpace(childKey))
+				childType, ok := oidcProviderMetadataTypes[normalizedChild]
+				if !ok {
+					return fmt.Errorf("%s field %q is not supported", context, childKey)
+				}
+				if childKey != normalizedChild {
+					return fmt.Errorf("%s field %q must use the canonical name %q", context, childKey, normalizedChild)
+				}
+				if err := validateLDAPMetadataValue(context+"."+childKey, childValue, childType); err != nil {
+					return err
+				}
+			}
+		}
+	}
+	return nil
+}
+
 func validateLDAPMetadataValue(key string, value any, valueType string) error {
 	if value == nil {
 		return nil
@@ -660,6 +797,13 @@ func validateLDAPMetadataValue(key string, value any, valueType string) error {
 	case "object_list":
 		if _, ok := strictMetadataObjectList(value); !ok {
 			return fmt.Errorf("%s must be an array of objects", key)
+		}
+	case "string_list":
+		if _, ok := value.(string); ok {
+			return nil
+		}
+		if _, ok := strictMetadataStringList(value); !ok {
+			return fmt.Errorf("%s must be a string or an array of strings", key)
 		}
 	}
 	return nil
@@ -716,6 +860,9 @@ func validateIdentitySettingItem(item model.PlatformItem, existingMetadata map[s
 			return fmt.Errorf("identity setting LDAP provider id %q is duplicated", id)
 		}
 	}
+	if err := validateOIDCSettingMetadata(item.Metadata, existingMetadata); err != nil {
+		return err
+	}
 	return validateWeComSettingMetadata(item.Metadata, existingMetadata)
 }
 
@@ -727,6 +874,131 @@ func identityHasLDAPMetadata(metadata map[string]any) bool {
 		}
 	}
 	return false
+}
+
+func validateOIDCSettingMetadata(metadata, existingMetadata map[string]any) error {
+	providerIDs := map[string]bool{}
+	for _, key := range []string{"oidc_providers", "external_oidc_providers"} {
+		objects, _ := strictMetadataObjectList(metadata[key])
+		existingObjects, _ := strictMetadataObjectList(existingMetadata[key])
+		for index, object := range objects {
+			existingObject := matchingOIDCProviderObject(object, existingObjects, index)
+			id, enabled, err := validateOIDCProviderObject(object, existingObject, false, fmt.Sprintf("identity setting %s[%d]", key, index))
+			if err != nil {
+				return err
+			}
+			if enabled && id != "" {
+				if providerIDs[id] {
+					return fmt.Errorf("identity setting OIDC provider id %q is duplicated", id)
+				}
+				providerIDs[id] = true
+			}
+		}
+	}
+	if !identityHasFlatOIDCMetadata(metadata) {
+		return nil
+	}
+	existingObject := matchingFlatOIDCProviderObject(metadata, existingMetadata)
+	id, enabled, err := validateOIDCProviderObject(metadata, existingObject, true, "identity setting OIDC provider")
+	if err != nil {
+		return err
+	}
+	if enabled && id != "" && providerIDs[id] {
+		return fmt.Errorf("identity setting OIDC provider id %q is duplicated", id)
+	}
+	return nil
+}
+
+func identityHasOIDCMetadata(metadata map[string]any) bool {
+	for key := range metadata {
+		normalized := strings.ToLower(strings.TrimSpace(key))
+		if strings.HasPrefix(normalized, "oidc_") || strings.HasPrefix(normalized, "external_oidc_") {
+			return true
+		}
+	}
+	return false
+}
+
+func identityHasFlatOIDCMetadata(metadata map[string]any) bool {
+	for key := range metadata {
+		normalized := strings.ToLower(strings.TrimSpace(key))
+		if normalized == "oidc_providers" || normalized == "external_oidc_providers" {
+			continue
+		}
+		if strings.HasPrefix(normalized, "oidc_") || strings.HasPrefix(normalized, "external_oidc_") {
+			return true
+		}
+	}
+	return false
+}
+
+func validateOIDCProviderObject(object, existing map[string]any, requireExplicitEnable bool, context string) (string, bool, error) {
+	enabled := !requireExplicitEnable
+	if requireExplicitEnable {
+		enabled, _ = metadataBoolValue(object["oidc_enabled"])
+		if _, exists := object["oidc_enabled"]; !exists {
+			enabled, _ = metadataBoolValue(object["oidc_login_enabled"])
+			if _, legacyExists := object["oidc_login_enabled"]; !legacyExists {
+				enabled, _ = metadataBoolValue(object["external_oidc_enabled"])
+			}
+		}
+	} else if value, exists := object["enabled"]; exists {
+		enabled, _ = metadataBoolValue(value)
+	}
+	provider := externalOIDCProviderShapeFromObject(object)
+	secretConfigured := oidcProviderSecretConfigured(object, existing)
+	if err := validateExternalOIDCProviderShape(provider, enabled, secretConfigured); err != nil {
+		return provider.ID, enabled, fmt.Errorf("%s: %w", context, err)
+	}
+	return provider.ID, enabled, nil
+}
+
+func matchingFlatOIDCProviderObject(incoming, existing map[string]any) map[string]any {
+	if existing == nil || !identityHasOIDCMetadata(existing) {
+		return nil
+	}
+	incomingID := externalOIDCProviderShapeFromObject(incoming).ID
+	existingID := externalOIDCProviderShapeFromObject(existing).ID
+	if incomingID != "" && existingID != "" && incomingID != existingID {
+		return nil
+	}
+	return existing
+}
+
+func matchingOIDCProviderObject(incoming map[string]any, existing []map[string]any, index int) map[string]any {
+	incomingID := externalOIDCProviderShapeFromObject(incoming).ID
+	if incomingID != "" {
+		for _, candidate := range existing {
+			if externalOIDCProviderShapeFromObject(candidate).ID == incomingID {
+				return candidate
+			}
+		}
+		return nil
+	}
+	if index >= 0 && index < len(existing) {
+		return existing[index]
+	}
+	return nil
+}
+
+func oidcProviderSecretConfigured(object, existing map[string]any) bool {
+	if clearRequested, _ := metadataBoolByKeys(object, "oidc_client_secret_clear", "clear_oidc_client_secret", "client_secret_clear", "clear_client_secret"); clearRequested {
+		return false
+	}
+	if firstMetadataString(object, "client_secret", "oidc_client_secret", "external_oidc_client_secret") != "" {
+		return true
+	}
+	if existing == nil {
+		return false
+	}
+	return firstMetadataString(existing,
+		"client_secret",
+		"oidc_client_secret",
+		"external_oidc_client_secret",
+		"oidc_client_secret_encrypted",
+		"client_secret_encrypted",
+		"external_oidc_client_secret_encrypted",
+	) != ""
 }
 
 func validateWeComSettingMetadata(metadata, existingMetadata map[string]any) error {

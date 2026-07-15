@@ -17,7 +17,10 @@ import (
 	goldap "github.com/go-ldap/ldap/v3"
 )
 
-const externalLDAPTimeout = 10 * time.Second
+const (
+	externalLDAPTimeout             = 10 * time.Second
+	externalLDAPRequestTimeoutGrace = 250 * time.Millisecond
+)
 
 type externalLDAPProvider struct {
 	ID                   string
@@ -170,7 +173,9 @@ func (a realLDAPAuthenticator) Authenticate(ctx context.Context, provider extern
 		_ = conn.Close()
 	})
 	defer stopContextClose()
-	conn.SetTimeout(timeout)
+	// Keep go-ldap's request timer as a fallback, but let the shared context
+	// determine the externally visible cancellation and deadline error.
+	conn.SetTimeout(timeout + externalLDAPRequestTimeoutGrace)
 	if provider.StartTLS {
 		if err := conn.StartTLS(tlsConfig); err != nil {
 			return externalLDAPClaims{}, false, fmt.Errorf("start ldap tls for %s: %w", provider.ID, ldapContextError(ctx, err))

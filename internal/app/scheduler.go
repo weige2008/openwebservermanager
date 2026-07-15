@@ -12,6 +12,7 @@ import (
 )
 
 const defaultSchedulerPollInterval = 30 * time.Second
+const schedulerStopGracePeriod = 250 * time.Millisecond
 
 type SchedulerConfig struct {
 	PollInterval time.Duration
@@ -25,6 +26,8 @@ type TaskScheduler struct {
 	ctx          context.Context
 	cancel       context.CancelFunc
 	done         chan struct{}
+	stop         chan struct{}
+	stopOnce     sync.Once
 
 	mu      sync.Mutex
 	running map[string]bool
@@ -48,6 +51,7 @@ func (s *Server) StartScheduler(ctx context.Context, cfg SchedulerConfig) *TaskS
 		ctx:          schedulerCtx,
 		cancel:       cancel,
 		done:         make(chan struct{}),
+		stop:         make(chan struct{}),
 		running:      map[string]bool{},
 	}
 	go scheduler.run()
@@ -55,8 +59,15 @@ func (s *Server) StartScheduler(ctx context.Context, cfg SchedulerConfig) *TaskS
 }
 
 func (s *TaskScheduler) Stop() {
-	s.cancel()
-	<-s.done
+	s.stopOnce.Do(func() { close(s.stop) })
+	select {
+	case <-s.done:
+		s.cancel()
+		return
+	case <-time.After(schedulerStopGracePeriod):
+		s.cancel()
+		<-s.done
+	}
 }
 
 func (s *TaskScheduler) run() {
@@ -67,6 +78,8 @@ func (s *TaskScheduler) run() {
 	for {
 		select {
 		case <-s.ctx.Done():
+			return
+		case <-s.stop:
 			return
 		case <-ticker.C:
 			s.scan()
@@ -93,7 +106,7 @@ func (s *TaskScheduler) scan() {
 			s.runTask(task)
 		}
 	}
-	if err := s.server.dispatchEmailNotifications(now); err != nil {
+	if err := s.server.dispatchEmailNotifications(s.ctx, now); err != nil {
 		s.logger.Warn("email notification dispatch failed", "error", err)
 	}
 }

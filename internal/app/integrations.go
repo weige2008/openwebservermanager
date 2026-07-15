@@ -2,14 +2,17 @@ package app
 
 import (
 	"bytes"
+	"context"
 	"crypto/tls"
 	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
+	"mime"
 	"net"
 	"net/http"
+	"net/mail"
 	"net/smtp"
 	"net/url"
 	"sort"
@@ -18,6 +21,11 @@ import (
 	"time"
 
 	"openwebservermanager/internal/model"
+)
+
+const (
+	smtpConnectTimeout = 10 * time.Second
+	smtpSessionTimeout = 15 * time.Second
 )
 
 type smtpTestRequest struct {
@@ -56,7 +64,9 @@ type smtpDeliveryConfig struct {
 	Username           string
 	Password           string
 	From               string
+	FromAddress        string
 	To                 []string
+	ToAddresses        []string
 	UseTLS             bool
 	StartTLS           bool
 	ServerName         string
@@ -117,7 +127,7 @@ func (s *Server) handleSMTPTest(w http.ResponseWriter, r *http.Request) {
 		body = "This is a test email from Open Web Server Manager."
 	}
 	started := time.Now()
-	if err := sendSMTPTestMail(cfg, subject, body); err != nil {
+	if err := sendSMTPTestMail(r.Context(), cfg, subject, body); err != nil {
 		errText := sanitizeSMTPTestText(cfg, err.Error())
 		if logErr := s.createIntegrationTestOperationLog(r, "system_settings.smtp_test.failed", "failed", item.ID, "SMTP test failed: "+errText, map[string]any{
 			"integration":     "smtp",
@@ -710,14 +720,12 @@ func smtpDeliveryConfigFromSetting(item model.PlatformItem, password, toOverride
 		ServerName:         smtpMetadataString(metadata, "smtp_server_name", "server_name"),
 		InsecureSkipVerify: smtpMetadataBoolAny(metadata, "smtp_insecure_skip_verify", "insecure_skip_verify"),
 	}
+	if cfg.UseTLS && cfg.StartTLS {
+		return smtpDeliveryConfig{}, errors.New("smtp_use_tls and smtp_start_tls cannot both be enabled")
+	}
 	if cfg.From == "" {
 		cfg.From = cfg.Username
 	}
-	recipients := splitRecipients(firstNonEmpty(strings.TrimSpace(toOverride), smtpMetadataString(metadata, "smtp_to", "to", "test_to")))
-	if len(recipients) == 0 && cfg.From != "" {
-		recipients = []string{cfg.From}
-	}
-	cfg.To = recipients
 	if cfg.Host == "" {
 		return smtpDeliveryConfig{}, errors.New("smtp_host is required")
 	}
@@ -727,9 +735,25 @@ func smtpDeliveryConfigFromSetting(item model.PlatformItem, password, toOverride
 	if cfg.From == "" {
 		return smtpDeliveryConfig{}, errors.New("smtp_from is required")
 	}
-	if len(cfg.To) == 0 {
+	fromHeader, fromAddress, err := parseSMTPMailbox(cfg.From)
+	if err != nil {
+		return smtpDeliveryConfig{}, fmt.Errorf("smtp_from is invalid: %w", err)
+	}
+	cfg.From = fromHeader
+	cfg.FromAddress = fromAddress
+	recipientValue := firstNonEmpty(strings.TrimSpace(toOverride), smtpMetadataString(metadata, "smtp_to", "to", "test_to"))
+	if recipientValue == "" {
+		recipientValue = cfg.From
+	}
+	toHeaders, toAddresses, err := parseSMTPRecipientList(recipientValue)
+	if err != nil {
+		return smtpDeliveryConfig{}, fmt.Errorf("smtp_to is invalid: %w", err)
+	}
+	if len(toAddresses) == 0 {
 		return smtpDeliveryConfig{}, errors.New("smtp_to is required")
 	}
+	cfg.To = toHeaders
+	cfg.ToAddresses = toAddresses
 	if cfg.ServerName == "" {
 		cfg.ServerName = cfg.Host
 	}
@@ -762,39 +786,55 @@ func llmDeliveryConfigFromSetting(item model.PlatformItem, apiKey string) (llmDe
 	return cfg, nil
 }
 
-func sendSMTPTestMail(cfg smtpDeliveryConfig, subject, body string) error {
+func sendSMTPTestMail(ctx context.Context, cfg smtpDeliveryConfig, subject, body string) error {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	ctx, cancel := context.WithTimeout(ctx, smtpSessionTimeout)
+	defer cancel()
+
 	address := net.JoinHostPort(cfg.Host, strconv.Itoa(cfg.Port))
 	tlsConfig := &tls.Config{
 		ServerName:         cfg.ServerName,
 		InsecureSkipVerify: cfg.InsecureSkipVerify,
 		MinVersion:         tls.VersionTLS12,
 	}
-	dialer := &net.Dialer{Timeout: 10 * time.Second}
-	var client *smtp.Client
-	if cfg.UseTLS {
-		conn, err := tls.DialWithDialer(dialer, "tcp", address, tlsConfig)
-		if err != nil {
-			return err
-		}
-		client, err = smtp.NewClient(conn, cfg.Host)
-		if err != nil {
-			_ = conn.Close()
-			return err
-		}
-	} else {
-		conn, err := dialer.Dial("tcp", address)
-		if err != nil {
-			return err
-		}
-		client, err = smtp.NewClient(conn, cfg.Host)
-		if err != nil {
-			_ = conn.Close()
+	dialer := &net.Dialer{Timeout: smtpConnectTimeout}
+	conn, err := dialer.DialContext(ctx, "tcp", address)
+	if err != nil {
+		return smtpContextError(ctx, err)
+	}
+	defer conn.Close()
+	if deadline, ok := ctx.Deadline(); ok {
+		if err := conn.SetDeadline(deadline); err != nil {
 			return err
 		}
 	}
+	stopCancellationWatch := make(chan struct{})
+	defer close(stopCancellationWatch)
+	go func() {
+		select {
+		case <-ctx.Done():
+			_ = conn.Close()
+		case <-stopCancellationWatch:
+		}
+	}()
+
+	var client *smtp.Client
+	if cfg.UseTLS {
+		tlsConn := tls.Client(conn, tlsConfig)
+		if err := tlsConn.HandshakeContext(ctx); err != nil {
+			return smtpContextError(ctx, err)
+		}
+		conn = tlsConn
+	}
+	client, err = smtp.NewClient(conn, cfg.Host)
+	if err != nil {
+		return smtpContextError(ctx, err)
+	}
 	defer client.Close()
 	if err := client.Hello("openwebservermanager"); err != nil {
-		return err
+		return smtpContextError(ctx, err)
 	}
 	if cfg.StartTLS && !cfg.UseTLS {
 		ok, _ := client.Extension("STARTTLS")
@@ -802,34 +842,44 @@ func sendSMTPTestMail(cfg smtpDeliveryConfig, subject, body string) error {
 			return errors.New("SMTP server does not advertise STARTTLS")
 		}
 		if err := client.StartTLS(tlsConfig); err != nil {
-			return err
+			return smtpContextError(ctx, err)
 		}
 	}
 	if cfg.Username != "" && cfg.Password != "" {
 		if err := client.Auth(smtp.PlainAuth("", cfg.Username, cfg.Password, cfg.Host)); err != nil {
-			return err
+			return smtpContextError(ctx, err)
 		}
 	}
-	if err := client.Mail(cfg.From); err != nil {
-		return err
+	if err := client.Mail(cfg.FromAddress); err != nil {
+		return smtpContextError(ctx, err)
 	}
-	for _, recipient := range cfg.To {
+	for _, recipient := range cfg.ToAddresses {
 		if err := client.Rcpt(recipient); err != nil {
-			return err
+			return smtpContextError(ctx, err)
 		}
 	}
 	writer, err := client.Data()
 	if err != nil {
-		return err
+		return smtpContextError(ctx, err)
 	}
 	if _, err := io.WriteString(writer, smtpMessage(cfg.From, cfg.To, subject, body)); err != nil {
 		_ = writer.Close()
-		return err
+		return smtpContextError(ctx, err)
 	}
 	if err := writer.Close(); err != nil {
-		return err
+		return smtpContextError(ctx, err)
 	}
-	return client.Quit()
+	return smtpContextError(ctx, client.Quit())
+}
+
+func smtpContextError(ctx context.Context, err error) error {
+	if err == nil {
+		return nil
+	}
+	if contextErr := ctx.Err(); contextErr != nil {
+		return contextErr
+	}
+	return err
 }
 
 func sendLLMTestPrompt(cfg llmDeliveryConfig, prompt string) (string, error) {
@@ -954,10 +1004,14 @@ func llmChatCompletionsURL(base string) (string, error) {
 }
 
 func smtpMessage(from string, to []string, subject, body string) string {
+	subject = sanitizeSMTPHeader(subject)
+	if !isASCII(subject) {
+		subject = mime.QEncoding.Encode("utf-8", subject)
+	}
 	headers := []string{
 		"From: " + from,
 		"To: " + strings.Join(to, ", "),
-		"Subject: " + sanitizeSMTPHeader(subject),
+		"Subject: " + subject,
 		"Date: " + time.Now().UTC().Format(time.RFC1123Z),
 		"MIME-Version: 1.0",
 		"Content-Type: text/plain; charset=utf-8",
@@ -965,23 +1019,62 @@ func smtpMessage(from string, to []string, subject, body string) string {
 	return strings.Join(headers, "\r\n") + "\r\n\r\n" + body + "\r\n"
 }
 
+func parseSMTPMailbox(value string) (string, string, error) {
+	address, err := mail.ParseAddress(strings.TrimSpace(value))
+	if err != nil {
+		return "", "", err
+	}
+	if strings.TrimSpace(address.Address) == "" {
+		return "", "", errors.New("email address is empty")
+	}
+	header := address.Address
+	if strings.TrimSpace(address.Name) != "" {
+		header = address.String()
+	}
+	return header, address.Address, nil
+}
+
+func parseSMTPRecipientList(value string) ([]string, []string, error) {
+	normalized := strings.NewReplacer(";", ",", "\r", ",", "\n", ",").Replace(strings.TrimSpace(value))
+	if normalized == "" {
+		return nil, nil, nil
+	}
+	addresses, err := mail.ParseAddressList(normalized)
+	if err != nil {
+		return nil, nil, err
+	}
+	headers := make([]string, 0, len(addresses))
+	envelopes := make([]string, 0, len(addresses))
+	seen := map[string]bool{}
+	for _, address := range addresses {
+		envelope := strings.TrimSpace(address.Address)
+		if envelope == "" || seen[strings.ToLower(envelope)] {
+			continue
+		}
+		seen[strings.ToLower(envelope)] = true
+		header := envelope
+		if strings.TrimSpace(address.Name) != "" {
+			header = address.String()
+		}
+		headers = append(headers, header)
+		envelopes = append(envelopes, envelope)
+	}
+	return headers, envelopes, nil
+}
+
+func isASCII(value string) bool {
+	for _, r := range value {
+		if r > 127 {
+			return false
+		}
+	}
+	return true
+}
+
 func sanitizeSMTPHeader(value string) string {
 	value = strings.ReplaceAll(value, "\r", " ")
 	value = strings.ReplaceAll(value, "\n", " ")
 	return strings.TrimSpace(value)
-}
-
-func splitRecipients(value string) []string {
-	result := []string{}
-	for _, part := range strings.FieldsFunc(value, func(r rune) bool {
-		return r == ',' || r == ';' || r == '\n' || r == '\r'
-	}) {
-		part = strings.TrimSpace(part)
-		if part != "" {
-			result = append(result, part)
-		}
-	}
-	return result
 }
 
 func smtpMetadataString(metadata map[string]any, keys ...string) string {

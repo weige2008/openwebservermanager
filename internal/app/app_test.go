@@ -36,6 +36,7 @@ import (
 	"slices"
 	"strconv"
 	"strings"
+	"sync"
 	"testing"
 	"testing/fstest"
 	"time"
@@ -10380,7 +10381,7 @@ func TestSMTPNotificationsDispatchNewAlertsOnce(t *testing.T) {
 	if err != nil || len(emptyCandidates) != 0 {
 		t.Fatalf("explicit empty notification categories should suppress alerts: count=%d err=%v", len(emptyCandidates), err)
 	}
-	if err := server.dispatchEmailNotifications(now); err != nil {
+	if err := server.dispatchEmailNotifications(context.Background(), now); err != nil {
 		t.Fatalf("initialize notification delivery: %v", err)
 	}
 	select {
@@ -10421,7 +10422,7 @@ func TestSMTPNotificationsDispatchNewAlertsOnce(t *testing.T) {
 		scheduler.Stop()
 		t.Fatal("SMTP server did not receive notification email")
 	}
-	if err := server.dispatchEmailNotifications(now.Add(2 * time.Minute)); err != nil {
+	if err := server.dispatchEmailNotifications(context.Background(), now.Add(2*time.Minute)); err != nil {
 		t.Fatalf("repeat notification dispatch: %v", err)
 	}
 	select {
@@ -10478,7 +10479,7 @@ func TestSMTPNotificationFailureBackoffRedactsSecrets(t *testing.T) {
 	}
 
 	now := time.Now().UTC()
-	sendErr := server.dispatchEmailNotifications(now)
+	sendErr := server.dispatchEmailNotifications(context.Background(), now)
 	if sendErr == nil {
 		t.Fatal("failing SMTP server did not fail notification delivery")
 	}
@@ -10500,7 +10501,7 @@ func TestSMTPNotificationFailureBackoffRedactsSecrets(t *testing.T) {
 	if metadataIntDefault(state.Metadata["failure_count"], 0) != 1 {
 		t.Fatalf("notification failure count = %#v, want 1", state.Metadata["failure_count"])
 	}
-	if err := server.dispatchEmailNotifications(now.Add(30 * time.Second)); err != nil {
+	if err := server.dispatchEmailNotifications(context.Background(), now.Add(30*time.Second)); err != nil {
 		t.Fatalf("notification retry backoff should skip delivery: %v", err)
 	}
 	afterBackoff, ok, err := server.cfg.Store.GetPlatformItem(notificationDeliveryCollection, setting.ID)
@@ -12958,6 +12959,233 @@ func TestSMTPIntegrationTestFailureRedactsSecrets(t *testing.T) {
 	}
 	if !strings.Contains(logsBody, "system_settings.smtp_test.failed") || !strings.Contains(logsBody, "[redacted]") {
 		t.Fatalf("SMTP test failure operation log missing expected redacted failure entry: %s", logsBody)
+	}
+}
+
+func TestSMTPIntegrationSettingValidation(t *testing.T) {
+	handler, cookie := newTestHandler(t)
+	base := func(metadata map[string]any) map[string]any {
+		return map[string]any{
+			"name":     "SMTP validation",
+			"type":     "integration",
+			"status":   "enabled",
+			"metadata": metadata,
+		}
+	}
+	tests := []struct {
+		name     string
+		metadata map[string]any
+		contains string
+	}{
+		{name: "zero port", metadata: map[string]any{"smtp_port": 0}, contains: "between 1 and 65535"},
+		{name: "fractional port", metadata: map[string]any{"smtp_port": 25.5}, contains: "between 1 and 65535"},
+		{name: "string port", metadata: map[string]any{"smtp_port": "587"}, contains: "between 1 and 65535"},
+		{name: "invalid sender", metadata: map[string]any{"smtp_from": "not-an-address"}, contains: "smtp_from is invalid"},
+		{name: "invalid recipients", metadata: map[string]any{"smtp_to": "first@example.test, invalid"}, contains: "smtp_to is invalid"},
+		{name: "invalid test recipient", metadata: map[string]any{"smtp_test_to": "bad"}, contains: "smtp_test_to is invalid"},
+		{name: "TLS conflict", metadata: map[string]any{"smtp_use_tls": true, "smtp_start_tls": true}, contains: "cannot both be enabled"},
+		{name: "invalid boolean", metadata: map[string]any{"smtp_use_tls": "true"}, contains: "must be a boolean"},
+		{name: "invalid legacy boolean", metadata: map[string]any{"notifications_enabled": "true"}, contains: "must be a boolean"},
+		{name: "invalid legacy port", metadata: map[string]any{"port": "587"}, contains: "between 1 and 65535"},
+		{name: "invalid categories type", metadata: map[string]any{"smtp_notification_categories": "security"}, contains: "array of strings"},
+		{name: "invalid category", metadata: map[string]any{"smtp_notification_categories": []string{"security", "typo"}}, contains: "unsupported category"},
+		{name: "unknown SMTP field", metadata: map[string]any{"smtp_notificatons_enabled": true}, contains: "is not supported"},
+		{name: "noncanonical SMTP field", metadata: map[string]any{"SMTP_HOST": "smtp.example.test"}, contains: "canonical name"},
+		{name: "notifications missing host", metadata: map[string]any{"smtp_notifications_enabled": true, "smtp_from": "sender@example.test", "smtp_to": "receiver@example.test"}, contains: "smtp_host is required"},
+		{name: "notifications missing sender", metadata: map[string]any{"smtp_notifications_enabled": true, "smtp_host": "smtp.example.test", "smtp_to": "receiver@example.test"}, contains: "smtp_from is required"},
+		{name: "notifications missing recipients", metadata: map[string]any{"smtp_notifications_enabled": true, "smtp_host": "smtp.example.test", "smtp_from": "sender@example.test"}, contains: "smtp_to is required"},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			rec := assertStatus(t, handler, http.MethodPost, "/api/admin/system-settings", base(test.metadata), cookie, http.StatusBadRequest)
+			if !strings.Contains(rec.Body.String(), test.contains) {
+				t.Fatalf("validation error = %s, want substring %q", rec.Body.String(), test.contains)
+			}
+		})
+	}
+	invalidTopLevelPort := base(map[string]any{})
+	invalidTopLevelPort["port"] = -1
+	portRec := assertStatus(t, handler, http.MethodPost, "/api/admin/system-settings", invalidTopLevelPort, cookie, http.StatusBadRequest)
+	if !strings.Contains(portRec.Body.String(), "port must be between 1 and 65535") {
+		t.Fatalf("top-level SMTP port validation error = %s", portRec.Body.String())
+	}
+
+	llmOnly := assertStatus(t, handler, http.MethodPost, "/api/admin/system-settings", base(map[string]any{
+		"smtp_port":                    587,
+		"smtp_use_tls":                 false,
+		"smtp_start_tls":               false,
+		"smtp_notifications_enabled":   false,
+		"llm_provider":                 "openai-compatible",
+		"llm_base_url":                 "https://api.example.test/v1",
+		"llm_model":                    "test-model",
+		"smtp_notification_categories": []string{},
+	}), cookie, http.StatusCreated)
+	var llmSetting model.PlatformItem
+	decodeResponse(t, llmOnly, &llmSetting)
+
+	valid := assertStatus(t, handler, http.MethodPost, "/api/admin/system-settings", base(map[string]any{
+		"smtp_host":                    "smtp.example.test",
+		"smtp_port":                    587,
+		"smtp_from":                    "Operations <sender@example.test>",
+		"smtp_to":                      "First <first@example.test>; second@example.test",
+		"smtp_notifications_enabled":   true,
+		"smtp_notification_categories": []string{"security", "task"},
+	}), cookie, http.StatusCreated)
+	var setting model.PlatformItem
+	decodeResponse(t, valid, &setting)
+
+	patchRec := assertStatus(t, handler, http.MethodPatch, "/api/admin/system-settings/"+setting.ID, map[string]any{
+		"metadata": map[string]any{"smtp_notifications_enabled": true},
+	}, cookie, http.StatusBadRequest)
+	if !strings.Contains(patchRec.Body.String(), "smtp_host is required") {
+		t.Fatalf("PATCH final-state validation error = %s", patchRec.Body.String())
+	}
+	assertStatus(t, handler, http.MethodPatch, "/api/admin/system-settings/"+setting.ID, map[string]any{
+		"status": "disabled",
+	}, cookie, http.StatusOK)
+}
+
+func TestSMTPDeliveryCancellationAndSchedulerStop(t *testing.T) {
+	stalled := newStalledSMTPServer(t)
+	host, portText, err := net.SplitHostPort(stalled.addr)
+	if err != nil {
+		t.Fatalf("split stalled SMTP address: %v", err)
+	}
+	port, err := strconv.Atoi(portText)
+	if err != nil {
+		t.Fatalf("parse stalled SMTP port: %v", err)
+	}
+	cfg, err := smtpDeliveryConfigFromSetting(model.PlatformItem{
+		Host: host,
+		Port: port,
+		Metadata: map[string]any{
+			"smtp_from": "sender@example.test",
+			"smtp_to":   "receiver@example.test",
+		},
+	}, "", "")
+	if err != nil {
+		t.Fatalf("build stalled SMTP config: %v", err)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
+	defer cancel()
+	started := time.Now()
+	err = sendSMTPTestMail(ctx, cfg, "stalled", "stalled")
+	if !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("stalled SMTP error = %v, want context deadline exceeded", err)
+	}
+	if elapsed := time.Since(started); elapsed > time.Second {
+		t.Fatalf("stalled SMTP cancellation took %s", elapsed)
+	}
+	select {
+	case <-stalled.accepted:
+	default:
+	}
+
+	server, cookie := newTestServer(t, nil)
+	settingRec := assertStatus(t, server, http.MethodPost, "/api/admin/system-settings", map[string]any{
+		"name": "Stalled SMTP", "type": "integration", "status": "enabled", "host": host, "port": port,
+		"metadata": map[string]any{
+			"smtp_host":                        host,
+			"smtp_port":                        port,
+			"smtp_from":                        "sender@example.test",
+			"smtp_to":                          "receiver@example.test",
+			"smtp_notifications_enabled":       true,
+			"smtp_notifications_send_existing": true,
+		},
+	}, cookie, http.StatusCreated)
+	var setting model.PlatformItem
+	decodeResponse(t, settingRec, &setting)
+	testPayload, err := json.Marshal(map[string]any{"setting_id": setting.ID})
+	if err != nil {
+		t.Fatalf("marshal stalled SMTP test payload: %v", err)
+	}
+	requestContext, cancelRequest := context.WithTimeout(context.Background(), 100*time.Millisecond)
+	defer cancelRequest()
+	request := httptest.NewRequest(http.MethodPost, "/api/admin/system-settings/smtp/test", bytes.NewReader(testPayload)).WithContext(requestContext)
+	request.Header.Set("Content-Type", "application/json")
+	request.AddCookie(cookie)
+	response := httptest.NewRecorder()
+	requestStarted := time.Now()
+	server.ServeHTTP(response, request)
+	if response.Code != http.StatusBadGateway || !strings.Contains(response.Body.String(), "context deadline exceeded") {
+		t.Fatalf("canceled SMTP HTTP test status=%d body=%s", response.Code, response.Body.String())
+	}
+	if elapsed := time.Since(requestStarted); elapsed > time.Second {
+		t.Fatalf("canceled SMTP HTTP request took %s", elapsed)
+	}
+	select {
+	case <-stalled.accepted:
+	default:
+	}
+	if _, err := server.cfg.Store.CreatePlatformItem("login_logs", model.PlatformItemRequest{
+		Name: "blocked", Type: "password", Status: "failed", Description: "stalled SMTP alert",
+	}); err != nil {
+		t.Fatalf("create stalled SMTP notification: %v", err)
+	}
+	scheduler := server.StartScheduler(context.Background(), SchedulerConfig{PollInterval: time.Hour})
+	select {
+	case <-stalled.accepted:
+	case <-time.After(2 * time.Second):
+		scheduler.Stop()
+		t.Fatal("scheduler did not connect to stalled SMTP server")
+	}
+	stopped := make(chan struct{})
+	go func() {
+		scheduler.Stop()
+		close(stopped)
+	}()
+	select {
+	case <-stopped:
+	case <-time.After(2 * time.Second):
+		t.Fatal("scheduler Stop blocked on stalled SMTP server")
+	}
+	state, ok, err := server.cfg.Store.GetPlatformItem(notificationDeliveryCollection, setting.ID)
+	if err != nil || !ok || !strings.Contains(firstMetadataString(state.Metadata, "last_error"), "context canceled") {
+		t.Fatalf("stalled SMTP cancellation state missing: ok=%v err=%v metadata=%#v", ok, err, state.Metadata)
+	}
+}
+
+func TestSMTPDeliveryTLSSTARTTLSAndEncodedHeaders(t *testing.T) {
+	for _, mode := range []string{"tls", "starttls"} {
+		t.Run(mode, func(t *testing.T) {
+			smtpServer := newFakeSMTPTLSServer(t, mode)
+			host, portText, err := net.SplitHostPort(smtpServer.addr)
+			if err != nil {
+				t.Fatalf("split SMTP address: %v", err)
+			}
+			port, err := strconv.Atoi(portText)
+			if err != nil {
+				t.Fatalf("parse SMTP port: %v", err)
+			}
+			metadata := map[string]any{
+				"smtp_from":                 "\u8fd0\u7ef4\u4e2d\u5fc3 <sender@example.test>",
+				"smtp_to":                   "\u5ba1\u8ba1\u5458 <receiver@example.test>",
+				"smtp_insecure_skip_verify": true,
+			}
+			if mode == "tls" {
+				metadata["smtp_use_tls"] = true
+			} else {
+				metadata["smtp_start_tls"] = true
+			}
+			cfg, err := smtpDeliveryConfigFromSetting(model.PlatformItem{Host: host, Port: port, Metadata: metadata}, "", "")
+			if err != nil {
+				t.Fatalf("build %s SMTP config: %v", mode, err)
+			}
+			if cfg.FromAddress != "sender@example.test" || len(cfg.ToAddresses) != 1 || cfg.ToAddresses[0] != "receiver@example.test" {
+				t.Fatalf("normalized SMTP envelope addresses = from %q to %#v", cfg.FromAddress, cfg.ToAddresses)
+			}
+			if err := sendSMTPTestMail(context.Background(), cfg, "\u7cfb\u7edf\u544a\u8b66\r\nX-Injected: no", "delivery works"); err != nil {
+				t.Fatalf("send %s SMTP message: %v", mode, err)
+			}
+			select {
+			case message := <-smtpServer.messages:
+				if !strings.Contains(message, "Subject: =?utf-8?q?") || strings.Contains(message, "\r\nX-Injected:") {
+					t.Fatalf("SMTP message headers were not safely encoded:\n%s", message)
+				}
+			case <-time.After(2 * time.Second):
+				t.Fatalf("%s SMTP server did not receive message", mode)
+			}
+		})
 	}
 }
 
@@ -19065,6 +19293,50 @@ type fakeSMTPServer struct {
 	close    func()
 }
 
+type stalledSMTPServer struct {
+	addr     string
+	accepted chan struct{}
+	close    func()
+}
+
+func newStalledSMTPServer(t *testing.T) stalledSMTPServer {
+	t.Helper()
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("listen stalled SMTP: %v", err)
+	}
+	done := make(chan struct{})
+	var closeOnce sync.Once
+	server := stalledSMTPServer{
+		addr:     listener.Addr().String(),
+		accepted: make(chan struct{}, 8),
+		close: func() {
+			closeOnce.Do(func() {
+				close(done)
+				_ = listener.Close()
+			})
+		},
+	}
+	t.Cleanup(server.close)
+	go func() {
+		for {
+			conn, err := listener.Accept()
+			if err != nil {
+				return
+			}
+			select {
+			case server.accepted <- struct{}{}:
+			default:
+			}
+			go func() {
+				<-done
+				_ = conn.Close()
+			}()
+		}
+	}()
+	return server
+}
+
 func newFakeSMTPServer(t *testing.T) fakeSMTPServer {
 	t.Helper()
 	listener, err := net.Listen("tcp", "127.0.0.1:0")
@@ -19087,6 +19359,46 @@ func newFakeSMTPServer(t *testing.T) fakeSMTPServer {
 				return
 			}
 			go handleFakeSMTPConnection(conn, server.messages, server.auths)
+		}
+	}()
+	return server
+}
+
+func newFakeSMTPTLSServer(t *testing.T, mode string) fakeSMTPServer {
+	t.Helper()
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("listen fake %s SMTP: %v", mode, err)
+	}
+	_, _, _, certificate := testMTLSMaterials(t)
+	tlsConfig := &tls.Config{Certificates: []tls.Certificate{certificate}, MinVersion: tls.VersionTLS12}
+	server := fakeSMTPServer{
+		addr:     listener.Addr().String(),
+		messages: make(chan string, 4),
+		auths:    make(chan string, 4),
+		close: func() {
+			_ = listener.Close()
+		},
+	}
+	t.Cleanup(server.close)
+	go func() {
+		for {
+			conn, err := listener.Accept()
+			if err != nil {
+				return
+			}
+			go func() {
+				if mode == "tls" {
+					tlsConn := tls.Server(conn, tlsConfig)
+					if err := tlsConn.Handshake(); err != nil {
+						_ = conn.Close()
+						return
+					}
+					handleFakeSMTPConnection(tlsConn, server.messages, server.auths)
+					return
+				}
+				handleFakeSMTPStartTLSConnection(conn, tlsConfig, server.messages, server.auths)
+			}()
 		}
 	}()
 	return server
@@ -19166,6 +19478,101 @@ func handleFakeSMTPConnection(conn net.Conn, messages chan<- string, auths chan<
 			if !writeLine("250 fake.smtp.local") {
 				return
 			}
+		case strings.HasPrefix(command, "AUTH "):
+			select {
+			case auths <- trimmed:
+			default:
+			}
+			if !writeLine("235 authenticated") {
+				return
+			}
+		case strings.HasPrefix(command, "MAIL FROM:"), strings.HasPrefix(command, "RCPT TO:"):
+			if !writeLine("250 ok") {
+				return
+			}
+		case strings.HasPrefix(command, "DATA"):
+			inData = true
+			if !writeLine("354 end data with <CR><LF>.<CR><LF>") {
+				return
+			}
+		case strings.HasPrefix(command, "QUIT"):
+			_ = writeLine("221 bye")
+			return
+		default:
+			if !writeLine("250 ok") {
+				return
+			}
+		}
+	}
+}
+
+func handleFakeSMTPStartTLSConnection(conn net.Conn, tlsConfig *tls.Config, messages chan<- string, auths chan<- string) {
+	defer conn.Close()
+	reader := bufio.NewReader(conn)
+	writer := bufio.NewWriter(conn)
+	writeLine := func(value string) bool {
+		if _, err := writer.WriteString(value + "\r\n"); err != nil {
+			return false
+		}
+		return writer.Flush() == nil
+	}
+	if !writeLine("220 fake.smtp.local ESMTP") {
+		return
+	}
+	var data strings.Builder
+	inData := false
+	tlsActive := false
+	for {
+		line, err := reader.ReadString('\n')
+		if err != nil {
+			return
+		}
+		trimmed := strings.TrimRight(line, "\r\n")
+		if inData {
+			if trimmed == "." {
+				select {
+				case messages <- data.String():
+				default:
+				}
+				data.Reset()
+				inData = false
+				if !writeLine("250 queued") {
+					return
+				}
+				continue
+			}
+			data.WriteString(line)
+			continue
+		}
+		command := strings.ToUpper(trimmed)
+		switch {
+		case strings.HasPrefix(command, "EHLO"):
+			if !writeLine("250-fake.smtp.local") {
+				return
+			}
+			if !tlsActive {
+				if !writeLine("250 STARTTLS") {
+					return
+				}
+			} else if !writeLine("250 AUTH PLAIN") {
+				return
+			}
+		case strings.HasPrefix(command, "HELO"):
+			if !writeLine("250 fake.smtp.local") {
+				return
+			}
+		case strings.HasPrefix(command, "STARTTLS") && !tlsActive:
+			if !writeLine("220 ready to start TLS") {
+				return
+			}
+			tlsConn := tls.Server(conn, tlsConfig)
+			if err := tlsConn.Handshake(); err != nil {
+				return
+			}
+			conn = tlsConn
+			reader = bufio.NewReader(conn)
+			writer = bufio.NewWriter(conn)
+			tlsActive = true
 		case strings.HasPrefix(command, "AUTH "):
 			select {
 			case auths <- trimmed:

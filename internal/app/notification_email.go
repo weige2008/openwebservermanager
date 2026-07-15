@@ -1,6 +1,7 @@
 package app
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"sort"
@@ -13,7 +14,7 @@ import (
 const notificationDeliveryCollection = "notification_deliveries"
 const maxNotificationDeliveryKeys = 1000
 
-func (s *Server) dispatchEmailNotifications(now time.Time) error {
+func (s *Server) dispatchEmailNotifications(ctx context.Context, now time.Time) error {
 	setting, ok, err := s.smtpIntegrationSetting("")
 	if err != nil || !ok {
 		return err
@@ -63,7 +64,7 @@ func (s *Server) dispatchEmailNotifications(now time.Time) error {
 	}
 
 	subject, body := s.emailNotificationMessage(pending)
-	if err := sendSMTPTestMail(cfg, subject, body); err != nil {
+	if err := sendSMTPTestMail(ctx, cfg, subject, body); err != nil {
 		return s.saveEmailNotificationFailure(setting, &state, now, errors.New(sanitizeSMTPTestText(cfg, err.Error())))
 	}
 

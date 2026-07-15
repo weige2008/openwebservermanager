@@ -99,7 +99,7 @@ func testSequentialProxyRuntime(t *testing.T, spec sequentialProxyTestSpec) {
 	if err != nil {
 		t.Fatalf("build expected %s routes: %v", spec.name, err)
 	}
-	assertSequentialProxyStatus(t, spec.name, status.State, status.Routes, "running", wantRoutes)
+	assertSequentialProxyStatus(t, spec.name, status.State, status.LastError, status.Routes, "running", wantRoutes)
 	assertProxyEcho(t, status.Routes[0].ListenAddress, spec.name+" first\n", firstReceived)
 	assertProxyEcho(t, status.Routes[1].ListenAddress, spec.name+" second\n", secondReceived)
 	waitForCondition(t, 2*time.Second, func() bool {
@@ -114,7 +114,7 @@ func testSequentialProxyRuntime(t *testing.T, spec sequentialProxyTestSpec) {
 	if err != nil {
 		t.Fatalf("build reloaded %s routes: %v", spec.name, err)
 	}
-	assertSequentialProxyStatus(t, spec.name, status.State, status.Routes, "running", wantRoutes)
+	assertSequentialProxyStatus(t, spec.name, status.State, status.LastError, status.Routes, "running", wantRoutes)
 	assertProxyEcho(t, status.Routes[0].ListenAddress, spec.name+" reloaded first\n", secondReceived)
 	assertProxyEcho(t, status.Routes[1].ListenAddress, spec.name+" reloaded second\n", firstReceived)
 
@@ -167,10 +167,10 @@ func saveSequentialProxySettings(t *testing.T, handler http.Handler, cookie *htt
 	return response
 }
 
-func assertSequentialProxyStatus(t *testing.T, name, state string, got []proxyRouteStatus, wantState string, want []proxyRouteStatus) {
+func assertSequentialProxyStatus(t *testing.T, name, state, lastError string, got []proxyRouteStatus, wantState string, want []proxyRouteStatus) {
 	t.Helper()
 	if state != wantState {
-		t.Fatalf("%s state=%q, want %q", name, state, wantState)
+		t.Fatalf("%s state=%q, want %q, error=%q", name, state, wantState, lastError)
 	}
 	assertProxyRoutesEqual(t, name+" routes", got, want)
 }
@@ -216,16 +216,11 @@ func assertProxyEcho(t *testing.T, address, payload string, received <-chan stri
 
 func reserveLocalTCPRange(t *testing.T, count int) ([]net.Listener, string) {
 	t.Helper()
-	for attempt := 0; attempt < 100; attempt++ {
-		seed, err := net.Listen("tcp", "127.0.0.1:0")
-		if err != nil {
-			t.Fatalf("find local tcp range: %v", err)
-		}
-		port := seed.Addr().(*net.TCPAddr).Port
-		_ = seed.Close()
-		if port+count-1 > 65535 {
-			continue
-		}
+	const firstTestPort = 20000
+	const testPortRange = 10000
+	seed := int(time.Now().UnixNano() % testPortRange)
+	for attempt := 0; attempt < 1000; attempt++ {
+		port := firstTestPort + (seed+attempt*37)%testPortRange
 		listeners := make([]net.Listener, 0, count)
 		for offset := 0; offset < count; offset++ {
 			listener, listenErr := net.Listen("tcp", net.JoinHostPort("127.0.0.1", strconv.Itoa(port+offset)))

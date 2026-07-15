@@ -27,6 +27,12 @@ func preparePlatformItemCreateRequest(collection string, req *model.PlatformItem
 			req.Metadata = map[string]any{}
 		}
 		normalizeScheduledTaskMutation(req)
+	case "system_settings":
+		if strings.EqualFold(strings.TrimSpace(req.Type), "integration") {
+			if err := validateSMTPIntegrationMetadataInput(req.Metadata); err != nil {
+				return err
+			}
+		}
 	}
 	return validatePlatformItemRequest(collection, *req)
 }
@@ -36,6 +42,11 @@ func preparePlatformItemUpdateRequest(collection string, existing model.Platform
 		normalizeScheduledTaskMutation(req)
 	}
 	item := platformItemAfterUpdate(existing, *req)
+	if collection == "system_settings" && strings.EqualFold(strings.TrimSpace(item.Type), "integration") && req.Metadata != nil {
+		if err := validateSMTPIntegrationMetadataInput(req.Metadata); err != nil {
+			return err
+		}
+	}
 	switch collection {
 	case "command_filters":
 		return validateCommandFilterItem(item)
@@ -75,6 +86,9 @@ func validatePlatformItemRequest(collection string, req model.PlatformItemReques
 			Name:     strings.TrimSpace(req.Name),
 			Type:     strings.TrimSpace(req.Type),
 			Status:   strings.TrimSpace(req.Status),
+			Host:     strings.TrimSpace(req.Host),
+			Port:     req.Port,
+			Username: strings.TrimSpace(req.Username),
 			Metadata: req.Metadata,
 		})
 	default:
@@ -307,18 +321,218 @@ var retentionDayMetadataKeys = []string{
 }
 
 func validateSystemSettingItem(item model.PlatformItem) error {
-	if !strings.EqualFold(strings.TrimSpace(item.Type), "retention") {
-		return nil
-	}
+	settingType := strings.ToLower(strings.TrimSpace(item.Type))
 	status := strings.ToLower(strings.TrimSpace(item.Status))
 	if status != "" {
 		switch status {
 		case "enabled", "active", "disabled", "inactive":
 		default:
-			return fmt.Errorf("retention setting status must be enabled or disabled, got %q", status)
+			return fmt.Errorf("%s setting status must be enabled or disabled, got %q", firstNonEmpty(settingType, "system"), status)
 		}
 	}
-	return validateRetentionDaysMetadata(item.Metadata, "retention setting")
+	switch settingType {
+	case "retention":
+		return validateRetentionDaysMetadata(item.Metadata, "retention setting")
+	case "integration":
+		return validateSMTPIntegrationItem(item)
+	default:
+		return nil
+	}
+}
+
+var smtpIntegrationMetadataTypes = map[string]string{
+	"host":                             "string",
+	"port":                             "integer",
+	"username":                         "string",
+	"from":                             "string",
+	"mail_from":                        "string",
+	"to":                               "string",
+	"test_to":                          "string",
+	"use_tls":                          "boolean",
+	"ssl":                              "boolean",
+	"tls":                              "boolean",
+	"start_tls":                        "boolean",
+	"starttls":                         "boolean",
+	"server_name":                      "string",
+	"insecure_skip_verify":             "boolean",
+	"notifications_enabled":            "boolean",
+	"notification_categories":          "string_list",
+	"notifications_send_existing":      "boolean",
+	"smtp_host":                        "string",
+	"smtp_port":                        "integer",
+	"smtp_username":                    "string",
+	"smtp_from":                        "string",
+	"smtp_to":                          "string",
+	"smtp_test_to":                     "string",
+	"smtp_use_tls":                     "boolean",
+	"smtp_ssl":                         "boolean",
+	"smtp_start_tls":                   "boolean",
+	"smtp_starttls":                    "boolean",
+	"smtp_server_name":                 "string",
+	"smtp_insecure_skip_verify":        "boolean",
+	"smtp_notifications_enabled":       "boolean",
+	"smtp_notification_categories":     "string_list",
+	"smtp_notifications_send_existing": "boolean",
+	"smtp_password":                    "string",
+	"smtp_password_clear":              "boolean",
+	"smtp_password_encrypted":          "string",
+	"smtp_password_set":                "boolean",
+	"smtp_password_updated_at":         "string",
+}
+
+func validateSMTPIntegrationMetadataInput(metadata map[string]any) error {
+	for key, value := range metadata {
+		normalized := strings.ToLower(strings.TrimSpace(key))
+		valueType, known := smtpIntegrationMetadataTypes[normalized]
+		if !known {
+			if strings.HasPrefix(normalized, "smtp_") {
+				return fmt.Errorf("integration setting field %q is not supported", key)
+			}
+			continue
+		}
+		if key != normalized {
+			return fmt.Errorf("integration setting field %q must use the canonical name %q", key, normalized)
+		}
+		if value == nil {
+			continue
+		}
+		switch valueType {
+		case "string":
+			if _, ok := value.(string); !ok {
+				return fmt.Errorf("integration setting %s must be a string", key)
+			}
+		case "integer":
+			port, ok := strictMetadataInteger(value)
+			if !ok || port < 1 || port > 65535 {
+				return fmt.Errorf("integration setting %s must be an integer between 1 and 65535", key)
+			}
+		case "boolean":
+			if _, ok := value.(bool); !ok {
+				return fmt.Errorf("integration setting %s must be a boolean", key)
+			}
+		case "string_list":
+			categories, ok := strictMetadataStringList(value)
+			if !ok {
+				return fmt.Errorf("integration setting %s must be an array of strings", key)
+			}
+			allowed := map[string]bool{"security": true, "task": true, "gateway": true, "operation": true}
+			for _, category := range categories {
+				if !allowed[strings.ToLower(strings.TrimSpace(category))] {
+					return fmt.Errorf("integration setting %s contains unsupported category %q", key, category)
+				}
+			}
+		}
+	}
+	return nil
+}
+
+func validateSMTPIntegrationItem(item model.PlatformItem) error {
+	metadata := item.Metadata
+	if metadata == nil {
+		metadata = map[string]any{}
+	}
+	useTLS := smtpMetadataBoolAny(metadata, "smtp_use_tls", "smtp_ssl", "use_tls", "ssl", "tls")
+	startTLS := smtpMetadataBoolAny(metadata, "smtp_start_tls", "smtp_starttls", "start_tls", "starttls")
+	if useTLS && startTLS {
+		return errors.New("integration setting smtp_use_tls and smtp_start_tls cannot both be enabled")
+	}
+	if item.Port < 0 || item.Port > 65535 {
+		return errors.New("integration setting port must be between 1 and 65535 when set")
+	}
+	if value, exists := firstMetadataValue(metadata, "smtp_port"); exists && !metadataValueEmpty(value) {
+		port, ok := metadataInt(value)
+		if number, isFloat := value.(float64); isFloat && number != math.Trunc(number) {
+			ok = false
+		}
+		if !ok || port < 1 || port > 65535 {
+			return errors.New("integration setting smtp_port must be an integer between 1 and 65535")
+		}
+	}
+	if from := smtpMetadataString(metadata, "smtp_from", "from", "mail_from"); from != "" {
+		if _, _, err := parseSMTPMailbox(from); err != nil {
+			return fmt.Errorf("integration setting smtp_from is invalid: %w", err)
+		}
+	}
+	if recipients := smtpMetadataString(metadata, "smtp_to", "to"); recipients != "" {
+		if _, _, err := parseSMTPRecipientList(recipients); err != nil {
+			return fmt.Errorf("integration setting smtp_to is invalid: %w", err)
+		}
+	}
+	if recipient := smtpMetadataString(metadata, "smtp_test_to", "test_to"); recipient != "" {
+		if _, _, err := parseSMTPRecipientList(recipient); err != nil {
+			return fmt.Errorf("integration setting smtp_test_to is invalid: %w", err)
+		}
+	}
+	if !smtpMetadataBoolAny(metadata, "smtp_notifications_enabled", "notifications_enabled") {
+		return nil
+	}
+	if firstNonEmpty(smtpMetadataString(metadata, "smtp_host", "host"), item.Host) == "" {
+		return errors.New("integration setting smtp_host is required when email notifications are enabled")
+	}
+	if smtpMetadataString(metadata, "smtp_from", "from", "mail_from") == "" {
+		return errors.New("integration setting smtp_from is required when email notifications are enabled")
+	}
+	if smtpMetadataString(metadata, "smtp_to", "to") == "" {
+		return errors.New("integration setting smtp_to is required when email notifications are enabled")
+	}
+	if _, err := smtpDeliveryConfigFromSetting(item, "", ""); err != nil {
+		return fmt.Errorf("integration setting SMTP notification configuration is invalid: %w", err)
+	}
+	return nil
+}
+
+func strictMetadataInteger(value any) (int, bool) {
+	switch typed := value.(type) {
+	case int:
+		return typed, true
+	case int8:
+		return int(typed), true
+	case int16:
+		return int(typed), true
+	case int32:
+		return int(typed), true
+	case int64:
+		return int(typed), true
+	case uint:
+		return int(typed), true
+	case uint8:
+		return int(typed), true
+	case uint16:
+		return int(typed), true
+	case uint32:
+		return int(typed), true
+	case uint64:
+		if uint64(int(typed)) != typed {
+			return 0, false
+		}
+		return int(typed), true
+	case float64:
+		if typed != math.Trunc(typed) {
+			return 0, false
+		}
+		return int(typed), true
+	default:
+		return 0, false
+	}
+}
+
+func strictMetadataStringList(value any) ([]string, bool) {
+	switch typed := value.(type) {
+	case []string:
+		return typed, true
+	case []any:
+		result := make([]string, 0, len(typed))
+		for _, entry := range typed {
+			text, ok := entry.(string)
+			if !ok {
+				return nil, false
+			}
+			result = append(result, text)
+		}
+		return result, true
+	default:
+		return nil, false
+	}
 }
 
 func validateRetentionDaysMetadata(metadata map[string]any, context string) error {

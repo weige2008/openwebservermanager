@@ -5031,6 +5031,13 @@ export function PlatformSettingsPage({ config, sectionId }: { config: PlatformPa
   const canRunSMTPTest = canTestSMTPSettings && (canSaveIntegrationSettings || Boolean(integration?.id))
   const canRunLLMTest = canTestLLMSettings && (canSaveIntegrationSettings || Boolean(integration?.id))
   const showPermissionDenied = () => app.showToast(app.t('permissionDenied', 'Permission denied'))
+  const smtpPortNumber = Number(form.port)
+  const smtpPortValid = Number.isInteger(smtpPortNumber) && smtpPortNumber >= 1 && smtpPortNumber <= 65535
+  const smtpSenderValid = !form.from.trim() || smtpMailboxInputValid(form.from)
+  const smtpRecipientsValid = !form.to.trim() || smtpRecipientInputValid(form.to)
+  const smtpTestRecipientValid = !form.testTo.trim() || smtpRecipientInputValid(form.testTo)
+  const smtpNotificationRecipientsReady = !form.notificationsEnabled || Boolean(form.to.trim())
+  const smtpFormValid = smtpPortValid && smtpSenderValid && smtpRecipientsValid && smtpTestRecipientValid && smtpNotificationRecipientsReady
 
   useEffect(() => {
     setBrandingForm(brandingFormFromItem(brandingSetting, app.publicConfig))
@@ -5488,7 +5495,10 @@ export function PlatformSettingsPage({ config, sectionId }: { config: PlatformPa
                   <Input value={form.host} onChange={(event) => patchForm({ host: event.currentTarget.value })} placeholder='smtp.example.com' />
                 </Field>
                 <Field label={app.t('smtpPort', 'SMTP port')}>
-                  <Input type='number' value={form.port} onChange={(event) => patchForm({ port: event.currentTarget.value })} placeholder='587' />
+                  <>
+                    <Input type='number' min={1} max={65535} step={1} value={form.port} onChange={(event) => patchForm({ port: event.currentTarget.value })} placeholder='587' aria-invalid={!smtpPortValid} />
+                    {!smtpPortValid ? <span className='text-xs font-normal text-destructive'>{app.t('smtpPortInvalid', 'Enter an integer from 1 to 65535.')}</span> : null}
+                  </>
                 </Field>
                 <Field label={app.t('smtpSecurity', 'Security')}>
                   <Select value={form.security} onChange={(event) => patchForm({ security: event.currentTarget.value as SMTPIntegrationForm['security'] })}>
@@ -5507,13 +5517,23 @@ export function PlatformSettingsPage({ config, sectionId }: { config: PlatformPa
                   <Input type='password' value={form.password} onChange={(event) => patchForm({ password: event.currentTarget.value, passwordClear: false })} placeholder={form.passwordSet ? app.t('leaveBlankToKeepSecret', 'Leave blank to keep current secret') : ''} autoComplete='new-password' />
                 </Field>
                 <Field label={app.t('smtpFrom', 'Sender')}>
-                  <Input value={form.from} onChange={(event) => patchForm({ from: event.currentTarget.value })} placeholder='ops@example.com' />
+                  <>
+                    <Input value={form.from} onChange={(event) => patchForm({ from: event.currentTarget.value })} placeholder='ops@example.com' aria-invalid={!smtpSenderValid} />
+                    {!smtpSenderValid ? <span className='text-xs font-normal text-destructive'>{app.t('smtpSenderInvalid', 'Enter a valid sender email address.')}</span> : null}
+                  </>
                 </Field>
                 <Field label={app.t('smtpTo', 'Default recipients')}>
-                  <Input value={form.to} onChange={(event) => patchForm({ to: event.currentTarget.value })} placeholder='admin@example.com, audit@example.com' />
+                  <>
+                    <Input value={form.to} onChange={(event) => patchForm({ to: event.currentTarget.value })} placeholder='admin@example.com, audit@example.com' aria-invalid={!smtpRecipientsValid || !smtpNotificationRecipientsReady} />
+                    {!smtpRecipientsValid ? <span className='text-xs font-normal text-destructive'>{app.t('smtpRecipientsInvalid', 'Enter valid recipient addresses separated by commas or semicolons.')}</span> : null}
+                    {smtpRecipientsValid && !smtpNotificationRecipientsReady ? <span className='text-xs font-normal text-destructive'>{app.t('smtpNotificationsRecipientsRequired', 'Default recipients are required when email alerts are enabled.')}</span> : null}
+                  </>
                 </Field>
                 <Field className='md:col-span-2' label={app.t('smtpTestTo', 'Test recipient')}>
-                  <Input value={form.testTo} onChange={(event) => patchForm({ testTo: event.currentTarget.value })} placeholder={form.to || form.from || 'admin@example.com'} />
+                  <>
+                    <Input value={form.testTo} onChange={(event) => patchForm({ testTo: event.currentTarget.value })} placeholder={form.to || form.from || 'admin@example.com'} aria-invalid={!smtpTestRecipientValid} />
+                    {!smtpTestRecipientValid ? <span className='text-xs font-normal text-destructive'>{app.t('smtpTestRecipientInvalid', 'Enter a valid test recipient address.')}</span> : null}
+                  </>
                 </Field>
                 <label className='flex items-center gap-2 rounded-lg border border-border bg-muted/20 px-3 py-2 text-sm md:col-span-2'>
                   <input
@@ -5542,13 +5562,13 @@ export function PlatformSettingsPage({ config, sectionId }: { config: PlatformPa
               </div>
               <div className='flex flex-wrap justify-end gap-2'>
                 {canSaveIntegrationSettings ? (
-                  <Button variant='outline' onClick={() => void saveIntegration()} disabled={saving || testing || !form.host.trim() || !form.from.trim()}>
+                  <Button variant='outline' onClick={() => void saveIntegration()} disabled={saving || testing || !form.host.trim() || !form.from.trim() || !smtpFormValid}>
                     <Save className='size-4' />
                     {saving ? app.t('saving', 'Saving') : app.t('save', 'Save')}
                   </Button>
                 ) : null}
                 {canRunSMTPTest ? (
-                  <Button variant='primary' onClick={() => void testSMTP()} disabled={saving || testing || !form.host.trim() || !form.from.trim()}>
+                  <Button variant='primary' onClick={() => void testSMTP()} disabled={saving || testing || !form.host.trim() || !form.from.trim() || !smtpFormValid}>
                     <Play className='size-4' />
                     {testing ? app.t('testing', 'Testing') : app.t('sendTestEmail', 'Send test')}
                   </Button>
@@ -5900,6 +5920,21 @@ function integrationMetadataFromForm(form: SMTPIntegrationForm, existing?: Recor
   if (form.llmApiKey.trim()) metadata.llm_api_key = form.llmApiKey.trim()
   if (form.llmApiKeyClear) metadata.llm_api_key_clear = true
   return metadata
+}
+
+function smtpMailboxInputValid(value: string) {
+  const trimmed = value.trim()
+  const angleAddress = trimmed.match(/<([^<>]+)>$/)?.[1]?.trim()
+  const address = angleAddress || trimmed
+  return /^[^\s@<>]+@[^\s@<>]+\.[^\s@<>]+$/.test(address)
+}
+
+function smtpRecipientInputValid(value: string) {
+  return value
+    .split(/[;,\n\r]+/)
+    .map((entry) => entry.trim())
+    .filter(Boolean)
+    .every(smtpMailboxInputValid)
 }
 
 async function ensureAccessMFA(path: string, requestAccessMFACode: RequestAccessMFACode) {

@@ -1061,6 +1061,7 @@ export function SettingsPage() {
   const canSaveLDAPSettings = canSaveSystemSetting(ldapSettings.setting?.id)
   const canSaveWeComSettings = canSaveSystemSetting(wecomSettings.setting?.id)
   const ldapURLValid = !ldapSettings.url.trim() || isValidLDAPURL(ldapSettings.url)
+  const ldapURLFieldInvalid = ldapSettings.enabled && (!ldapSettings.url.trim() || !ldapURLValid)
   const ldapUsesImplicitTLS = ldapSettings.url.trim().toLowerCase().startsWith('ldaps://')
   const ldapTLSModeValid = !(ldapUsesImplicitTLS && ldapSettings.startTLS)
   const ldapSearchBaseReady = Boolean(ldapSettings.baseDN.trim() || ldapSettings.userDNTemplate.trim())
@@ -1844,9 +1845,9 @@ export function SettingsPage() {
                 value={ldapSettings.url}
                 onChange={(event) => patchLDAP({ url: event.currentTarget.value })}
                 placeholder='ldap://directory.example.com:389'
-                aria-invalid={!ldapURLValid}
+                aria-invalid={ldapURLFieldInvalid}
               />
-              {!ldapURLValid ? <span className='text-xs font-normal text-destructive'>{t('settingsPage.ldapUrlInvalid', { defaultValue: 'Enter an ldap:// or ldaps:// URL without credentials, path, query, or fragment.' })}</span> : null}
+              {ldapURLFieldInvalid ? <span className='text-xs font-normal text-destructive'>{t('settingsPage.ldapUrlInvalid', { defaultValue: 'Enter an ldap:// or ldaps:// URL without credentials, path, query, or fragment.' })}</span> : null}
             </Field>
             <Field label={t('settingsPage.ldapBindDN', { defaultValue: 'Bind DN' })}>
               <Input value={ldapSettings.bindDN} onChange={(event) => patchLDAP({ bindDN: event.currentTarget.value })} placeholder='cn=reader,dc=example,dc=com' />

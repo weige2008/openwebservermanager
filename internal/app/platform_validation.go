@@ -9,6 +9,8 @@ import (
 	"time"
 
 	"openwebservermanager/internal/model"
+
+	goldap "github.com/go-ldap/ldap/v3"
 )
 
 const (
@@ -29,8 +31,13 @@ func preparePlatformItemCreateRequest(collection string, req *model.PlatformItem
 		}
 		normalizeScheduledTaskMutation(req)
 	case "system_settings":
-		if strings.EqualFold(strings.TrimSpace(req.Type), "integration") {
+		switch strings.ToLower(strings.TrimSpace(req.Type)) {
+		case "integration":
 			if err := validateIntegrationMetadataInput(req.Metadata); err != nil {
+				return err
+			}
+		case "identity":
+			if err := validateIdentityMetadataInput(req.Metadata); err != nil {
 				return err
 			}
 		}
@@ -43,9 +50,16 @@ func preparePlatformItemUpdateRequest(collection string, existing model.Platform
 		normalizeScheduledTaskMutation(req)
 	}
 	item := platformItemAfterUpdate(existing, *req)
-	if collection == "system_settings" && strings.EqualFold(strings.TrimSpace(item.Type), "integration") && req.Metadata != nil {
-		if err := validateIntegrationMetadataInput(req.Metadata); err != nil {
-			return err
+	if collection == "system_settings" && req.Metadata != nil {
+		switch strings.ToLower(strings.TrimSpace(item.Type)) {
+		case "integration":
+			if err := validateIntegrationMetadataInput(req.Metadata); err != nil {
+				return err
+			}
+		case "identity":
+			if err := validateIdentityMetadataInput(req.Metadata); err != nil {
+				return err
+			}
 		}
 	}
 	switch collection {
@@ -339,9 +353,379 @@ func validateSystemSettingItem(item model.PlatformItem) error {
 			return err
 		}
 		return validateLLMIntegrationItem(item)
+	case "identity":
+		return validateIdentitySettingItem(item)
 	default:
 		return nil
 	}
+}
+
+var ldapTopLevelMetadataTypes = map[string]string{
+	"ldap_enabled":                  "boolean",
+	"ldap_login_enabled":            "boolean",
+	"external_ldap_enabled":         "boolean",
+	"ldap_provider_id":              "string",
+	"ldap_provider_name":            "string",
+	"ldap_url":                      "string",
+	"ldap_host":                     "string",
+	"ldap_port":                     "integer",
+	"ldap_use_tls":                  "boolean",
+	"ldap_bind_dn":                  "string",
+	"ldap_bind_password":            "secret",
+	"plain_ldap_bind_password":      "secret",
+	"ldap_bind_password_clear":      "boolean",
+	"clear_ldap_bind_password":      "boolean",
+	"ldap_bind_password_encrypted":  "string",
+	"ldap_bind_password_set":        "boolean",
+	"ldap_bind_password_updated_at": "string",
+	"ldap_base_dn":                  "string",
+	"ldap_user_filter":              "string",
+	"ldap_user_dn_template":         "string",
+	"ldap_username_attribute":       "string",
+	"ldap_display_name_attribute":   "string",
+	"ldap_email_attribute":          "string",
+	"ldap_role":                     "string",
+	"ldap_auto_create":              "boolean",
+	"ldap_start_tls":                "boolean",
+	"ldap_insecure_skip_verify":     "boolean",
+	"ldap_server_name":              "string",
+	"ldap_providers":                "object_list",
+	"external_ldap_providers":       "object_list",
+}
+
+var ldapProviderMetadataTypes = map[string]string{
+	"id":                            "string",
+	"provider_id":                   "string",
+	"ldap_provider_id":              "string",
+	"name":                          "string",
+	"label":                         "string",
+	"provider_name":                 "string",
+	"ldap_provider_name":            "string",
+	"enabled":                       "boolean",
+	"url":                           "string",
+	"ldap_url":                      "string",
+	"host":                          "string",
+	"ldap_host":                     "string",
+	"port":                          "integer",
+	"ldap_port":                     "integer",
+	"use_tls":                       "boolean",
+	"ldap_use_tls":                  "boolean",
+	"bind_dn":                       "string",
+	"ldap_bind_dn":                  "string",
+	"manager_dn":                    "string",
+	"bind_password":                 "secret",
+	"ldap_bind_password":            "secret",
+	"plain_ldap_bind_password":      "secret",
+	"ldap_bind_password_clear":      "boolean",
+	"clear_ldap_bind_password":      "boolean",
+	"bind_password_clear":           "boolean",
+	"clear_bind_password":           "boolean",
+	"ldap_bind_password_encrypted":  "string",
+	"bind_password_encrypted":       "string",
+	"ldap_bind_password_set":        "boolean",
+	"ldap_bind_password_updated_at": "string",
+	"base_dn":                       "string",
+	"ldap_base_dn":                  "string",
+	"search_base":                   "string",
+	"user_base_dn":                  "string",
+	"user_filter":                   "string",
+	"ldap_user_filter":              "string",
+	"filter":                        "string",
+	"user_dn_template":              "string",
+	"ldap_user_dn_template":         "string",
+	"username_attribute":            "string",
+	"ldap_username_attribute":       "string",
+	"display_name_attribute":        "string",
+	"ldap_display_name_attribute":   "string",
+	"email_attribute":               "string",
+	"ldap_email_attribute":          "string",
+	"role":                          "string",
+	"default_role":                  "string",
+	"ldap_role":                     "string",
+	"auto_create":                   "boolean",
+	"ldap_auto_create":              "boolean",
+	"start_tls":                     "boolean",
+	"ldap_start_tls":                "boolean",
+	"insecure_skip_verify":          "boolean",
+	"ldap_insecure_skip_verify":     "boolean",
+	"server_name":                   "string",
+	"tls_server_name":               "string",
+	"ldap_server_name":              "string",
+}
+
+var ldapAttributeNamePattern = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._;-]{0,127}$`)
+var ldapRolePattern = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}$`)
+
+func validateIdentityMetadataInput(metadata map[string]any) error {
+	for key, value := range metadata {
+		normalized := strings.ToLower(strings.TrimSpace(key))
+		valueType, known := ldapTopLevelMetadataTypes[normalized]
+		if !known {
+			if strings.HasPrefix(normalized, "ldap_") || strings.HasPrefix(normalized, "external_ldap_") || strings.HasPrefix(normalized, "plain_ldap_") {
+				return fmt.Errorf("identity setting field %q is not supported", key)
+			}
+			continue
+		}
+		if key != normalized {
+			return fmt.Errorf("identity setting field %q must use the canonical name %q", key, normalized)
+		}
+		if err := validateLDAPMetadataValue(key, value, valueType); err != nil {
+			return err
+		}
+		if valueType != "object_list" || value == nil {
+			continue
+		}
+		objects, _ := strictMetadataObjectList(value)
+		for index, object := range objects {
+			context := fmt.Sprintf("identity setting %s[%d]", key, index)
+			for childKey, childValue := range object {
+				normalizedChild := strings.ToLower(strings.TrimSpace(childKey))
+				childType, ok := ldapProviderMetadataTypes[normalizedChild]
+				if !ok {
+					return fmt.Errorf("%s field %q is not supported", context, childKey)
+				}
+				if childKey != normalizedChild {
+					return fmt.Errorf("%s field %q must use the canonical name %q", context, childKey, normalizedChild)
+				}
+				if err := validateLDAPMetadataValue(context+"."+childKey, childValue, childType); err != nil {
+					return err
+				}
+			}
+		}
+	}
+	return nil
+}
+
+func validateLDAPMetadataValue(key string, value any, valueType string) error {
+	if value == nil {
+		return nil
+	}
+	switch valueType {
+	case "string", "secret":
+		text, ok := value.(string)
+		if !ok {
+			return fmt.Errorf("%s must be a string", key)
+		}
+		limit := 64 << 10
+		if valueType == "secret" {
+			limit = maxIntegrationSecret
+		}
+		if len(text) > limit {
+			return fmt.Errorf("%s must not exceed %d bytes", key, limit)
+		}
+	case "integer":
+		port, ok := strictMetadataInteger(value)
+		if !ok || port < 1 || port > 65535 {
+			return fmt.Errorf("%s must be an integer between 1 and 65535", key)
+		}
+	case "boolean":
+		if _, ok := value.(bool); !ok {
+			return fmt.Errorf("%s must be a boolean", key)
+		}
+	case "object_list":
+		if _, ok := strictMetadataObjectList(value); !ok {
+			return fmt.Errorf("%s must be an array of objects", key)
+		}
+	}
+	return nil
+}
+
+func strictMetadataObjectList(value any) ([]map[string]any, bool) {
+	switch typed := value.(type) {
+	case []map[string]any:
+		return typed, true
+	case []any:
+		result := make([]map[string]any, 0, len(typed))
+		for _, entry := range typed {
+			object, ok := entry.(map[string]any)
+			if !ok {
+				return nil, false
+			}
+			result = append(result, object)
+		}
+		return result, true
+	default:
+		return nil, false
+	}
+}
+
+func validateIdentitySettingItem(item model.PlatformItem) error {
+	if item.Metadata == nil {
+		return nil
+	}
+	if err := validateIdentityMetadataInput(item.Metadata); err != nil {
+		return err
+	}
+	providerIDs := map[string]bool{}
+	for _, key := range []string{"ldap_providers", "external_ldap_providers"} {
+		objects, _ := strictMetadataObjectList(item.Metadata[key])
+		for index, object := range objects {
+			id, enabled, err := validateLDAPProviderObject(object, false, fmt.Sprintf("identity setting %s[%d]", key, index))
+			if err != nil {
+				return err
+			}
+			if enabled && id != "" {
+				if providerIDs[id] {
+					return fmt.Errorf("identity setting LDAP provider id %q is duplicated", id)
+				}
+				providerIDs[id] = true
+			}
+		}
+	}
+	if !identityHasLDAPMetadata(item.Metadata) {
+		return nil
+	}
+	id, enabled, err := validateLDAPProviderObject(item.Metadata, true, "identity setting LDAP provider")
+	if err != nil {
+		return err
+	}
+	if enabled && id != "" && providerIDs[id] {
+		return fmt.Errorf("identity setting LDAP provider id %q is duplicated", id)
+	}
+	return nil
+}
+
+func identityHasLDAPMetadata(metadata map[string]any) bool {
+	for key := range metadata {
+		normalized := strings.ToLower(strings.TrimSpace(key))
+		if strings.HasPrefix(normalized, "ldap_") || strings.HasPrefix(normalized, "external_ldap_") || strings.HasPrefix(normalized, "plain_ldap_") {
+			return true
+		}
+	}
+	return false
+}
+
+func validateLDAPProviderObject(object map[string]any, requireExplicitEnable bool, context string) (string, bool, error) {
+	enabled := !requireExplicitEnable
+	if requireExplicitEnable {
+		enabled, _ = metadataBoolValue(object["ldap_enabled"])
+		if _, exists := object["ldap_enabled"]; !exists {
+			enabled, _ = metadataBoolValue(object["ldap_login_enabled"])
+			if _, legacyExists := object["ldap_login_enabled"]; !legacyExists {
+				enabled, _ = metadataBoolValue(object["external_ldap_enabled"])
+			}
+		}
+	} else if value, exists := object["enabled"]; exists {
+		enabled, _ = metadataBoolValue(value)
+	}
+	provider := externalLDAPProvider{
+		ID:                   firstMetadataString(object, "id", "provider_id", "ldap_provider_id"),
+		Name:                 firstMetadataString(object, "name", "label", "provider_name", "ldap_provider_name"),
+		URL:                  externalLDAPURL(object),
+		BindDN:               firstMetadataString(object, "bind_dn", "ldap_bind_dn", "manager_dn"),
+		BaseDN:               firstMetadataString(object, "base_dn", "ldap_base_dn", "search_base", "user_base_dn"),
+		UserFilter:           firstMetadataString(object, "user_filter", "ldap_user_filter", "filter"),
+		UserDNTemplate:       firstMetadataString(object, "user_dn_template", "ldap_user_dn_template"),
+		UsernameAttribute:    firstMetadataString(object, "username_attribute", "ldap_username_attribute"),
+		DisplayNameAttribute: firstMetadataString(object, "display_name_attribute", "ldap_display_name_attribute"),
+		EmailAttribute:       firstMetadataString(object, "email_attribute", "ldap_email_attribute"),
+		Role:                 firstMetadataString(object, "role", "default_role", "ldap_role"),
+		ServerName:           firstMetadataString(object, "server_name", "tls_server_name", "ldap_server_name"),
+	}
+	provider.StartTLS, _ = metadataBoolValue(object["ldap_start_tls"])
+	if value, exists := object["start_tls"]; exists {
+		provider.StartTLS, _ = metadataBoolValue(value)
+	}
+	provider.InsecureSkipVerify, _ = metadataBoolValue(object["ldap_insecure_skip_verify"])
+	if value, exists := object["insecure_skip_verify"]; exists {
+		provider.InsecureSkipVerify, _ = metadataBoolValue(value)
+	}
+	if provider.ID == "" {
+		provider.ID = firstNonEmpty(provider.Name, provider.URL)
+	}
+	if err := validateExternalLDAPProviderShape(provider, enabled); err != nil {
+		return provider.ID, enabled, fmt.Errorf("%s: %w", context, err)
+	}
+	return provider.ID, enabled, nil
+}
+
+func validateExternalLDAPProvider(provider externalLDAPProvider) error {
+	return validateExternalLDAPProviderShape(provider, true)
+}
+
+func validateExternalLDAPProviderShape(provider externalLDAPProvider, required bool) error {
+	var parsedScheme string
+	if strings.TrimSpace(provider.URL) != "" {
+		parsed, err := parseLDAPURL(provider.URL)
+		if err != nil {
+			return err
+		}
+		parsedScheme = parsed.Scheme
+	} else if required {
+		return errors.New("ldap URL is required when LDAP login is enabled")
+	}
+	if provider.StartTLS && parsedScheme == "ldaps" {
+		return errors.New("ldap STARTTLS cannot be enabled with an ldaps URL")
+	}
+	for label, value := range map[string]string{
+		"provider id":      provider.ID,
+		"provider name":    provider.Name,
+		"bind identity":    provider.BindDN,
+		"base DN":          provider.BaseDN,
+		"user DN template": provider.UserDNTemplate,
+		"TLS server name":  provider.ServerName,
+	} {
+		if strings.ContainsAny(value, "\x00\r\n") {
+			return fmt.Errorf("ldap %s must not contain control characters", label)
+		}
+	}
+	if len(provider.ID) > 256 || len(provider.Name) > 256 {
+		return errors.New("ldap provider id and name must not exceed 256 bytes")
+	}
+	if len(provider.BindDN) > 4096 || len(provider.BaseDN) > 4096 || len(provider.UserDNTemplate) > 4096 {
+		return errors.New("ldap DN fields must not exceed 4096 bytes")
+	}
+	if len(provider.ServerName) > 255 || strings.ContainsAny(provider.ServerName, " /\\@\t") {
+		return errors.New("ldap TLS server name is invalid")
+	}
+	if provider.BaseDN != "" {
+		if _, err := goldap.ParseDN(provider.BaseDN); err != nil {
+			return fmt.Errorf("ldap base DN is invalid: %w", err)
+		}
+	}
+	if provider.UserDNTemplate != "" {
+		if strings.Count(provider.UserDNTemplate, "{username}") != 1 {
+			return errors.New("ldap user DN template must contain exactly one {username} placeholder")
+		}
+		probe := strings.ReplaceAll(provider.UserDNTemplate, "{username}", "ldap-template-user")
+		if strings.ContainsAny(probe, ",=") {
+			if _, err := goldap.ParseDN(probe); err != nil {
+				return fmt.Errorf("ldap user DN template is invalid: %w", err)
+			}
+		}
+	}
+	if required && provider.BaseDN == "" && provider.UserDNTemplate == "" {
+		return errors.New("ldap base DN or user DN template is required when LDAP login is enabled")
+	}
+	if provider.UserDNTemplate == "" {
+		filter := provider.UserFilter
+		if filter == "" {
+			filter = "(|(uid={username})(sAMAccountName={username})(userPrincipalName={username})(mail={username}))"
+		}
+		if !strings.Contains(filter, "{username}") {
+			return errors.New("ldap user filter must contain the {username} placeholder")
+		}
+		if len(filter) > 4096 {
+			return errors.New("ldap user filter must not exceed 4096 bytes")
+		}
+		compiled := strings.ReplaceAll(filter, "{username}", goldap.EscapeFilter("ldap-filter-user"))
+		if _, err := goldap.CompileFilter(compiled); err != nil {
+			return fmt.Errorf("ldap user filter is invalid: %w", err)
+		}
+	}
+	for label, attribute := range map[string]string{
+		"username attribute":     provider.UsernameAttribute,
+		"display name attribute": provider.DisplayNameAttribute,
+		"email attribute":        provider.EmailAttribute,
+	} {
+		if attribute != "" && !ldapAttributeNamePattern.MatchString(attribute) {
+			return fmt.Errorf("ldap %s is invalid", label)
+		}
+	}
+	if provider.Role != "" && !ldapRolePattern.MatchString(provider.Role) {
+		return errors.New("ldap default role is invalid")
+	}
+	return nil
 }
 
 var integrationMetadataTypes = map[string]string{

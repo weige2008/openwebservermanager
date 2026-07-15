@@ -47,7 +47,12 @@ type externalLDAPClaims struct {
 	Groups      []string
 }
 
-type realLDAPAuthenticator struct{}
+type ldapDialContextFunc func(context.Context, string, string) (net.Conn, error)
+
+type realLDAPAuthenticator struct {
+	dialContext ldapDialContextFunc
+	timeout     time.Duration
+}
 
 var (
 	errExternalLDAPUserDisabled   = errors.New("external ldap user is disabled")
@@ -130,32 +135,54 @@ func sanitizeLDAPText(provider externalLDAPProvider, password, text string) stri
 	return strings.NewReplacer(replacements...).Replace(text)
 }
 
-func (realLDAPAuthenticator) Authenticate(ctx context.Context, provider externalLDAPProvider, username, password string) (externalLDAPClaims, bool, error) {
+func (a realLDAPAuthenticator) Authenticate(ctx context.Context, provider externalLDAPProvider, username, password string) (externalLDAPClaims, bool, error) {
 	if err := ctx.Err(); err != nil {
 		return externalLDAPClaims{}, false, err
 	}
-	tlsConfig := &tls.Config{
-		ServerName:         provider.ServerName,
-		InsecureSkipVerify: provider.InsecureSkipVerify,
+	if err := validateExternalLDAPProvider(provider); err != nil {
+		return externalLDAPClaims{}, false, fmt.Errorf("invalid ldap provider %s: %w", provider.ID, err)
 	}
-	conn, err := goldap.DialURL(provider.URL, goldap.DialWithTLSConfig(tlsConfig))
+	timeout := a.timeout
+	if timeout <= 0 {
+		timeout = externalLDAPTimeout
+	}
+	ctx, cancel := context.WithTimeout(ctx, timeout)
+	defer cancel()
+	parsedURL, err := parseLDAPURL(provider.URL)
 	if err != nil {
-		return externalLDAPClaims{}, false, fmt.Errorf("connect ldap provider %s: %w", provider.ID, err)
+		return externalLDAPClaims{}, false, err
+	}
+	serverName := strings.TrimSpace(provider.ServerName)
+	if serverName == "" {
+		serverName = parsedURL.Hostname()
+	}
+	tlsConfig := &tls.Config{
+		ServerName:         serverName,
+		InsecureSkipVerify: provider.InsecureSkipVerify,
+		MinVersion:         tls.VersionTLS12,
+	}
+	conn, err := a.dialLDAP(ctx, parsedURL, tlsConfig, timeout)
+	if err != nil {
+		return externalLDAPClaims{}, false, fmt.Errorf("connect ldap provider %s: %w", provider.ID, ldapContextError(ctx, err))
 	}
 	defer conn.Close()
-	conn.SetTimeout(externalLDAPTimeout)
+	stopContextClose := context.AfterFunc(ctx, func() {
+		_ = conn.Close()
+	})
+	defer stopContextClose()
+	conn.SetTimeout(timeout)
 	if provider.StartTLS {
 		if err := conn.StartTLS(tlsConfig); err != nil {
-			return externalLDAPClaims{}, false, fmt.Errorf("start ldap tls for %s: %w", provider.ID, err)
+			return externalLDAPClaims{}, false, fmt.Errorf("start ldap tls for %s: %w", provider.ID, ldapContextError(ctx, err))
 		}
 	}
 	if strings.TrimSpace(provider.UserDNTemplate) != "" {
-		userDN := strings.ReplaceAll(provider.UserDNTemplate, "{username}", username)
+		userDN := ldapUserBindName(provider.UserDNTemplate, username)
 		if err := conn.Bind(userDN, password); err != nil {
 			if ldapInvalidCredentials(err) {
 				return externalLDAPClaims{}, false, nil
 			}
-			return externalLDAPClaims{}, false, fmt.Errorf("bind ldap user for %s: %w", provider.ID, err)
+			return externalLDAPClaims{}, false, fmt.Errorf("bind ldap user for %s: %w", provider.ID, ldapContextError(ctx, err))
 		}
 		return externalLDAPClaims{
 			Subject:  userDN,
@@ -165,7 +192,7 @@ func (realLDAPAuthenticator) Authenticate(ctx context.Context, provider external
 	}
 	if provider.BindDN != "" {
 		if err := conn.Bind(provider.BindDN, provider.BindPassword); err != nil {
-			return externalLDAPClaims{}, false, fmt.Errorf("bind ldap service account for %s: %w", provider.ID, err)
+			return externalLDAPClaims{}, false, fmt.Errorf("bind ldap service account for %s: %w", provider.ID, ldapContextError(ctx, err))
 		}
 	}
 	filter := provider.UserFilter
@@ -188,7 +215,7 @@ func (realLDAPAuthenticator) Authenticate(ctx context.Context, provider external
 		goldap.ScopeWholeSubtree,
 		goldap.NeverDerefAliases,
 		2,
-		int(externalLDAPTimeout.Seconds()),
+		int((timeout+time.Second-1)/time.Second),
 		false,
 		filter,
 		attributes,
@@ -196,7 +223,7 @@ func (realLDAPAuthenticator) Authenticate(ctx context.Context, provider external
 	)
 	result, err := conn.Search(search)
 	if err != nil {
-		return externalLDAPClaims{}, false, fmt.Errorf("search ldap user for %s: %w", provider.ID, err)
+		return externalLDAPClaims{}, false, fmt.Errorf("search ldap user for %s: %w", provider.ID, ldapContextError(ctx, err))
 	}
 	if len(result.Entries) != 1 {
 		return externalLDAPClaims{}, false, nil
@@ -206,7 +233,7 @@ func (realLDAPAuthenticator) Authenticate(ctx context.Context, provider external
 		if ldapInvalidCredentials(err) {
 			return externalLDAPClaims{}, false, nil
 		}
-		return externalLDAPClaims{}, false, fmt.Errorf("bind ldap user for %s: %w", provider.ID, err)
+		return externalLDAPClaims{}, false, fmt.Errorf("bind ldap user for %s: %w", provider.ID, ldapContextError(ctx, err))
 	}
 	claims := externalLDAPClaims{
 		Subject:     firstNonEmpty(entry.DN, entry.GetAttributeValue(provider.UsernameAttribute), username),
@@ -217,6 +244,92 @@ func (realLDAPAuthenticator) Authenticate(ctx context.Context, provider external
 		Groups:      entry.GetAttributeValues("memberOf"),
 	}
 	return claims, true, nil
+}
+
+func (a realLDAPAuthenticator) dialLDAP(ctx context.Context, parsedURL *url.URL, tlsConfig *tls.Config, timeout time.Duration) (*goldap.Conn, error) {
+	dialContext := a.dialContext
+	if dialContext == nil {
+		dialer := &net.Dialer{Timeout: timeout}
+		dialContext = dialer.DialContext
+	}
+	port := parsedURL.Port()
+	if port == "" {
+		if parsedURL.Scheme == "ldaps" {
+			port = goldap.DefaultLdapsPort
+		} else {
+			port = goldap.DefaultLdapPort
+		}
+	}
+	address := net.JoinHostPort(parsedURL.Hostname(), port)
+	networkConn, err := dialContext(ctx, "tcp", address)
+	if err != nil {
+		return nil, err
+	}
+	secure := parsedURL.Scheme == "ldaps"
+	if secure {
+		tlsConn := tls.Client(networkConn, tlsConfig)
+		if err := tlsConn.HandshakeContext(ctx); err != nil {
+			_ = networkConn.Close()
+			return nil, err
+		}
+		networkConn = tlsConn
+	}
+	conn := goldap.NewConn(networkConn, secure)
+	conn.Start()
+	return conn, nil
+}
+
+func ldapContextError(ctx context.Context, err error) error {
+	if contextErr := ctx.Err(); contextErr != nil {
+		return contextErr
+	}
+	return err
+}
+
+func ldapUserBindName(template, username string) string {
+	replacement := username
+	probe := strings.ReplaceAll(template, "{username}", "ldap-template-user")
+	if _, err := goldap.ParseDN(probe); err == nil {
+		replacement = goldap.EscapeDN(username)
+	}
+	return strings.ReplaceAll(template, "{username}", replacement)
+}
+
+func parseLDAPURL(raw string) (*url.URL, error) {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return nil, errors.New("ldap URL is required")
+	}
+	if len(raw) > 2048 {
+		return nil, errors.New("ldap URL must not exceed 2048 bytes")
+	}
+	parsed, err := url.Parse(raw)
+	if err != nil {
+		return nil, fmt.Errorf("parse ldap URL: %w", err)
+	}
+	parsed.Scheme = strings.ToLower(parsed.Scheme)
+	if parsed.Scheme != "ldap" && parsed.Scheme != "ldaps" {
+		return nil, errors.New("ldap URL scheme must be ldap or ldaps")
+	}
+	if parsed.User != nil {
+		return nil, errors.New("ldap URL must not contain credentials")
+	}
+	if parsed.Hostname() == "" {
+		return nil, errors.New("ldap URL host is required")
+	}
+	if parsed.Path != "" && parsed.Path != "/" {
+		return nil, errors.New("ldap URL must not contain a path")
+	}
+	if parsed.RawQuery != "" || parsed.Fragment != "" {
+		return nil, errors.New("ldap URL must not contain a query or fragment")
+	}
+	if portText := parsed.Port(); portText != "" {
+		port, err := strconv.Atoi(portText)
+		if err != nil || port < 1 || port > 65535 {
+			return nil, errors.New("ldap URL port must be between 1 and 65535")
+		}
+	}
+	return parsed, nil
 }
 
 func ldapInvalidCredentials(err error) bool {
@@ -394,6 +507,9 @@ func (s *Server) externalLDAPProviderFromObject(object map[string]any, requireEx
 	if provider.EmailAttribute == "" {
 		provider.EmailAttribute = "mail"
 	}
+	if provider.Role == "" {
+		provider.Role = "user"
+	}
 	provider.AutoCreate = true
 	if autoCreate, ok := metadataBoolValue(object["auto_create"]); ok {
 		provider.AutoCreate = autoCreate
@@ -409,8 +525,8 @@ func (s *Server) externalLDAPProviderFromObject(object map[string]any, requireEx
 	if value, ok := metadataBoolValue(object["insecure_skip_verify"]); ok {
 		provider.InsecureSkipVerify = value
 	}
-	if provider.URL == "" || (provider.BaseDN == "" && provider.UserDNTemplate == "") {
-		return externalLDAPProvider{}, false, nil
+	if err := validateExternalLDAPProvider(provider); err != nil {
+		return externalLDAPProvider{}, false, err
 	}
 	return provider, true, nil
 }
@@ -450,10 +566,15 @@ func externalLDAPURL(metadata map[string]any) string {
 		scheme = "ldaps"
 		port = 636
 	}
-	if text := firstMetadataString(metadata, "port", "ldap_port"); text != "" {
-		if parsed, err := strconv.Atoi(text); err == nil && parsed > 0 {
+	for _, key := range []string{"port", "ldap_port"} {
+		value, exists := metadata[key]
+		if !exists || metadataValueEmpty(value) {
+			continue
+		}
+		if parsed, ok := metadataInt(value); ok && parsed > 0 && parsed <= 65535 {
 			port = parsed
 		}
+		break
 	}
 	return (&url.URL{Scheme: scheme, Host: net.JoinHostPort(host, strconv.Itoa(port))}).String()
 }

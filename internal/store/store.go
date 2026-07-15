@@ -1231,6 +1231,7 @@ func (s *Store) UpdatePlatformItem(collection, id string, req model.PlatformItem
 		"token_expires_at",
 	)
 	existingCredentialSecrets := copyMetadataSecrets(item.Metadata, "encrypted_password", "encrypted_private_key", "encrypted_passphrase")
+	existingSystemSettingMetadata := item.Metadata
 	existingSystemSettingSecrets := copyMetadataSecrets(item.Metadata, "smtp_password_encrypted", "llm_api_key_encrypted", "oidc_client_secret_encrypted", "ldap_bind_password_encrypted", "wecom_agent_secret_encrypted", "dns_api_token_encrypted", "proxy_private_key_encrypted")
 	existingCertificateSecrets := copyMetadataSecrets(item.Metadata, "certificate_private_key_encrypted")
 	existingCertificatePlainPrivateKey := firstMetadataString(item.Metadata, certificatePrivateKeyPlainKeys...)
@@ -1317,6 +1318,7 @@ func (s *Store) UpdatePlatformItem(collection, id string, req model.PlatformItem
 				}
 			}
 			restoreMetadataAnyValues(item.Metadata, existingSystemSettingSecretState)
+			restoreNestedSystemSettingSecrets(item.Metadata, existingSystemSettingMetadata)
 		}
 		if collection == "certificates" {
 			for key, value := range existingCertificateSecrets {
@@ -2736,6 +2738,119 @@ var externalSystemSettingSecretSpecs = []externalSystemSettingSecretSpec{
 		setKey:       "proxy_private_key_set",
 		updatedAtKey: "proxy_private_key_updated_at",
 	},
+}
+
+func restoreNestedSystemSettingSecrets(incoming, existing any) {
+	switch incomingValue := incoming.(type) {
+	case map[string]any:
+		existingValue, ok := existing.(map[string]any)
+		if !ok {
+			for _, spec := range externalSystemSettingSecretSpecs {
+				if firstMetadataString(incomingValue, spec.plainKeys...) != "" || metadataBoolByKeys(incomingValue, spec.clearKeys...) {
+					continue
+				}
+				delete(incomingValue, spec.encryptedKey)
+				delete(incomingValue, spec.setKey)
+				delete(incomingValue, spec.updatedAtKey)
+			}
+			for _, child := range incomingValue {
+				restoreNestedSystemSettingSecrets(child, nil)
+			}
+			return
+		}
+		for _, spec := range externalSystemSettingSecretSpecs {
+			if firstMetadataString(incomingValue, spec.plainKeys...) != "" || metadataBoolByKeys(incomingValue, spec.clearKeys...) {
+				continue
+			}
+			delete(incomingValue, spec.encryptedKey)
+			delete(incomingValue, spec.setKey)
+			delete(incomingValue, spec.updatedAtKey)
+			if encrypted := firstMetadataString(existingValue, spec.encryptedKey); encrypted != "" {
+				incomingValue[spec.encryptedKey] = encrypted
+				restoreMetadataAnyValues(incomingValue, copyMetadataValues(existingValue, spec.setKey, spec.updatedAtKey))
+			}
+		}
+		for key, child := range incomingValue {
+			restoreNestedSystemSettingSecrets(child, existingValue[key])
+		}
+	case []any:
+		existingValues, ok := systemSettingMetadataSlice(existing)
+		if !ok {
+			return
+		}
+		existingByID := map[string]any{}
+		for _, child := range existingValues {
+			if object, ok := child.(map[string]any); ok {
+				if id := systemSettingMetadataObjectID(object); id != "" {
+					existingByID[id] = child
+				}
+			}
+		}
+		for index, child := range incomingValue {
+			var existingChild any
+			if object, ok := child.(map[string]any); ok {
+				if id := systemSettingMetadataObjectID(object); id != "" {
+					existingChild = existingByID[id]
+				} else if index < len(existingValues) {
+					existingChild = existingValues[index]
+				}
+			}
+			if existingChild == nil && index < len(existingValues) {
+				if _, isObject := child.(map[string]any); !isObject {
+					existingChild = existingValues[index]
+				}
+			}
+			restoreNestedSystemSettingSecrets(child, existingChild)
+		}
+	case []map[string]any:
+		existingValues, ok := systemSettingMetadataSlice(existing)
+		if !ok {
+			return
+		}
+		existingByID := map[string]any{}
+		for _, child := range existingValues {
+			if object, ok := child.(map[string]any); ok {
+				if id := systemSettingMetadataObjectID(object); id != "" {
+					existingByID[id] = child
+				}
+			}
+		}
+		for index, child := range incomingValue {
+			var existingChild any
+			if id := systemSettingMetadataObjectID(child); id != "" {
+				existingChild = existingByID[id]
+			} else if index < len(existingValues) {
+				existingChild = existingValues[index]
+			}
+			restoreNestedSystemSettingSecrets(child, existingChild)
+		}
+	}
+}
+
+func systemSettingMetadataSlice(value any) ([]any, bool) {
+	switch typed := value.(type) {
+	case []any:
+		return typed, true
+	case []map[string]any:
+		result := make([]any, len(typed))
+		for index := range typed {
+			result[index] = typed[index]
+		}
+		return result, true
+	default:
+		return nil, false
+	}
+}
+
+func systemSettingMetadataObjectID(metadata map[string]any) string {
+	return firstMetadataString(metadata,
+		"id",
+		"provider_id",
+		"ldap_provider_id",
+		"oidc_provider_id",
+		"wecom_provider_id",
+		"integration_id",
+	)
 }
 
 var sensitiveMetadataKeys = map[string]struct{}{

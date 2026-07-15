@@ -116,11 +116,15 @@ interface LDAPSettingsState {
   bindPasswordClear: boolean
   baseDN: string
   userFilter: string
+  userDNTemplate: string
   usernameAttribute: string
   displayNameAttribute: string
   emailAttribute: string
   role: string
   autoCreate: boolean
+  startTLS: boolean
+  serverName: string
+  insecureSkipVerify: boolean
   setting?: PlatformItem
 }
 
@@ -231,7 +235,7 @@ const loginFailureWindowKeys = ['login_failure_window_minutes', 'failure_window_
 const loginLockMinutesKeys = ['login_lock_minutes', 'lock_minutes', 'login_lock_duration_minutes', 'lock_duration_minutes']
 const defaultLoginPolicyForm: LoginPolicyFormState = { name: '', action: 'deny', account: '*', cidr: '', priority: 0, expiresAt: '' }
 const oidcSettingKeys = ['oidc_login_enabled', 'external_oidc_enabled', 'oidc_issuer', 'oidc_jwks_uri', 'oidc_authorization_endpoint', 'oidc_token_endpoint', 'oidc_client_id', 'oidc_provider_id']
-const ldapSettingKeys = ['ldap_enabled', 'ldap_url', 'ldap_base_dn', 'ldap_bind_dn', 'ldap_user_filter', 'ldap_provider_id', 'ldap_provider_name']
+const ldapSettingKeys = ['ldap_enabled', 'ldap_url', 'ldap_base_dn', 'ldap_bind_dn', 'ldap_user_filter', 'ldap_user_dn_template', 'ldap_start_tls', 'ldap_server_name', 'ldap_provider_id', 'ldap_provider_name']
 const wecomSettingKeys = ['wecom_enabled', 'wecom_corp_id', 'wecom_agent_id', 'wecom_provider_id', 'wecom_provider_name']
 
 export function SettingsPage() {
@@ -861,6 +865,10 @@ export function SettingsPage() {
       showPermissionDenied()
       return
     }
+    if (!ldapFormValid) {
+      app.showToast(t('settingsPage.ldapConfigurationInvalid', { defaultValue: 'Complete the LDAP connection settings before saving.' }))
+      return
+    }
     setLDAPBusy(true)
     try {
       const target = ldapSettings.setting
@@ -873,11 +881,15 @@ export function SettingsPage() {
         ldap_bind_dn: ldapSettings.bindDN.trim(),
         ldap_base_dn: ldapSettings.baseDN.trim(),
         ldap_user_filter: ldapSettings.userFilter.trim() || '(uid={username})',
+        ldap_user_dn_template: ldapSettings.userDNTemplate.trim(),
         ldap_username_attribute: ldapSettings.usernameAttribute.trim() || 'uid',
         ldap_display_name_attribute: ldapSettings.displayNameAttribute.trim() || 'cn',
         ldap_email_attribute: ldapSettings.emailAttribute.trim() || 'mail',
         ldap_role: ldapSettings.role || 'user',
         ldap_auto_create: ldapSettings.autoCreate,
+        ldap_start_tls: ldapSettings.startTLS,
+        ldap_server_name: ldapSettings.serverName.trim(),
+        ldap_insecure_skip_verify: ldapSettings.insecureSkipVerify,
       }
       if (ldapSettings.bindPassword.trim()) metadata.ldap_bind_password = ldapSettings.bindPassword.trim()
       else if (ldapSettings.bindPasswordClear) metadata.ldap_bind_password_clear = true
@@ -1048,6 +1060,11 @@ export function SettingsPage() {
   const canSaveOIDCSettings = canSaveSystemSetting(oidcSettings.setting?.id)
   const canSaveLDAPSettings = canSaveSystemSetting(ldapSettings.setting?.id)
   const canSaveWeComSettings = canSaveSystemSetting(wecomSettings.setting?.id)
+  const ldapURLValid = !ldapSettings.url.trim() || isValidLDAPURL(ldapSettings.url)
+  const ldapUsesImplicitTLS = ldapSettings.url.trim().toLowerCase().startsWith('ldaps://')
+  const ldapTLSModeValid = !(ldapUsesImplicitTLS && ldapSettings.startTLS)
+  const ldapSearchBaseReady = Boolean(ldapSettings.baseDN.trim() || ldapSettings.userDNTemplate.trim())
+  const ldapFormValid = !ldapSettings.enabled || (Boolean(ldapSettings.url.trim()) && ldapURLValid && ldapTLSModeValid && ldapSearchBaseReady)
   const canShowLoginAccessSection = canReadSystemSettings || canReadLoginPolicies || canReadLoginLocks || canReadLicense
 
   return (
@@ -1823,7 +1840,13 @@ export function SettingsPage() {
               <Input value={ldapSettings.providerName} onChange={(event) => patchLDAP({ providerName: event.currentTarget.value })} placeholder='Corporate LDAP' />
             </Field>
             <Field label={t('settingsPage.ldapUrl', { defaultValue: 'LDAP URL' })}>
-              <Input value={ldapSettings.url} onChange={(event) => patchLDAP({ url: event.currentTarget.value })} placeholder='ldap://directory.example.com:389' />
+              <Input
+                value={ldapSettings.url}
+                onChange={(event) => patchLDAP({ url: event.currentTarget.value })}
+                placeholder='ldap://directory.example.com:389'
+                aria-invalid={!ldapURLValid}
+              />
+              {!ldapURLValid ? <span className='text-xs font-normal text-destructive'>{t('settingsPage.ldapUrlInvalid', { defaultValue: 'Enter an ldap:// or ldaps:// URL without credentials, path, query, or fragment.' })}</span> : null}
             </Field>
             <Field label={t('settingsPage.ldapBindDN', { defaultValue: 'Bind DN' })}>
               <Input value={ldapSettings.bindDN} onChange={(event) => patchLDAP({ bindDN: event.currentTarget.value })} placeholder='cn=reader,dc=example,dc=com' />
@@ -1832,10 +1855,14 @@ export function SettingsPage() {
               <Input type='password' value={ldapSettings.bindPassword} onChange={(event) => patchLDAP({ bindPassword: event.currentTarget.value, bindPasswordClear: false })} placeholder={ldapSettings.bindPasswordSet ? 'Leave blank to keep current password' : ''} autoComplete='new-password' />
             </Field>
             <Field label={t('settingsPage.ldapBaseDN', { defaultValue: 'Base DN' })}>
-              <Input value={ldapSettings.baseDN} onChange={(event) => patchLDAP({ baseDN: event.currentTarget.value })} placeholder='ou=people,dc=example,dc=com' />
+              <Input value={ldapSettings.baseDN} onChange={(event) => patchLDAP({ baseDN: event.currentTarget.value })} placeholder='ou=people,dc=example,dc=com' aria-invalid={ldapSettings.enabled && !ldapSearchBaseReady} />
             </Field>
             <Field label={t('settingsPage.ldapUserFilter', { defaultValue: 'User filter' })}>
               <Input value={ldapSettings.userFilter} onChange={(event) => patchLDAP({ userFilter: event.currentTarget.value })} placeholder='(uid={username})' />
+            </Field>
+            <Field label={t('settingsPage.ldapUserDNTemplate', { defaultValue: 'User DN / UPN template' })}>
+              <Input value={ldapSettings.userDNTemplate} onChange={(event) => patchLDAP({ userDNTemplate: event.currentTarget.value })} placeholder='uid={username},ou=people,dc=example,dc=com' aria-invalid={ldapSettings.enabled && !ldapSearchBaseReady} />
+              {ldapSettings.enabled && !ldapSearchBaseReady ? <span className='text-xs font-normal text-destructive'>{t('settingsPage.ldapSearchBaseRequired', { defaultValue: 'Provide a Base DN for directory search or a user DN/UPN template for direct bind.' })}</span> : null}
             </Field>
             <Field label={t('settingsPage.ldapUsernameAttribute', { defaultValue: 'Username attribute' })}>
               <Input value={ldapSettings.usernameAttribute} onChange={(event) => patchLDAP({ usernameAttribute: event.currentTarget.value })} placeholder='uid' />
@@ -1853,7 +1880,31 @@ export function SettingsPage() {
                 <option value='admin'>admin</option>
               </Select>
             </Field>
+            <Field label={t('settingsPage.ldapTLSServerName', { defaultValue: 'TLS server name' })}>
+              <Input value={ldapSettings.serverName} onChange={(event) => patchLDAP({ serverName: event.currentTarget.value })} placeholder='directory.example.com' />
+            </Field>
           </div>
+          <div className='grid gap-2 md:grid-cols-2'>
+            <label className='flex items-center gap-2 rounded-lg border border-border bg-background/70 px-3 py-2 text-sm'>
+              <input
+                type='checkbox'
+                className='size-4 accent-primary'
+                checked={ldapSettings.startTLS}
+                onChange={(event) => patchLDAP({ startTLS: event.currentTarget.checked })}
+              />
+              <span>{t('settingsPage.ldapStartTLS', { defaultValue: 'Upgrade ldap:// connections with STARTTLS' })}</span>
+            </label>
+            <label className='flex items-center gap-2 rounded-lg border border-border bg-background/70 px-3 py-2 text-sm'>
+              <input
+                type='checkbox'
+                className='size-4 accent-primary'
+                checked={ldapSettings.insecureSkipVerify}
+                onChange={(event) => patchLDAP({ insecureSkipVerify: event.currentTarget.checked })}
+              />
+              <span>{t('settingsPage.ldapInsecureSkipVerify', { defaultValue: 'Skip TLS certificate verification' })}</span>
+            </label>
+          </div>
+          {!ldapTLSModeValid ? <p className='text-xs text-destructive'>{t('settingsPage.ldapTLSModeConflict', { defaultValue: 'STARTTLS cannot be combined with an ldaps:// URL.' })}</p> : null}
           <label className='flex items-center gap-2 rounded-lg border border-border bg-background/70 px-3 py-2 text-sm'>
             <input
               type='checkbox'
@@ -1901,7 +1952,7 @@ export function SettingsPage() {
           </div>
           {canSaveLDAPSettings ? (
             <div className='flex justify-end'>
-              <Button variant='primary' onClick={() => void saveLDAPSettings()} disabled={ldapBusy || (ldapSettings.enabled && (!ldapSettings.url.trim() || !ldapSettings.baseDN.trim()))}>
+              <Button variant='primary' onClick={() => void saveLDAPSettings()} disabled={ldapBusy || !ldapFormValid}>
                 {ldapBusy ? t('saving') : t('save')}
               </Button>
             </div>
@@ -2398,11 +2449,15 @@ function defaultLDAPSettings(): LDAPSettingsState {
     bindPasswordClear: false,
     baseDN: '',
     userFilter: '(uid={username})',
+    userDNTemplate: '',
     usernameAttribute: 'uid',
     displayNameAttribute: 'cn',
     emailAttribute: 'mail',
     role: 'user',
     autoCreate: true,
+    startTLS: false,
+    serverName: '',
+    insecureSkipVerify: false,
   }
 }
 
@@ -2465,11 +2520,15 @@ function ldapSettingsFromSettings(items: PlatformItem[]): LDAPSettingsState {
     bindPasswordClear: false,
     baseDN: metadataText(metadata.ldap_base_dn) || metadataText(metadata.base_dn) || '',
     userFilter: metadataText(metadata.ldap_user_filter) || metadataText(metadata.user_filter) || '(uid={username})',
+    userDNTemplate: metadataText(metadata.ldap_user_dn_template) || metadataText(metadata.user_dn_template) || '',
     usernameAttribute: metadataText(metadata.ldap_username_attribute) || metadataText(metadata.username_attribute) || 'uid',
     displayNameAttribute: metadataText(metadata.ldap_display_name_attribute) || metadataText(metadata.display_name_attribute) || 'cn',
     emailAttribute: metadataText(metadata.ldap_email_attribute) || metadataText(metadata.email_attribute) || 'mail',
     role: metadataText(metadata.ldap_role) || metadataText(metadata.role) || 'user',
     autoCreate: metadata.ldap_auto_create === undefined ? true : metadataBoolValue(metadata.ldap_auto_create) === true,
+    startTLS: metadataBoolValue(metadata.ldap_start_tls) === true || metadataBoolValue(metadata.start_tls) === true,
+    serverName: metadataText(metadata.ldap_server_name) || metadataText(metadata.tls_server_name) || metadataText(metadata.server_name) || '',
+    insecureSkipVerify: metadataBoolValue(metadata.ldap_insecure_skip_verify) === true || metadataBoolValue(metadata.insecure_skip_verify) === true,
     setting,
   }
 }
@@ -2504,6 +2563,22 @@ function hasOIDCMetadata(item: PlatformItem) {
 function hasLDAPMetadata(item: PlatformItem) {
   const metadata = item.metadata ?? {}
   return ldapSettingKeys.some((key) => Object.prototype.hasOwnProperty.call(metadata, key))
+}
+
+function isValidLDAPURL(value: string) {
+  try {
+    const parsed = new URL(value.trim())
+    if (parsed.protocol !== 'ldap:' && parsed.protocol !== 'ldaps:') return false
+    if (!parsed.hostname || parsed.username || parsed.password || parsed.search || parsed.hash) return false
+    if (parsed.pathname && parsed.pathname !== '/') return false
+    if (parsed.port) {
+      const port = Number(parsed.port)
+      if (!Number.isInteger(port) || port < 1 || port > 65535) return false
+    }
+    return true
+  } catch {
+    return false
+  }
 }
 
 function hasWeComMetadata(item: PlatformItem) {

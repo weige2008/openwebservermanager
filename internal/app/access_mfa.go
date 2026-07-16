@@ -1,6 +1,7 @@
 package app
 
 import (
+	"fmt"
 	"net/http"
 	"strings"
 	"time"
@@ -19,15 +20,8 @@ type accessMFAVerifyRequest struct {
 }
 
 func accessMFAInputFromRequest(r *http.Request) accessMFAInput {
-	query := r.URL.Query()
 	code := strings.TrimSpace(r.Header.Get("X-OpenWebServerManager-MFA-Code"))
-	if code == "" {
-		code = strings.TrimSpace(query.Get("mfa_code"))
-	}
 	recovery := strings.TrimSpace(r.Header.Get("X-OpenWebServerManager-Recovery-Code"))
-	if recovery == "" {
-		recovery = strings.TrimSpace(query.Get("recovery_code"))
-	}
 	return accessMFAInput{MFACode: code, RecoveryCode: recovery}
 }
 
@@ -94,6 +88,14 @@ func (s *Server) requireAccessMFA(w http.ResponseWriter, r *http.Request, input 
 		s.writeAccessMFARequired(w, ttl, false)
 		return false
 	}
+	previous, ok, err := s.userMFASnapshot(session.UserID)
+	if err != nil || !ok {
+		if err == nil {
+			err = fmt.Errorf("user not found")
+		}
+		writeError(w, http.StatusInternalServerError, err.Error())
+		return false
+	}
 	verified, method, err := s.verifyMFAInput(session.UserID, profile, input.MFACode, input.RecoveryCode)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, err.Error())
@@ -105,6 +107,9 @@ func (s *Server) requireAccessMFA(w http.ResponseWriter, r *http.Request, input 
 		return false
 	}
 	if err := s.auth.grantAccessMFA(token, session.UserID, ttl); err != nil {
+		if mfaVerificationMutates(method) {
+			err = s.restoreMFASnapshotAfterFailure(r, session.UserID, previous, err)
+		}
 		writeError(w, http.StatusInternalServerError, err.Error())
 		return false
 	}

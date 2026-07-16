@@ -13,6 +13,7 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -389,6 +390,25 @@ func (s *Store) VerifyUserPassword(userID, password string) (bool, error) {
 		return false, nil
 	}
 	return bcrypt.CompareHashAndPassword([]byte(hash), []byte(password)) == nil, nil
+}
+
+func (s *Store) UserHasLocalPassword(userID string) (bool, error) {
+	userID = strings.TrimSpace(userID)
+	if userID == "" {
+		return false, nil
+	}
+	s.mu.RLock()
+	admin := s.state.Admin
+	s.mu.RUnlock()
+	if admin != nil && admin.UserID == userID {
+		return admin.PasswordHash != "", nil
+	}
+	item, ok, err := s.GetPlatformItem("users", userID)
+	if err != nil || !ok {
+		return false, err
+	}
+	hash, _ := item.Metadata["password_hash"].(string)
+	return strings.TrimSpace(hash) != "", nil
 }
 
 func (s *Store) SnapshotUserPassword(userID string) (UserPasswordSnapshot, error) {
@@ -2358,12 +2378,17 @@ func (s *Store) UserMFAProfile(userID string) (MFAProfile, bool, error) {
 }
 
 func (s *Store) EnableUserMFA(userID, secret string, recoveryCodes []string) (MFAProfile, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
 	item, ok, err := s.GetPlatformItem("users", userID)
 	if err != nil {
 		return MFAProfile{}, err
 	}
 	if !ok {
 		return MFAProfile{}, os.ErrNotExist
+	}
+	if metadataBool(item.Metadata["mfa_enabled"]) {
+		return MFAProfile{}, os.ErrExist
 	}
 	if item.Metadata == nil {
 		item.Metadata = map[string]any{}
@@ -2383,6 +2408,7 @@ func (s *Store) EnableUserMFA(userID, secret string, recoveryCodes []string) (MF
 	item.Metadata["mfa_secret_encrypted"] = encrypted
 	item.Metadata["mfa_recovery_hashes"] = hashes
 	item.Metadata["mfa_recovery_count"] = len(hashes)
+	delete(item.Metadata, "mfa_last_totp_counter")
 	if _, err := s.SavePlatformItem("users", item); err != nil {
 		return MFAProfile{}, err
 	}
@@ -2390,6 +2416,8 @@ func (s *Store) EnableUserMFA(userID, secret string, recoveryCodes []string) (MF
 }
 
 func (s *Store) DisableUserMFA(userID string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
 	item, ok, err := s.GetPlatformItem("users", userID)
 	if err != nil {
 		return err
@@ -2405,11 +2433,14 @@ func (s *Store) DisableUserMFA(userID string) error {
 	delete(item.Metadata, "mfa_secret_encrypted")
 	delete(item.Metadata, "mfa_recovery_hashes")
 	delete(item.Metadata, "mfa_recovery_count")
+	delete(item.Metadata, "mfa_last_totp_counter")
 	_, err = s.SavePlatformItem("users", item)
 	return err
 }
 
 func (s *Store) ReplaceUserMFARecoveryCodes(userID string, recoveryCodes []string) (MFAProfile, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
 	item, ok, err := s.GetPlatformItem("users", userID)
 	if err != nil {
 		return MFAProfile{}, err
@@ -2447,6 +2478,8 @@ func (s *Store) ConsumeUserMFARecoveryCode(userID, code string) (bool, error) {
 	if hash == "" {
 		return false, nil
 	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
 	item, ok, err := s.GetPlatformItem("users", userID)
 	if err != nil || !ok {
 		return false, err
@@ -2471,6 +2504,42 @@ func (s *Store) ConsumeUserMFARecoveryCode(userID, code string) (bool, error) {
 	item.Metadata["mfa_recovery_count"] = len(next)
 	_, err = s.SavePlatformItem("users", item)
 	return err == nil, err
+}
+
+func (s *Store) ConsumeUserMFATOTP(userID, code string, now time.Time) (bool, error) {
+	if strings.TrimSpace(code) == "" {
+		return false, nil
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	item, ok, err := s.GetPlatformItem("users", userID)
+	if err != nil || !ok {
+		return false, err
+	}
+	if !metadataBool(item.Metadata["mfa_enabled"]) {
+		return false, nil
+	}
+	encrypted, _ := item.Metadata["mfa_secret_encrypted"].(string)
+	if encrypted == "" {
+		return false, nil
+	}
+	secret, err := s.cipher.DecryptString(encrypted)
+	if err != nil {
+		return false, err
+	}
+	lastCounter, _ := metadataUint64Value(item.Metadata["mfa_last_totp_counter"])
+	counter, matched := security.VerifyTOTPAfter(secret, code, now, lastCounter)
+	if !matched {
+		return false, nil
+	}
+	if item.Metadata == nil {
+		item.Metadata = map[string]any{}
+	}
+	item.Metadata["mfa_last_totp_counter"] = counter
+	if _, err := s.SavePlatformItem("users", item); err != nil {
+		return false, err
+	}
+	return true, nil
 }
 
 func copyMetadataSecrets(metadata map[string]any, keys ...string) map[string]string {
@@ -2588,6 +2657,33 @@ func metadataIntValue(value any) int {
 		}
 	}
 	return 0
+}
+
+func metadataUint64Value(value any) (uint64, bool) {
+	switch typed := value.(type) {
+	case uint64:
+		return typed, true
+	case uint:
+		return uint64(typed), true
+	case int:
+		if typed >= 0 {
+			return uint64(typed), true
+		}
+	case int64:
+		if typed >= 0 {
+			return uint64(typed), true
+		}
+	case float64:
+		if typed >= 0 && typed <= float64(^uint64(0)) && typed == float64(uint64(typed)) {
+			return uint64(typed), true
+		}
+	case string:
+		parsed, err := strconv.ParseUint(strings.TrimSpace(typed), 10, 64)
+		if err == nil {
+			return parsed, true
+		}
+	}
+	return 0, false
 }
 
 func metadataStringList(value any) []string {

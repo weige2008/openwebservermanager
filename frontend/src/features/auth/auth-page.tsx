@@ -166,6 +166,16 @@ export function AuthPage() {
         method: 'POST',
         body: JSON.stringify(passkeyAssertionPayload(credential as PublicKeyCredential, options.challenge_id)),
       })
+      if (result.mfa_required || result.mfa_setup_required) {
+        if (!result.mfa_token) throw new Error(t('operationFailed'))
+        setMFAChallenge({
+          token: result.mfa_token,
+          setupRequired: Boolean(result.mfa_setup_required),
+          secret: result.secret,
+          otpauthURL: result.otpauth_url,
+        })
+        return
+      }
       if (!result.user) throw new Error(t('operationFailed'))
       app.setAuthenticatedUser(result.user)
       await app.refresh(true)

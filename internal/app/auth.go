@@ -74,6 +74,8 @@ type mfaChallenge struct {
 	Username      string
 	ClientIP      string
 	FailureKey    string
+	LoginType     string
+	LoginMetadata map[string]any
 	SetupRequired bool
 	Secret        string
 	ExpiresAt     time.Time
@@ -1164,7 +1166,8 @@ func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if proceed, handled := s.handleLoginMFA(w, r, admin, username, clientIP, failureKey, req); handled {
+	proceed, handled, mfaPrevious, mfaMutated := s.handleLoginMFA(w, r, admin, username, clientIP, failureKey, loginType, req)
+	if handled {
 		return
 	} else if !proceed {
 		return
@@ -1180,16 +1183,28 @@ func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
 	}); err != nil {
 		if loginType == "ldap" {
 			err = s.restoreExternalUserAfterLoginLogFailure(r, admin.UserID, ldapPreviousUser, ldapHadPreviousUser, err)
+		} else if mfaMutated {
+			err = s.restoreMFASnapshotAfterFailure(r, admin.UserID, mfaPrevious, err)
 		}
 		writeError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
 	if err := s.auth.resetLoginFailures(failureKey); err != nil {
+		if loginType == "ldap" {
+			err = s.restoreExternalUserAfterLoginStateFailure(r, admin.UserID, ldapPreviousUser, ldapHadPreviousUser, err)
+		} else if mfaMutated {
+			err = s.restoreMFASnapshotAfterFailure(r, admin.UserID, mfaPrevious, err)
+		}
 		writeError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
 	token, session, err := s.auth.create(admin)
 	if err != nil {
+		if loginType == "ldap" {
+			err = s.restoreExternalUserAfterLoginStateFailure(r, admin.UserID, ldapPreviousUser, ldapHadPreviousUser, err)
+		} else if mfaMutated {
+			err = s.restoreMFASnapshotAfterFailure(r, admin.UserID, mfaPrevious, err)
+		}
 		writeError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
@@ -1197,6 +1212,8 @@ func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
 	if err := s.recordUserLoginState(r, token, session, clientIP); err != nil {
 		if loginType == "ldap" {
 			err = s.restoreExternalUserAfterLoginStateFailure(r, admin.UserID, ldapPreviousUser, ldapHadPreviousUser, err)
+		} else if mfaMutated {
+			err = s.restoreMFASnapshotAfterFailure(r, admin.UserID, mfaPrevious, err)
 		}
 		writeError(w, http.StatusInternalServerError, err.Error())
 		return

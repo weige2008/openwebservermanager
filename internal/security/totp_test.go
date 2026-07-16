@@ -24,3 +24,26 @@ func TestVerifyTOTPAcceptsNormalizedSecretAndAdjacentWindow(t *testing.T) {
 		t.Fatal("VerifyTOTP accepted malformed input")
 	}
 }
+
+func TestVerifyTOTPAfterRejectsReplayedAndOlderCounters(t *testing.T) {
+	now := time.Unix(1234567890, 0).UTC()
+	secret := "JBSWY3DPEHPK3PXP"
+	code, ok := TOTPCodeAt(secret, now)
+	if !ok {
+		t.Fatal("failed to generate TOTP test code")
+	}
+	counter, ok := VerifyTOTPAfter(secret, code, now, 0)
+	if !ok {
+		t.Fatal("VerifyTOTPAfter rejected a fresh code")
+	}
+	if _, ok := VerifyTOTPAfter(secret, code, now, counter); ok {
+		t.Fatal("VerifyTOTPAfter accepted a replayed code")
+	}
+	older, ok := TOTPCodeAt(secret, now.Add(-TOTPPeriod*time.Second))
+	if !ok {
+		t.Fatal("failed to generate older TOTP test code")
+	}
+	if _, ok := VerifyTOTPAfter(secret, older, now, counter); ok {
+		t.Fatal("VerifyTOTPAfter accepted an older counter")
+	}
+}

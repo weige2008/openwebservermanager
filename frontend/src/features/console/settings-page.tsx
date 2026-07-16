@@ -63,6 +63,7 @@ const scaleOptions: Array<{ value: ThemeScale; labelKey: string }> = [
 interface MFAStatus {
   enabled: boolean
   forced: boolean
+  password_required: boolean
   recovery_count: number
 }
 
@@ -1533,17 +1534,19 @@ export function SettingsPage() {
             </div>
           ) : mfaStatus?.enabled ? (
             <div className='grid gap-3 rounded-lg border border-border bg-background/70 p-3'>
-              <Field label={t('settingsPage.currentPassword')}>
-                <Input type='password' value={mfaPassword} onChange={(event) => setMFAPassword(event.currentTarget.value)} />
-              </Field>
+              {mfaStatus.password_required ? (
+                <Field label={t('settingsPage.currentPassword')}>
+                  <Input type='password' value={mfaPassword} onChange={(event) => setMFAPassword(event.currentTarget.value)} />
+                </Field>
+              ) : null}
               <Field label={t('settingsPage.mfaCurrentCode')}>
-                <Input value={mfaCode} onChange={(event) => setMFACode(event.currentTarget.value)} inputMode='numeric' placeholder='123456' />
+                <Input value={mfaCode} onChange={(event) => setMFACode(event.currentTarget.value)} inputMode='text' placeholder='123456 / ABCDE-FGHIJ' />
               </Field>
               <div className='flex flex-wrap justify-end gap-2'>
-                <Button variant='outline' onClick={() => void regenerateMFARecoveryCodes()} disabled={mfaBusy || !mfaPassword.trim() || !mfaCode.trim()}>
+                <Button variant='outline' onClick={() => void regenerateMFARecoveryCodes()} disabled={mfaBusy || (mfaStatus.password_required && !mfaPassword.trim()) || !mfaCode.trim()}>
                   {t('settingsPage.regenerateRecoveryCodes')}
                 </Button>
-                <Button variant='destructive' onClick={() => void disableMFA()} disabled={mfaBusy || !mfaPassword.trim() || !mfaCode.trim()}>
+                <Button variant='destructive' onClick={() => void disableMFA()} disabled={mfaBusy || (mfaStatus.password_required && !mfaPassword.trim()) || !mfaCode.trim()}>
                   {t('settingsPage.disableMFA')}
                 </Button>
               </div>

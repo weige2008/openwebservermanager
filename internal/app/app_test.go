@@ -1561,7 +1561,11 @@ func TestAccessMFARequiredForPortalConnections(t *testing.T) {
 	var user model.PlatformItem
 	decodeResponse(t, userRec, &user)
 	secret := "JBSWY3DPEHPK3PXP"
-	if _, err := srv.cfg.Store.EnableUserMFA(user.ID, secret, []string{"ABCDE-FGHIJ"}); err != nil {
+	recoveryCodes := []string{
+		"ABCDE-FGHIJ", "KLMNO-PQRST", "UVWXY-ZABCD", "EFGHI-JKLMN",
+		"OPQRS-TUVWX", "YZABC-DEFGH", "IJKLM-NOPQR", "STUVW-XYZAB",
+	}
+	if _, err := srv.cfg.Store.EnableUserMFA(user.ID, secret, recoveryCodes); err != nil {
 		t.Fatalf("enable user MFA: %v", err)
 	}
 
@@ -1639,6 +1643,16 @@ func TestAccessMFARequiredForPortalConnections(t *testing.T) {
 		},
 	}, adminCookie, http.StatusCreated)
 
+	recoveryIndex := 0
+	nextRecoveryCode := func() string {
+		t.Helper()
+		if recoveryIndex >= len(recoveryCodes) {
+			t.Fatal("test exhausted MFA recovery codes")
+		}
+		code := recoveryCodes[recoveryIndex]
+		recoveryIndex++
+		return code
+	}
 	loginWithMFA := func() *http.Cookie {
 		t.Helper()
 		loginRec := assertStatus(t, handler, http.MethodPost, "/api/auth/login", map[string]any{
@@ -1652,8 +1666,8 @@ func TestAccessMFARequiredForPortalConnections(t *testing.T) {
 			t.Fatalf("login MFA challenge missing token: %v", challenge)
 		}
 		completeRec := assertStatus(t, handler, http.MethodPost, "/api/auth/mfa/complete-login", map[string]any{
-			"token":    token,
-			"mfa_code": totpCode(secret, time.Now().UTC()),
+			"token":         token,
+			"recovery_code": nextRecoveryCode(),
 		}, nil, http.StatusOK)
 		cookies := completeRec.Result().Cookies()
 		if len(cookies) == 0 {
@@ -1702,7 +1716,7 @@ func TestAccessMFARequiredForPortalConnections(t *testing.T) {
 	reconnectRec := assertStatus(t, handler, http.MethodPost, "/api/access/ssh/"+asset.ID, map[string]any{
 		"cols":           120,
 		"rows":           32,
-		"mfa_code":       totpCode(secret, time.Now().UTC()),
+		"recovery_code":  nextRecoveryCode(),
 		"reconnect_from": session.ID,
 	}, reconnectCookie, http.StatusAccepted)
 	var reconnected model.ConnectionSession
@@ -1721,7 +1735,7 @@ func TestAccessMFARequiredForPortalConnections(t *testing.T) {
 	assertStatus(t, handler, http.MethodPost, "/api/connections/ssh", map[string]any{
 		"server_id":     legacyServer.ID,
 		"credential_id": legacyCredential.ID,
-		"mfa_code":      totpCode(secret, time.Now().UTC()),
+		"recovery_code": nextRecoveryCode(),
 	}, legacyCookie, http.StatusCreated)
 
 	databaseCookie := loginWithMFA()
@@ -1729,8 +1743,8 @@ func TestAccessMFARequiredForPortalConnections(t *testing.T) {
 		"sql": "CREATE TABLE access_mfa_check(id INTEGER PRIMARY KEY)",
 	}, databaseCookie, http.StatusPreconditionRequired)
 	assertStatus(t, handler, http.MethodPost, "/api/access/database/"+databaseAsset.ID+"/query", map[string]any{
-		"sql":      "CREATE TABLE access_mfa_check(id INTEGER PRIMARY KEY)",
-		"mfa_code": totpCode(secret, time.Now().UTC()),
+		"sql":           "CREATE TABLE access_mfa_check(id INTEGER PRIMARY KEY)",
+		"recovery_code": nextRecoveryCode(),
 	}, databaseCookie, http.StatusOK)
 
 	operationRec := assertStatus(t, handler, http.MethodGet, "/api/admin/audit/operation-logs", nil, adminCookie, http.StatusOK)
@@ -1791,8 +1805,8 @@ func TestAccessMFAWebAssetPreflightUnlocksProxy(t *testing.T) {
 	var challenge map[string]any
 	decodeResponse(t, loginRec, &challenge)
 	completeRec := assertStatus(t, handler, http.MethodPost, "/api/auth/mfa/complete-login", map[string]any{
-		"token":    challenge["mfa_token"],
-		"mfa_code": totpCode(secret, time.Now().UTC()),
+		"token":         challenge["mfa_token"],
+		"recovery_code": "KLMNO-PQRST",
 	}, nil, http.StatusOK)
 	userCookie := completeRec.Result().Cookies()[0]
 
@@ -6520,7 +6534,7 @@ func TestTOTPLoginMFASetupChallengeRecoveryAndDisable(t *testing.T) {
 	}
 	completeRec := assertStatus(t, handler, http.MethodPost, "/api/auth/mfa/complete-login", map[string]any{
 		"token":    token,
-		"mfa_code": totpCode(secret, time.Now().UTC()),
+		"mfa_code": totpCode(secret, time.Now().UTC().Add(totpPeriod*time.Second)),
 	}, nil, http.StatusOK)
 	assertStatus(t, handler, http.MethodPost, "/api/auth/mfa/complete-login", map[string]any{
 		"token":    token,
@@ -6556,7 +6570,7 @@ func TestTOTPLoginMFASetupChallengeRecoveryAndDisable(t *testing.T) {
 
 	assertStatus(t, handler, http.MethodPost, "/api/auth/mfa/disable", map[string]any{
 		"current_password": "password123",
-		"mfa_code":         totpCode(secret, time.Now().UTC()),
+		"recovery_code":    regeneratedCodes[1],
 	}, recoveryCookie, http.StatusOK)
 	assertStatus(t, handler, http.MethodPost, "/api/auth/login", map[string]any{"username": "admin", "password": "password123"}, nil, http.StatusOK)
 }
@@ -6650,7 +6664,7 @@ func TestMFAOperationLogFailureRollsBackMutations(t *testing.T) {
 	}
 
 	removeDisableLogBlocker := blockPlatformItemCreate(t, srv.cfg.Store, "operation_logs")
-	removeMFARestoreBlocker := blockPlatformItemSavePayloadFragment(t, srv.cfg.Store, "users", adminUser.ID, `"mfa_enabled":true`)
+	removeMFARestoreBlocker := blockPlatformItemSaveMissingPayloadFragment(t, srv.cfg.Store, "users", adminUser.ID, `"mfa_last_totp_counter"`)
 	restoreFailureRec := assertStatus(t, handler, http.MethodPost, "/api/auth/mfa/disable", map[string]any{
 		"current_password": "password123",
 		"mfa_code":         totpCode(secret, time.Now().UTC()),

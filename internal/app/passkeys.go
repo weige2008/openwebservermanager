@@ -651,6 +651,35 @@ func (s *Server) handlePasskeyLoginVerify(w http.ResponseWriter, r *http.Request
 		writeError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
+	loginMetadata := map[string]any{
+		"credential_id": credentialID,
+		"passkey_id":    item.ID,
+		"user_agent":    trimMetadataTextForPasskey(r.UserAgent(), 512),
+	}
+	profile, _, err := s.cfg.Store.UserMFAProfile(challenge.User.UserID)
+	if err != nil {
+		err = s.restorePasskeyUsageAfterLoginFailure(r, item.ID, previous, err)
+		writeError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	if profile.Enabled || s.forceMFAEnabled() {
+		setupRequired := !profile.Enabled
+		secret := ""
+		if setupRequired {
+			secret, err = generateTOTPSecret()
+			if err != nil {
+				err = s.restorePasskeyUsageAfterLoginFailure(r, item.ID, previous, err)
+				writeError(w, http.StatusInternalServerError, err.Error())
+				return
+			}
+		}
+		if !s.writeMFAChallenge(w, r, challenge.User, challenge.Username, challenge.ClientIP, challenge.FailureKey, "passkey", setupRequired, secret, loginMetadata) {
+			if restoreErr := s.restorePasskeyUsageAfterLoginFailure(r, item.ID, previous, nil); restoreErr != nil {
+				_ = s.audit(r, "auth.passkey.restore_failed", item.ID, "", restoreErr.Error())
+			}
+		}
+		return
+	}
 	if err := s.createLoginLog(r, model.PlatformItemRequest{
 		Name:        challenge.Username,
 		Type:        "passkey",
@@ -660,16 +689,12 @@ func (s *Server) handlePasskeyLoginVerify(w http.ResponseWriter, r *http.Request
 		Metadata: map[string]any{
 			"client_ip":     challenge.ClientIP,
 			"account":       challenge.Username,
-			"credential_id": credentialID,
-			"passkey_id":    item.ID,
-			"user_agent":    trimMetadataTextForPasskey(r.UserAgent(), 512),
+			"credential_id": loginMetadata["credential_id"],
+			"passkey_id":    loginMetadata["passkey_id"],
+			"user_agent":    loginMetadata["user_agent"],
 		},
 	}); err != nil {
-		if _, restoreErr := s.cfg.Store.SavePlatformItem("passkeys", previous); restoreErr != nil {
-			detail := "failed to restore passkey usage after login log failure: " + restoreErr.Error()
-			_ = s.audit(r, "auth.passkey.restore_failed", item.ID, "", detail)
-			err = fmt.Errorf("%w; additionally %s", err, detail)
-		}
+		err = s.restorePasskeyUsageAfterLoginFailure(r, item.ID, previous, err)
 		writeError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
@@ -689,6 +714,18 @@ func (s *Server) handlePasskeyLoginVerify(w http.ResponseWriter, r *http.Request
 	_ = s.audit(r, "auth.passkey.login", session.UserID, "", "signed in with passkey")
 	http.SetCookie(w, s.authCookie(r, token, int(authSessionTTL.Seconds())))
 	writeJSON(w, http.StatusOK, map[string]any{"user": s.authUserPayload(session)})
+}
+
+func (s *Server) restorePasskeyUsageAfterLoginFailure(r *http.Request, passkeyID string, previous model.PlatformItem, originalErr error) error {
+	if _, restoreErr := s.cfg.Store.SavePlatformItem("passkeys", previous); restoreErr != nil {
+		detail := "failed to restore passkey usage after login log failure: " + restoreErr.Error()
+		_ = s.audit(r, "auth.passkey.restore_failed", passkeyID, "", detail)
+		if originalErr != nil {
+			return fmt.Errorf("%w; additionally %s", originalErr, detail)
+		}
+		return errors.New(detail)
+	}
+	return originalErr
 }
 
 func (s *Server) recordPasskeyLoginFailure(w http.ResponseWriter, r *http.Request, username, clientIP, failureKey, detail string) {

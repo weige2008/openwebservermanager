@@ -21,25 +21,48 @@ func NormalizeTOTPSecret(secret string) string {
 }
 
 func VerifyTOTP(secret, code string, now time.Time) bool {
+	_, ok := verifyTOTPCounter(secret, code, now, 0, false)
+	return ok
+}
+
+// VerifyTOTPAfter returns the matching counter only when it is newer than the
+// last accepted counter. Persisting that counter prevents replay within the
+// normal TOTP clock-skew window.
+func VerifyTOTPAfter(secret, code string, now time.Time, lastAccepted uint64) (uint64, bool) {
+	return verifyTOTPCounter(secret, code, now, lastAccepted, true)
+}
+
+func verifyTOTPCounter(secret, code string, now time.Time, lastAccepted uint64, enforceAfter bool) (uint64, bool) {
 	code = strings.TrimSpace(strings.ReplaceAll(code, " ", ""))
 	if len(code) != TOTPDigits {
-		return false
+		return 0, false
 	}
+	baseCounter := now.Unix() / TOTPPeriod
 	for offset := -1; offset <= 1; offset++ {
-		expected, ok := TOTPCodeAt(secret, now.Add(time.Duration(offset*TOTPPeriod)*time.Second))
+		candidate := baseCounter + int64(offset)
+		if candidate < 0 || (enforceAfter && uint64(candidate) <= lastAccepted) {
+			continue
+		}
+		expected, ok := totpCodeForCounter(secret, uint64(candidate))
 		if ok && hmac.Equal([]byte(expected), []byte(code)) {
-			return true
+			return uint64(candidate), true
 		}
 	}
-	return false
+	return 0, false
 }
 
 func TOTPCodeAt(secret string, now time.Time) (string, bool) {
+	if now.Unix() < 0 {
+		return "", false
+	}
+	return totpCodeForCounter(secret, uint64(now.Unix()/TOTPPeriod))
+}
+
+func totpCodeForCounter(secret string, counter uint64) (string, bool) {
 	key, err := base32.StdEncoding.WithPadding(base32.NoPadding).DecodeString(NormalizeTOTPSecret(secret))
 	if err != nil || len(key) == 0 {
 		return "", false
 	}
-	counter := uint64(now.Unix() / TOTPPeriod)
 	var msg [8]byte
 	binary.BigEndian.PutUint64(msg[:], counter)
 	mac := hmac.New(sha1.New, key)

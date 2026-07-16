@@ -17,9 +17,40 @@ $sourceRoot = Join-Path $workRoot "guacamole-server-$GuacamoleVersion"
 $patchPath = Join-Path $repoRoot "scripts/guacd/guacamole-server-1.5.5-cygwin.patch"
 $packageCache = Join-Path $workRoot "packages"
 
+function Invoke-DownloadWithRetry {
+  param(
+    [Parameter(Mandatory = $true)]
+    [string]$Uri,
+    [Parameter(Mandatory = $true)]
+    [string]$OutFile,
+    [int]$MaxAttempts = 5
+  )
+
+  $partialPath = "$OutFile.part"
+  for ($attempt = 1; $attempt -le $MaxAttempts; $attempt++) {
+    try {
+      Remove-Item -LiteralPath $partialPath -Force -ErrorAction SilentlyContinue
+      Invoke-WebRequest -Uri $Uri -OutFile $partialPath -TimeoutSec 120
+      if (!(Test-Path -LiteralPath $partialPath) -or (Get-Item -LiteralPath $partialPath).Length -le 0) {
+        throw "download returned an empty file"
+      }
+      Move-Item -LiteralPath $partialPath -Destination $OutFile -Force
+      return
+    } catch {
+      Remove-Item -LiteralPath $partialPath -Force -ErrorAction SilentlyContinue
+      if ($attempt -eq $MaxAttempts) {
+        throw "Failed to download $Uri after $MaxAttempts attempts: $($_.Exception.Message)"
+      }
+      $delaySeconds = [Math]::Min(30, 2 * $attempt)
+      Write-Warning "Download attempt $attempt for $Uri failed: $($_.Exception.Message). Retrying in $delaySeconds seconds."
+      Start-Sleep -Seconds $delaySeconds
+    }
+  }
+}
+
 New-Item -ItemType Directory -Force -Path $workRoot, $packageCache | Out-Null
 if (!(Test-Path -LiteralPath $setupPath)) {
-  Invoke-WebRequest -Uri "https://cygwin.com/setup-x86_64.exe" -OutFile $setupPath
+  Invoke-DownloadWithRetry -Uri "https://cygwin.com/setup-x86_64.exe" -OutFile $setupPath
 }
 
 $packages = @(
@@ -51,7 +82,7 @@ if ($setup.ExitCode -ne 0) {
 }
 
 if (!(Test-Path -LiteralPath $archivePath)) {
-  Invoke-WebRequest -Uri "https://archive.apache.org/dist/guacamole/$GuacamoleVersion/source/guacamole-server-$GuacamoleVersion.tar.gz" -OutFile $archivePath
+  Invoke-DownloadWithRetry -Uri "https://archive.apache.org/dist/guacamole/$GuacamoleVersion/source/guacamole-server-$GuacamoleVersion.tar.gz" -OutFile $archivePath
 }
 if (Test-Path -LiteralPath $sourceRoot) {
   Remove-Item -LiteralPath $sourceRoot -Recurse -Force

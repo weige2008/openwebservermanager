@@ -36,6 +36,8 @@ const presetOptions: Array<{ value: ThemePreset; label: string }> = [
   { value: 'lavender-dream', label: 'Lavender Dream' },
 ]
 
+const maxPasskeysPerUser = 20
+
 const fontOptions: Array<{ value: ThemeFont; labelKey: string }> = [
   { value: 'default', labelKey: 'auto' },
   { value: 'sans', labelKey: 'sans' },
@@ -271,6 +273,7 @@ export function SettingsPage() {
   const [mfaRecoveryCodes, setMFARecoveryCodes] = useState<string[]>([])
   const [mfaBusy, setMFABusy] = useState(false)
   const [passkeys, setPasskeys] = useState<PasskeyItem[]>([])
+  const [passkeyName, setPasskeyName] = useState('')
   const [passkeyBusy, setPasskeyBusy] = useState(false)
   const [sshPublicKeys, setSSHPublicKeys] = useState<SSHPublicKeyItem[]>([])
   const [sshPublicKeyForm, setSSHPublicKeyForm] = useState({ name: '', publicKey: '' })
@@ -493,8 +496,9 @@ export function SettingsPage() {
       if (!credential) throw new Error(t('operationFailed'))
       await apiRequest<PasskeyItem>('/api/auth/passkeys/register/verify', {
         method: 'POST',
-        body: JSON.stringify(passkeyAttestationPayload(credential as PublicKeyCredential, options.challenge_id, `${username} passkey`)),
+        body: JSON.stringify(passkeyAttestationPayload(credential as PublicKeyCredential, options.challenge_id, passkeyName.trim() || t('settingsPage.defaultPasskeyName', { defaultValue: 'Passkey' }))),
       })
+      setPasskeyName('')
       await loadPasskeys()
       app.showToast(t('settingsPage.passkeyRegistered', { defaultValue: 'Passkey registered.' }))
     } catch (error) {
@@ -1469,12 +1473,16 @@ export function SettingsPage() {
               {t('settingsPage.passkeyEmpty', { defaultValue: 'No passkeys are registered for this account yet.' })}
             </div>
           )}
-          <div className='flex justify-end'>
-            <Button variant='primary' onClick={() => void registerPasskey()} disabled={passkeyBusy || !passkeySupported() || !passkeySecureContext()}>
+          <div className='grid gap-2 sm:grid-cols-[minmax(0,1fr)_auto] sm:items-end'>
+            <Field label={t('settingsPage.passkeyName', { defaultValue: 'Passkey name' })}>
+              <Input value={passkeyName} onChange={(event) => setPasskeyName(event.currentTarget.value)} maxLength={128} placeholder={t('settingsPage.passkeyNamePlaceholder', { defaultValue: 'Work laptop' })} />
+            </Field>
+            <Button variant='primary' onClick={() => void registerPasskey()} disabled={passkeyBusy || passkeys.length >= maxPasskeysPerUser || !passkeySupported() || !passkeySecureContext()}>
               <Fingerprint className='size-4' />
               {passkeyBusy ? t('saving') : t('settingsPage.registerPasskey', { defaultValue: 'Register passkey' })}
             </Button>
           </div>
+          {passkeys.length >= maxPasskeysPerUser ? <p className='text-xs text-destructive'>{t('settingsPage.passkeyLimitReached', { defaultValue: 'This account has reached the 20-passkey limit.' })}</p> : null}
         </div>
       </CardStaggerItem>
 

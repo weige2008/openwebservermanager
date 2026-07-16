@@ -17,11 +17,24 @@ import (
 	"strconv"
 	"strings"
 	"time"
+	"unicode"
+	"unicode/utf8"
 
 	"openwebservermanager/internal/model"
 	"openwebservermanager/internal/store"
 
 	"github.com/fxamacker/cbor/v2"
+)
+
+const (
+	maxPasskeysPerUser           = 20
+	maxPasskeyNameRunes          = 128
+	maxPasskeyCredentialIDBytes  = 1023
+	maxPasskeyClientDataBytes    = 16 << 10
+	maxPasskeyAttestationBytes   = 256 << 10
+	maxPasskeyAuthenticatorBytes = 64 << 10
+	maxPasskeySignatureBytes     = 1024
+	maxPasskeyUserHandleBytes    = 64
 )
 
 type passkeyChallenge struct {
@@ -213,6 +226,10 @@ func (s *Server) handlePasskeyRegisterOptions(w http.ResponseWriter, r *http.Req
 		writeError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
+	if len(existing) >= maxPasskeysPerUser {
+		writeError(w, http.StatusConflict, fmt.Sprintf("an account can register at most %d passkeys", maxPasskeysPerUser))
+		return
+	}
 	exclude := make([]passkeyCredentialDescriptor, 0, len(existing))
 	for _, item := range existing {
 		if credentialID := passkeyCredentialID(item); credentialID != "" {
@@ -267,22 +284,27 @@ func (s *Server) handlePasskeyRegisterVerify(w http.ResponseWriter, r *http.Requ
 		writeError(w, http.StatusUnauthorized, "passkey registration challenge expired")
 		return
 	}
-	if strings.TrimSpace(req.Type) != "" && req.Type != "public-key" {
+	if req.Type != "public-key" {
 		writeError(w, http.StatusBadRequest, "unsupported passkey credential type")
 		return
 	}
-	clientDataJSON, err := passkeyBase64Decode(req.Response.ClientDataJSON)
+	name, err := normalizePasskeyName(req.Name, "Passkey")
 	if err != nil {
-		writeError(w, http.StatusBadRequest, "invalid client data")
+		writeError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	clientDataJSON, err := decodePasskeyField(req.Response.ClientDataJSON, "client data", maxPasskeyClientDataBytes)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, err.Error())
 		return
 	}
 	if err := validateWebAuthnClientData(clientDataJSON, "webauthn.create", challenge.Challenge, challenge.Origin); err != nil {
 		writeError(w, http.StatusBadRequest, err.Error())
 		return
 	}
-	attestationObject, err := passkeyBase64Decode(req.Response.AttestationObject)
+	attestationObject, err := decodePasskeyField(req.Response.AttestationObject, "attestation object", maxPasskeyAttestationBytes)
 	if err != nil {
-		writeError(w, http.StatusBadRequest, "invalid attestation object")
+		writeError(w, http.StatusBadRequest, err.Error())
 		return
 	}
 	data, err := parsePasskeyAttestation(attestationObject, challenge.RPID)
@@ -300,6 +322,10 @@ func (s *Server) handlePasskeyRegisterVerify(w http.ResponseWriter, r *http.Requ
 		return
 	}
 	credentialID := passkeyBase64Encode(data.CredentialID)
+	if len(data.CredentialID) > maxPasskeyCredentialIDBytes {
+		writeError(w, http.StatusBadRequest, "passkey credential id is too large")
+		return
+	}
 	if _, _, ok, err := s.passkeyByCredentialID("", credentialID); err != nil {
 		writeError(w, http.StatusInternalServerError, err.Error())
 		return
@@ -307,9 +333,14 @@ func (s *Server) handlePasskeyRegisterVerify(w http.ResponseWriter, r *http.Requ
 		writeError(w, http.StatusConflict, "passkey already registered")
 		return
 	}
-	name := strings.TrimSpace(req.Name)
-	if name == "" {
-		name = "Passkey"
+	existing, err := s.passkeysForUser(session.UserID)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	if len(existing) >= maxPasskeysPerUser {
+		writeError(w, http.StatusConflict, fmt.Sprintf("an account can register at most %d passkeys", maxPasskeysPerUser))
+		return
 	}
 	item, err := s.cfg.Store.CreatePlatformItem("passkeys", model.PlatformItemRequest{
 		Name:     name,
@@ -543,9 +574,13 @@ func (s *Server) handlePasskeyLoginVerify(w http.ResponseWriter, r *http.Request
 		return
 	}
 	challenge.User = currentUser
-	clientDataJSON, err := passkeyBase64Decode(req.Response.ClientDataJSON)
+	if req.Type != "public-key" {
+		s.recordPasskeyLoginFailure(w, r, challenge.Username, challenge.ClientIP, challenge.FailureKey, "unsupported passkey credential type")
+		return
+	}
+	clientDataJSON, err := decodePasskeyField(req.Response.ClientDataJSON, "client data", maxPasskeyClientDataBytes)
 	if err != nil {
-		s.recordPasskeyLoginFailure(w, r, challenge.Username, challenge.ClientIP, challenge.FailureKey, "invalid passkey client data")
+		s.recordPasskeyLoginFailure(w, r, challenge.Username, challenge.ClientIP, challenge.FailureKey, err.Error())
 		return
 	}
 	if err := validateWebAuthnClientData(clientDataJSON, "webauthn.get", challenge.Challenge, challenge.Origin); err != nil {
@@ -553,7 +588,11 @@ func (s *Server) handlePasskeyLoginVerify(w http.ResponseWriter, r *http.Request
 		return
 	}
 	rawID, err := passkeyRequestCredentialID(req.RawID, req.ID)
-	if err != nil || len(rawID) == 0 {
+	if err != nil {
+		s.recordPasskeyLoginFailure(w, r, challenge.Username, challenge.ClientIP, challenge.FailureKey, err.Error())
+		return
+	}
+	if len(rawID) == 0 {
 		s.recordPasskeyLoginFailure(w, r, challenge.Username, challenge.ClientIP, challenge.FailureKey, "invalid passkey credential id")
 		return
 	}
@@ -568,15 +607,15 @@ func (s *Server) handlePasskeyLoginVerify(w http.ResponseWriter, r *http.Request
 		return
 	}
 	if userHandle := strings.TrimSpace(req.Response.UserHandle); userHandle != "" {
-		decodedUserHandle, err := passkeyBase64Decode(userHandle)
+		decodedUserHandle, err := decodePasskeyField(userHandle, "user handle", maxPasskeyUserHandleBytes)
 		if err != nil || !bytes.Equal(decodedUserHandle, []byte(challenge.User.UserID)) {
 			s.recordPasskeyLoginFailure(w, r, challenge.Username, challenge.ClientIP, challenge.FailureKey, "passkey user handle mismatch")
 			return
 		}
 	}
-	authenticatorData, err := passkeyBase64Decode(req.Response.AuthenticatorData)
+	authenticatorData, err := decodePasskeyField(req.Response.AuthenticatorData, "authenticator data", maxPasskeyAuthenticatorBytes)
 	if err != nil {
-		s.recordPasskeyLoginFailure(w, r, challenge.Username, challenge.ClientIP, challenge.FailureKey, "invalid authenticator data")
+		s.recordPasskeyLoginFailure(w, r, challenge.Username, challenge.ClientIP, challenge.FailureKey, err.Error())
 		return
 	}
 	signCount, err := validatePasskeyAssertionAuthData(authenticatorData, challenge.RPID)
@@ -584,9 +623,9 @@ func (s *Server) handlePasskeyLoginVerify(w http.ResponseWriter, r *http.Request
 		s.recordPasskeyLoginFailure(w, r, challenge.Username, challenge.ClientIP, challenge.FailureKey, err.Error())
 		return
 	}
-	signature, err := passkeyBase64Decode(req.Response.Signature)
+	signature, err := decodePasskeyField(req.Response.Signature, "signature", maxPasskeySignatureBytes)
 	if err != nil {
-		s.recordPasskeyLoginFailure(w, r, challenge.Username, challenge.ClientIP, challenge.FailureKey, "invalid passkey signature")
+		s.recordPasskeyLoginFailure(w, r, challenge.Username, challenge.ClientIP, challenge.FailureKey, err.Error())
 		return
 	}
 	if !verifyPasskeySignature(publicKey, authenticatorData, clientDataJSON, signature) {
@@ -594,8 +633,8 @@ func (s *Server) handlePasskeyLoginVerify(w http.ResponseWriter, r *http.Request
 		return
 	}
 	storedSignCount := passkeyMetadataInt(item.Metadata["sign_count"])
-	if storedSignCount > 0 && signCount > 0 && int(signCount) <= storedSignCount {
-		s.recordPasskeyLoginFailure(w, r, challenge.Username, challenge.ClientIP, challenge.FailureKey, "passkey sign count did not advance")
+	if err := validatePasskeySignCount(storedSignCount, signCount); err != nil {
+		s.recordPasskeyLoginFailure(w, r, challenge.Username, challenge.ClientIP, challenge.FailureKey, err.Error())
 		return
 	}
 	previous := item
@@ -840,6 +879,9 @@ func parsePasskeyRegistrationAuthData(authData []byte, rpID string) (passkeyRegi
 	if flags&0x04 == 0 {
 		return passkeyRegistrationData{}, errors.New("passkey user verification was not performed")
 	}
+	if flags&0x10 != 0 && flags&0x08 == 0 {
+		return passkeyRegistrationData{}, errors.New("passkey backup state is invalid")
+	}
 	if flags&0x40 == 0 {
 		return passkeyRegistrationData{}, errors.New("passkey attested credential data is missing")
 	}
@@ -883,7 +925,23 @@ func validatePasskeyAssertionAuthData(authData []byte, rpID string) (uint32, err
 	if authData[32]&0x04 == 0 {
 		return 0, errors.New("passkey user verification was not performed")
 	}
+	if authData[32]&0x10 != 0 && authData[32]&0x08 == 0 {
+		return 0, errors.New("passkey backup state is invalid")
+	}
 	return binary.BigEndian.Uint32(authData[33:37]), nil
+}
+
+func validatePasskeySignCount(stored int, current uint32) error {
+	if stored < 0 || uint64(stored) > uint64(^uint32(0)) {
+		return errors.New("stored passkey sign count is invalid")
+	}
+	if stored == 0 && current == 0 {
+		return nil
+	}
+	if uint64(current) <= uint64(stored) {
+		return errors.New("passkey sign count did not advance")
+	}
+	return nil
 }
 
 func normalizePasskeyTransports(values []string) []string {
@@ -951,13 +1009,50 @@ func verifyPasskeySignature(publicKey *ecdsa.PublicKey, authenticatorData, clien
 }
 
 func passkeyRequestCredentialID(rawID, id string) ([]byte, error) {
-	if strings.TrimSpace(rawID) != "" {
-		return passkeyBase64Decode(rawID)
+	rawID = strings.TrimSpace(rawID)
+	id = strings.TrimSpace(id)
+	if rawID == "" || id == "" {
+		return nil, errors.New("credential id and raw id are required")
 	}
-	if strings.TrimSpace(id) != "" {
-		return passkeyBase64Decode(id)
+	raw, err := decodePasskeyField(rawID, "credential raw id", maxPasskeyCredentialIDBytes)
+	if err != nil {
+		return nil, err
 	}
-	return nil, errors.New("credential id is required")
+	encoded, err := decodePasskeyField(id, "credential id", maxPasskeyCredentialIDBytes)
+	if err != nil {
+		return nil, err
+	}
+	if !bytes.Equal(raw, encoded) {
+		return nil, errors.New("credential id does not match raw id")
+	}
+	return raw, nil
+}
+
+func decodePasskeyField(value, label string, maxBytes int) ([]byte, error) {
+	raw, err := passkeyBase64Decode(value)
+	if err != nil {
+		return nil, fmt.Errorf("invalid passkey %s", label)
+	}
+	if len(raw) > maxBytes {
+		return nil, fmt.Errorf("passkey %s is too large", label)
+	}
+	return raw, nil
+}
+
+func normalizePasskeyName(value, fallback string) (string, error) {
+	name := strings.TrimSpace(value)
+	if name == "" {
+		name = strings.TrimSpace(fallback)
+	}
+	if name == "" || !utf8.ValidString(name) || utf8.RuneCountInString(name) > maxPasskeyNameRunes {
+		return "", fmt.Errorf("passkey name must contain between 1 and %d characters", maxPasskeyNameRunes)
+	}
+	for _, character := range name {
+		if unicode.IsControl(character) {
+			return "", errors.New("passkey name must not contain control characters")
+		}
+	}
+	return name, nil
 }
 
 func randomPasskeyChallenge() (string, error) {

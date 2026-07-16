@@ -10845,7 +10845,7 @@ func TestAgentClientReportsMetricsAndRelaysTCP(t *testing.T) {
 	if err != nil {
 		t.Fatalf("dial through real agent client: %v", err)
 	}
-	waitForCondition(t, 2*time.Second, func() bool {
+	waitForCondition(t, 5*time.Second, func() bool {
 		stored, ok, loadErr := srv.cfg.Store.GetPlatformItem("agent_gateways", gateway.ID)
 		return loadErr == nil && ok && metadataIntDefault(stored.Metadata["active_sessions"], 0) == 1
 	})

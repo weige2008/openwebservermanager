@@ -4037,6 +4037,19 @@ function PlatformItemDialog({
   const storageOwnerItems = app.data.platform?.users || []
   const gatewaySelectionMode = gatewayGroupSelectionModeFromForm(form)
   const selectedGatewayIDs = metadataStringListFromForm(form.metadata, 'gateway_ids')
+  const oidcClientType = (form.type || 'confidential').toLowerCase()
+  const oidcClientID = metadataFormText(form.metadata, 'client_id')
+  const oidcAuthMethod = metadataFormText(form.metadata, 'token_endpoint_auth_method') || (oidcClientType === 'public' ? 'none' : 'client_secret_basic')
+  const oidcRedirectURIs = metadataStringListFromForm(form.metadata, 'redirect_uris')
+  const oidcScopes = metadataStringListFromForm(form.metadata, 'scopes')
+  const oidcClientFormValid = !isOIDCClient || (
+    validOIDCClientID(oidcClientID)
+    && oidcRedirectURIs.length > 0
+    && oidcRedirectURIs.length <= 64
+    && oidcRedirectURIs.every((value) => validOIDCRedirectURI(value, oidcClientType === 'public'))
+    && validOIDCScopes(oidcScopes)
+    && (oidcClientType === 'public' ? oidcAuthMethod === 'none' : ['client_secret_basic', 'client_secret_post'].includes(oidcAuthMethod))
+  )
   const databaseCredentials = (app.data.platform?.credentials || []).filter((item) => item.type === 'database_password')
   const mtlsCertificates = (app.data.platform?.certificates || []).filter((item) => metadataBool(item.metadata?.mtls_enabled) && metadataBool(item.metadata?.has_private_key))
   return (
@@ -4688,6 +4701,7 @@ function PlatformItemDialog({
                   placeholder='openweb-client'
                   value={metadataFormText(form.metadata, 'client_id')}
                   onChange={(event) => onChange({ metadata: metadataWithValue(form.metadata, 'client_id', event.currentTarget.value) })}
+                  aria-invalid={!validOIDCClientID(oidcClientID)}
                 />
               </Field>
               <Field label={app.t('oidcClientSecret', 'Client secret')}>
@@ -4715,12 +4729,17 @@ function PlatformItemDialog({
               ) : null}
               <Field label={app.t('oidcAuthMethod', 'Token auth method')}>
                 <Select
-                  value={metadataFormText(form.metadata, 'token_endpoint_auth_method') || ((form.type || 'confidential') === 'public' ? 'none' : 'client_secret_basic')}
+                  value={oidcAuthMethod}
                   onChange={(event) => onChange({ metadata: metadataWithValue(form.metadata, 'token_endpoint_auth_method', event.currentTarget.value) })}
                 >
-                  <option value='client_secret_basic'>client_secret_basic</option>
-                  <option value='client_secret_post'>client_secret_post</option>
-                  <option value='none'>none</option>
+                  {oidcClientType === 'public' ? (
+                    <option value='none'>none</option>
+                  ) : (
+                    <>
+                      <option value='client_secret_basic'>client_secret_basic</option>
+                      <option value='client_secret_post'>client_secret_post</option>
+                    </>
+                  )}
                 </Select>
               </Field>
               <Field className='sm:col-span-2' label={app.t('oidcRedirectURIs', 'Redirect URIs')}>
@@ -4728,7 +4747,8 @@ function PlatformItemDialog({
                   className='font-mono text-xs'
                   placeholder={'https://client.example.com/callback\nhttp://localhost:3000/callback'}
                   value={metadataFormText(form.metadata, 'redirect_uris')}
-                  onChange={(event) => onChange({ metadata: metadataWithList(form.metadata, 'redirect_uris', splitLines(event.currentTarget.value)) })}
+                  onChange={(event) => onChange({ metadata: metadataWithList(form.metadata, 'redirect_uris', splitTextLines(event.currentTarget.value)) })}
+                  aria-invalid={!oidcRedirectURIs.length || !oidcRedirectURIs.every((value) => validOIDCRedirectURI(value, oidcClientType === 'public'))}
                 />
               </Field>
               <Field className='sm:col-span-2' label={app.t('oidcScopes', 'Scopes')}>
@@ -4736,6 +4756,7 @@ function PlatformItemDialog({
                   placeholder='openid profile email'
                   value={metadataListInputText(form.metadata, 'scopes')}
                   onChange={(event) => onChange({ metadata: metadataWithList(form.metadata, 'scopes', splitWords(event.currentTarget.value)) })}
+                  aria-invalid={!validOIDCScopes(oidcScopes)}
                 />
               </Field>
               <Field label={app.t('group')}><Input value={form.group} onChange={(event) => onChange({ group: event.currentTarget.value })} /></Field>
@@ -4864,7 +4885,8 @@ function PlatformItemDialog({
         <Field label='Metadata JSON'><Textarea value={form.metadata} onChange={(event) => onChange({ metadata: event.currentTarget.value })} /></Field>
         <div className='flex justify-end gap-2'>
           <Button variant='outline' onClick={() => onOpenChange(false)}>{app.t('cancel', '取消')}</Button>
-          <Button variant='primary' onClick={onSave} disabled={saving || !form.name.trim()}>
+          {isOIDCClient && !oidcClientFormValid ? <p className='mr-auto text-xs text-destructive'>{app.t('invalidOIDCClientConfiguration', 'Enter a valid Client ID, compatible authentication method, redirect URI, and scopes including openid.')}</p> : null}
+          <Button variant='primary' onClick={onSave} disabled={saving || !form.name.trim() || !oidcClientFormValid}>
             <Save className='size-4' />
             {saving ? app.t('saving', '保存中') : app.t('save', '保存')}
           </Button>
@@ -6831,8 +6853,55 @@ function splitLines(value: string) {
   return value.split(/\r?\n|,/).map((item) => item.trim()).filter(Boolean)
 }
 
+function splitTextLines(value: string) {
+  return value.split(/\r?\n/).map((item) => item.trim()).filter(Boolean)
+}
+
 function splitWords(value: string) {
   return value.split(/[\s,]+/).map((item) => item.trim()).filter(Boolean)
+}
+
+function validOIDCClientID(value: string) {
+  return Boolean(value)
+    && value.trim() === value
+    && new TextEncoder().encode(value).length <= 256
+    && !/[\s\u0000-\u001f\u007f]/u.test(value)
+}
+
+function validOIDCRedirectURI(value: string, publicClient: boolean) {
+  if (!value || value.trim() !== value || new TextEncoder().encode(value).length > 2048 || /[\r\n\u0000]/u.test(value)) return false
+  try {
+    const parsed = new URL(value)
+    if (parsed.hash || parsed.username || parsed.password) return false
+    const protocol = parsed.protocol.toLowerCase()
+    if (protocol === 'https:') return Boolean(parsed.hostname)
+    if (protocol === 'http:') {
+      const hostname = parsed.hostname.replace(/^\[|\]$/g, '').replace(/\.$/, '').toLowerCase()
+      return hostname === 'localhost' || hostname === '::1' || validOIDCLoopbackIPv4(hostname)
+    }
+    return publicClient && !parsed.host && Boolean(parsed.pathname) && validOIDCPrivateUseScheme(protocol.slice(0, -1))
+  } catch {
+    return false
+  }
+}
+
+function validOIDCLoopbackIPv4(hostname: string) {
+  const octets = hostname.split('.')
+  return octets.length === 4
+    && octets[0] === '127'
+    && octets.every((octet) => /^\d{1,3}$/.test(octet) && Number(octet) <= 255)
+}
+
+function validOIDCPrivateUseScheme(scheme: string) {
+  if (scheme.length > 255) return false
+  const labels = scheme.toLowerCase().split('.')
+  return labels.length >= 2
+    && labels.every((label) => label.length > 0 && label.length <= 63 && /^[a-z0-9](?:[a-z0-9-]*[a-z0-9])?$/.test(label))
+}
+
+function validOIDCScopes(scopes: string[]) {
+  if (!scopes.length || scopes.length > 32 || !scopes.includes('openid') || new Set(scopes).size !== scopes.length) return false
+  return scopes.every((scope) => new TextEncoder().encode(scope).length <= 128 && /^[\x21\x23-\x5b\x5d-\x7e]+$/.test(scope))
 }
 
 function stringValue(value: unknown) {

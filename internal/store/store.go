@@ -1802,11 +1802,11 @@ func applyOIDCClientPlatformSecret(req model.PlatformItemRequest, item *model.Pl
 	if item.Type == "" {
 		item.Type = "confidential"
 	}
-	secret := strings.TrimSpace(req.Password)
+	secret := req.Password
 	for _, key := range []string{"client_secret", "clientSecret", "secret"} {
 		if secret == "" {
 			if text, ok := item.Metadata[key].(string); ok {
-				secret = strings.TrimSpace(text)
+				secret = text
 			}
 		}
 		delete(item.Metadata, key)

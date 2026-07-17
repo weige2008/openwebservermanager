@@ -152,6 +152,10 @@ func (s *Server) handlePlatformAPI(w http.ResponseWriter, r *http.Request) bool 
 }
 
 func (s *Server) handleCollection(w http.ResponseWriter, r *http.Request, collection, id string) {
+	if collection == "oidc_clients" && (r.Method == http.MethodPost || r.Method == http.MethodPatch) {
+		s.oidcClientMu.Lock()
+		defer s.oidcClientMu.Unlock()
+	}
 	if managedWorkflowCollection(collection) && r.Method != http.MethodGet {
 		writeError(w, http.StatusMethodNotAllowed, "workflow records must be changed through dedicated decision and execution endpoints")
 		return
@@ -210,6 +214,12 @@ func (s *Server) handleCollection(w http.ResponseWriter, r *http.Request, collec
 			writeError(w, http.StatusBadRequest, err.Error())
 			return
 		}
+		if collection == "oidc_clients" {
+			if err := s.validateOIDCClientMutation("", nil, req); err != nil {
+				writeError(w, http.StatusBadRequest, err.Error())
+				return
+			}
+		}
 		if err := validateAuthorizationRequest(collection, req); err != nil {
 			writeError(w, http.StatusBadRequest, err.Error())
 			return
@@ -249,6 +259,12 @@ func (s *Server) handleCollection(w http.ResponseWriter, r *http.Request, collec
 		if err := preparePlatformItemUpdateRequest(collection, previous, &req); err != nil {
 			writeError(w, http.StatusBadRequest, err.Error())
 			return
+		}
+		if collection == "oidc_clients" {
+			if err := s.validateOIDCClientMutation(id, &previous, req); err != nil {
+				writeError(w, http.StatusBadRequest, err.Error())
+				return
+			}
 		}
 		item, err := s.cfg.Store.UpdatePlatformItem(collection, id, req)
 		if err != nil {

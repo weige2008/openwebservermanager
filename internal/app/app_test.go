@@ -503,6 +503,15 @@ func TestPlatformCollectionEndpoints(t *testing.T) {
 				payload["type"] = "asset-status"
 				payload["metadata"] = map[string]any{"interval_seconds": 600, "timeout_ms": 2000}
 			}
+			if path == "/api/admin/oidc-clients" {
+				payload["type"] = "public"
+				payload["metadata"] = map[string]any{
+					"client_id":                  "collection-contract-client",
+					"redirect_uris":              []string{"https://client.example/contract"},
+					"scopes":                     []string{"openid"},
+					"token_endpoint_auth_method": "none",
+				}
+			}
 			rec := assertStatus(t, handler, http.MethodPost, path, payload, cookie, http.StatusCreated)
 			var item model.PlatformItem
 			if err := json.Unmarshal(rec.Body.Bytes(), &item); err != nil {
@@ -7202,39 +7211,16 @@ func TestOIDCProviderAuthorizationCodeFlow(t *testing.T) {
 		}
 	}
 
-	clearedCodeVerifier := "cleared-verifier-1234567890-abcdefghijklmnop"
-	clearedChallengeRaw := sha256.Sum256([]byte(clearedCodeVerifier))
-	clearedCodeChallenge := base64.RawURLEncoding.EncodeToString(clearedChallengeRaw[:])
 	clearedAuthorizePath := "/api/oidc/authorize?" + url.Values{
-		"response_type":         {"code"},
-		"client_id":             {"openweb-test"},
-		"redirect_uri":          {redirectURI},
-		"scope":                 {"openid profile"},
-		"state":                 {"state-cleared"},
-		"nonce":                 {"nonce-cleared"},
-		"code_challenge":        {clearedCodeChallenge},
-		"code_challenge_method": {"S256"},
-	}.Encode()
-	clearedAuthorizeRec := assertStatus(t, handler, http.MethodGet, clearedAuthorizePath, nil, adminCookie, http.StatusFound)
-	clearedLocation, err := url.Parse(clearedAuthorizeRec.Header().Get("Location"))
-	if err != nil {
-		t.Fatalf("parse cleared authorize redirect: %v", err)
-	}
-	clearedCode := clearedLocation.Query().Get("code")
-	if clearedCode == "" {
-		t.Fatal("cleared authorize redirect did not include code")
-	}
-	clearedTokenForm := url.Values{
-		"grant_type":    {"authorization_code"},
+		"response_type": {"code"},
 		"client_id":     {"openweb-test"},
-		"code":          {clearedCode},
 		"redirect_uri":  {redirectURI},
-		"code_verifier": {clearedCodeVerifier},
+		"scope":         {"openid profile"},
+	}.Encode()
+	clearedAuthorizeRec := assertStatus(t, handler, http.MethodGet, clearedAuthorizePath, nil, adminCookie, http.StatusBadRequest)
+	if !strings.Contains(clearedAuthorizeRec.Body.String(), "secret is not configured") {
+		t.Fatalf("confidential client without a secret remained usable: %s", clearedAuthorizeRec.Body.String())
 	}
-	assertFormStatus(t, handler, "/api/oidc/token", clearedTokenForm, nil, map[string]string{
-		"Authorization": "Basic " + base64.StdEncoding.EncodeToString([]byte("openweb-test:client-secret")),
-	}, http.StatusUnauthorized)
-	assertFormStatus(t, handler, "/api/oidc/token", clearedTokenForm, nil, nil, http.StatusUnauthorized)
 
 	publicClientRec := assertStatus(t, handler, http.MethodPatch, "/api/admin/oidc-clients/"+client.ID, map[string]any{
 		"name":   "openweb-test",

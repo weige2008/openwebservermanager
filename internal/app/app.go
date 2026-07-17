@@ -15,6 +15,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"openwebservermanager/internal/agentrelay"
@@ -97,6 +98,7 @@ type Server struct {
 	staticFS            fs.FS
 	auth                *authManager
 	oidc                *oidcManager
+	oidcClientMu        sync.Mutex
 	ldap                ldapAuthenticator
 	activeConnections   activeConnectionRegistry
 	agentRelay          *agentrelay.Manager

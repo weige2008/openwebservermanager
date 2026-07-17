@@ -12,6 +12,7 @@ import (
 	"errors"
 	"fmt"
 	"math/big"
+	"net"
 	"net/http"
 	"net/url"
 	"os"
@@ -19,6 +20,7 @@ import (
 	"strings"
 	"sync"
 	"time"
+	"unicode"
 
 	"openwebservermanager/internal/model"
 	"openwebservermanager/internal/store"
@@ -50,6 +52,7 @@ type oidcAuthorizationCode struct {
 	UserID              string
 	Username            string
 	Role                string
+	Email               string
 	AuthTime            time.Time
 	ExpiresAt           time.Time
 }
@@ -58,14 +61,13 @@ type oidcAccessToken struct {
 	ClientID  string
 	Scope     string
 	UserID    string
-	Username  string
-	Role      string
 	ExpiresAt time.Time
 }
 
 type oidcClientCredentials struct {
 	ClientID     string
 	ClientSecret string
+	Method       string
 }
 
 func newOIDCManager(stores ...*store.Store) *oidcManager {
@@ -175,7 +177,7 @@ func (s *Server) handleOIDCDiscovery(w http.ResponseWriter, r *http.Request) {
 		"id_token_signing_alg_values_supported": []string{"RS256"},
 		"token_endpoint_auth_methods_supported": []string{"client_secret_basic", "client_secret_post", "none"},
 		"scopes_supported":                      []string{"openid", "profile", "email"},
-		"claims_supported":                      []string{"sub", "iss", "aud", "exp", "iat", "auth_time", "nonce", "name", "preferred_username", "role"},
+		"claims_supported":                      []string{"sub", "iss", "aud", "exp", "iat", "auth_time", "nonce", "name", "preferred_username", "role", "email"},
 		"code_challenge_methods_supported":      []string{"plain", "S256"},
 		"prompt_values_supported":               []string{"none", "login", "consent", "select_account"},
 	})
@@ -196,15 +198,30 @@ func (s *Server) handleOIDCJWKS(w http.ResponseWriter, _ *http.Request) {
 }
 
 func (s *Server) handleOIDCAuthorize(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Cache-Control", "no-store")
 	query := r.URL.Query()
+	for _, key := range []string{"client_id", "redirect_uri"} {
+		if len(query[key]) != 1 {
+			writeError(w, http.StatusBadRequest, key+" must be provided exactly once")
+			return
+		}
+	}
+	if !oidcAuthorizeValueValid(query.Get("client_id"), 256) || !oidcAuthorizeValueValid(query.Get("redirect_uri"), 2048) {
+		writeError(w, http.StatusBadRequest, "client_id or redirect_uri is invalid")
+		return
+	}
 	client, err := s.oidcClientByID(query.Get("client_id"))
 	if err != nil {
 		writeError(w, http.StatusBadRequest, err.Error())
 		return
 	}
-	redirectURI := strings.TrimSpace(query.Get("redirect_uri"))
+	redirectURI := query.Get("redirect_uri")
 	if !oidcRedirectAllowed(client, redirectURI) {
 		writeError(w, http.StatusBadRequest, "redirect_uri is not allowed for client")
+		return
+	}
+	if err := validateOIDCAuthorizeParameters(query); err != nil {
+		s.redirectOIDCError(w, r, redirectURI, "invalid_request", err.Error())
 		return
 	}
 	if query.Get("response_type") != "code" {
@@ -239,6 +256,10 @@ func (s *Server) handleOIDCAuthorize(w http.ResponseWriter, r *http.Request) {
 	}
 	if oidcClientRequiresPKCE(client) && codeChallenge == "" {
 		s.redirectOIDCError(w, r, redirectURI, "invalid_request", "public clients must use PKCE")
+		return
+	}
+	if oidcClientRequiresPKCE(client) && codeChallengeMethod != "S256" {
+		s.redirectOIDCError(w, r, redirectURI, "invalid_request", "public clients must use S256 PKCE")
 		return
 	}
 	prompts, err := oidcPromptValues(query.Get("prompt"))
@@ -286,8 +307,6 @@ func (s *Server) handleOIDCAuthorize(w http.ResponseWriter, r *http.Request) {
 		CodeChallenge:       codeChallenge,
 		CodeChallengeMethod: codeChallengeMethod,
 		UserID:              session.UserID,
-		Username:            session.Username,
-		Role:                session.Role,
 		AuthTime:            session.AuthTime,
 		ExpiresAt:           time.Now().UTC().Add(oidcAuthorizationCodeTTL),
 	})
@@ -304,6 +323,36 @@ func (s *Server) handleOIDCAuthorize(w http.ResponseWriter, r *http.Request) {
 	location.RawQuery = values.Encode()
 	_ = s.audit(r, "oidc.authorize", oidcClientID(client), "", "issued authorization code")
 	http.Redirect(w, r, location.String(), http.StatusFound)
+}
+
+func validateOIDCAuthorizeParameters(query url.Values) error {
+	limits := map[string]int{
+		"response_type": 32, "response_mode": 16, "scope": 4096, "state": 2048,
+		"nonce": 2048, "code_challenge": 128, "code_challenge_method": 16,
+		"prompt": 128, "max_age": 32,
+	}
+	for key, limit := range limits {
+		values := query[key]
+		if len(values) > 1 {
+			return fmt.Errorf("authorization parameter %s must not be repeated", key)
+		}
+		if len(values) == 1 && !oidcAuthorizeValueValid(values[0], limit) {
+			return fmt.Errorf("authorization parameter %s is invalid or exceeds %d bytes", key, limit)
+		}
+	}
+	return nil
+}
+
+func oidcAuthorizeValueValid(value string, limit int) bool {
+	if len(value) > limit {
+		return false
+	}
+	for _, ch := range value {
+		if unicode.IsControl(ch) {
+			return false
+		}
+	}
+	return true
 }
 
 func oidcPromptValues(raw string) (map[string]bool, error) {
@@ -353,32 +402,82 @@ func (s *Server) redirectOIDCLogin(w http.ResponseWriter, r *http.Request, reaut
 }
 
 func (s *Server) handleOIDCToken(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Cache-Control", "no-store")
+	w.Header().Set("Pragma", "no-cache")
+	r.Body = http.MaxBytesReader(w, r.Body, 64<<10)
 	if err := r.ParseForm(); err != nil {
-		writeError(w, http.StatusBadRequest, "invalid token request")
+		writeOIDCTokenError(w, http.StatusBadRequest, "invalid_request", "invalid token request")
+		return
+	}
+	if err := validateOIDCTokenRequestParameters(r); err != nil {
+		writeOIDCTokenError(w, http.StatusBadRequest, "invalid_request", err.Error())
 		return
 	}
 	if r.PostForm.Get("grant_type") != "authorization_code" {
-		writeError(w, http.StatusBadRequest, "unsupported grant_type")
+		writeOIDCTokenError(w, http.StatusBadRequest, "unsupported_grant_type", "only authorization_code is supported")
 		return
 	}
-	credentials := oidcClientCredentialsFromRequest(r)
+	credentials, err := oidcClientCredentialsFromRequest(r)
+	if err != nil {
+		writeOIDCTokenError(w, http.StatusUnauthorized, "invalid_client", err.Error())
+		return
+	}
 	client, err := s.oidcClientByID(credentials.ClientID)
 	if err != nil {
-		writeError(w, http.StatusUnauthorized, "invalid client")
+		writeOIDCInvalidClient(w, credentials.Method == "client_secret_basic")
 		return
 	}
-	if !oidcClientSecretValid(client, credentials.ClientSecret) {
-		writeError(w, http.StatusUnauthorized, "invalid client")
+	if !oidcClientCredentialsValid(client, credentials) {
+		writeOIDCInvalidClient(w, oidcClientAuthMethod(client) == "client_secret_basic")
 		return
 	}
-	redirectURI := strings.TrimSpace(r.PostForm.Get("redirect_uri"))
+	redirectURI := r.PostForm.Get("redirect_uri")
 	codeValue := r.PostForm.Get("code")
 	code, err := s.oidc.consumeAuthorizationCode(codeValue, oidcClientID(client), redirectURI, r.PostForm.Get("code_verifier"))
 	if err != nil {
-		writeError(w, http.StatusBadRequest, err.Error())
+		writeOIDCTokenError(w, http.StatusBadRequest, "invalid_grant", err.Error())
+		return
+	}
+	if !oidcRedirectAllowed(client, redirectURI) {
+		writeOIDCTokenError(w, http.StatusBadRequest, "invalid_grant", "authorization code redirect_uri is no longer allowed")
+		return
+	}
+	currentUser, ok, err := s.authUserByID(code.UserID)
+	if err != nil {
+		err = s.restoreOIDCAuthorizationCodeAfterFailure(r, codeValue, code, err)
+		writeOIDCTokenError(w, http.StatusInternalServerError, "server_error", err.Error())
+		return
+	}
+	if !ok {
+		writeOIDCTokenError(w, http.StatusBadRequest, "invalid_grant", "authorization code user is disabled or no longer exists")
+		return
+	}
+	code.Username = currentUser.Username
+	code.Role = currentUser.Role
+	code.Email, err = s.oidcUserEmail(code.UserID)
+	if err != nil {
+		err = s.restoreOIDCAuthorizationCodeAfterFailure(r, codeValue, code, err)
+		writeOIDCTokenError(w, http.StatusInternalServerError, "server_error", err.Error())
 		return
 	}
 	issuer := requestBaseURL(r, s.cfg.TrustProxyHeaders)
+	idToken, err := s.oidc.signIDToken(issuer, code)
+	if err != nil {
+		err = s.restoreOIDCAuthorizationCodeAfterFailure(r, codeValue, code, err)
+		writeOIDCTokenError(w, http.StatusInternalServerError, "server_error", err.Error())
+		return
+	}
+	accessToken, err := s.oidc.createAccessToken(oidcAccessToken{
+		ClientID:  code.ClientID,
+		Scope:     code.Scope,
+		UserID:    code.UserID,
+		ExpiresAt: time.Now().UTC().Add(oidcAccessTokenTTL),
+	})
+	if err != nil {
+		err = s.restoreOIDCAuthorizationCodeAfterFailure(r, codeValue, code, err)
+		writeOIDCTokenError(w, http.StatusInternalServerError, "server_error", err.Error())
+		return
+	}
 	if err := s.createOperationLog(r, model.PlatformItemRequest{
 		Name:        "oidc.token",
 		Type:        "oidc",
@@ -388,33 +487,8 @@ func (s *Server) handleOIDCToken(w http.ResponseWriter, r *http.Request) {
 		Description: "issued oidc tokens",
 		Metadata:    map[string]any{"client_ip": s.clientIP(r), "client_id": code.ClientID, "scope": code.Scope},
 	}); err != nil {
-		if restoreErr := s.oidc.restoreAuthorizationCode(codeValue, code); restoreErr != nil {
-			err = fmt.Errorf("%w; additionally restore authorization code: %v", err, restoreErr)
-		}
-		writeError(w, http.StatusInternalServerError, err.Error())
-		return
-	}
-	idToken, err := s.oidc.signIDToken(issuer, code)
-	if err != nil {
-		if restoreErr := s.oidc.restoreAuthorizationCode(codeValue, code); restoreErr != nil {
-			err = fmt.Errorf("%w; additionally restore authorization code: %v", err, restoreErr)
-		}
-		writeError(w, http.StatusInternalServerError, err.Error())
-		return
-	}
-	accessToken, err := s.oidc.createAccessToken(oidcAccessToken{
-		ClientID:  code.ClientID,
-		Scope:     code.Scope,
-		UserID:    code.UserID,
-		Username:  code.Username,
-		Role:      code.Role,
-		ExpiresAt: time.Now().UTC().Add(oidcAccessTokenTTL),
-	})
-	if err != nil {
-		if restoreErr := s.oidc.restoreAuthorizationCode(codeValue, code); restoreErr != nil {
-			err = fmt.Errorf("%w; additionally restore authorization code: %v", err, restoreErr)
-		}
-		writeError(w, http.StatusInternalServerError, err.Error())
+		err = s.rollbackOIDCTokenIssuance(r, accessToken, codeValue, code, err)
+		writeOIDCTokenError(w, http.StatusInternalServerError, "server_error", err.Error())
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]any{
@@ -426,7 +500,66 @@ func (s *Server) handleOIDCToken(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
+func validateOIDCTokenRequestParameters(r *http.Request) error {
+	limits := map[string]int{
+		"grant_type": 64, "code": 1024, "redirect_uri": 2048, "code_verifier": 128,
+		"client_id": 256, "client_secret": 4096,
+	}
+	for key, limit := range limits {
+		values := r.PostForm[key]
+		if len(values) > 1 {
+			return fmt.Errorf("token parameter %s must not be repeated", key)
+		}
+		if len(values) == 1 && len(values[0]) > limit {
+			return fmt.Errorf("token parameter %s exceeds %d bytes", key, limit)
+		}
+	}
+	return nil
+}
+
+func writeOIDCInvalidClient(w http.ResponseWriter, basic bool) {
+	if basic {
+		w.Header().Set("WWW-Authenticate", `Basic realm="oidc-token"`)
+	}
+	writeOIDCTokenError(w, http.StatusUnauthorized, "invalid_client", "client authentication failed")
+}
+
+func writeOIDCTokenError(w http.ResponseWriter, status int, code, description string) {
+	payload := map[string]any{"error": code}
+	if strings.TrimSpace(description) != "" {
+		payload["error_description"] = description
+	}
+	writeJSON(w, status, payload)
+}
+
+func (s *Server) restoreOIDCAuthorizationCodeAfterFailure(r *http.Request, codeValue string, code oidcAuthorizationCode, originalErr error) error {
+	if restoreErr := s.oidc.restoreAuthorizationCode(codeValue, code); restoreErr != nil {
+		detail := "failed to restore OIDC authorization code: " + restoreErr.Error()
+		_ = s.audit(r, "oidc.token.restore_failed", code.ClientID, "", detail)
+		return fmt.Errorf("%w; additionally %s", originalErr, detail)
+	}
+	return originalErr
+}
+
+func (s *Server) rollbackOIDCTokenIssuance(r *http.Request, accessToken, codeValue string, code oidcAuthorizationCode, originalErr error) error {
+	var rollbackErrors []string
+	if err := s.oidc.deleteAccessToken(accessToken); err != nil {
+		rollbackErrors = append(rollbackErrors, "delete access token: "+err.Error())
+	}
+	if err := s.oidc.restoreAuthorizationCode(codeValue, code); err != nil {
+		rollbackErrors = append(rollbackErrors, "restore authorization code: "+err.Error())
+	}
+	if len(rollbackErrors) == 0 {
+		return originalErr
+	}
+	detail := "failed to roll back OIDC token issuance: " + strings.Join(rollbackErrors, "; ")
+	_ = s.audit(r, "oidc.token.restore_failed", code.ClientID, "", detail)
+	return fmt.Errorf("%w; additionally %s", originalErr, detail)
+}
+
 func (s *Server) handleOIDCUserInfo(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Cache-Control", "no-store")
+	w.Header().Set("Pragma", "no-cache")
 	token := oidcBearerTokenFromRequest(r)
 	if token == "" {
 		writeError(w, http.StatusUnauthorized, "bearer token required")
@@ -454,12 +587,40 @@ func (s *Server) handleOIDCUserInfo(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusUnauthorized, "invalid bearer token")
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]any{
-		"sub":                user.UserID,
-		"name":               user.Username,
-		"preferred_username": user.Username,
-		"role":               user.Role,
-	})
+	claims := map[string]any{"sub": user.UserID}
+	if oidcScopeContains(accessToken.Scope, "profile") {
+		claims["name"] = user.Username
+		claims["preferred_username"] = user.Username
+		claims["role"] = user.Role
+	}
+	if oidcScopeContains(accessToken.Scope, "email") {
+		email, err := s.oidcUserEmail(user.UserID)
+		if err != nil {
+			writeError(w, http.StatusInternalServerError, err.Error())
+			return
+		}
+		if email != "" {
+			claims["email"] = email
+		}
+	}
+	writeJSON(w, http.StatusOK, claims)
+}
+
+func (s *Server) oidcUserEmail(userID string) (string, error) {
+	item, ok, err := s.cfg.Store.GetPlatformItem("users", userID)
+	if err != nil || !ok {
+		return "", err
+	}
+	return firstMetadataString(item.Metadata, "email", "mail"), nil
+}
+
+func oidcScopeContains(scope, expected string) bool {
+	for _, value := range strings.Fields(scope) {
+		if value == expected {
+			return true
+		}
+	}
+	return false
 }
 
 func oidcBearerTokenFromRequest(r *http.Request) string {
@@ -490,7 +651,9 @@ func (s *Server) redirectOIDCError(w http.ResponseWriter, r *http.Request, redir
 	if description != "" {
 		values.Set("error_description", description)
 	}
-	if state := r.URL.Query().Get("state"); state != "" {
+	stateValues := r.URL.Query()["state"]
+	if len(stateValues) == 1 && stateValues[0] != "" && oidcAuthorizeValueValid(stateValues[0], 2048) {
+		state := stateValues[0]
 		values.Set("state", state)
 	}
 	location.RawQuery = values.Encode()
@@ -498,14 +661,14 @@ func (s *Server) redirectOIDCError(w http.ResponseWriter, r *http.Request, redir
 }
 
 func (s *Server) oidcClientByID(clientID string) (model.PlatformItem, error) {
-	clientID = strings.TrimSpace(clientID)
-	if clientID == "" {
+	if !oidcClientIdentifierValid(clientID) {
 		return model.PlatformItem{}, errors.New("client_id is required")
 	}
 	items, err := s.cfg.Store.ListPlatformItems("oidc_clients")
 	if err != nil {
 		return model.PlatformItem{}, err
 	}
+	matchedID := ""
 	for _, item := range items {
 		if !platformItemEnabled(item) {
 			continue
@@ -513,35 +676,263 @@ func (s *Server) oidcClientByID(clientID string) (model.PlatformItem, error) {
 		if oidcClientID(item) != clientID {
 			continue
 		}
-		raw, ok, err := s.cfg.Store.GetPlatformItem("oidc_clients", item.ID)
-		if err != nil {
-			return model.PlatformItem{}, err
+		if matchedID != "" {
+			return model.PlatformItem{}, errors.New("oidc client_id is ambiguous")
 		}
-		if !ok {
-			return model.PlatformItem{}, errors.New("oidc client not found")
-		}
-		return raw, nil
+		matchedID = item.ID
 	}
-	return model.PlatformItem{}, errors.New("oidc client not found")
+	if matchedID == "" {
+		return model.PlatformItem{}, errors.New("oidc client not found")
+	}
+	raw, ok, err := s.cfg.Store.GetPlatformItem("oidc_clients", matchedID)
+	if err != nil {
+		return model.PlatformItem{}, err
+	}
+	if !ok {
+		return model.PlatformItem{}, errors.New("oidc client not found")
+	}
+	if err := validateOIDCClientConfiguration(raw); err != nil {
+		return model.PlatformItem{}, fmt.Errorf("oidc client configuration is invalid: %w", err)
+	}
+	if oidcClientAuthMethod(raw) != "none" && firstMetadataString(raw.Metadata, "client_secret_hash") == "" {
+		return model.PlatformItem{}, errors.New("oidc client configuration is invalid: confidential client secret is not configured")
+	}
+	return raw, nil
 }
 
-func oidcClientCredentialsFromRequest(r *http.Request) oidcClientCredentials {
-	clientID, clientSecret, _ := r.BasicAuth()
-	if clientID == "" {
-		clientID = r.PostForm.Get("client_id")
+func (s *Server) validateOIDCClientMutation(id string, existing *model.PlatformItem, req model.PlatformItemRequest) error {
+	item := model.PlatformItem{
+		Name:     strings.TrimSpace(req.Name),
+		Type:     strings.TrimSpace(req.Type),
+		Status:   strings.TrimSpace(req.Status),
+		Host:     strings.TrimSpace(req.Host),
+		Metadata: cloneMetadata(req.Metadata),
 	}
-	if clientSecret == "" {
-		clientSecret = r.PostForm.Get("client_secret")
+	if existing != nil {
+		item = platformItemAfterUpdate(*existing, req)
 	}
-	return oidcClientCredentials{
-		ClientID:     strings.TrimSpace(clientID),
-		ClientSecret: clientSecret,
+	if item.Metadata == nil {
+		item.Metadata = map[string]any{}
 	}
+	clientID := oidcClientID(item)
+	if err := validateOIDCClientConfiguration(item); err != nil {
+		return err
+	}
+	items, err := s.cfg.Store.ListPlatformItems("oidc_clients")
+	if err != nil {
+		return err
+	}
+	for _, candidate := range items {
+		if candidate.ID != id && oidcClientID(candidate) == clientID {
+			return errors.New("OIDC client_id is already in use")
+		}
+	}
+	return nil
+}
+
+func validateOIDCClientConfiguration(item model.PlatformItem) error {
+	clientID := oidcClientID(item)
+	if !oidcClientIdentifierValid(clientID) {
+		return errors.New("OIDC client_id must be 1-256 visible characters without whitespace or controls")
+	}
+	clientType := strings.ToLower(strings.TrimSpace(item.Type))
+	if clientType == "" {
+		clientType = "confidential"
+	}
+	if clientType != "confidential" && clientType != "public" {
+		return errors.New("OIDC client type must be confidential or public")
+	}
+	authMethod := oidcClientAuthMethod(item)
+	if clientType == "public" && authMethod != "none" {
+		return errors.New("public OIDC clients must use token_endpoint_auth_method none")
+	}
+	if clientType == "confidential" && authMethod != "client_secret_basic" && authMethod != "client_secret_post" {
+		return errors.New("confidential OIDC clients must use client_secret_basic or client_secret_post")
+	}
+
+	redirectURIs := oidcRedirectURIs(item)
+	if len(redirectURIs) == 0 || len(redirectURIs) > 64 {
+		return errors.New("OIDC clients must configure between 1 and 64 redirect URIs")
+	}
+	seenRedirects := map[string]bool{}
+	for _, redirectURI := range redirectURIs {
+		if strings.TrimSpace(redirectURI) != redirectURI {
+			return errors.New("OIDC redirect URIs must not contain surrounding whitespace")
+		}
+		if seenRedirects[redirectURI] {
+			return errors.New("OIDC redirect URIs must be unique")
+		}
+		seenRedirects[redirectURI] = true
+		if err := validateOIDCRedirectURI(redirectURI, clientType == "public"); err != nil {
+			return err
+		}
+	}
+	if err := validateOIDCConfiguredScopes(item); err != nil {
+		return err
+	}
+	return nil
+}
+
+func oidcClientIdentifierValid(value string) bool {
+	if value == "" || len(value) > 256 || strings.TrimSpace(value) != value {
+		return false
+	}
+	for _, ch := range value {
+		if unicode.IsControl(ch) || unicode.IsSpace(ch) {
+			return false
+		}
+	}
+	return true
+}
+
+func validateOIDCRedirectURI(raw string, publicClient bool) error {
+	if raw == "" || len(raw) > 2048 || strings.ContainsAny(raw, "\r\n\x00") {
+		return errors.New("OIDC redirect URI must be 1-2048 characters without controls")
+	}
+	parsed, err := url.Parse(raw)
+	if err != nil || !parsed.IsAbs() || parsed.Scheme == "" {
+		return fmt.Errorf("OIDC redirect URI %q must be absolute", raw)
+	}
+	if parsed.Fragment != "" {
+		return fmt.Errorf("OIDC redirect URI %q must not include a fragment", raw)
+	}
+	if parsed.User != nil {
+		return fmt.Errorf("OIDC redirect URI %q must not include user information", raw)
+	}
+	scheme := strings.ToLower(parsed.Scheme)
+	switch scheme {
+	case "https":
+		if parsed.Host == "" || parsed.Hostname() == "" {
+			return fmt.Errorf("OIDC redirect URI %q must include a host", raw)
+		}
+	case "http":
+		if parsed.Host == "" || !oidcLoopbackHost(parsed.Hostname()) {
+			return fmt.Errorf("OIDC http redirect URI %q must use a loopback host", raw)
+		}
+	default:
+		if !publicClient {
+			return fmt.Errorf("OIDC redirect URI %q must use https or loopback http", raw)
+		}
+		if !oidcPrivateUseSchemeValid(scheme) || parsed.Host != "" {
+			return fmt.Errorf("OIDC private-use redirect URI %q must use a reverse-domain scheme without a host", raw)
+		}
+		if parsed.Path == "" && parsed.Opaque == "" {
+			return fmt.Errorf("OIDC private-use redirect URI %q must include a path", raw)
+		}
+	}
+	return nil
+}
+
+func oidcLoopbackHost(host string) bool {
+	host = strings.TrimSuffix(strings.ToLower(strings.TrimSpace(host)), ".")
+	if host == "localhost" {
+		return true
+	}
+	ip := net.ParseIP(host)
+	return ip != nil && ip.IsLoopback()
+}
+
+func oidcPrivateUseSchemeValid(scheme string) bool {
+	if len(scheme) > 255 {
+		return false
+	}
+	labels := strings.Split(strings.ToLower(scheme), ".")
+	if len(labels) < 2 {
+		return false
+	}
+	for _, label := range labels {
+		if len(label) == 0 || len(label) > 63 || !oidcSchemeAlphaNumeric(label[0]) || !oidcSchemeAlphaNumeric(label[len(label)-1]) {
+			return false
+		}
+		for _, ch := range []byte(label) {
+			if !oidcSchemeAlphaNumeric(ch) && ch != '-' {
+				return false
+			}
+		}
+	}
+	return true
+}
+
+func oidcSchemeAlphaNumeric(ch byte) bool {
+	return ch >= 'a' && ch <= 'z' || ch >= '0' && ch <= '9'
+}
+
+func validateOIDCConfiguredScopes(item model.PlatformItem) error {
+	values := metadataStrings(item.Metadata["scopes"])
+	if len(values) == 0 {
+		return errors.New("OIDC clients must configure 1-32 scopes including openid")
+	}
+	seen := map[string]bool{}
+	count := 0
+	hasOpenID := false
+	for _, value := range values {
+		for _, scope := range strings.Fields(strings.ReplaceAll(value, ",", " ")) {
+			if !oidcScopeTokenValid(scope) {
+				return fmt.Errorf("OIDC scope %q is invalid", scope)
+			}
+			if seen[scope] {
+				return fmt.Errorf("OIDC scope %q is duplicated", scope)
+			}
+			seen[scope] = true
+			count++
+			hasOpenID = hasOpenID || scope == "openid"
+		}
+	}
+	if count == 0 || count > 32 || !hasOpenID {
+		return errors.New("OIDC clients must configure 1-32 scopes including openid")
+	}
+	return nil
+}
+
+func oidcScopeTokenValid(scope string) bool {
+	if scope == "" || len(scope) > 128 {
+		return false
+	}
+	for _, ch := range []byte(scope) {
+		if ch < 0x21 || ch > 0x7e || ch == '"' || ch == '\\' {
+			return false
+		}
+	}
+	return true
+}
+
+func oidcClientCredentialsFromRequest(r *http.Request) (oidcClientCredentials, error) {
+	authorization := strings.TrimSpace(r.Header.Get("Authorization"))
+	basicID, basicSecret, hasBasic := r.BasicAuth()
+	if authorization != "" && !hasBasic {
+		return oidcClientCredentials{}, errors.New("unsupported client authentication scheme")
+	}
+	bodyIDs, bodyHasID := r.PostForm["client_id"]
+	bodySecrets, bodyHasSecret := r.PostForm["client_secret"]
+	bodyID := ""
+	if bodyHasID && len(bodyIDs) == 1 {
+		bodyID = bodyIDs[0]
+	}
+	if hasBasic {
+		if bodyHasSecret {
+			return oidcClientCredentials{}, errors.New("multiple client authentication methods are not allowed")
+		}
+		if bodyHasID && bodyID != basicID {
+			return oidcClientCredentials{}, errors.New("client_id does not match HTTP Basic credentials")
+		}
+		return oidcClientCredentials{ClientID: basicID, ClientSecret: basicSecret, Method: "client_secret_basic"}, nil
+	}
+	if bodyHasSecret {
+		secret := ""
+		if len(bodySecrets) == 1 {
+			secret = bodySecrets[0]
+		}
+		return oidcClientCredentials{ClientID: bodyID, ClientSecret: secret, Method: "client_secret_post"}, nil
+	}
+	return oidcClientCredentials{ClientID: bodyID, Method: "none"}, nil
 }
 
 func oidcClientID(item model.PlatformItem) string {
-	if value := firstMetadataString(item.Metadata, "client_id", "clientId"); value != "" {
-		return value
+	for _, key := range []string{"client_id", "clientId"} {
+		values := metadataStrings(item.Metadata[key])
+		if len(values) > 0 && values[0] != "" {
+			return values[0]
+		}
 	}
 	if item.Name != "" {
 		return item.Name
@@ -550,12 +941,11 @@ func oidcClientID(item model.PlatformItem) string {
 }
 
 func oidcRedirectAllowed(item model.PlatformItem, redirectURI string) bool {
-	redirectURI = strings.TrimSpace(redirectURI)
-	if redirectURI == "" {
+	if redirectURI == "" || strings.TrimSpace(redirectURI) != redirectURI {
 		return false
 	}
 	for _, candidate := range oidcRedirectURIs(item) {
-		if strings.TrimSpace(candidate) == redirectURI {
+		if candidate == redirectURI {
 			return true
 		}
 	}
@@ -565,8 +955,18 @@ func oidcRedirectAllowed(item model.PlatformItem, redirectURI string) bool {
 func oidcRedirectURIs(item model.PlatformItem) []string {
 	values := []string{}
 	for _, key := range []string{"redirect_uris", "redirectUris", "redirect_uri", "redirectUri", "callbacks", "callback_urls"} {
-		for _, value := range metadataStrings(item.Metadata[key]) {
-			values = append(values, splitCriteria(value)...)
+		for _, raw := range metadataStrings(item.Metadata[key]) {
+			normalized := strings.ReplaceAll(raw, "\r\n", "\n")
+			lines := strings.Split(normalized, "\n")
+			if len(lines) == 1 {
+				values = append(values, raw)
+				continue
+			}
+			for _, line := range lines {
+				if strings.TrimSpace(line) != "" {
+					values = append(values, line)
+				}
+			}
 		}
 	}
 	if item.Host != "" {
@@ -580,6 +980,9 @@ func oidcValidateScope(item model.PlatformItem, requested string) (string, error
 	if len(requestedScopes) == 0 {
 		requestedScopes = []string{"openid"}
 	}
+	if len(requestedScopes) > 32 {
+		return "", errors.New("no more than 32 scopes may be requested")
+	}
 	allowed := map[string]bool{}
 	allowedScopes := metadataStrings(item.Metadata["scopes"])
 	if len(allowedScopes) == 0 {
@@ -591,7 +994,15 @@ func oidcValidateScope(item model.PlatformItem, requested string) (string, error
 		}
 	}
 	hasOpenID := false
+	seen := map[string]bool{}
 	for _, scope := range requestedScopes {
+		if !oidcScopeTokenValid(scope) {
+			return "", errors.New("scope is invalid: " + scope)
+		}
+		if seen[scope] {
+			return "", errors.New("scope is duplicated: " + scope)
+		}
+		seen[scope] = true
 		if scope == "openid" {
 			hasOpenID = true
 		}
@@ -605,12 +1016,15 @@ func oidcValidateScope(item model.PlatformItem, requested string) (string, error
 	return strings.Join(requestedScopes, " "), nil
 }
 
-func oidcClientSecretValid(item model.PlatformItem, secret string) bool {
+func oidcClientCredentialsValid(item model.PlatformItem, credentials oidcClientCredentials) bool {
+	if credentials.Method != oidcClientAuthMethod(item) || len(credentials.ClientSecret) > 4096 {
+		return false
+	}
 	hash, _ := item.Metadata["client_secret_hash"].(string)
 	if hash == "" {
-		return strings.TrimSpace(secret) == "" && oidcClientAllowsPublicTokenAuth(item)
+		return credentials.ClientSecret == "" && credentials.Method == "none" && oidcClientAllowsPublicTokenAuth(item)
 	}
-	return bcrypt.CompareHashAndPassword([]byte(hash), []byte(secret)) == nil
+	return bcrypt.CompareHashAndPassword([]byte(hash), []byte(credentials.ClientSecret)) == nil
 }
 
 func oidcClientRequiresPKCE(item model.PlatformItem) bool {
@@ -618,9 +1032,18 @@ func oidcClientRequiresPKCE(item model.PlatformItem) bool {
 }
 
 func oidcClientAllowsPublicTokenAuth(item model.PlatformItem) bool {
+	return oidcClientAuthMethod(item) == "none"
+}
+
+func oidcClientAuthMethod(item model.PlatformItem) string {
 	method := strings.ToLower(firstMetadataString(item.Metadata, "token_endpoint_auth_method", "auth_method", "authMethod"))
-	clientType := strings.ToLower(strings.TrimSpace(item.Type))
-	return clientType == "public" || method == "none"
+	if method != "" {
+		return method
+	}
+	if strings.EqualFold(strings.TrimSpace(item.Type), "public") {
+		return "none"
+	}
+	return "client_secret_basic"
 }
 
 func (m *oidcManager) createAuthorizationCode(code oidcAuthorizationCode) (string, error) {
@@ -672,7 +1095,7 @@ func (m *oidcManager) consumeAuthorizationCode(codeValue, clientID, redirectURI,
 	if !ok {
 		return oidcAuthorizationCode{}, errors.New("authorization code is invalid or already used")
 	}
-	if time.Now().UTC().After(code.ExpiresAt) {
+	if !time.Now().UTC().Before(code.ExpiresAt) {
 		return oidcAuthorizationCode{}, errors.New("authorization code expired")
 	}
 	if code.ClientID != clientID || code.RedirectURI != redirectURI {
@@ -694,7 +1117,7 @@ func (m *oidcManager) restoreAuthorizationCode(codeValue string, code oidcAuthor
 	if err := m.pruneLocked(); err != nil {
 		return err
 	}
-	if time.Now().UTC().After(code.ExpiresAt) {
+	if !time.Now().UTC().Before(code.ExpiresAt) {
 		return nil
 	}
 	if m.store == nil {
@@ -747,6 +1170,24 @@ func (m *oidcManager) accessToken(value string) (oidcAccessToken, bool, error) {
 	return token, true, nil
 }
 
+func (m *oidcManager) deleteAccessToken(value string) error {
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return nil
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if m.store == nil {
+		delete(m.accessTokens, value)
+		return nil
+	}
+	err := m.store.DeletePlatformItem("oidc_access_tokens", oidcRuntimeTokenID(value))
+	if errors.Is(err, os.ErrNotExist) {
+		return nil
+	}
+	return err
+}
+
 func (m *oidcManager) pruneLocked() error {
 	now := time.Now().UTC()
 	if m.store != nil {
@@ -767,12 +1208,12 @@ func (m *oidcManager) pruneLocked() error {
 		return nil
 	}
 	for key, code := range m.codes {
-		if now.After(code.ExpiresAt) {
+		if !now.Before(code.ExpiresAt) {
 			delete(m.codes, key)
 		}
 	}
 	for key, token := range m.accessTokens {
-		if now.After(token.ExpiresAt) {
+		if !now.Before(token.ExpiresAt) {
 			delete(m.accessTokens, key)
 		}
 	}
@@ -839,14 +1280,19 @@ func oidcPKCEValueValid(value string) bool {
 func (m *oidcManager) signIDToken(issuer string, code oidcAuthorizationCode) (string, error) {
 	now := time.Now().UTC()
 	claims := map[string]any{
-		"iss":                issuer,
-		"sub":                code.UserID,
-		"aud":                code.ClientID,
-		"exp":                now.Add(oidcAccessTokenTTL).Unix(),
-		"iat":                now.Unix(),
-		"name":               code.Username,
-		"preferred_username": code.Username,
-		"role":               code.Role,
+		"iss": issuer,
+		"sub": code.UserID,
+		"aud": code.ClientID,
+		"exp": now.Add(oidcAccessTokenTTL).Unix(),
+		"iat": now.Unix(),
+	}
+	if oidcScopeContains(code.Scope, "profile") {
+		claims["name"] = code.Username
+		claims["preferred_username"] = code.Username
+		claims["role"] = code.Role
+	}
+	if oidcScopeContains(code.Scope, "email") && code.Email != "" {
+		claims["email"] = code.Email
 	}
 	if !code.AuthTime.IsZero() {
 		claims["auth_time"] = code.AuthTime.UTC().Unix()
